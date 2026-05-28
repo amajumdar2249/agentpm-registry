@@ -1,0 +1,17 @@
+{
+  "name": "clari-rate-limits",
+  "slug": "clari-rate-limits",
+  "description": "Handle Clari API rate limits with backoff and export job scheduling.",
+  "content": "# Clari Rate Limits\n\n## Overview\n\nThe Clari API enforces rate limits per API key. Export jobs are asynchronous and queued server-side, so the primary concern is polling frequency and concurrent export requests.\n\n## Rate Limit Behavior\n\n| Aspect | Value |\n|--------|-------|\n| Scope | Per API key |\n| Response on limit | HTTP 429 |\n| Export job queue | Server-managed, async |\n| Recommended polling | 5-10 second intervals |\n\n## Instructions\n\n### Exponential Backoff for Export Polling\n\n```python\nimport time\nimport requests\n\ndef poll_with_backoff(\n    job_id: str,\n    api_key: str,\n    max_attempts: int = 60,\n    base_delay: float = 5.0,\n    max_delay: float = 60.0,\n) -> dict:\n    for attempt in range(max_attempts):\n        resp = requests.get(\n            f\"https://api.clari.com/v4/export/jobs/{job_id}\",\n            headers={\"apikey\": api_key},\n        )\n\n        if resp.status_code == 429:\n            retry_after = int(resp.headers.get(\"Retry-After\", base_delay))\n            time.sleep(retry_after)\n            continue\n\n        resp.raise_for_status()\n        status = resp.json()\n\n        if status[\"status\"] in (\"COMPLETED\", \"FAILED\"):\n            return status\n\n        delay = min(base_delay * (1.5 ** attempt), max_delay)\n        time.sleep(delay)\n\n    raise TimeoutError(f\"Job {job_id} did not complete in {max_attempts} attempts\")\n```\n\n### Sequential Export Scheduler\n\n```python\ndef export_all_periods(\n    client,\n    forecast_name: str,\n    periods: list[str],\n    delay_between: float = 10.0,\n) -> list[dict]:\n    results = []\n    for period in periods:\n        print(f\"Exporting {period}...\")\n        job = client.export_forecast(forecast_name, period)\n        result = poll_with_backoff(job[\"jobId\"], client.config.api_key)\n        results.append(result)\n        time.sleep(delay_between)  # Avoid hitting rate limits\n    return results\n```\n\n## Error Handling\n\n| Scenario | Detection | Response |\n|----------|-----------|----------|\n| 429 with Retry-After | Check header | Wait exact duration |\n| 429 without header | Status code only | Backoff from 5s |\n| Job queue full | Multiple pending jobs | Wait for completion before new exports |\n\n## Resources\n\n- [Clari API Reference](https://developer.clari.com/documentation/external_spec)\n\n## Next Steps\n\nFor security configuration, see `clari-security-basics`.\n",
+  "version": "1.0.0",
+  "metadata": {
+    "name": "clari-rate-limits",
+    "description": "Handle Clari API rate limits with backoff and export job scheduling.",
+    "allowed-tools": "Read, Write, Edit",
+    "version": "1.0.0",
+    "license": "MIT",
+    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+    "tags": "",
+    "compatibility": "Designed for Claude Code"
+  }
+}
