@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031292",
   "name": "apollo-observability",
   "slug": "apollo-observability",
   "description": "Set up Apollo.io monitoring and observability.",
   "content": "# Apollo Observability\n\n## Overview\n\nComprehensive observability for Apollo.io integrations: Prometheus metrics (request count, latency, rate limits, credits), structured logging with PII redaction, OpenTelemetry tracing, and alerting rules. Tracks the metrics that matter: credit burn rate, enrichment success rate, and API health.\n\n## Prerequisites\n\n- Valid Apollo API key\n- Node.js 18+\n\n## Instructions\n\n### Step 1: Prometheus Metrics\n\n```typescript\n// src/observability/metrics.ts\nimport { Counter, Histogram, Gauge, Registry } from 'prom-client';\n\nexport const registry = new Registry();\n\nexport const requestsTotal = new Counter({\n  name: 'apollo_requests_total',\n  help: 'Total Apollo API requests by endpoint and status',\n  labelNames: ['endpoint', 'method', 'status'] as const,\n  registers: [registry],\n});\n\nexport const requestDuration = new Histogram({\n  name: 'apollo_request_duration_seconds',\n  help: 'Apollo API request duration',\n  labelNames: ['endpoint'] as const,\n  buckets: [0.1, 0.25, 0.5, 1, 2.5, 5, 10],\n  registers: [registry],\n});\n\nexport const rateLimitRemaining = new Gauge({\n  name: 'apollo_rate_limit_remaining',\n  help: 'Remaining requests in current rate limit window',\n  labelNames: ['endpoint'] as const,\n  registers: [registry],\n});\n\nexport const creditsUsed = new Counter({\n  name: 'apollo_credits_used_total',\n  help: 'Total Apollo enrichment credits consumed',\n  labelNames: ['type'] as const,  // 'person', 'organization', 'bulk'\n  registers: [registry],\n});\n\nexport const enrichmentSuccessRate = new Gauge({\n  name: 'apollo_enrichment_success_rate',\n  help: 'Percentage of enrichment calls that found a match',\n  registers: [registry],\n});\n```\n\n### Step 2: Axios Interceptors for Auto-Collection\n\n```typescript\n// src/observability/instrument.ts\nimport { AxiosInstance } from 'axios';\nimport { requestsTotal, requestDuration, rateLimitRemaining, creditsUsed } from './metrics';\n\nconst CREDIT_ENDPOINTS = ['/people/match', '/people/bulk_match', '/organizations/enrich'];\n\nexport function instrumentClient(client: AxiosInstance) {\n  client.interceptors.request.use((config) => {\n    (config as any)._startTime = Date.now();\n    return config;\n  });\n\n  client.interceptors.response.use(\n    (response) => {\n      const endpoint = response.config.url ?? 'unknown';\n      const duration = (Date.now() - (response.config as any)._startTime) / 1000;\n\n      requestsTotal.inc({ endpoint, method: response.config.method?.toUpperCase() ?? 'GET', status: String(response.status) });\n      requestDuration.observe({ endpoint }, duration);\n\n      // Rate limit tracking\n      const remaining = response.headers['x-rate-limit-remaining'];\n      if (remaining) rateLimitRemaining.set({ endpoint }, parseInt(remaining, 10));\n\n      // Credit tracking\n      if (CREDIT_ENDPOINTS.some((ep) => endpoint.includes(ep))) {\n        const type = endpoint.includes('bulk') ? 'bulk' : endpoint.includes('organization') ? 'organization' : 'person';\n        const count = response.data?.matches?.length ?? 1;\n        creditsUsed.inc({ type }, count);\n      }\n\n      return response;\n    },\n    (err) => {\n      requestsTotal.inc({\n        endpoint: err.config?.url ?? 'unknown',\n        method: err.config?.method?.toUpperCase() ?? 'GET',\n        status: String(err.response?.status ?? 0),\n      });\n      return Promise.reject(err);\n    },\n  );\n}\n```\n\n### Step 3: Structured Logging with PII Redaction\n\n```typescript\n// src/observability/logger.ts\nimport pino from 'pino';\n\nexport const logger = pino({\n  level: process.env.LOG_LEVEL ?? 'info',\n  redact: {\n    paths: ['*.email', '*.phone_numbers', '*.linkedin_url', 'headers.x-api-key'],\n    censor: '[REDACTED]',\n  },\n  formatters: { level: (label) => ({ level: label }) },\n  transport: process.env.NODE_ENV !== 'production' ? { target: 'pino-pretty' } : undefined,\n});\n\nexport const apolloLog = logger.child({ service: 'apollo' });\n\n// Usage:\n// apolloLog.info({ endpoint: '/mixed_people/api_search', results: 25 }, 'Search completed');\n// apolloLog.warn({ endpoint: '/people/match', status: 429 }, 'Rate limited');\n// apolloLog.error({ err, endpoint: '/contacts' }, 'Request failed');\n```\n\n### Step 4: OpenTelemetry Tracing\n\n```typescript\n// src/observability/tracing.ts\nimport { trace, SpanStatusCode } from '@opentelemetry/api';\nimport { AxiosInstance } from 'axios';\n\nconst tracer = trace.getTracer('apollo-integration');\n\nexport function addTracing(client: AxiosInstance) {\n  client.interceptors.request.use((config) => {\n    const span = tracer.startSpan(`apollo.${config.method?.toUpperCase()} ${config.url}`);\n    span.setAttribute('apollo.endpoint', config.url ?? '');\n    (config as any)._span = span;\n    return config;\n  });\n\n  client.interceptors.response.use(\n    (response) => {\n      const span = (response.config as any)._span;\n      if (span) {\n        span.setAttribute('http.status_code', response.status);\n        span.setAttribute('apollo.rate_limit_remaining', response.headers['x-rate-limit-remaining'] ?? 'unknown');\n        span.setStatus({ code: SpanStatusCode.OK });\n        span.end();\n      }\n      return response;\n    },\n    (err) => {\n      const span = (err.config as any)?._span;\n      if (span) {\n        span.setAttribute('http.status_code', err.response?.status ?? 0);\n        span.setStatus({ code: SpanStatusCode.ERROR, message: err.message });\n        span.end();\n      }\n      return Promise.reject(err);\n    },\n  );\n}\n```\n\n### Step 5: Alerting Rules\n\n```yaml\n# prometheus/apollo-alerts.yml\ngroups:\n  - name: apollo-integration\n    rules:\n      - alert: ApolloHighErrorRate\n        expr: rate(apollo_requests_total{status=~\"4..|5..\"}[5m]) / rate(apollo_requests_total[5m]) > 0.1\n        for: 5m\n        labels: { severity: critical }\n        annotations: { summary: \"Apollo API error rate > 10% for 5 minutes\" }\n\n      - alert: ApolloRateLimitLow\n        expr: apollo_rate_limit_remaining < 20\n        for: 1m\n        labels: { severity: warning }\n        annotations: { summary: \"Apollo rate limit below 20 remaining requests\" }\n\n      - alert: ApolloHighLatency\n        expr: histogram_quantile(0.95, rate(apollo_request_duration_seconds_bucket[5m])) > 5\n        for: 10m\n        labels: { severity: warning }\n        annotations: { summary: \"Apollo p95 latency > 5s for 10 minutes\" }\n\n      - alert: ApolloCreditBurnRate\n        expr: rate(apollo_credits_used_total[1h]) * 24 > 500\n        for: 30m\n        labels: { severity: warning }\n        annotations: { summary: \"Apollo credit burn rate projects > 500/day\" }\n```\n\n### Step 6: Metrics Endpoint\n\n```typescript\nimport express from 'express';\nimport { registry } from './metrics';\n\nconst metricsApp = express();\nmetricsApp.get('/metrics', async (_, res) => {\n  res.set('Content-Type', registry.contentType);\n  res.end(await registry.metrics());\n});\nmetricsApp.get('/health', (_, res) => res.json({ status: 'ok' }));\nmetricsApp.listen(9090, () => console.log('Metrics on :9090'));\n```\n\n## Output\n\n- Prometheus metrics: requests, duration, rate limits, credits, enrichment success\n- Axios interceptors for automatic collection on every API call\n- Pino structured logger with PII redaction\n- OpenTelemetry tracing spans for distributed tracing\n- Alerting rules for errors, rate limits, latency, and credit burn rate\n- `/metrics` and `/health` HTTP endpoints\n\n## Error Handling\n\n| Issue | Resolution |\n|-------|------------|\n| Missing metrics | Verify `instrumentClient()` called before first API call |\n| Alert noise | Tune `for` duration and thresholds |\n| Log volume | Use `LOG_LEVEL=warn` in production |\n| Credit burn alert | Review enrichment scoring thresholds in `apollo-cost-tuning` |\n\n## Resources\n\n- [Prometheus Node.js Client](https://github.com/siimon/prom-client)\n- [OpenTelemetry JavaScript](https://opentelemetry.io/docs/languages/js/)\n- [Pino Logger](https://getpino.io/)\n- [Apollo API Usage Stats](https://docs.apollo.io/reference/view-api-usage-stats)\n\n## Next Steps\n\nProceed to `apollo-incident-runbook` for incident response.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "apollo-observability",
-    "description": "Set up Apollo.io monitoring and observability.",
-    "allowed-tools": "Read, Write, Edit, Bash(kubectl:*), Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

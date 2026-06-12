@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000019598",
   "name": "block-no-verify-hook",
   "slug": "block-no-verify-hook",
   "description": "Configure a PreToolUse hook to prevent AI agents from skipping git pre-commit hooks with --no-verify and other bypass flags. Use when setting up Claude Code projects that enforce commit quality gates.",
   "content": "\n# Block No-Verify Hook\n\nPreToolUse hook configuration that intercepts and blocks bypass-flag usage before execution, ensuring AI agents cannot skip pre-commit hooks, GPG signing, or other git safety mechanisms.\n\n## Overview\n\nAI coding agents (Claude Code, Codex, etc.) can run shell commands with flags like `--no-verify` that bypass pre-commit hooks. This defeats the purpose of linting, formatting, testing, and security checks configured in pre-commit hooks. The block-no-verify hook adds a PreToolUse guard that rejects any tool call containing bypass flags before execution.\n\n## Problem\n\nWhen AI agents commit code, they may use bypass flags to avoid hook failures:\n\n```bash\n# These commands skip pre-commit hooks entirely\ngit commit --no-verify -m \"quick fix\"\ngit push --no-verify\ngit commit --no-gpg-sign -m \"unsigned commit\"\ngit merge --no-verify feature-branch\n```\n\nThis allows:\n- Unformatted code to enter the repository\n- Linting errors to bypass checks\n- Security scanning to be skipped\n- Unsigned commits to bypass signing policies\n- Test suites to be circumvented\n\n## Solution\n\nAdd a `PreToolUse` hook to `.claude/settings.json` that inspects every Bash tool call and blocks commands containing bypass flags.\n\n### Configuration\n\nAdd the following to your project's `.claude/settings.json`:\n\n```json\n{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"Bash\",\n        \"hook\": {\n          \"type\": \"command\",\n          \"command\": \"if printf '%s' \\\"$TOOL_INPUT\\\" | grep -qE '(^|&&|;|\\\\|)\\\\s*git\\\\s+.*--(no-verify|no-gpg-sign)'; then echo 'BLOCKED: --no-verify and --no-gpg-sign flags are not allowed. Run the commit without bypass flags so that pre-commit hooks execute properly.' >&2; exit 2; fi\"\n        }\n      }\n    ]\n  }\n}\n```\n\n### How It Works\n\n1. **Matcher**: The hook targets only `Bash` tool calls, so it does not interfere with other tools (Read, Edit, Grep, etc.).\n2. **Inspection**: The `$TOOL_INPUT` environment variable contains the full command the agent is about to execute. The hook uses `printf` to safely pass input (avoiding `echo` pitfalls with special characters) and checks for `--no-verify` or `--no-gpg-sign` flags only when preceded by a `git` command.\n3. **Blocking**: If a bypass flag is found in a git command, the hook exits with code 2 and prints an error message. Exit code 2 signals Claude Code to reject the tool call entirely.\n4. **Pass-through**: If no bypass flag is found, the hook exits with code 0 and the command executes normally.\n\n### Exit Codes\n\n| Code | Meaning |\n|------|---------|\n| 0 | Allow the tool call to proceed |\n| 1 | Error (tool call still proceeds, warning shown) |\n| 2 | Block the tool call entirely |\n\n## Blocked Flags\n\n| Flag | Purpose | Why Blocked |\n|------|---------|-------------|\n| `--no-verify` | Skips pre-commit and commit-msg hooks | Bypasses linting, formatting, testing, security checks |\n| `--no-gpg-sign` | Skips GPG commit signing | Bypasses commit signing policy |\n\n## Installation\n\n### Per-Project Setup\n\nCreate or update `.claude/settings.json` in your project root:\n\n```bash\nmkdir -p .claude\ncat > .claude/settings.json << 'EOF'\n{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"Bash\",\n        \"hook\": {\n          \"type\": \"command\",\n          \"command\": \"if printf '%s' \\\"$TOOL_INPUT\\\" | grep -qE '(^|&&|;|\\\\|)\\\\s*git\\\\s+.*--(no-verify|no-gpg-sign)'; then echo 'BLOCKED: --no-verify and --no-gpg-sign flags are not allowed. Run the commit without bypass flags so that pre-commit hooks execute properly.' >&2; exit 2; fi\"\n        }\n      }\n    ]\n  }\n}\nEOF\n```\n\n### Global Setup\n\nTo enforce across all projects, add to `~/.claude/settings.json`:\n\n```bash\nmkdir -p ~/.claude\ncat > ~/.claude/settings.json << 'EOF'\n{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"Bash\",\n        \"hook\": {\n          \"type\": \"command\",\n          \"command\": \"if printf '%s' \\\"$TOOL_INPUT\\\" | grep -qE '(^|&&|;|\\\\|)\\\\s*git\\\\s+.*--(no-verify|no-gpg-sign)'; then echo 'BLOCKED: --no-verify and --no-gpg-sign flags are not allowed. Run the commit without bypass flags so that pre-commit hooks execute properly.' >&2; exit 2; fi\"\n        }\n      }\n    ]\n  }\n}\nEOF\n```\n\n## Verification\n\nTest that the hook blocks bypass flags:\n\n```bash\n# This should be blocked by the hook:\ngit commit --no-verify -m \"test\"\n\n# This should succeed normally:\ngit commit -m \"test\"\n```\n\n## Extending the Hook\n\n### Adding More Blocked Flags\n\nTo block additional flags (e.g., `--force`), extend the grep pattern:\n\n```json\n{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"Bash\",\n        \"hook\": {\n          \"type\": \"command\",\n          \"command\": \"if printf '%s' \\\"$TOOL_INPUT\\\" | grep -qE '(^|&&|;|\\\\|)\\\\s*git\\\\s+.*--(no-verify|no-gpg-sign|force-with-lease|force)'; then echo 'BLOCKED: Bypass flags are not allowed.' >&2; exit 2; fi\"\n        }\n      }\n    ]\n  }\n}\n```\n\n### Combining with Other Hooks\n\nThe block-no-verify hook works alongside other PreToolUse hooks:\n\n```json\n{\n  \"hooks\": {\n    \"PreToolUse\": [\n      {\n        \"matcher\": \"Bash\",\n        \"hook\": {\n          \"type\": \"command\",\n          \"command\": \"if printf '%s' \\\"$TOOL_INPUT\\\" | grep -qE '(^|&&|;|\\\\|)\\\\s*git\\\\s+.*--(no-verify|no-gpg-sign)'; then echo 'BLOCKED: Bypass flags not allowed.' >&2; exit 2; fi\"\n        }\n      },\n      {\n        \"matcher\": \"Bash\",\n        \"hook\": {\n          \"type\": \"command\",\n          \"command\": \"if printf '%s' \\\"$TOOL_INPUT\\\" | grep -qE 'rm\\\\s+-rf\\\\s+/'; then echo 'BLOCKED: Dangerous rm command.' >&2; exit 2; fi\"\n        }\n      }\n    ]\n  }\n}\n```\n\n## Best Practices\n\n1. **Commit the settings file** -- Add `.claude/settings.json` to version control so all team members benefit from the hook.\n2. **Document in onboarding** -- Mention the hook in your project's contributing guide so developers understand why bypass flags are blocked.\n3. **Pair with pre-commit hooks** -- The block-no-verify hook ensures pre-commit hooks run; make sure you have meaningful pre-commit hooks configured.\n4. **Test after setup** -- Verify the hook works by intentionally triggering it in a test commit.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "block-no-verify-hook",
-    "description": "Configure a PreToolUse hook to prevent AI agents from skipping git pre-commit hooks with --no-verify and other bypass flags. Use when setting up Claude Code projects that enforce commit quality gates."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

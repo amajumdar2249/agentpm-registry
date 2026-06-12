@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032042",
   "name": "flyio-reference-architecture",
   "slug": "flyio-reference-architecture",
   "description": "Implement Fly.io reference architecture with multi-region apps, Postgres,",
   "content": "# Fly.io Reference Architecture\n\n## Overview\n\nProduction architecture for Fly.io: multi-region web tier, Postgres with read replicas, Redis for caching, background workers, and private networking.\n\n## Architecture\n\n```\n           \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 Fly.io Anycast DNS \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n           \u2502                                          \u2502\n    \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u25bc\u2500\u2500\u2500\u2500\u2500\u2500\u2510  \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510  \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u25bc\u2500\u2500\u2500\u2510\n    \u2502  Web (iad)  \u2502  \u2502  Web (lhr)   \u2502  \u2502   Web (nrt)     \u2502\n    \u2502  shared-1x  \u2502  \u2502  shared-1x   \u2502  \u2502   shared-1x     \u2502\n    \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2518  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n           \u2502                \u2502                    \u2502\n    \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2534\u2500\u2500\u2500 .internal DNS\n           \u2502                \u2502                    \u2502\n    \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u25bc\u2500\u2500\u2500\u2500\u2500\u2500\u2510  \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u25bc\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510  \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u25bc\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n    \u2502 Postgres    \u2502  \u2502 Postgres     \u2502  \u2502   Redis          \u2502\n    \u2502 Primary     \u2502  \u2502 Replica      \u2502  \u2502   (upstash.io)   \u2502\n    \u2502 (iad)       \u2502  \u2502 (lhr)        \u2502  \u2502                  \u2502\n    \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n           \u2502\n    \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u25bc\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n    \u2502  Worker     \u2502\n    \u2502  (iad)      \u2502\n    \u2502  shared-1x  \u2502\n    \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n```\n\n## Setup Commands\n\n```bash\n# 1. Web app \u2014 multi-region\nfly launch --name my-web --region iad\nfly scale count 1 --region lhr\nfly scale count 1 --region nrt\n\n# 2. Postgres with replica\nfly postgres create --name my-db --region iad\nfly postgres attach my-db -a my-web\n# Add read replica in Europe\nfly machine clone <primary-machine-id> --region lhr -a my-db\n\n# 3. Background worker (same codebase, different process)\nfly launch --name my-worker --region iad --no-deploy\n# fly.toml for worker: no [http_service], use [processes]\n\n# 4. All communicate via .internal DNS\n# my-db.internal:5432 (Postgres)\n# my-web.internal:3000 (internal API)\n```\n\n## fly.toml Configurations\n\n### Web App\n\n```toml\napp = \"my-web\"\nprimary_region = \"iad\"\n\n[http_service]\n  internal_port = 3000\n  force_https = true\n  auto_stop_machines = \"suspend\"\n  min_machines_running = 1\n\n[[vm]]\n  cpu_kind = \"shared\"\n  cpus = 1\n  memory = \"512mb\"\n```\n\n### Background Worker\n\n```toml\napp = \"my-worker\"\nprimary_region = \"iad\"\n\n[processes]\n  worker = \"node dist/worker.js\"\n\n# No [http_service] \u2014 worker doesn't serve HTTP\n\n[[vm]]\n  cpu_kind = \"shared\"\n  cpus = 1\n  memory = \"512mb\"\n```\n\n## Key Design Decisions\n\n| Decision | Choice | Rationale |\n|----------|--------|-----------|\n| Web tier | 3 regions | Low latency for global users |\n| Database | Fly Postgres + replica | Read replicas near users |\n| Cache | Upstash Redis (or Fly Redis) | Managed, multi-region |\n| Workers | Separate Fly app | Independent scaling |\n| Networking | 6PN (.internal DNS) | Zero-trust, no public exposure |\n| Storage | Fly Volumes (NVMe) | Fast, region-local |\n\n## Resources\n\n- [Fly.io Docs](https://fly.io/docs/)\n- [Multi-Region Postgres](https://fly.io/docs/postgres/high-availability-and-global-replication/)\n- [Private Networking](https://fly.io/docs/networking/private-networking/)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "flyio-reference-architecture",
-    "description": "Implement Fly.io reference architecture with multi-region apps, Postgres,",
-    "Trigger": "fly.io architecture\", \"fly.io system design\", \"fly.io multi-region\".",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

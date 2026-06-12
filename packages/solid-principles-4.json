@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000022476",
   "name": "solid-principles",
   "slug": "solid-principles-4",
   "description": "SOLID principles adapted for functional and TypeScript-first development.",
   "content": "\n# SOLID Principles for Node.js/TypeScript\n\n## Overview\nSOLID principles adapted for functional and TypeScript-first development.\n\n## S - Single Responsibility Principle\n\nA module/function should have only one reason to change.\n\n### Violation\n```typescript\n// Bad: Does validation, processing, and notification\nconst processOrder = async (order: Order) => {\n  // Validation\n  if (!order.items.length) throw new Error('Empty order');\n  if (order.total < 0) throw new Error('Invalid total');\n\n  // Processing\n  const processed = { ...order, status: 'processed' };\n  await db.orders.save(processed);\n\n  // Notification\n  await emailService.send(order.userId, 'Order confirmed');\n\n  return processed;\n};\n```\n\n### Correct\n```typescript\n// Good: Separate responsibilities\nconst validateOrder = (order: Order): Result<Order, ValidationError> => {\n  if (!order.items.length) return Result.fail(emptyOrderError());\n  if (order.total < 0) return Result.fail(invalidTotalError());\n  return Result.ok(order);\n};\n\nconst saveOrder = (db: Database) =>\n  async (order: Order): Promise<Order> => {\n    const processed = { ...order, status: 'processed' };\n    await db.orders.save(processed);\n    return processed;\n  };\n\nconst notifyUser = (notifier: Notifier) =>\n  async (userId: string, message: string): Promise<void> => {\n    await notifier.send(userId, message);\n  };\n\n// Compose in orchestrator\nconst processOrder = async (order: Order) => {\n  const validation = validateOrder(order);\n  if (validation.isFailure) return validation;\n\n  const saved = await saveOrder(db)(validation.value);\n  await notifyUser(emailService)(saved.userId, 'Order confirmed');\n\n  return Result.ok(saved);\n};\n```\n\n## O - Open/Closed Principle\n\nOpen for extension, closed for modification.\n\n### Violation\n```typescript\n// Bad: Must modify function to add new discount types\nconst calculateDiscount = (type: string, amount: number): number => {\n  if (type === 'percentage') return amount * 0.1;\n  if (type === 'fixed') return 10;\n  if (type === 'loyalty') return amount * 0.15;\n  return 0;\n};\n```\n\n### Correct\n```typescript\n// Good: Extend via new strategies without modifying existing code\ntype DiscountStrategy = (amount: number) => number;\n\nconst discountStrategies: Record<string, DiscountStrategy> = {\n  percentage: (amount) => amount * 0.1,\n  fixed: () => 10,\n  loyalty: (amount) => amount * 0.15,\n};\n\n// Easy to extend\ndiscountStrategies.holiday = (amount) => amount * 0.25;\n\nconst calculateDiscount = (type: string, amount: number): number =>\n  discountStrategies[type]?.(amount) ?? 0;\n```\n\n## L - Liskov Substitution Principle\n\nSubtypes must be substitutable for their base types.\n\n### Violation\n```typescript\n// Bad: Square breaks Rectangle contract\nclass Rectangle {\n  constructor(public width: number, public height: number) {}\n  setWidth(w: number) { this.width = w; }\n  setHeight(h: number) { this.height = h; }\n  area() { return this.width * this.height; }\n}\n\nclass Square extends Rectangle {\n  setWidth(w: number) {\n    this.width = w;\n    this.height = w; // Breaks expectation!\n  }\n}\n```\n\n### Correct\n```typescript\n// Good: Use composition and explicit types\ntype Shape = {\n  area: () => number;\n};\n\nconst createRectangle = (width: number, height: number): Shape => ({\n  area: () => width * height,\n});\n\nconst createSquare = (side: number): Shape => ({\n  area: () => side * side,\n});\n```\n\n## I - Interface Segregation Principle\n\nClients should not depend on interfaces they don't use.\n\n### Violation\n```typescript\n// Bad: Fat interface\ninterface DataService {\n  read(id: string): Promise<Data>;\n  write(data: Data): Promise<void>;\n  delete(id: string): Promise<void>;\n  backup(): Promise<void>;\n  restore(): Promise<void>;\n  migrate(): Promise<void>;\n}\n\n// Client only needs read\nconst reportGenerator = (service: DataService) => {\n  // Only uses service.read(), but depends on entire interface\n};\n```\n\n### Correct\n```typescript\n// Good: Segregated interfaces\ntype Reader<T> = {\n  read: (id: string) => Promise<T>;\n};\n\ntype Writer<T> = {\n  write: (data: T) => Promise<void>;\n};\n\ntype Deletable = {\n  delete: (id: string) => Promise<void>;\n};\n\n// Client depends only on what it needs\nconst reportGenerator = (reader: Reader<ReportData>) => {\n  // Only depends on read capability\n};\n\n// Compose interfaces as needed\ntype DataService = Reader<Data> & Writer<Data> & Deletable;\n```\n\n## D - Dependency Inversion Principle\n\nDepend on abstractions, not concretions.\n\n### Violation\n```typescript\n// Bad: Direct dependency on implementation\nimport { PrismaClient } from '@prisma/client';\n\nconst createUserService = () => {\n  const prisma = new PrismaClient(); // Hardcoded!\n\n  return {\n    findUser: (id: string) => prisma.user.findFirst({ where: { id } }),\n  };\n};\n```\n\n### Correct\n```typescript\n// Good: Depend on abstraction\ntype UserRepository = {\n  findById: (id: string) => Promise<User | null>;\n  save: (user: User) => Promise<User>;\n};\n\nconst createUserService = (repo: UserRepository) => ({\n  findUser: (id: string) => repo.findById(id),\n  createUser: async (data: CreateUserData) => {\n    const user = { id: generateId(), ...data };\n    return repo.save(user);\n  },\n});\n\n// Inject implementation\nconst prismaRepo: UserRepository = {\n  findById: (id) => prisma.user.findFirst({ where: { id } }),\n  save: (user) => prisma.user.create({ data: user }),\n};\n\nconst service = createUserService(prismaRepo);\n```\n\n## SOLID in Practice\n\n### Factory Function Pattern\n```typescript\n// Follows all SOLID principles\ntype Dependencies = {\n  userRepo: UserRepository;\n  orderRepo: OrderRepository;\n  paymentGateway: PaymentGateway;\n  logger: Logger;\n};\n\nconst createOrderProcessor = (deps: Dependencies) => {\n  const validateOrder = (order: Order): Result<Order, ValidationError> => {\n    // Single responsibility: validation only\n  };\n\n  const processPayment = async (order: Order): Promise<Result<Payment, PaymentError>> => {\n    // Single responsibility: payment only\n  };\n\n  return {\n    process: async (order: Order): Promise<Result<ProcessedOrder, OrderError>> => {\n      const validation = validateOrder(order);\n      if (validation.isFailure) return validation;\n\n      const payment = await processPayment(validation.value);\n      if (payment.isFailure) return payment;\n\n      // Compose results\n      return Result.ok({ order: validation.value, payment: payment.value });\n    },\n  };\n};\n```\n\n### Testing SOLID Code\n```typescript\ndescribe('OrderProcessor', () => {\n  it('should process valid order', async () => {\n    // Easy to test due to dependency injection\n    const deps = {\n      userRepo: createFakeUserRepo(),\n      orderRepo: createFakeOrderRepo(),\n      paymentGateway: { charge: jest.fn().mockResolvedValue(Result.ok({})) },\n      logger: { info: jest.fn() },\n    };\n\n    const processor = createOrderProcessor(deps);\n    const result = await processor.process(createTestOrder());\n\n    expect(result.isSuccess).toBe(true);\n  });\n});\n```\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "solid-principles",
-    "description": "SOLID principles adapted for functional and TypeScript-first development."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

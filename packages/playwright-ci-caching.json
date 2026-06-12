@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000000066",
   "name": "playwright-ci-caching",
   "slug": "playwright-ci-caching",
   "description": "Cache Playwright browser binaries in CI/CD pipelines (GitHub Actions, Azure DevOps) to avoid 1-2 minute download overhead on every build.",
   "content": "\n# Caching Playwright Browsers in CI/CD\n\n## When to Use This Skill\n\nUse this skill when:\n- Setting up CI/CD for a project with Playwright E2E tests\n- Build times are slow due to browser downloads (~400MB, 1-2 minutes)\n- You want automatic cache invalidation when Playwright version changes\n- Using GitHub Actions or Azure DevOps pipelines\n\n## The Problem\n\nPlaywright browsers (~400MB) must be downloaded on every CI run by default. This:\n- Adds 1-2 minutes to every build\n- Wastes bandwidth\n- Can fail on transient network issues\n- Slows down PR feedback loops\n\n## Core Pattern\n\n1. **Extract Playwright version** from `Directory.Packages.props` (CPM) to use as cache key\n2. **Cache browser binaries** using platform-appropriate paths\n3. **Conditional install** - only download on cache miss\n4. **Automatic cache bust** - key includes version, so package upgrades invalidate cache\n\n## Cache Paths by OS\n\n| OS | Path |\n|----|------|\n| Linux | `~/.cache/ms-playwright` |\n| macOS | `~/Library/Caches/ms-playwright` |\n| Windows | `%USERPROFILE%\\AppData\\Local\\ms-playwright` |\n\n## GitHub Actions\n\n```yaml\n- name: Get Playwright Version\n  shell: pwsh\n  run: |\n    $propsPath = \"Directory.Packages.props\"\n    [xml]$props = Get-Content $propsPath\n    $version = $props.Project.ItemGroup.PackageVersion |\n      Where-Object { $_.Include -eq \"Microsoft.Playwright\" } |\n      Select-Object -ExpandProperty Version\n    echo \"PlaywrightVersion=$version\" >> $env:GITHUB_ENV\n\n- name: Cache Playwright Browsers\n  id: playwright-cache\n  uses: actions/cache@v4\n  with:\n    path: ~/.cache/ms-playwright\n    key: ${{ runner.os }}-playwright-${{ env.PlaywrightVersion }}\n\n- name: Install Playwright Browsers\n  if: steps.playwright-cache.outputs.cache-hit != 'true'\n  shell: pwsh\n  run: ./build/playwright.ps1 install --with-deps\n```\n\n### Multi-OS GitHub Actions\n\nFor workflows that run on multiple operating systems:\n\n```yaml\n- name: Cache Playwright Browsers\n  id: playwright-cache\n  uses: actions/cache@v4\n  with:\n    path: |\n      ~/.cache/ms-playwright\n      ~/Library/Caches/ms-playwright\n      ~/AppData/Local/ms-playwright\n    key: ${{ runner.os }}-playwright-${{ env.PlaywrightVersion }}\n```\n\n## Azure DevOps\n\n```yaml\n- task: PowerShell@2\n  displayName: 'Get Playwright Version'\n  inputs:\n    targetType: 'inline'\n    script: |\n      [xml]$props = Get-Content \"Directory.Packages.props\"\n      $version = $props.Project.ItemGroup.PackageVersion |\n        Where-Object { $_.Include -eq \"Microsoft.Playwright\" } |\n        Select-Object -ExpandProperty Version\n      Write-Host \"##vso[task.setvariable variable=PlaywrightVersion]$version\"\n\n- task: Cache@2\n  displayName: 'Cache Playwright Browsers'\n  inputs:\n    key: 'playwright | \"$(Agent.OS)\" | $(PlaywrightVersion)'\n    path: '$(HOME)/.cache/ms-playwright'\n    cacheHitVar: 'PlaywrightCacheHit'\n\n- task: PowerShell@2\n  displayName: 'Install Playwright Browsers'\n  condition: ne(variables['PlaywrightCacheHit'], 'true')\n  inputs:\n    filePath: 'build/playwright.ps1'\n    arguments: 'install --with-deps'\n```\n\n## Helper Script: playwright.ps1\n\nCreate a `build/playwright.ps1` script that discovers and runs the Playwright CLI. This abstracts away the Playwright CLI location which varies by project structure.\n\n```powershell\n# build/playwright.ps1\n# Discovers Microsoft.Playwright.dll and runs the bundled Playwright CLI\n\nparam(\n    [Parameter(ValueFromRemainingArguments = $true)]\n    [string[]]$Arguments\n)\n\n# Find the Playwright DLL (after dotnet build/restore)\n$playwrightDll = Get-ChildItem -Path . -Recurse -Filter \"Microsoft.Playwright.dll\" -ErrorAction SilentlyContinue |\n    Select-Object -First 1\n\nif (-not $playwrightDll) {\n    Write-Error \"Microsoft.Playwright.dll not found. Run 'dotnet build' first.\"\n    exit 1\n}\n\n$playwrightDir = $playwrightDll.DirectoryName\n\n# Find the playwright CLI (path varies by OS and node version)\n$playwrightCmd = Get-ChildItem -Path \"$playwrightDir/.playwright/node\" -Recurse -Filter \"playwright.cmd\" -ErrorAction SilentlyContinue |\n    Select-Object -First 1\n\nif (-not $playwrightCmd) {\n    # Try Unix executable\n    $playwrightCmd = Get-ChildItem -Path \"$playwrightDir/.playwright/node\" -Recurse -Filter \"playwright\" -ErrorAction SilentlyContinue |\n        Where-Object { $_.Name -eq \"playwright\" } |\n        Select-Object -First 1\n}\n\nif (-not $playwrightCmd) {\n    Write-Error \"Playwright CLI not found in $playwrightDir/.playwright/node\"\n    exit 1\n}\n\nWrite-Host \"Using Playwright CLI: $($playwrightCmd.FullName)\"\n& $playwrightCmd.FullName @Arguments\n```\n\nUsage:\n```bash\n# Install browsers\n./build/playwright.ps1 install --with-deps\n\n# Install specific browser\n./build/playwright.ps1 install chromium\n\n# Show installed browsers\n./build/playwright.ps1 install --dry-run\n```\n\n## Prerequisites\n\nThis pattern assumes:\n\n1. **Central Package Management (CPM)** with `Directory.Packages.props`:\n   ```xml\n   <Project>\n     <ItemGroup>\n       <PackageVersion Include=\"Microsoft.Playwright\" Version=\"1.40.0\" />\n     </ItemGroup>\n   </Project>\n   ```\n\n2. **Project has been built** before running `playwright.ps1` (so DLLs exist)\n\n3. **PowerShell available** on CI agents (pre-installed on GitHub Actions and Azure DevOps)\n\n## Why Version-Based Cache Keys Matter\n\nUsing the Playwright version in the cache key ensures:\n\n- **Automatic invalidation** when you upgrade Playwright\n- **No stale browser binaries** that don't match the SDK version\n- **No manual cache clearing** needed after version bumps\n\nIf you hardcode the cache key (e.g., `playwright-browsers-v1`), you'll need to manually bump it every time you upgrade Playwright, or you'll get cryptic version mismatch errors.\n\n## Troubleshooting\n\n### Cache not being used\n\n1. Verify the version extraction step outputs the correct version\n2. Check that the cache path matches your OS\n3. Ensure `Directory.Packages.props` exists and has the Playwright package\n\n### \"Browser not found\" after cache hit\n\nThe cached browsers don't match the Playwright SDK version. This happens when:\n- The cache key doesn't include the version\n- The version extraction failed silently\n\nFix: Ensure the Playwright version is in the cache key.\n\n### playwright.ps1 can't find the DLL\n\nRun `dotnet build` or `dotnet restore` before running the script. The Playwright DLL only exists after NuGet restore.\n\n## References\n\nThis pattern is battle-tested in production projects:\n- [petabridge/geekedin](https://github.com/petabridge/geekedin)\n- [petabridge/DrawTogether.NET](https://github.com/petabridge/DrawTogether.NET)\n\n## Related Skills\n\n- `dotnet-skills:playwright-blazor` - Writing Playwright tests for Blazor applications\n- `dotnet-skills:project-structure` - Central Package Management setup\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "playwright-ci-caching",
-    "description": "Cache Playwright browser binaries in CI/CD pipelines (GitHub Actions, Azure DevOps) to avoid 1-2 minute download overhead on every build.",
-    "invocable": "false"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

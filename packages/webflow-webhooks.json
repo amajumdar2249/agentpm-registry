@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000000005",
   "name": "webflow-webhooks",
   "slug": "webflow-webhooks",
   "description": "Receive and verify Webflow webhooks. Use when setting up Webflow webhook handlers, debugging signature verification, or handling Webflow events like form_submission, site_publish, ecomm_new_order, or collection item changes.",
   "content": "\n# Webflow Webhooks\n\nReceive, verify, and process Webflow webhook events for form submissions, CMS changes, ecommerce orders, site publishing, and more.\n\n## Quick Start Workflow\n\n> **Prerequisite:** You need a Webflow account with an active site. For signature verification, create webhooks via the API (not the dashboard) \u2014 see [Setup](references/setup.md).\n\n1. **Create webhook**: Register a webhook via the Webflow API for your desired event type\n2. **Receive events**: Set up an endpoint that accepts POST requests with raw body parsing\n3. **Verify signatures**: Validate `x-webflow-signature` and `x-webflow-timestamp` headers\n4. **Process events**: Route events by `triggerType` and handle each accordingly\n5. **Acknowledge**: Return `200` to confirm receipt (other statuses trigger retries)\n\n### Signature Verification\n\n```javascript\nconst crypto = require('crypto');\n\nfunction verifyWebflowSignature(rawBody, signature, timestamp, secret) {\n  // Check timestamp to prevent replay attacks (5 minute window - 300000 milliseconds)\n  const currentTime = Date.now();\n  if (Math.abs(currentTime - parseInt(timestamp)) > 300000) {\n    return false;\n  }\n\n  // Generate HMAC signature\n  const signedContent = `${timestamp}:${rawBody}`;\n  const expectedSignature = crypto\n    .createHmac('sha256', secret)\n    .update(signedContent)\n    .digest('hex');\n\n  // Timing-safe comparison\n  try {\n    return crypto.timingSafeEqual(\n      Buffer.from(signature),\n      Buffer.from(expectedSignature)\n    );\n  } catch {\n    return false; // Different lengths = invalid\n  }\n}\n```\n\n### Processing Events\n\n```javascript\napp.post('/webhooks/webflow', express.raw({ type: 'application/json' }), (req, res) => {\n  const signature = req.headers['x-webflow-signature'];\n  const timestamp = req.headers['x-webflow-timestamp'];\n\n  if (!signature || !timestamp) {\n    return res.status(400).send('Missing required headers');\n  }\n\n  const isValid = verifyWebflowSignature(\n    req.body.toString(),\n    signature,\n    timestamp,\n    process.env.WEBFLOW_WEBHOOK_SECRET\n  );\n\n  if (!isValid) {\n    return res.status(400).send('Invalid signature');\n  }\n\n  const event = JSON.parse(req.body);\n\n  switch (event.triggerType) {\n    case 'form_submission':\n      console.log('New form submission:', event.payload.data);\n      break;\n    case 'ecomm_new_order':\n      console.log('New order:', event.payload);\n      break;\n    case 'collection_item_created':\n      console.log('New CMS item:', event.payload);\n      break;\n    case 'collection_item_published':\n      console.log('Published CMS items:', event.payload.items);\n      break;\n  }\n\n  res.status(200).send('OK');\n});\n```\n\n## Event Types\n\nWebflow supports 14 webhook event types across 6 categories: Forms, Site, Pages, Ecommerce, CMS, and Comments. See **[references/event-types.md](references/event-types.md)** for the complete reference with all payload schemas and examples.\n\n| Category | Events | Required Scope |\n|----------|--------|----------------|\n| Forms | `form_submission` | `forms:read` |\n| Site | `site_publish` | `sites:read` |\n| Pages | `page_created`, `page_metadata_updated`, `page_deleted` | `pages:read` |\n| Ecommerce | `ecomm_new_order`, `ecomm_order_changed`, `ecomm_inventory_changed` | `ecommerce:read` |\n| CMS | `collection_item_created`, `collection_item_changed`, `collection_item_deleted`, `collection_item_unpublished`, `collection_item_published` | `cms:read` |\n| Comments | `comment_created` | `comments:read` |\n\n## Environment Variables\n\n```bash\n# For webhooks created via OAuth App\nWEBFLOW_WEBHOOK_SECRET=your_oauth_client_secret\n\n# For webhooks created via API (after April 2025)\nWEBFLOW_WEBHOOK_SECRET=whsec_xxxxx  # Returned when creating webhook\n```\n\n## Best Practices\n\n1. **Always verify signatures**: Use HMAC-SHA256 verification for webhooks created via OAuth or API \u2014 see [Verification](references/verification.md)\n2. **Use raw body for verification**: Never verify against parsed JSON; configure your framework accordingly\n3. **Validate timestamps**: Enforce a 5-minute window (300000ms) to prevent replay attacks\n4. **Return 200 quickly**: Acknowledge receipt immediately; process events asynchronously for heavy workloads\n5. **Handle retries gracefully**: Webflow retries up to 3 times on failure (10-minute intervals) \u2014 implement idempotency\n6. **Use HTTPS in production**: Webhook endpoints must use HTTPS for security\n\n## Important Notes\n\n- **Never handle secrets in plain text.** API tokens, OAuth client secrets, and webhook signing secrets must always be stored in environment variables or a secrets manager. Never ask the user for tokens or secrets directly, and never hard-code them in source files.\n- Webhooks created through the Webflow dashboard do NOT include signature headers\n- Only webhooks created via OAuth apps or API include `x-webflow-signature` and `x-webflow-timestamp`\n- Timestamp validation (5 minute window - 300000 milliseconds) is critical to prevent replay attacks\n- Return 200 status to acknowledge receipt; other statuses trigger retries (up to 3 times, 10-minute intervals)\n\n## Reference Documentation\n\nEach reference file includes YAML frontmatter with `name`, `description`, and `tags` for searchability. Use the search script available in `scripts/search_references.py` to quickly find relevant references by tag or keyword.\n\n- **[references/event-types.md](references/event-types.md)**: Complete reference for all 14 event types with scopes, payload schemas, and examples\n- **[references/webhook-api.md](references/webhook-api.md)**: REST API v2 endpoints for creating, listing, getting, and deleting webhooks\n- **[references/overview.md](references/overview.md)**: Webhook concepts, delivery behavior, limits, and security considerations\n- **[references/setup.md](references/setup.md)**: Dashboard and API configuration, OAuth, scopes, environment setup\n- **[references/verification.md](references/verification.md)**: HMAC-SHA256 signature verification, common gotchas, debugging\n- **[references/faq.md](references/faq.md)**: FAQ and troubleshooting for delivery issues, signature failures, and API errors\n\n### Searching References\n\n```bash\n# List all references with metadata\npython scripts/search_references.py --list\n\n# Search by tag (exact match)\npython scripts/search_references.py --tag <tag>\n\n# Search by keyword (across name, description, tags, and content)\npython scripts/search_references.py --search <query>\n```\n\n## Scripts\n\n- **`scripts/search_references.py`**: Search reference files by tag, keyword, or list all with metadata\n",
+  "author": "Ben Sabic",
   "version": "1.0.0",
-  "metadata": {
-    "name": "webflow-webhooks",
-    "description": "Receive and verify Webflow webhooks. Use when setting up Webflow webhook handlers, debugging signature verification, or handling Webflow events like form_submission, site_publish, ecomm_new_order, or collection item changes.",
-    "license": "MIT",
-    "metadata": "",
-    "author": "Ben Sabic",
-    "repository": "https://github.com/224-industries/webflow-skills",
-    "url": "https://skills.224ai.au/webflow-webhooks.skill",
-    "version": "1.0.0",
-    "keywords": "ai, agent, skill, webhooks, signature verification, webflow, form submission, site publish, ecomm order, collection item"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

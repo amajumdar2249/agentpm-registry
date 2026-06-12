@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031590",
   "name": "clickhouse-webhooks-events",
   "slug": "clickhouse-webhooks-events",
   "description": "Ingest data into ClickHouse from webhooks, Kafka, and streaming sources",
   "content": "# ClickHouse Data Ingestion\n\n## Overview\n\nBuild data ingestion pipelines into ClickHouse from HTTP webhooks, Kafka,\nand streaming sources with proper batching, deduplication, and error handling.\n\n## Prerequisites\n\n- ClickHouse table with appropriate engine (see `clickhouse-core-workflow-a`)\n- `@clickhouse/client` connected\n\n## Instructions\n\n### Step 1: Webhook Receiver with Batched Inserts\n\n```typescript\nimport express from 'express';\nimport { createClient } from '@clickhouse/client';\n\nconst client = createClient({ url: process.env.CLICKHOUSE_HOST! });\nconst app = express();\napp.use(express.json());\n\n// Buffer for batching \u2014 ClickHouse hates one-row-at-a-time inserts\nconst buffer: Record<string, unknown>[] = [];\nconst BATCH_SIZE = 5_000;\nconst FLUSH_INTERVAL_MS = 5_000;\n\nasync function flushBuffer() {\n  if (buffer.length === 0) return;\n  const batch = buffer.splice(0, buffer.length);\n\n  try {\n    await client.insert({\n      table: 'analytics.events',\n      values: batch,\n      format: 'JSONEachRow',\n    });\n    console.log(`Flushed ${batch.length} events to ClickHouse`);\n  } catch (err) {\n    console.error('Insert failed, re-queuing:', (err as Error).message);\n    buffer.unshift(...batch);  // Put back at front for retry\n  }\n}\n\n// Flush periodically\nsetInterval(flushBuffer, FLUSH_INTERVAL_MS);\n\n// Webhook endpoint\napp.post('/ingest', async (req, res) => {\n  const events = Array.isArray(req.body) ? req.body : [req.body];\n\n  for (const event of events) {\n    buffer.push({\n      event_type: event.type ?? 'unknown',\n      user_id: event.userId ?? 0,\n      properties: JSON.stringify(event.properties ?? {}),\n      created_at: new Date().toISOString().replace('T', ' ').slice(0, 19),\n    });\n  }\n\n  if (buffer.length >= BATCH_SIZE) {\n    await flushBuffer();\n  }\n\n  res.status(202).json({ queued: events.length, buffer_size: buffer.length });\n});\n```\n\n### Step 2: Kafka Table Engine (Server-Side Ingestion)\n\n```sql\n-- Create a Kafka engine table (consumes messages automatically)\nCREATE TABLE analytics.events_kafka (\n    event_type  String,\n    user_id     UInt64,\n    properties  String,\n    timestamp   DateTime\n)\nENGINE = Kafka()\nSETTINGS\n    kafka_broker_list = 'kafka:9092',\n    kafka_topic_list = 'events',\n    kafka_group_name = 'clickhouse_consumer',\n    kafka_format = 'JSONEachRow',\n    kafka_num_consumers = 2,\n    kafka_max_block_size = 65536;\n\n-- Materialized view pipes Kafka \u2192 MergeTree automatically\nCREATE MATERIALIZED VIEW analytics.events_kafka_mv\nTO analytics.events\nAS SELECT\n    event_type,\n    user_id,\n    properties,\n    timestamp AS created_at\nFROM analytics.events_kafka;\n\n-- ClickHouse now consumes from Kafka continuously!\n-- Check lag:\nSELECT * FROM system.kafka_consumers;\n```\n\n### Step 3: ClickPipes (ClickHouse Cloud Managed Ingestion)\n\nClickHouse Cloud offers **ClickPipes** \u2014 a managed ingestion service that\nconnects to Kafka, Confluent, Amazon MSK, S3, and GCS without code.\n\n```\nClickPipes Configuration (Cloud Console):\n1. Source: Amazon MSK / Confluent Cloud / Apache Kafka\n2. Topic: events\n3. Format: JSONEachRow\n4. Target: analytics.events\n5. Scaling: 2 consumers (auto-scales)\n```\n\n### Step 4: HTTP Interface Bulk Insert\n\n```text\n# Insert from CSV file via HTTP (no client needed)\ncurl 'http://localhost:8123/?query=INSERT+INTO+analytics.events+FORMAT+CSVWithNames' \\\n  --data-binary @events.csv\n\n# Insert from NDJSON file\ncurl 'http://localhost:8123/?query=INSERT+INTO+analytics.events+FORMAT+JSONEachRow' \\\n  --data-binary @events.ndjson\n\n# Insert from Parquet file\ncurl 'http://localhost:8123/?query=INSERT+INTO+analytics.events+FORMAT+Parquet' \\\n  --data-binary @events.parquet\n\n# Insert from remote URL (ClickHouse fetches it)\nINSERT INTO analytics.events\nSELECT * FROM url('https://data.example.com/events.csv', CSVWithNames);\n\n# Insert from S3\nINSERT INTO analytics.events\nSELECT * FROM s3(\n    'https://my-bucket.s3.amazonaws.com/events/*.parquet',\n    'ACCESS_KEY', 'SECRET_KEY',\n    'Parquet'\n);\n```\n\n### Step 5: Deduplication with ReplacingMergeTree\n\n```sql\n-- For idempotent ingestion (webhook retries, Kafka reprocessing)\nCREATE TABLE analytics.events_dedup (\n    event_id    String,           -- Unique event identifier\n    event_type  LowCardinality(String),\n    user_id     UInt64,\n    properties  String,\n    created_at  DateTime,\n    _version    UInt64 DEFAULT toUnixTimestamp(now())\n)\nENGINE = ReplacingMergeTree(_version)\nORDER BY event_id;               -- Dedup key\n\n-- Insert duplicate-safe: same event_id keeps latest _version\n-- Query with FINAL for deduplicated results\nSELECT * FROM analytics.events_dedup FINAL\nWHERE created_at >= today() - 7;\n```\n\n### Step 6: Insert Monitoring\n\n```sql\n-- Track insert throughput\nSELECT\n    toStartOfMinute(event_time) AS minute,\n    count() AS inserts,\n    sum(written_rows) AS rows_inserted,\n    formatReadableSize(sum(written_bytes)) AS bytes_inserted\nFROM system.query_log\nWHERE type = 'QueryFinish'\n  AND query_kind = 'Insert'\n  AND event_time >= now() - INTERVAL 1 HOUR\nGROUP BY minute\nORDER BY minute;\n\n-- Check for insert errors\nSELECT event_time, exception, substring(query, 1, 200)\nFROM system.query_log\nWHERE type = 'ExceptionWhileProcessing'\n  AND query_kind = 'Insert'\n  AND event_time >= now() - INTERVAL 1 HOUR\nORDER BY event_time DESC;\n```\n\n## Insert Best Practices\n\n| Practice | Why |\n|----------|-----|\n| Batch 10K-100K rows per INSERT | Fewer parts, faster merges |\n| Buffer 1-5 seconds for real-time | Balances latency vs throughput |\n| Use `JSONEachRow` format | Client handles serialization |\n| Compress with `ZSTD` on wire | Reduces network transfer |\n| Use `ReplacingMergeTree` for retries | Handles duplicate delivery |\n| Use `async_insert=1` for small batches | Server-side batching |\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `Too many parts` | Single-row inserts | Batch inserts (10K+ rows) |\n| `Cannot parse input` | Wrong format | Match format to data structure |\n| `TIMEOUT` on large insert | Slow network | Enable compression, split batch |\n| Duplicate events | Webhook retries | Use ReplacingMergeTree + event_id |\n\n## Resources\n\n- [Kafka Integration](https://clickhouse.com/docs/integrations/kafka)\n- [ClickPipes](https://clickhouse.com/cloud/clickpipes)\n- [HTTP Interface](https://clickhouse.com/docs/interfaces/http)\n- [S3 Table Function](https://clickhouse.com/docs/sql-reference/table-functions/s3)\n\n## Next Steps\n\nFor query and server performance, see `clickhouse-performance-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clickhouse-webhooks-events",
-    "description": "Ingest data into ClickHouse from webhooks, Kafka, and streaming sources",
-    "Trigger": "clickhouse ingestion\", \"clickhouse webhook\", \"clickhouse Kafka\",",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

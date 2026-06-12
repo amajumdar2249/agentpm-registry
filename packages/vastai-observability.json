@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033452",
   "name": "vastai-observability",
   "slug": "vastai-observability",
   "description": "Monitor Vast.ai GPU instance health, utilization, and costs.",
   "content": "# Vast.ai Observability\n\n## Overview\n\nMonitor Vast.ai GPU instance health, utilization, and costs. Key metrics: GPU utilization (idle GPUs waste $0.20-$4.00/hr), instance uptime, training progress, cost accumulation, and spot preemption events.\n\n## Prerequisites\n\n- Vast.ai account with active instances\n- `vastai` CLI installed\n- Optional: Prometheus, Grafana, or Datadog for dashboarding\n\n## Instructions\n\n### Step 1: Instance Metrics Collector\n\n```python\nimport subprocess, json, time\nfrom datetime import datetime\n\nclass VastMetricsCollector:\n    def __init__(self, output_file=\"vast_metrics.jsonl\"):\n        self.output_file = output_file\n\n    def collect(self):\n        result = subprocess.run(\n            [\"vastai\", \"show\", \"instances\", \"--raw\"],\n            capture_output=True, text=True)\n        instances = json.loads(result.stdout)\n\n        metrics = {\n            \"timestamp\": datetime.utcnow().isoformat(),\n            \"total_instances\": len(instances),\n            \"running\": 0, \"total_hourly_cost\": 0,\n            \"instances\": [],\n        }\n\n        for inst in instances:\n            status = inst.get(\"actual_status\", \"unknown\")\n            dph = inst.get(\"dph_total\", 0)\n            if status == \"running\":\n                metrics[\"running\"] += 1\n                metrics[\"total_hourly_cost\"] += dph\n\n            metrics[\"instances\"].append({\n                \"id\": inst[\"id\"],\n                \"gpu\": inst.get(\"gpu_name\"),\n                \"status\": status,\n                \"dph\": dph,\n                \"gpu_util\": inst.get(\"gpu_util\", 0),\n                \"gpu_temp\": inst.get(\"gpu_temp\", 0),\n            })\n\n        with open(self.output_file, \"a\") as f:\n            f.write(json.dumps(metrics) + \"\\n\")\n\n        return metrics\n\n    def run(self, interval=60):\n        while True:\n            m = self.collect()\n            print(f\"[{m['timestamp']}] Running: {m['running']} | \"\n                  f\"Cost: ${m['total_hourly_cost']:.3f}/hr\")\n            time.sleep(interval)\n```\n\n### Step 2: Alert Conditions\n\n```python\ndef check_alerts(metrics):\n    alerts = []\n\n    # Idle GPU alert (running but <10% utilization)\n    for inst in metrics[\"instances\"]:\n        if inst[\"status\"] == \"running\" and inst[\"gpu_util\"] < 10:\n            alerts.append(f\"IDLE: Instance {inst['id']} GPU util={inst['gpu_util']}% \"\n                         f\"(wasting ${inst['dph']:.3f}/hr)\")\n\n    # High temperature alert\n    for inst in metrics[\"instances\"]:\n        if inst.get(\"gpu_temp\", 0) > 85:\n            alerts.append(f\"HOT: Instance {inst['id']} GPU temp={inst['gpu_temp']}C\")\n\n    # Budget alert\n    daily_projection = metrics[\"total_hourly_cost\"] * 24\n    if daily_projection > 100:\n        alerts.append(f\"BUDGET: Projected daily cost ${daily_projection:.2f}\")\n\n    return alerts\n```\n\n### Step 3: Remote GPU Monitoring\n\n```bash\n# SSH into instance and collect nvidia-smi metrics\nssh -p $PORT root@$HOST \"nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw --format=csv,noheader,nounits\"\n# Output: 95, 20480, 24576, 72, 285\n```\n\n### Step 4: Prometheus Exporter (Optional)\n\n```python\nfrom prometheus_client import Gauge, start_http_server\n\ngpu_util = Gauge(\"vastai_gpu_utilization\", \"GPU utilization %\", [\"instance_id\", \"gpu_name\"])\nhourly_cost = Gauge(\"vastai_hourly_cost\", \"Total hourly cost USD\")\ninstance_count = Gauge(\"vastai_instance_count\", \"Running instances\")\n\ndef export_metrics(metrics):\n    instance_count.set(metrics[\"running\"])\n    hourly_cost.set(metrics[\"total_hourly_cost\"])\n    for inst in metrics[\"instances\"]:\n        if inst[\"status\"] == \"running\":\n            gpu_util.labels(inst[\"id\"], inst[\"gpu\"]).set(inst[\"gpu_util\"])\n\nstart_http_server(9090)  # Prometheus scrape target\n```\n\n## Output\n\n- Metrics collector with JSONL output\n- Alert conditions (idle GPU, high temp, budget)\n- Remote GPU monitoring via SSH + nvidia-smi\n- Optional Prometheus exporter for Grafana dashboards\n\n## Error Handling\n\n| Alert | Threshold | Response |\n|-------|-----------|----------|\n| Idle GPU | util < 10% for > 10 min | Investigate or destroy instance |\n| High temp | > 85C sustained | Reduce workload or report to host |\n| Budget exceeded | Projected daily > $100 | Destroy non-critical instances |\n| Instance offline | Status changed from running | Trigger auto-recovery |\n\n## Resources\n\n- [Vast.ai CLI](https://docs.vast.ai/cli/get-started)\n- [NVIDIA nvidia-smi](https://developer.nvidia.com/nvidia-system-management-interface)\n\n## Next Steps\n\nFor incident response procedures, see `vastai-incident-runbook`.\n\n## Examples\n\n**Quick dashboard**: Run `VastMetricsCollector().run(interval=30)` in tmux on a monitoring server. Pipe alerts to Slack via webhook.\n\n**Cost tracking**: Parse `vast_metrics.jsonl` to plot hourly cost over time and identify spending patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "vastai-observability",
-    "description": "Monitor Vast.ai GPU instance health, utilization, and costs.",
-    "allowed-tools": "Read, Write, Edit, Bash(vastai:*), Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

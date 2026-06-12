@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000018074",
   "name": "rw-integrate-uploads",
   "slug": "rw-integrate-uploads",
   "description": "Help users upload local files to Runway for use as inputs to generation models",
   "content": "\n# Integrate Uploads\n\n> **PREREQUISITE:** Run `+rw-check-compatibility` first. Run `+rw-fetch-api-reference` to load the latest API reference before integrating. Requires `+rw-setup-api-key` for API credentials.\n\nHelp users upload local files (images, videos, audio) to Runway's ephemeral storage for use as inputs to generation models.\n\n## When to Use Uploads\n\nUse the Uploads API when:\n- The user has a **local file** (not a public URL) they want to use as input\n- The file exceeds **data URI size limits** (5 MB for images, 16 MB for video/audio)\n- The file's URL doesn't meet Runway's **URL requirements** (HTTPS, proper headers, no redirects)\n\n**You do NOT need uploads when:**\n- The asset is already at a public HTTPS URL with proper headers\n- The asset is small enough for a data URI (< 5 MB image, < 16 MB video)\n\n## How It Works\n\n1. Request an ephemeral upload slot \u2192 get a presigned upload URL and form fields\n2. Upload the file to the presigned URL\n3. Use the returned `runway://` URI as input to any generation endpoint\n\n**`runway://` URIs are valid for 24 hours.**\n\n## SDK Upload (Recommended)\n\n### Node.js\n\n```javascript\nimport RunwayML from '@runwayml/sdk';\nimport fs from 'fs';\n\nconst client = new RunwayML();\n\n// Upload from a file stream\nconst upload = await client.uploads.createEphemeral(\n  fs.createReadStream('/path/to/image.jpg')\n);\n\n// Use the runway:// URI in any generation call\nconst task = await client.imageToVideo.create({\n  model: 'gen4.5',\n  promptImage: upload.runwayUri,\n  promptText: 'The scene comes to life',\n  ratio: '1280:720',\n  duration: 5\n}).waitForTaskOutput();\n```\n\nThe Node.js SDK accepts:\n- `fs.ReadStream` \u2014 file streams\n- `File` objects \u2014 from web APIs\n- `Blob` objects\n- `Buffer` / `ArrayBuffer` / typed arrays\n- `Response` objects \u2014 from `fetch()`\n- Async iterables\n\n### Python\n\n```python\nfrom runwayml import RunwayML\nfrom pathlib import Path\n\nclient = RunwayML()\n\n# Upload from a file path\nupload = client.uploads.create_ephemeral(\n    Path('/path/to/image.jpg')\n)\n\n# Use the runway:// URI\ntask = client.image_to_video.create(\n    model='gen4.5',\n    prompt_image=upload.runway_uri,\n    prompt_text='The scene comes to life',\n    ratio='1280:720',\n    duration=5\n).wait_for_task_output()\n```\n\nThe Python SDK accepts:\n- `pathlib.Path` objects\n- `IOBase` objects (file-like objects)\n- Two-tuples of `(filename, content)`\n\n## REST API Upload (Manual)\n\nIf not using the SDK, the upload flow has three steps:\n\n### Step 1: Create an upload slot\n\n```javascript\nconst response = await fetch('https://api.dev.runwayml.com/v1/uploads', {\n  method: 'POST',\n  headers: {\n    'Authorization': `Bearer ${process.env.RUNWAYML_API_SECRET}`,\n    'X-Runway-Version': '2024-11-06',\n    'Content-Type': 'application/json'\n  },\n  body: JSON.stringify({\n    filename: 'image.jpg',\n    type: 'ephemeral'\n  })\n});\n\nconst { uploadUrl, fields, runwayUri } = await response.json();\n```\n\n### Step 2: Upload the file using the presigned URL\n\n```javascript\nconst formData = new FormData();\n\n// Add all presigned form fields first\nfor (const [key, value] of Object.entries(fields)) {\n  formData.append(key, value);\n}\n\n// Add the file last\nformData.append('file', fileBuffer, 'image.jpg');\n\nawait fetch(uploadUrl, {\n  method: 'POST',\n  body: formData\n});\n```\n\n### Step 3: Use the `runway://` URI\n\n```javascript\nconst task = await fetch('https://api.dev.runwayml.com/v1/image_to_video', {\n  method: 'POST',\n  headers: {\n    'Authorization': `Bearer ${process.env.RUNWAYML_API_SECRET}`,\n    'X-Runway-Version': '2024-11-06',\n    'Content-Type': 'application/json'\n  },\n  body: JSON.stringify({\n    model: 'gen4.5',\n    promptImage: runwayUri,\n    promptText: 'Animate this scene',\n    ratio: '1280:720',\n    duration: 5\n  })\n});\n```\n\n## Upload Constraints\n\n| Constraint | Value |\n|-----------|-------|\n| Minimum file size | 512 bytes |\n| Maximum file size | 200 MB |\n| URI validity | 24 hours |\n| Requires credits | Yes (must have purchased credits) |\n\n## Integration Pattern\n\n### Express.js \u2014 Upload Endpoint with File Generation\n\n```javascript\nimport RunwayML from '@runwayml/sdk';\nimport express from 'express';\nimport multer from 'multer';\n\nconst client = new RunwayML();\nconst app = express();\nconst upload = multer({ storage: multer.memoryStorage() });\n\napp.post('/api/image-to-video', upload.single('image'), async (req, res) => {\n  try {\n    // Upload the user's file to Runway\n    const runwayUpload = await client.uploads.createEphemeral(req.file.buffer);\n\n    // Use the uploaded file for video generation\n    const task = await client.imageToVideo.create({\n      model: 'gen4.5',\n      promptImage: runwayUpload.runwayUri,\n      promptText: req.body.prompt || 'Animate this image',\n      ratio: '1280:720',\n      duration: 5\n    }).waitForTaskOutput();\n\n    res.json({ videoUrl: task.output[0] });\n  } catch (error) {\n    console.error('Generation failed:', error);\n    res.status(500).json({ error: error.message });\n  }\n});\n```\n\n### Next.js \u2014 Upload + Generate\n\n```typescript\n// app/api/image-to-video/route.ts\nimport RunwayML from '@runwayml/sdk';\nimport { NextRequest, NextResponse } from 'next/server';\n\nconst client = new RunwayML();\n\nexport async function POST(request: NextRequest) {\n  const formData = await request.formData();\n  const imageFile = formData.get('image') as File;\n  const prompt = formData.get('prompt') as string;\n\n  try {\n    // Upload file to Runway\n    const upload = await client.uploads.createEphemeral(imageFile);\n\n    // Generate video from the uploaded image\n    const task = await client.imageToVideo.create({\n      model: 'gen4.5',\n      promptImage: upload.runwayUri,\n      promptText: prompt || 'Animate this image',\n      ratio: '1280:720',\n      duration: 5\n    }).waitForTaskOutput();\n\n    return NextResponse.json({ videoUrl: task.output[0] });\n  } catch (error) {\n    return NextResponse.json(\n      { error: error instanceof Error ? error.message : 'Failed' },\n      { status: 500 }\n    );\n  }\n}\n```\n\n### FastAPI \u2014 Upload + Generate\n\n```python\nfrom fastapi import FastAPI, UploadFile, Form, HTTPException\nfrom runwayml import RunwayML\n\napp = FastAPI()\nclient = RunwayML()\n\n@app.post(\"/api/image-to-video\")\nasync def image_to_video(image: UploadFile, prompt: str = Form(\"Animate this image\")):\n    try:\n        # Upload to Runway\n        content = await image.read()\n        upload = client.uploads.create_ephemeral((image.filename, content))\n\n        # Generate video\n        task = client.image_to_video.create(\n            model=\"gen4.5\",\n            prompt_image=upload.runway_uri,\n            prompt_text=prompt,\n            ratio=\"1280:720\",\n            duration=5\n        ).wait_for_task_output()\n\n        return {\"video_url\": task.output[0]}\n    except Exception as e:\n        raise HTTPException(status_code=500, detail=str(e))\n```\n\n## Tips\n\n- **Always upload local files** before passing them to generation endpoints. Don't try to pass local file paths \u2014 they won't work.\n- **`runway://` URIs expire after 24 hours.** If you need to re-use an asset, upload it again.\n- **The SDK handles the presigned URL flow automatically** \u2014 prefer the SDK over manual REST calls.\n- **For models requiring image/video input** (image-to-video, video-to-video, character performance), upload the asset first, then pass the `runway://` URI.\n- **Maximum 200 MB per file** via uploads \u2014 larger than URL (16 MB) or data URI (5 MB) limits.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "rw-integrate-uploads",
-    "description": "Help users upload local files to Runway for use as inputs to generation models",
-    "user-invocable": "false",
-    "allowed-tools": "Read, Grep, Glob, Edit, Write"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

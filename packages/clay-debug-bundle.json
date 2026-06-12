@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031521",
   "name": "clay-debug-bundle",
   "slug": "clay-debug-bundle",
   "description": "Collect Clay debug evidence for support tickets and troubleshooting.",
   "content": "# Clay Debug Bundle\n\n## Current State\n\n!`node --version 2>/dev/null || echo 'N/A'`\n!`python3 --version 2>/dev/null || echo 'N/A'`\n\n## Overview\n\nCollect all diagnostic information needed for Clay support tickets. Clay is a web platform, so debugging focuses on webhook delivery, enrichment column errors, HTTP API responses, and credit consumption -- not pods or clusters.\n\n## Prerequisites\n\n- Clay account with access to affected table\n- curl for testing webhook/API connectivity\n- Browser developer tools for capturing network requests\n\n## Instructions\n\n### Step 1: Create Debug Bundle Script\n\n```bash\n#!/bin/bash\n# clay-debug-bundle.sh \u2014 collect Clay integration diagnostics\nset -euo pipefail\n\nBUNDLE_DIR=\"clay-debug-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE_DIR\"\n\necho \"=== Clay Debug Bundle ===\" > \"$BUNDLE_DIR/summary.txt\"\necho \"Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\n```\n\n### Step 2: Test Webhook Connectivity\n\n```bash\n# Test webhook endpoint is reachable\necho \"--- Webhook Test ---\" >> \"$BUNDLE_DIR/summary.txt\"\nWEBHOOK_URL=\"${CLAY_WEBHOOK_URL:-not_set}\"\nif [ \"$WEBHOOK_URL\" != \"not_set\" ]; then\n  HTTP_CODE=$(curl -s -o \"$BUNDLE_DIR/webhook-response.txt\" -w \"%{http_code}\" \\\n    -X POST \"$WEBHOOK_URL\" \\\n    -H \"Content-Type: application/json\" \\\n    -d '{\"_debug\": true, \"_test\": \"debug-bundle\"}')\n  echo \"Webhook HTTP Status: $HTTP_CODE\" >> \"$BUNDLE_DIR/summary.txt\"\n  echo \"Webhook URL: ${WEBHOOK_URL:0:50}...\" >> \"$BUNDLE_DIR/summary.txt\"\nelse\n  echo \"CLAY_WEBHOOK_URL: NOT SET\" >> \"$BUNDLE_DIR/summary.txt\"\nfi\n```\n\n### Step 3: Capture Environment and Configuration\n\n```bash\n# Capture environment (redacted)\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"--- Environment ---\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"Node: $(node --version 2>/dev/null || echo 'N/A')\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"Python: $(python3 --version 2>/dev/null || echo 'N/A')\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"OS: $(uname -s -r)\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"CLAY_API_KEY: ${CLAY_API_KEY:+[SET]}\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"CLAY_WEBHOOK_URL: ${CLAY_WEBHOOK_URL:+[SET]}\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# Capture .env (redacted)\nif [ -f .env ]; then\n  sed 's/=.*/=***REDACTED***/' .env > \"$BUNDLE_DIR/config-redacted.txt\"\nfi\n```\n\n### Step 4: Test Enterprise API (If Available)\n\n```bash\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"--- Enterprise API Test ---\" >> \"$BUNDLE_DIR/summary.txt\"\nif [ -n \"${CLAY_API_KEY:-}\" ]; then\n  API_CODE=$(curl -s -o \"$BUNDLE_DIR/api-response.txt\" -w \"%{http_code}\" \\\n    -X POST \"https://api.clay.com/v1/people/enrich\" \\\n    -H \"Authorization: Bearer $CLAY_API_KEY\" \\\n    -H \"Content-Type: application/json\" \\\n    -d '{\"email\": \"test@example.com\"}')\n  echo \"Enterprise API Status: $API_CODE\" >> \"$BUNDLE_DIR/summary.txt\"\nelse\n  echo \"Enterprise API: No API key configured\" >> \"$BUNDLE_DIR/summary.txt\"\nfi\n```\n\n### Step 5: Capture Application Logs\n\n```bash\n# Grab recent Clay-related log entries\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"--- Recent Errors ---\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# Search for Clay errors in common log locations\nfor logfile in logs/*.log /tmp/clay-*.log; do\n  if [ -f \"$logfile\" ]; then\n    grep -i \"clay\\|webhook\\|enrich\" \"$logfile\" 2>/dev/null | tail -50 >> \"$BUNDLE_DIR/logs.txt\"\n  fi\ndone\n\n# Check npm logs for module issues\nif [ -d node_modules ]; then\n  echo \"Dependencies installed: YES\" >> \"$BUNDLE_DIR/summary.txt\"\n  ls package.json 2>/dev/null && echo \"package.json: EXISTS\" >> \"$BUNDLE_DIR/summary.txt\"\nfi\n```\n\n### Step 6: Collect Clay Table Info (Manual Steps)\n\nAdd to the debug bundle manually from the Clay UI:\n\n```markdown\n## Clay Table Diagnostics (fill in from Clay UI)\n\n- Table Name: _______________\n- Table URL: _______________\n- Row Count: _______________\n- Enrichment Columns: _______________\n- Auto-run enabled: YES / NO\n- Error cells visible: YES (count: ___) / NO\n- Credit balance remaining: _______________\n- Plan tier: Free / Starter / Explorer / Pro / Enterprise\n\n## Error Details (from clicking red cells)\n- Error message: _______________\n- Error column: _______________\n- Error row count: _______________\n\n## Recent Changes\n- Last table edit: _______________\n- Any new columns added: _______________\n- Any provider connections changed: _______________\n```\n\n### Step 7: Package and Review\n\n```bash\ntar -czf \"$BUNDLE_DIR.tar.gz\" \"$BUNDLE_DIR\"\necho \"\"\necho \"Bundle created: $BUNDLE_DIR.tar.gz\"\necho \"\"\necho \"BEFORE SUBMITTING: Review for sensitive data!\"\necho \"  - Check $BUNDLE_DIR/config-redacted.txt for leaked secrets\"\necho \"  - Check $BUNDLE_DIR/logs.txt for PII (emails, names)\"\necho \"\"\necho \"Submit at: https://community.clay.com or support@clay.com\"\n```\n\n## Error Handling\n\n| Item | Purpose | Included |\n|------|---------|----------|\n| Webhook connectivity | Verify data can reach Clay | Automated |\n| Environment info | Compatibility check | Automated |\n| Enterprise API test | Verify API key validity | Automated |\n| Application logs | Error patterns | Automated |\n| Table diagnostics | Clay-side configuration | Manual checklist |\n| Config (redacted) | Secret management issues | Automated |\n\n## Sensitive Data Handling\n\n**Always redact before submitting:**\n\n- API keys and tokens\n- Email addresses and names from enrichment data\n- Provider API keys (Apollo, Clearbit, etc.)\n- CRM credentials\n\n**Safe to include:**\n\n- Error messages and HTTP status codes\n- Column names and table structure\n- Credit usage numbers\n- Software versions\n\n## Resources\n\n- [Clay Community Support](https://community.clay.com)\n- [Clay University Docs](https://university.clay.com)\n\n## Next Steps\n\nFor rate limit issues, see `clay-rate-limits`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clay-debug-bundle",
-    "description": "Collect Clay debug evidence for support tickets and troubleshooting.",
-    "allowed-tools": "Read, Bash(curl:*), Bash(tar:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

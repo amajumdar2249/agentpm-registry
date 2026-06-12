@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031395",
   "name": "bamboohr-upgrade-migration",
   "slug": "bamboohr-upgrade-migration",
   "description": "Plan and execute BambooHR API migration with breaking change detection.",
   "content": "# BambooHR Upgrade & Migration\n\n## Overview\n\nGuide for handling BambooHR API changes, migrating from legacy patterns, and proactively detecting deprecations. BambooHR's API is versioned at v1 \u2014 breaking changes are announced on their changelog rather than through version bumps.\n\n## Prerequisites\n\n- Current BambooHR integration working\n- Access to BambooHR API changelog\n- Git for version control\n- Test suite available\n\n## Instructions\n\n### Step 1: Check for Announced Changes\n\n```bash\n# Monitor BambooHR's official changelog pages\necho \"Check these URLs before any migration work:\"\necho \"  Past changes:    https://documentation.bamboohr.com/docs/past-changes-to-the-api\"\necho \"  Planned changes: https://documentation.bamboohr.com/docs/planned-changes-to-the-api\"\necho \"  Status page:     https://status.bamboohr.com\"\n```\n\n### Step 2: Common Migration Patterns\n\n#### URL Format Migration\n\nBambooHR has used two base URL formats historically:\n\n```typescript\n// Legacy format (still works)\nconst LEGACY = `https://api.bamboohr.com/api/gateway.php/${domain}/v1`;\n\n// Modern format (equivalent)\nconst MODERN = `https://${domain}.bamboohr.com/api/v1`;\n\n// Migration: both work, but use the gateway.php format for API key auth\n// The modern format is used for browser-based OAuth flows\n```\n\n#### XML to JSON Migration\n\n```typescript\n// Legacy: XML responses (default if no Accept header)\nconst xmlRes = await fetch(`${BASE}/employees/directory`, {\n  headers: { Authorization: AUTH },\n  // No Accept header \u2014 returns XML\n});\n\n// Current: JSON responses (always set Accept header)\nconst jsonRes = await fetch(`${BASE}/employees/directory`, {\n  headers: { Authorization: AUTH, Accept: 'application/json' },\n});\n\n// Migration checklist:\n// - Add 'Accept: application/json' to ALL requests\n// - Replace XML parsing with JSON.parse\n// - Update response type definitions\n```\n\n#### Employee Endpoint Changes\n\n```typescript\n// Legacy: using employee ID 0 for \"current user\"\n// GET /employees/0/?fields=firstName,lastName\n// This returns the employee record for the API key's user\n\n// Current: still works, but prefer explicit employee IDs from directory\nconst dir = await client.getDirectory();\nconst currentUser = dir.employees.find(e => e.workEmail === knownEmail);\n```\n\n### Step 3: Detect Deprecated Field Usage\n\n```typescript\n// Scan your codebase for BambooHR field references\nconst DEPRECATED_FIELDS = [\n  // As of 2025, these field aliases may change:\n  'bestEmail',       // Use 'workEmail' or 'homeEmail' explicitly\n  'fullName1',       // Use 'displayName' instead\n  'fullName2',       // Use firstName + lastName\n  'fullName3',       // Removed\n  'fullName4',       // Removed\n  'fullName5',       // Removed\n];\n\nconst CURRENT_FIELD_MAPPING: Record<string, string> = {\n  'bestEmail': 'workEmail',\n  'fullName1': 'displayName',\n  'fullName2': 'displayName',  // Or construct from firstName + lastName\n};\n\nfunction migrateFieldName(oldField: string): string {\n  if (DEPRECATED_FIELDS.includes(oldField)) {\n    const replacement = CURRENT_FIELD_MAPPING[oldField];\n    console.warn(`Deprecated field '${oldField}' \u2014 use '${replacement}' instead`);\n    return replacement || oldField;\n  }\n  return oldField;\n}\n```\n\n### Step 4: Migration Testing Strategy\n\n```typescript\n// tests/migration/bamboohr-compat.test.ts\nimport { describe, it, expect } from 'vitest';\n\ndescribe('BambooHR API Compatibility', () => {\n  it('should handle both old and new field names', async () => {\n    const emp = await client.getEmployee(testId, [\n      'displayName', 'firstName', 'lastName', 'workEmail',\n    ]);\n\n    // Verify current fields work\n    expect(emp.displayName).toBeTruthy();\n    expect(emp.workEmail).toBeTruthy();\n  });\n\n  it('should handle null fields gracefully', async () => {\n    // BambooHR may return null for newly added fields\n    const emp = await client.getEmployee(testId, [\n      'firstName', 'lastName', 'supervisor', 'division',\n    ]);\n\n    // These may be null/empty for some employees\n    expect(emp.firstName).toBeTruthy();\n    expect(emp.supervisor).toBeDefined(); // null is valid\n  });\n\n  it('should handle table schema changes', async () => {\n    const jobInfo = await client.getTableRows(testId, 'jobInfo');\n\n    // Verify required columns still present\n    if (jobInfo.length > 0) {\n      const row = jobInfo[0];\n      expect(row).toHaveProperty('date');\n      expect(row).toHaveProperty('jobTitle');\n    }\n  });\n});\n```\n\n### Step 5: Gradual Migration with Feature Flags\n\n```typescript\ninterface MigrationConfig {\n  useNewEndpoint: boolean;\n  useNewFieldNames: boolean;\n  enableNewWebhookFormat: boolean;\n}\n\nconst MIGRATION_FLAGS: MigrationConfig = {\n  useNewEndpoint: process.env.BAMBOOHR_USE_NEW_ENDPOINT === 'true',\n  useNewFieldNames: true,       // Already migrated\n  enableNewWebhookFormat: false, // Testing in staging\n};\n\nasync function getEmployeeData(id: string): Promise<Record<string, string>> {\n  const fields = MIGRATION_FLAGS.useNewFieldNames\n    ? ['displayName', 'workEmail', 'jobTitle']\n    : ['bestEmail', 'fullName1', 'jobTitle']; // Legacy\n\n  return client.getEmployee(id, fields);\n}\n```\n\n### Step 6: Rollback Procedure\n\n```bash\n#!/bin/bash\n# If migration causes issues:\n\n# 1. Revert to previous code\ngit revert HEAD --no-edit\n\n# 2. Deploy previous version\n# (use your deployment tool)\n\n# 3. Verify old API patterns still work\ncurl -s -u \"${BAMBOOHR_API_KEY}:x\" \\\n  -H \"Accept: application/json\" \\\n  \"${BASE}/employees/directory\" | jq '.employees | length'\n\necho \"Rollback complete. Document what failed for next attempt.\"\n```\n\n## Output\n\n- Identified deprecated fields and endpoints\n- Migration code with backward compatibility\n- Compatibility test suite\n- Feature-flagged gradual migration\n- Documented rollback procedure\n\n## Error Handling\n\n| Migration Issue | Detection | Solution |\n|----------------|-----------|----------|\n| Deprecated field returns null | Runtime null checks | Map to replacement field |\n| Endpoint returns 404 | HTTP status monitoring | Check BambooHR changelog |\n| Response schema changed | Zod validation failure | Update schema definitions |\n| New required fields | 400 on create/update | Add required fields to payload |\n\n## Resources\n\n- [BambooHR Past API Changes](https://documentation.bamboohr.com/docs/past-changes-to-the-api)\n- [BambooHR Planned API Changes](https://documentation.bamboohr.com/docs/planned-changes-to-the-api)\n- [BambooHR Field Names](https://documentation.bamboohr.com/docs/list-of-field-names)\n\n## Next Steps\n\nFor CI integration during upgrades, see `bamboohr-ci-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bamboohr-upgrade-migration",
-    "description": "Plan and execute BambooHR API migration with breaking change detection.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(git:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

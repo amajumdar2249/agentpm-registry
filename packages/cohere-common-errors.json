@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031640",
   "name": "cohere-common-errors",
   "slug": "cohere-common-errors",
   "description": "Diagnose and fix Cohere API v2 errors and exceptions.",
   "content": "# Cohere Common Errors\n\n## Overview\n\nQuick reference for real Cohere API v2 errors with exact messages, causes, and fixes.\n\n## Prerequisites\n\n- `cohere-ai` SDK installed\n- `CO_API_KEY` configured\n- Access to error logs\n\n## Error Reference\n\n### 400 \u2014 Bad Request: Missing Required Field\n\n```\nCohereError: model is required\n```\n\n**Cause:** API v2 requires `model` for all endpoints (Chat, Embed, Rerank, Classify).\n\n**Fix:**\n\n```typescript\n// Wrong (v1 style)\nawait cohere.chat({ messages: [...] });\n\n// Correct (v2)\nawait cohere.chat({ model: 'command-a-03-2025', messages: [...] });\n```\n\n---\n\n### 400 \u2014 Embed: Missing embedding_types\n\n```\nCohereError: embedding_types is required for embed models v3 and higher\n```\n\n**Fix:**\n\n```typescript\nawait cohere.embed({\n  model: 'embed-v4.0',\n  texts: ['hello'],\n  inputType: 'search_document',\n  embeddingTypes: ['float'],  // Required for v3+\n});\n```\n\n---\n\n### 400 \u2014 Embed: Missing input_type\n\n```\nCohereError: input_type is required for embed models v3 and higher\n```\n\n**Fix:** Use one of: `search_document`, `search_query`, `classification`, `clustering`, `image`.\n\n---\n\n### 401 \u2014 Invalid API Token\n\n```\nCohereError: invalid api token\n```\n\n**Cause:** `CO_API_KEY` is missing, wrong, or revoked.\n\n**Fix:**\n\n```bash\n# Verify key is set\necho $CO_API_KEY\n\n# Test directly\ncurl -H \"Authorization: Bearer $CO_API_KEY\" \\\n  https://api.cohere.com/v2/chat \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"model\":\"command-r7b-12-2024\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}'\n```\n\n---\n\n### 429 \u2014 Rate Limit Exceeded\n\n```\nCohereError: You are using a Trial key, which is limited to N calls/minute\n```\n\n**Rate limits by key type:**\n\n| Key Type | Chat | Embed | Rerank | Other |\n|----------|------|-------|--------|-------|\n| Trial | 20/min | 5/min | 5/min | 1000/month |\n| Production | 1000/min | 1000/min | 1000/min | Unlimited |\n\n**Fix:**\n\n```typescript\nimport { CohereError } from 'cohere-ai';\n\ntry {\n  await cohere.chat({ model: 'command-a-03-2025', messages: [...] });\n} catch (err) {\n  if (err instanceof CohereError && err.statusCode === 429) {\n    // Back off and retry\n    await new Promise(r => setTimeout(r, 60_000)); // wait 60s for trial keys\n    // retry...\n  }\n}\n```\n\n---\n\n### 400 \u2014 Classify: Too Few Examples\n\n```\nCohereError: each unique label requires at least 2 examples\n```\n\n**Fix:**\n\n```typescript\nawait cohere.classify({\n  model: 'embed-english-v3.0',\n  inputs: ['This product is amazing'],\n  examples: [\n    // Need at least 2 examples PER label\n    { text: 'I love it', label: 'positive' },\n    { text: 'Great product', label: 'positive' },\n    { text: 'Terrible', label: 'negative' },\n    { text: 'Worst ever', label: 'negative' },\n  ],\n});\n```\n\n---\n\n### 400 \u2014 Rerank: Too Many Documents\n\n```\nCohereError: too many documents, max is 1000\n```\n\n**Fix:** Batch your documents:\n\n```typescript\nasync function batchRerank(query: string, docs: string[], topN = 10) {\n  const BATCH = 1000;\n  let allResults: any[] = [];\n\n  for (let i = 0; i < docs.length; i += BATCH) {\n    const batch = docs.slice(i, i + BATCH);\n    const resp = await cohere.rerank({\n      model: 'rerank-v3.5',\n      query,\n      documents: batch,\n      topN,\n    });\n    allResults.push(\n      ...resp.results.map(r => ({ ...r, index: r.index + i }))\n    );\n  }\n\n  return allResults.sort((a, b) => b.relevanceScore - a.relevanceScore).slice(0, topN);\n}\n```\n\n---\n\n### 400 \u2014 Chat: response_format with documents\n\n```\nCohereError: response_format is not supported with documents or tools\n```\n\n**Cause:** `response_format: { type: 'json_object' }` cannot be combined with `documents` or `tools`.\n\n**Fix:** Use either JSON mode OR document/tool mode, not both. For structured RAG output, parse the text response yourself.\n\n---\n\n### 500/503 \u2014 Server Error\n\n```\nCohereError: internal server error\n```\n\n**Fix:** Retry with exponential backoff. If persistent, check [status.cohere.com](https://status.cohere.com).\n\n---\n\n### CohereTimeoutError\n\n```\nCohereTimeoutError: Request timed out\n```\n\n**Fix:** The SDK has a default timeout. Increase it or reduce payload:\n\n```typescript\nconst cohere = new CohereClientV2({\n  token: process.env.CO_API_KEY,\n  timeoutInSeconds: 120, // default is lower\n});\n```\n\n## Diagnostic Commands\n\n```bash\n# Check Cohere service status\ncurl -s https://status.cohere.com/api/v2/status.json | jq '.status'\n\n# Verify API key works\ncurl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"Authorization: Bearer $CO_API_KEY\" \\\n  https://api.cohere.com/v2/chat \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"model\":\"command-r7b-12-2024\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}'\n\n# Check installed SDK version\nnpm list cohere-ai 2>/dev/null || pip show cohere 2>/dev/null\n```\n\n## Error Handling Wrapper\n\n```typescript\nimport { CohereError, CohereTimeoutError } from 'cohere-ai';\n\nfunction diagnoseCohereError(err: unknown): string {\n  if (err instanceof CohereTimeoutError) {\n    return 'TIMEOUT: Increase timeoutInSeconds or reduce input size';\n  }\n  if (err instanceof CohereError) {\n    switch (err.statusCode) {\n      case 400: return `BAD_REQUEST: ${err.message}`;\n      case 401: return 'AUTH: Check CO_API_KEY';\n      case 429: return 'RATE_LIMIT: Back off or upgrade key';\n      case 500: return 'SERVER: Retry later, check status.cohere.com';\n      default:  return `UNKNOWN (${err.statusCode}): ${err.message}`;\n    }\n  }\n  return `UNEXPECTED: ${String(err)}`;\n}\n```\n\n## Resources\n\n- [Cohere Error Codes](https://docs.cohere.com/reference/errors)\n- [Cohere Status Page](https://status.cohere.com)\n- [Rate Limits](https://docs.cohere.com/docs/rate-limits)\n- [API v1 to v2 Migration](https://docs.cohere.com/docs/migrating-v1-to-v2)\n\n## Next Steps\n\nFor comprehensive debugging, see `cohere-debug-bundle`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "cohere-common-errors",
-    "description": "Diagnose and fix Cohere API v2 errors and exceptions.",
-    "allowed-tools": "Read, Grep, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

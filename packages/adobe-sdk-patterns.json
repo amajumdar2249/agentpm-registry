@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031165",
   "name": "adobe-sdk-patterns",
   "slug": "adobe-sdk-patterns",
   "description": "Apply production-ready patterns for Adobe Firefly Services SDK, PDF",
   "content": "# Adobe SDK Patterns\n\n## Overview\n\nProduction-ready patterns for Adobe SDK usage across Firefly Services (`@adobe/firefly-apis`, `@adobe/photoshop-apis`, `@adobe/lightroom-apis`), PDF Services (`@adobe/pdfservices-node-sdk`), and direct REST API calls.\n\n## Prerequisites\n\n- Completed `adobe-install-auth` setup\n- Familiarity with async/await patterns\n- Understanding of the Adobe API you are integrating\n\n## Instructions\n\n### Pattern 1: Singleton Auth Client with Token Caching\n\n```typescript\n// src/adobe/client.ts\nimport { ServicePrincipalCredentials, PDFServices } from '@adobe/pdfservices-node-sdk';\n\nlet pdfServicesInstance: PDFServices | null = null;\nlet tokenCache: { token: string; expiresAt: number } | null = null;\n\nexport function getPDFServices(): PDFServices {\n  if (!pdfServicesInstance) {\n    const credentials = new ServicePrincipalCredentials({\n      clientId: process.env.ADOBE_CLIENT_ID!,\n      clientSecret: process.env.ADOBE_CLIENT_SECRET!,\n    });\n    pdfServicesInstance = new PDFServices({ credentials });\n  }\n  return pdfServicesInstance;\n}\n\nexport async function getAccessToken(): Promise<string> {\n  if (tokenCache && tokenCache.expiresAt > Date.now() + 300_000) {\n    return tokenCache.token;\n  }\n\n  const res = await fetch('https://ims-na1.adobelogin.com/ims/token/v3', {\n    method: 'POST',\n    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },\n    body: new URLSearchParams({\n      client_id: process.env.ADOBE_CLIENT_ID!,\n      client_secret: process.env.ADOBE_CLIENT_SECRET!,\n      grant_type: 'client_credentials',\n      scope: process.env.ADOBE_SCOPES!,\n    }),\n  });\n\n  if (!res.ok) throw new Error(`Adobe IMS token error: ${res.status}`);\n  const data = await res.json();\n  tokenCache = { token: data.access_token, expiresAt: Date.now() + data.expires_in * 1000 };\n  return tokenCache.token;\n}\n```\n\n### Pattern 2: Typed API Wrapper with Error Classification\n\n```typescript\n// src/adobe/firefly-client.ts\nexport class AdobeApiError extends Error {\n  constructor(\n    message: string,\n    public readonly status: number,\n    public readonly code: string,\n    public readonly retryable: boolean,\n    public readonly retryAfter?: number\n  ) {\n    super(message);\n    this.name = 'AdobeApiError';\n  }\n}\n\nexport async function adobeApiFetch<T>(\n  url: string,\n  options: RequestInit & { apiKey?: string }\n): Promise<T> {\n  const token = await getAccessToken();\n  const { apiKey, ...fetchOptions } = options;\n\n  const response = await fetch(url, {\n    ...fetchOptions,\n    headers: {\n      'Authorization': `Bearer ${token}`,\n      'x-api-key': apiKey || process.env.ADOBE_CLIENT_ID!,\n      'Content-Type': 'application/json',\n      ...fetchOptions.headers,\n    },\n  });\n\n  if (!response.ok) {\n    const body = await response.text();\n    const retryAfter = response.headers.get('Retry-After');\n    throw new AdobeApiError(\n      `Adobe API ${response.status}: ${body}`,\n      response.status,\n      response.status === 429 ? 'RATE_LIMITED' :\n      response.status === 401 ? 'AUTH_EXPIRED' :\n      response.status >= 500 ? 'SERVER_ERROR' : 'CLIENT_ERROR',\n      response.status === 429 || response.status >= 500,\n      retryAfter ? parseInt(retryAfter) : undefined\n    );\n  }\n\n  return response.json();\n}\n```\n\n### Pattern 3: Retry with Exponential Backoff\n\n```typescript\n// src/adobe/retry.ts\nexport async function withRetry<T>(\n  operation: () => Promise<T>,\n  config = { maxRetries: 3, baseDelayMs: 1000 }\n): Promise<T> {\n  for (let attempt = 0; attempt <= config.maxRetries; attempt++) {\n    try {\n      return await operation();\n    } catch (err: any) {\n      if (attempt === config.maxRetries) throw err;\n\n      // Only retry on transient errors\n      if (err instanceof AdobeApiError && !err.retryable) throw err;\n\n      // Honor Retry-After header from Adobe\n      const delay = err.retryAfter\n        ? err.retryAfter * 1000\n        : config.baseDelayMs * Math.pow(2, attempt) + Math.random() * 500;\n\n      console.warn(`Adobe retry ${attempt + 1}/${config.maxRetries} in ${delay}ms`);\n      await new Promise(r => setTimeout(r, delay));\n    }\n  }\n  throw new Error('Unreachable');\n}\n```\n\n### Pattern 4: Job Polling for Async APIs (Photoshop, Lightroom)\n\n```typescript\n// src/adobe/polling.ts \u2014 Photoshop/Lightroom APIs are async (submit job, poll status)\ninterface AdobeJobStatus {\n  status: 'pending' | 'running' | 'succeeded' | 'failed';\n  _links?: { self: { href: string } };\n  output?: any;\n  error?: { code: string; message: string };\n}\n\nexport async function pollAdobeJob(\n  statusUrl: string,\n  options = { intervalMs: 2000, timeoutMs: 120_000 }\n): Promise<AdobeJobStatus> {\n  const token = await getAccessToken();\n  const deadline = Date.now() + options.timeoutMs;\n\n  while (Date.now() < deadline) {\n    const res = await fetch(statusUrl, {\n      headers: {\n        'Authorization': `Bearer ${token}`,\n        'x-api-key': process.env.ADOBE_CLIENT_ID!,\n      },\n    });\n\n    const status: AdobeJobStatus = await res.json();\n\n    if (status.status === 'succeeded') return status;\n    if (status.status === 'failed') {\n      throw new Error(`Adobe job failed: ${status.error?.message || 'Unknown error'}`);\n    }\n\n    await new Promise(r => setTimeout(r, options.intervalMs));\n  }\n\n  throw new Error('Adobe job polling timeout');\n}\n```\n\n### Pattern 5: Zod Validation for API Responses\n\n```typescript\nimport { z } from 'zod';\n\nconst FireflyImageOutputSchema = z.object({\n  outputs: z.array(z.object({\n    image: z.object({\n      url: z.string().url(),\n    }),\n    seed: z.number(),\n  })),\n});\n\nconst PhotoshopJobSchema = z.object({\n  status: z.enum(['pending', 'running', 'succeeded', 'failed']),\n  _links: z.object({\n    self: z.object({ href: z.string().url() }),\n  }).optional(),\n});\n\n// Usage\nconst raw = await adobeApiFetch<unknown>(fireflyUrl, { method: 'POST', body });\nconst validated = FireflyImageOutputSchema.parse(raw);\n```\n\n## Output\n\n- Type-safe client singleton with token caching\n- Error classification (retryable vs permanent)\n- Automatic retry with Adobe `Retry-After` header support\n- Async job polling for Photoshop/Lightroom operations\n- Zod runtime validation for API responses\n\n## Error Handling\n\n| Pattern | Use Case | Benefit |\n|---------|----------|---------|\n| Token caching | All API calls | Avoids redundant IMS token requests |\n| Error classification | Retry decisions | Only retries transient failures |\n| Job polling | Photoshop/Lightroom | Handles async operation lifecycle |\n| Zod validation | All responses | Catches API contract changes at runtime |\n\n## Resources\n\n- [Firefly Services SDK GitHub](https://github.com/Firefly-Services/firefly-services-sdk-js)\n- [PDF Services Node SDK](https://www.npmjs.com/package/@adobe/pdfservices-node-sdk)\n- [Firefly API Reference](https://developer.adobe.com/firefly-services/docs/firefly-api/api/)\n- [Photoshop API Reference](https://developer.adobe.com/firefly-services/docs/photoshop/api/)\n\n## Next Steps\n\nApply patterns in `adobe-core-workflow-a` for real-world usage.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "adobe-sdk-patterns",
-    "description": "Apply production-ready patterns for Adobe Firefly Services SDK, PDF",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

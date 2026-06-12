@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031205",
   "name": "algolia-rate-limits",
   "slug": "algolia-rate-limits",
   "description": "Handle Algolia rate limits and throttling: per-key limits, indexing",
   "content": "# Algolia Rate Limits\n\n## Overview\n\nAlgolia has two distinct rate limiting mechanisms: **per-API-key limits** (configurable, returns HTTP 429) and **server-side indexing limits** (protects cluster stability, returns HTTP 429 with specific messages). The `algoliasearch` v5 client has built-in retry with backoff, but you need to handle sustained rate limiting yourself.\n\n## How Algolia Rate Limiting Works\n\n### Per-API-Key Rate Limits\n\n| Setting | Default | Where to Change |\n|---------|---------|-----------------|\n| `maxQueriesPerIPPerHour` | 0 (unlimited) | Dashboard > API Keys > Edit |\n| `maxHitsPerQuery` | 1000 | Dashboard > API Keys > Edit |\n| Search requests | Plan-dependent | Upgrade plan |\n\n### Server-Side Indexing Limits\n\nWhen the indexing queue is overloaded, Algolia returns 429 with these messages:\n\n| Message | Meaning | Action |\n|---------|---------|--------|\n| `Too many jobs` | Queue full | Reduce batch frequency |\n| `Job queue too large` | Too much pending work | Wait for queue to drain |\n| `Old jobs on the queue` | Stuck tasks | Check dashboard > Indices > Operations |\n| `Disk almost full` | Record quota near limit | Delete unused records or upgrade |\n\n## Instructions\n\n### Step 1: Configure Per-Key Rate Limits\n\n```typescript\nimport { algoliasearch } from 'algoliasearch';\n\nconst client = algoliasearch(process.env.ALGOLIA_APP_ID!, process.env.ALGOLIA_ADMIN_KEY!);\n\n// Create a rate-limited API key for frontend use\nconst { key } = await client.addApiKey({\n  apiKey: {\n    acl: ['search'],\n    description: 'Frontend search key \u2014 rate limited',\n    maxQueriesPerIPPerHour: 1000,  // Per user IP\n    maxHitsPerQuery: 20,\n    indexes: ['products'],          // Restrict to specific indices\n    validity: 0,                    // 0 = never expires\n  },\n});\nconsole.log(`Created rate-limited key: ${key}`);\n```\n\n### Step 2: Implement Backoff for Sustained 429s\n\n```typescript\nimport { ApiError } from 'algoliasearch';\n\nasync function withBackoff<T>(\n  operation: () => Promise<T>,\n  config = { maxRetries: 5, baseDelayMs: 1000, maxDelayMs: 30000 }\n): Promise<T> {\n  for (let attempt = 0; attempt <= config.maxRetries; attempt++) {\n    try {\n      return await operation();\n    } catch (error) {\n      if (attempt === config.maxRetries) throw error;\n\n      // Only retry on 429 or 5xx\n      if (error instanceof ApiError) {\n        if (error.status !== 429 && error.status < 500) throw error;\n      }\n\n      // Exponential backoff with jitter\n      const delay = Math.min(\n        config.baseDelayMs * Math.pow(2, attempt) + Math.random() * 500,\n        config.maxDelayMs\n      );\n      console.warn(`Rate limited (attempt ${attempt + 1}). Retrying in ${delay.toFixed(0)}ms`);\n      await new Promise(r => setTimeout(r, delay));\n    }\n  }\n  throw new Error('Unreachable');\n}\n\n// Usage\nconst { hits } = await withBackoff(() =>\n  client.searchSingleIndex({ indexName: 'products', searchParams: { query: 'laptop' } })\n);\n```\n\n### Step 3: Throttled Batch Indexing\n\n```typescript\nimport PQueue from 'p-queue';\n\n// Limit concurrent indexing operations to avoid overloading the queue\nconst indexingQueue = new PQueue({\n  concurrency: 1,       // One batch at a time\n  interval: 1000,       // Per second\n  intervalCap: 2,       // Max 2 operations per second\n});\n\nasync function throttledBulkIndex(records: Record<string, any>[]) {\n  const BATCH_SIZE = 500;\n  const chunks: Record<string, any>[][] = [];\n  for (let i = 0; i < records.length; i += BATCH_SIZE) {\n    chunks.push(records.slice(i, i + BATCH_SIZE));\n  }\n\n  let indexed = 0;\n  await Promise.all(\n    chunks.map(chunk =>\n      indexingQueue.add(async () => {\n        const { taskID } = await client.saveObjects({\n          indexName: 'products',\n          objects: chunk,\n        });\n        await client.waitForTask({ indexName: 'products', taskID });\n        indexed += chunk.length;\n        console.log(`Indexed ${indexed}/${records.length}`);\n      })\n    )\n  );\n}\n```\n\n### Step 4: Monitor Usage Approaching Limits\n\n```typescript\n// Check current API key usage via the dashboard or programmatically\nasync function checkKeyUsage(apiKey: string) {\n  const keyInfo = await client.getApiKey({ key: apiKey });\n\n  console.log({\n    description: keyInfo.description,\n    maxQueriesPerIPPerHour: keyInfo.maxQueriesPerIPPerHour,\n    acl: keyInfo.acl,\n    indexes: keyInfo.indexes,\n  });\n}\n\n// Check record count vs plan limit\nasync function checkRecordUsage() {\n  const { items } = await client.listIndices();\n  const totalRecords = items.reduce((sum, idx) => sum + (idx.entries || 0), 0);\n  console.log(`Total records across all indices: ${totalRecords.toLocaleString()}`);\n}\n```\n\n## Error Handling\n\n| Scenario | Detection | Response |\n|----------|-----------|----------|\n| Burst spike (429) | `ApiError` with status 429 | Built-in retry handles it; add backoff for persistence |\n| Sustained overload | Repeated 429s across minutes | Reduce batch size and frequency |\n| Indexing queue full | 429 with \"Too many jobs\" | Pause indexing, wait for queue drain |\n| Plan limit reached | 429 with quota message | Upgrade plan or reduce record count |\n\n## Resources\n\n- [API Key Rate Limiting](https://support.algolia.com/hc/en-us/articles/4905140190353)\n- [Indexing Rate Limits](https://support.algolia.com/hc/en-us/articles/4406975251089)\n- [p-queue](https://github.com/sindresorhus/p-queue)\n\n## Next Steps\n\nFor security configuration, see `algolia-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "algolia-rate-limits",
-    "description": "Handle Algolia rate limits and throttling: per-key limits, indexing",
-    "Trigger": "algolia rate limit\", \"algolia throttling\", \"algolia 429\",",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

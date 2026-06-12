@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000021488",
   "name": "rn-async-patterns",
   "slug": "rn-async-patterns-2",
   "description": "Async/await correctness in React Native with Zustand. Use when debugging race conditions, missing awaits, floating promises, or async timing issues in Expo/React Native apps.",
   "content": "\n# React Native Async Patterns\n\n## Problem Statement\n\nAsync bugs in React Native are insidious because they often work in development but fail under load or on slower devices. The most common issues: missing `await` on async functions, race conditions between state updates, and assuming operations complete in order.\n\n---\n\n## Pattern: Floating Promise Detection\n\n**Problem:** Calling an async function without `await` causes it to run in the background. If subsequent code depends on its completion, you get a race condition.\n\n**Example (from retake bug):**\n\n```typescript\n// Before (buggy) - enableSkillAreaRetake is async but not awaited\nenableSkillAreaRetake(skillArea);         // Fire and forget \u274c\nawait clearSkillAreaAnswers(skillArea);   // Runs before enable completes\n\n// After (fixed)\nawait enableSkillAreaRetake(skillArea);   // Wait for state update \u2705\nawait clearSkillAreaAnswers(skillArea);   // Now runs in correct order\n```\n\n**Why it's subtle:** Both functions might have `async` in their signature, but only one was awaited. The code \"looks right\" at a glance.\n\n**Detection:**\n\n```bash\n# Find potential floating promises - async calls without await\ngrep -rn \"^\\s*[a-zA-Z]*\\s*(\" --include=\"*.ts\" --include=\"*.tsx\" | \\\n  grep -v \"await\\|return\\|const\\|let\\|if\\|else\\|=>\"\n```\n\n**Prevention:**\n\n1. ESLint rule `@typescript-eslint/no-floating-promises` - catches this at lint time\n2. Code review trigger: Any line calling a function that might be async without `await`, `return`, or assignment\n\n---\n\n## Pattern: Post-Condition Validation\n\n**Problem:** Assuming an async call succeeded without verifying. The call might return early, throw silently, or fail to update state.\n\n**Example (from retake bug):**\n\n```typescript\n// Before (buggy) - assumed load worked\nawait loadCompletedAssessmentAnswers(id);\n// Proceeded blindly with retake flow...\n\n// After (defensive)\nawait loadCompletedAssessmentAnswers(id);\nconst loaded = useAssessmentStore.getState().completedAssessmentAnswers;\nif (Object.keys(loaded).length === 0) {\n  throw new Error(\n    `Failed to load answers for assessment ${id} - cannot proceed with retake`\n  );\n}\n```\n\n**Principle:** Treat every async call as potentially failed until proven otherwise.\n\n**When to validate:**\n\n- After loading data that subsequent operations depend on\n- After state updates that must complete before continuing\n- Before irreversible operations (submissions, deletions)\n\n**Pattern template:**\n\n```typescript\nawait someAsyncOperation();\nconst result = getRelevantState();\nif (!isValid(result)) {\n  throw new Error(`[${functionName}] Post-condition failed: ${diagnosticContext}`);\n}\n```\n\n---\n\n## Pattern: Async Function Identification\n\n**Problem:** Not all async functions look async. Zustand actions, callbacks, and promise-returning functions may not have obvious `async` keywords.\n\n**Hidden async patterns:**\n\n```typescript\n// Obvious async\nasync function fetchData() { ... }\n\n// Less obvious - returns Promise\nfunction fetchData(): Promise<Data> { ... }\n\n// Hidden - Zustand action that's actually async\nconst useStore = create((set, get) => ({\n  // This looks sync but calls async internally\n  enableRetake: (area: string) => {\n    someAsyncSetup().then(() => {  // \u2190 Hidden async!\n      set({ retakeAreas: [...get().retakeAreas, area] });\n    });\n  },\n}));\n\n// Proper async Zustand action\nconst useStore = create((set, get) => ({\n  enableRetake: async (area: string) => {\n    await someAsyncSetup();\n    set({ retakeAreas: [...get().retakeAreas, area] });\n  },\n}));\n```\n\n**Detection:** Check function signatures and implementations:\n\n```bash\n# Find functions returning Promise\ngrep -rn \"): Promise<\" --include=\"*.ts\" --include=\"*.tsx\"\n\n# Find .then() chains that might need await\ngrep -rn \"\\.then(\" --include=\"*.ts\" --include=\"*.tsx\"\n```\n\n---\n\n## Pattern: Sequential vs Parallel Async\n\n**Problem:** Running async operations sequentially when they could be parallel (slow), or parallel when they must be sequential (race condition).\n\n```typescript\n// Sequential - correct when order matters\nawait enableSkillAreaRetake(skillArea);\nawait clearSkillAreaAnswers(skillArea);\nawait loadRetakeQuestions(skillArea);\n\n// Parallel - correct when operations are independent\nconst [user, settings, history] = await Promise.all([\n  fetchUser(id),\n  fetchSettings(id),\n  fetchHistory(id),\n]);\n\n// WRONG - parallel when order matters\nawait Promise.all([\n  enableSkillAreaRetake(skillArea),   // These have dependencies!\n  clearSkillAreaAnswers(skillArea),\n]);\n```\n\n**Decision framework:**\n\n| Operations share state? | Must run in order? | Pattern |\n|------------------------|-------------------|---------|\n| No | No | `Promise.all()` |\n| Yes | Yes | Sequential `await` |\n| Yes | No | Usually sequential to be safe |\n\n---\n\n## Pattern: Async in useEffect\n\n**Problem:** `useEffect` callbacks can't be async directly. Common mistakes with cleanup and race conditions.\n\n```typescript\n// WRONG - useEffect can't be async\nuseEffect(async () => {\n  const data = await fetchData();\n  setData(data);\n}, []);\n\n// CORRECT - async function inside\nuseEffect(() => {\n  async function load() {\n    const data = await fetchData();\n    setData(data);\n  }\n  load();\n}, []);\n\n// BETTER - with cleanup for race conditions\nuseEffect(() => {\n  let cancelled = false;\n  \n  async function load() {\n    const data = await fetchData();\n    if (!cancelled) {\n      setData(data);\n    }\n  }\n  load();\n  \n  return () => {\n    cancelled = true;\n  };\n}, [dependency]);\n```\n\n---\n\n## ESLint Configuration\n\nApply config from `configs/eslint-async.json` to catch these issues at lint time:\n\n```json\n{\n  \"rules\": {\n    \"@typescript-eslint/no-floating-promises\": \"error\",\n    \"@typescript-eslint/require-await\": \"warn\",\n    \"@typescript-eslint/await-thenable\": \"error\",\n    \"@typescript-eslint/no-misused-promises\": \"error\"\n  }\n}\n```\n\n**Required:** `@typescript-eslint/eslint-plugin` and proper TypeScript configuration.\n\n---\n\n## Code Review Checklist\n\nWhen reviewing async code, check:\n\n- [ ] Every async function call is either `await`ed, `return`ed, or explicitly fire-and-forget with comment\n- [ ] Operations that depend on each other are sequenced with `await`\n- [ ] Post-conditions validated after critical async operations\n- [ ] `useEffect` with async uses the inner function pattern\n- [ ] Race conditions considered when component could unmount during async\n- [ ] Error handling exists for async failures\n\n---\n\n## Quick Debugging\n\nWhen async timing issues occur:\n\n```typescript\n// Add timestamps to trace execution order\nconsole.log(`[${Date.now()}] Starting enableRetake`);\nawait enableSkillAreaRetake(skillArea);\nconsole.log(`[${Date.now()}] Finished enableRetake`);\nconsole.log(`[${Date.now()}] Starting clearAnswers`);\nawait clearSkillAreaAnswers(skillArea);\nconsole.log(`[${Date.now()}] Finished clearAnswers`);\n```\n\nLook for:\n- Operations finishing out of expected order\n- Operations starting before previous ones complete\n- Suspiciously fast \"completions\" (might not have awaited)\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "rn-async-patterns",
-    "description": "Async/await correctness in React Native with Zustand. Use when debugging race conditions, missing awaits, floating promises, or async timing issues in Expo/React Native apps."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

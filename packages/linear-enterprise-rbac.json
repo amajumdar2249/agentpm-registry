@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032503",
   "name": "linear-enterprise-rbac",
   "slug": "linear-enterprise-rbac",
   "description": "Implement enterprise role-based access control with Linear.",
   "content": "# Linear Enterprise RBAC\n\n## Overview\n\nImplement role-based access control for Linear integrations. Linear provides built-in organization roles (Owner, Admin, Member, Guest), team-level access control, and fine-grained OAuth scopes. Enterprise plans add SAML 2.0 SSO and SCIM user provisioning.\n\n## Prerequisites\n\n- Linear Business or Enterprise plan (for SSO/SCIM)\n- Organization admin access\n- SSO provider (Okta, Azure AD, Google Workspace) for SAML\n- Understanding of OAuth 2.0 scopes\n\n## Instructions\n\n### Step 1: Understand Linear's Built-In Roles\n\n| Role | Capabilities |\n|------|-------------|\n| **Owner** | Full workspace control, billing, delete workspace |\n| **Admin** | Manage members, teams, integrations, workspace settings |\n| **Member** | Create/edit issues, access team-visible data |\n| **Guest** | Read-only access to invited teams only |\n\nThese roles are fixed in Linear. Your application can layer additional permissions on top.\n\n### Step 2: Map Application Roles to OAuth Scopes\n\n```typescript\n// src/auth/permissions.ts\n\n// Available Linear OAuth scopes:\n// read, write, issues:create, admin\n// initiative:read, initiative:write\n// customer:read, customer:write\n\nconst ROLE_SCOPES: Record<string, string[]> = {\n  admin: [\"read\", \"write\", \"issues:create\", \"admin\"],\n  manager: [\"read\", \"write\", \"issues:create\"],\n  developer: [\"read\", \"write\", \"issues:create\"],\n  viewer: [\"read\"],\n};\n\nconst TEAM_ACCESS: Record<string, \"member\" | \"guest\" | \"none\"> = {\n  admin: \"member\",\n  manager: \"member\",\n  developer: \"member\",\n  viewer: \"guest\",\n};\n```\n\n### Step 3: Permission Guard\n\n```typescript\nimport { LinearClient } from \"@linear/sdk\";\n\ninterface UserContext {\n  userId: string;\n  role: string;\n  linearClient: LinearClient;\n  teamIds: string[];\n}\n\nclass PermissionGuard {\n  constructor(private ctx: UserContext) {}\n\n  canAccessTeam(teamId: string): boolean {\n    if (this.ctx.role === \"admin\") return true;\n    return this.ctx.teamIds.includes(teamId);\n  }\n\n  async canModifyIssue(issueId: string): Promise<boolean> {\n    if (this.ctx.role === \"viewer\") return false;\n\n    const issue = await this.ctx.linearClient.issue(issueId);\n    const team = await issue.team;\n    return team ? this.canAccessTeam(team.id) : false;\n  }\n\n  canCreateIssue(): boolean {\n    return [\"admin\", \"manager\", \"developer\"].includes(this.ctx.role);\n  }\n\n  canDeleteIssue(): boolean {\n    return this.ctx.role === \"admin\";\n  }\n\n  canManageIntegration(): boolean {\n    return this.ctx.role === \"admin\";\n  }\n\n  canAccessProject(projectTeamIds: string[]): boolean {\n    if (this.ctx.role === \"admin\") return true;\n    return projectTeamIds.some(id => this.ctx.teamIds.includes(id));\n  }\n}\n\n// Express middleware\nfunction requireRole(...allowedRoles: string[]) {\n  return (req: any, res: any, next: any) => {\n    if (!allowedRoles.includes(req.user.role)) {\n      return res.status(403).json({ error: \"Insufficient role\" });\n    }\n    next();\n  };\n}\n\n// Route protection\napp.post(\"/api/issues\", requireRole(\"admin\", \"manager\", \"developer\"), createIssueHandler);\napp.delete(\"/api/issues/:id\", requireRole(\"admin\"), deleteIssueHandler);\napp.get(\"/api/issues\", requireRole(\"admin\", \"manager\", \"developer\", \"viewer\"), listIssuesHandler);\n```\n\n### Step 4: Scoped Client Factory\n\n```typescript\n// Create Linear clients with appropriate access per user\nasync function getClientForUser(userId: string): Promise<LinearClient> {\n  const token = await getStoredOAuthToken(userId);\n  if (!token) throw new Error(\"User not authenticated with Linear\");\n  return new LinearClient({ accessToken: token });\n}\n\n// Verify team membership via API\nasync function getUserTeamIds(client: LinearClient): Promise<string[]> {\n  const viewer = await client.viewer;\n  const memberships = await viewer.teamMemberships();\n\n  const teamIds: string[] = [];\n  for (const membership of memberships.nodes) {\n    const team = await membership.team;\n    if (team) teamIds.push(team.id);\n  }\n  return teamIds;\n}\n```\n\n### Step 5: SAML SSO Configuration (Enterprise)\n\n```typescript\n// Linear Enterprise supports SAML 2.0 SSO\n// Configuration: Linear Settings > Security > SAML\n\n// After SSO login, verify user's Linear access\nasync function onSSOLogin(email: string): Promise<UserContext> {\n  // Look up user's stored OAuth token\n  const user = await db.users.findByEmail(email);\n  if (!user?.linearAccessToken) {\n    throw new Error(\"User must complete Linear OAuth after SSO login\");\n  }\n\n  const client = new LinearClient({ accessToken: user.linearAccessToken });\n  const viewer = await client.viewer;\n  const teamIds = await getUserTeamIds(client);\n\n  return {\n    userId: user.id,\n    role: mapLinearRoleToAppRole(viewer),\n    linearClient: client,\n    teamIds,\n  };\n}\n\nfunction mapLinearRoleToAppRole(viewer: any): string {\n  if (viewer.admin) return \"admin\";\n  if (viewer.guest) return \"viewer\";\n  return \"developer\";\n}\n```\n\n### Step 6: SCIM Provisioning (Enterprise)\n\n```typescript\n// SCIM auto-syncs users and groups from your IdP to Linear\n// Configuration: Linear Settings > Security > SCIM provisioning\n// Endpoint: https://api.linear.app/scim/v2\n// Bearer token: generated in Linear admin settings\n\n// After SCIM syncs users, verify in your app\nasync function syncSCIMUsers(client: LinearClient) {\n  const org = await client.organization;\n  const members = await org.users();\n\n  for (const user of members.nodes) {\n    console.log(`${user.name} (${user.email}): admin=${user.admin}, guest=${user.guest}, active=${user.active}`);\n\n    // Sync to your app's user database\n    await db.users.upsert({\n      email: user.email,\n      name: user.name,\n      linearId: user.id,\n      role: user.admin ? \"admin\" : user.guest ? \"viewer\" : \"developer\",\n      active: user.active,\n    });\n  }\n}\n```\n\n### Step 7: Audit Logging\n\n```typescript\ninterface AuditEntry {\n  timestamp: string;\n  userId: string;\n  action: string;\n  resource: string;\n  resourceId: string;\n  details: Record<string, unknown>;\n}\n\nfunction logAudit(entry: AuditEntry): void {\n  // Write to audit log (database, SIEM, CloudWatch, etc.)\n  console.log(JSON.stringify(entry));\n}\n\n// Wrap Linear operations with audit logging\nasync function auditedCreateIssue(\n  ctx: UserContext,\n  input: { teamId: string; title: string; [key: string]: any }\n) {\n  const guard = new PermissionGuard(ctx);\n  if (!guard.canCreateIssue()) throw new Error(\"Forbidden\");\n  if (!guard.canAccessTeam(input.teamId)) throw new Error(\"No team access\");\n\n  const result = await ctx.linearClient.createIssue(input);\n\n  logAudit({\n    timestamp: new Date().toISOString(),\n    userId: ctx.userId,\n    action: \"issue.create\",\n    resource: \"Issue\",\n    resourceId: (await result.issue)?.id ?? \"\",\n    details: { teamId: input.teamId, title: input.title },\n  });\n\n  return result;\n}\n\nasync function auditedUpdateIssue(\n  ctx: UserContext,\n  issueId: string,\n  updates: Record<string, unknown>\n) {\n  const guard = new PermissionGuard(ctx);\n  if (!(await guard.canModifyIssue(issueId))) throw new Error(\"Forbidden\");\n\n  logAudit({\n    timestamp: new Date().toISOString(),\n    userId: ctx.userId,\n    action: \"issue.update\",\n    resource: \"Issue\",\n    resourceId: issueId,\n    details: updates,\n  });\n\n  return ctx.linearClient.updateIssue(issueId, updates);\n}\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `Forbidden` | Token lacks required scope | Request OAuth with correct `ROLE_SCOPES` |\n| `Authentication required` | SSO session expired | Redirect to SAML IdP |\n| SCIM sync fails | Invalid bearer token | Regenerate SCIM token in Linear admin |\n| Guest can't create issue | Guest role is read-only | Upgrade to Member role in Linear |\n| Team not accessible | User not added to team | Add user to team in Linear Settings |\n\n## Examples\n\n### List Organization Members by Role\n\n```typescript\nconst client = new LinearClient({ apiKey: process.env.LINEAR_API_KEY! });\nconst org = await client.organization;\nconst members = await org.users();\n\nfor (const user of members.nodes) {\n  const role = user.admin ? \"admin\" : user.guest ? \"guest\" : \"member\";\n  console.log(`${user.name} (${user.email}): ${role}`);\n}\n```\n\n## Resources\n\n- [Linear OAuth Scopes](https://linear.app/developers/oauth-2-0-authentication)\n- [Linear SSO Guide](https://linear.app/docs/sso)\n- [SCIM Provisioning](https://linear.app/docs/scim)\n- [OAuth Actor Authorization](https://linear.app/developers/oauth-actor-authorization)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "linear-enterprise-rbac",
-    "description": "Implement enterprise role-based access control with Linear.",
-    "Trigger": "linear RBAC\", \"linear permissions\", \"linear SSO\",",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

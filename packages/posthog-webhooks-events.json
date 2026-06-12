@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032954",
   "name": "posthog-webhooks-events",
   "slug": "posthog-webhooks-events",
   "description": "Implement PostHog webhook destinations, Action-triggered notifications,",
   "content": "# PostHog Webhooks & Events\n\n## Overview\n\nPostHog sends webhooks via its CDP (Customer Data Platform) Destinations feature. You configure a Destination that fires when matching events are captured, sending an HTTP POST to your endpoint. This skill covers webhook destination setup, receiving and processing webhook payloads, querying events via the API, and using HogQL for custom event analysis.\n\n## Prerequisites\n\n- PostHog project with personal API key (`phx_...`)\n- HTTPS endpoint to receive webhooks\n- Events being captured in PostHog\n\n## Instructions\n\n### Step 1: Create a Webhook Destination via API\n\n```bash\nset -euo pipefail\n# Create a webhook destination that fires on specific events\ncurl -X POST \"https://app.posthog.com/api/projects/$POSTHOG_PROJECT_ID/pipeline_destinations/\" \\\n  -H \"Authorization: Bearer $POSTHOG_PERSONAL_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"name\": \"Signup Notifications\",\n    \"description\": \"Send webhook when user signs up\",\n    \"config\": {\n      \"url\": \"https://your-app.com/webhooks/posthog\",\n      \"method\": \"POST\",\n      \"headers\": {\n        \"X-Webhook-Secret\": \"your-webhook-secret\"\n      },\n      \"body\": {\n        \"event\": \"{event}\",\n        \"distinct_id\": \"{distinct_id}\",\n        \"person\": \"{person}\",\n        \"properties\": \"{properties}\",\n        \"timestamp\": \"{timestamp}\"\n      }\n    },\n    \"filters\": {\n      \"events\": [\n        {\"id\": \"user_signed_up\", \"type\": \"events\"},\n        {\"id\": \"subscription_started\", \"type\": \"events\"}\n      ]\n    }\n  }'\n```\n\n### Step 2: Receive and Process Webhooks\n\n```typescript\n// api/webhooks/posthog.ts\nimport { NextResponse } from 'next/server';\nimport crypto from 'crypto';\n\nconst WEBHOOK_SECRET = process.env.POSTHOG_WEBHOOK_SECRET!;\n\n// Verify webhook authenticity\nfunction verifySignature(payload: string, signature: string): boolean {\n  const expected = crypto.createHmac('sha256', WEBHOOK_SECRET)\n    .update(payload)\n    .digest('hex');\n  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));\n}\n\ninterface PostHogWebhookPayload {\n  event: string;\n  distinct_id: string;\n  properties: Record<string, any>;\n  person: {\n    properties: Record<string, any>;\n  };\n  timestamp: string;\n}\n\nexport async function POST(request: Request) {\n  const body = await request.text();\n  const signature = request.headers.get('x-webhook-secret') || '';\n\n  // Verify webhook is from PostHog\n  if (WEBHOOK_SECRET && signature !== WEBHOOK_SECRET) {\n    return NextResponse.json({ error: 'Invalid signature' }, { status: 401 });\n  }\n\n  const payload: PostHogWebhookPayload = JSON.parse(body);\n\n  // Route to handlers based on event type\n  switch (payload.event) {\n    case 'user_signed_up':\n      await onUserSignup(payload);\n      break;\n    case 'subscription_started':\n      await onSubscriptionStarted(payload);\n      break;\n    case 'subscription_canceled':\n      await onSubscriptionCanceled(payload);\n      break;\n    default:\n      console.log(`Unhandled PostHog event: ${payload.event}`);\n  }\n\n  return NextResponse.json({ received: true });\n}\n\nasync function onUserSignup(payload: PostHogWebhookPayload) {\n  const { distinct_id, properties, person } = payload;\n  console.log(`New signup: ${distinct_id}`);\n\n  // Sync to CRM\n  await fetch('https://api.hubspot.com/contacts/v1/contact/', {\n    method: 'POST',\n    headers: { Authorization: `Bearer ${process.env.HUBSPOT_KEY}` },\n    body: JSON.stringify({\n      properties: [\n        { property: 'email', value: person.properties.email },\n        { property: 'posthog_id', value: distinct_id },\n      ],\n    }),\n  });\n\n  // Notify Slack\n  await fetch(process.env.SLACK_WEBHOOK_URL!, {\n    method: 'POST',\n    body: JSON.stringify({\n      text: `New signup: ${person.properties.email || distinct_id} (${properties.source || 'unknown'})`,\n    }),\n  });\n}\n\nasync function onSubscriptionStarted(payload: PostHogWebhookPayload) {\n  console.log(`New subscription: ${payload.distinct_id}, plan: ${payload.properties.plan}`);\n}\n\nasync function onSubscriptionCanceled(payload: PostHogWebhookPayload) {\n  console.log(`Cancellation: ${payload.distinct_id}`);\n}\n```\n\n### Step 3: Query Events via the API\n\n```bash\nset -euo pipefail\n# List recent events by type\ncurl \"https://app.posthog.com/api/projects/$POSTHOG_PROJECT_ID/events/?event=user_signed_up&limit=10&orderBy=-timestamp\" \\\n  -H \"Authorization: Bearer $POSTHOG_PERSONAL_API_KEY\" | \\\n  jq '.results[] | {\n    distinct_id,\n    event,\n    timestamp,\n    properties: (.properties | {source, plan, referrer: .\"$referrer\"})\n  }'\n\n# Get events for a specific person\ncurl \"https://app.posthog.com/api/projects/$POSTHOG_PROJECT_ID/events/?distinct_id=user-123&limit=20\" \\\n  -H \"Authorization: Bearer $POSTHOG_PERSONAL_API_KEY\" | \\\n  jq '.results[] | {event, timestamp}'\n```\n\n### Step 4: Query Events with HogQL\n\n```typescript\n// Complex event analysis with HogQL (PostHog's SQL dialect)\nasync function queryPostHog(hogql: string) {\n  const response = await fetch(\n    `https://app.posthog.com/api/projects/${process.env.POSTHOG_PROJECT_ID}/query/`,\n    {\n      method: 'POST',\n      headers: {\n        'Content-Type': 'application/json',\n        Authorization: `Bearer ${process.env.POSTHOG_PERSONAL_API_KEY}`,\n      },\n      body: JSON.stringify({\n        query: { kind: 'HogQLQuery', query: hogql },\n      }),\n    }\n  );\n  return response.json();\n}\n\n// Example: Signup funnel analysis\nconst funnelData = await queryPostHog(`\n  SELECT\n    properties.$referrer AS referrer,\n    count() AS signups,\n    uniq(distinct_id) AS unique_users\n  FROM events\n  WHERE event = 'user_signed_up'\n    AND timestamp > now() - interval 30 day\n  GROUP BY referrer\n  ORDER BY signups DESC\n  LIMIT 20\n`);\n\n// Example: Feature adoption by plan\nconst adoptionData = await queryPostHog(`\n  SELECT\n    person.properties.plan AS plan,\n    properties.feature_name AS feature,\n    count() AS usage_count,\n    uniq(distinct_id) AS unique_users\n  FROM events\n  WHERE event = 'feature_used'\n    AND timestamp > now() - interval 7 day\n  GROUP BY plan, feature\n  ORDER BY usage_count DESC\n  LIMIT 50\n`);\n```\n\n### Step 5: Set Up Slack Webhook Destination (UI)\n\nPostHog has built-in Slack integration via Data Pipelines > Destinations:\n\n1. Go to Data Pipelines > Destinations > New Destination\n2. Select \"Slack\" or \"Webhook\"\n3. Configure event filters (which events trigger the notification)\n4. Set the webhook URL and message template\n5. Test with a sample event\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Webhook not firing | No matching destination filter | Check event name matches filter exactly |\n| Duplicate webhooks | Event matches multiple destinations | Narrow destination filters |\n| Webhook timeout | Handler too slow | Acknowledge with 200 immediately, process async |\n| HogQL query timeout | Unfiltered table scan | Add `timestamp >` filter and `LIMIT` |\n| 429 on events API | Too many queries | Cache results, reduce polling frequency |\n\n## Output\n\n- Webhook destination configured for specific events\n- Express/Next.js webhook handler with event routing\n- Event queries via REST API and HogQL\n- Slack/CRM integration on user lifecycle events\n\n## Resources\n\n- [PostHog CDP Destinations](https://posthog.com/docs/cdp/destinations)\n- [PostHog Webhook Destination](https://posthog.com/docs/cdp/destinations/webhook)\n- [PostHog Events API](https://posthog.com/docs/api/events)\n- [HogQL Documentation](https://posthog.com/docs/sql)\n\n## Next Steps\n\nFor deployment setup, see `posthog-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "posthog-webhooks-events",
-    "description": "Implement PostHog webhook destinations, Action-triggered notifications,",
-    "Trigger": "posthog webhook\", \"posthog events API\", \"posthog actions\",",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

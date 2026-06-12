@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000017847",
   "name": "claw-release",
   "slug": "claw-release",
   "description": "Release automation for Claw skills and website. Guides through version bumping, tagging, and release verification.",
   "content": "\n# Claw Release\n\nInternal tool for releasing skills and managing the ClawSec catalog.\n\n**An internal tool by [Prompt Security](https://prompt.security)**\n\n---\n\n## Operational Notes\n\n- Internal maintainer workflow only.\n- Required runtime: `bash`, `git`, `jq`, `gh`\n- Required credentials: authenticated GitHub CLI with permission to create releases\n- Side effects: creates commits, tags, pushes to remote, and publishes GitHub Releases\n- Trust model: run only from a trusted checkout with a clean working tree and maintainer approval\n\n\n## Release Artifact Verification\n\nFor standalone installs, verify the signed release manifest before trusting `SKILL.md`, `skill.json`, or the archive. The `skill.json` file is the package metadata/SBOM source, and the release pipeline signs `checksums.json` with the ClawSec release key.\n\n```bash\nset -euo pipefail\n\nSKILL_NAME=\"claw-release\"\nVERSION=\"0.0.3\"\nREPO=\"prompt-security/clawsec\"\nTAG=\"${SKILL_NAME}-v${VERSION}\"\nBASE=\"https://github.com/${REPO}/releases/download/${TAG}\"\nZIP_NAME=\"${SKILL_NAME}-v${VERSION}.zip\"\nTMP_DIR=\"$(mktemp -d)\"\ntrap 'rm -rf \"$TMP_DIR\"' EXIT\n\nRELEASE_PUBKEY_SHA256=\"711424e4535f84093fefb024cd1ca4ec87439e53907b305b79a631d5befba9c8\"\n\ncurl -fsSL \"$BASE/checksums.json\" -o \"$TMP_DIR/checksums.json\"\ncurl -fsSL \"$BASE/checksums.sig\" -o \"$TMP_DIR/checksums.sig\"\ncurl -fsSL \"$BASE/signing-public.pem\" -o \"$TMP_DIR/signing-public.pem\"\ncurl -fsSL \"$BASE/$ZIP_NAME\" -o \"$TMP_DIR/$ZIP_NAME\"\ncurl -fsSL \"$BASE/SKILL.md\" -o \"$TMP_DIR/SKILL.md\"\ncurl -fsSL \"$BASE/skill.json\" -o \"$TMP_DIR/skill.json\"\n\nACTUAL_PUBKEY_SHA256=\"$(openssl pkey -pubin -in \"$TMP_DIR/signing-public.pem\" -outform DER | shasum -a 256 | awk '{print $1}')\"\nif [ \"$ACTUAL_PUBKEY_SHA256\" != \"$RELEASE_PUBKEY_SHA256\" ]; then\n  echo \"ERROR: signing-public.pem fingerprint mismatch\" >&2\n  exit 1\nfi\n\nopenssl base64 -d -A -in \"$TMP_DIR/checksums.sig\" -out \"$TMP_DIR/checksums.sig.bin\"\nopenssl pkeyutl -verify -rawin -pubin \\\n  -inkey \"$TMP_DIR/signing-public.pem\" \\\n  -sigfile \"$TMP_DIR/checksums.sig.bin\" \\\n  -in \"$TMP_DIR/checksums.json\" >/dev/null\n\nhash_file() {\n  if command -v shasum >/dev/null 2>&1; then\n    shasum -a 256 \"$1\" | awk '{print $1}'\n  else\n    sha256sum \"$1\" | awk '{print $1}'\n  fi\n}\n\nverify_manifest_file() {\n  asset=\"$1\"\n  path=\"$2\"\n  expected=\"$(jq -r --arg asset \"$asset\" '.files[$asset].sha256 // empty' \"$TMP_DIR/checksums.json\")\"\n  if [ -z \"$expected\" ]; then\n    echo \"ERROR: checksums.json missing $asset\" >&2\n    exit 1\n  fi\n  actual=\"$(hash_file \"$path\")\"\n  if [ \"$actual\" != \"$expected\" ]; then\n    echo \"ERROR: checksum mismatch for $asset\" >&2\n    exit 1\n  fi\n}\n\nexpected_archive=\"$(jq -r '.archive.sha256 // empty' \"$TMP_DIR/checksums.json\")\"\nif [ -z \"$expected_archive\" ]; then\n  echo \"ERROR: checksums.json missing archive.sha256\" >&2\n  exit 1\nfi\nactual_archive=\"$(hash_file \"$TMP_DIR/$ZIP_NAME\")\"\nif [ \"$actual_archive\" != \"$expected_archive\" ]; then\n  echo \"ERROR: archive checksum mismatch\" >&2\n  exit 1\nfi\n\nverify_manifest_file \"SKILL.md\" \"$TMP_DIR/SKILL.md\"\nverify_manifest_file \"skill.json\" \"$TMP_DIR/skill.json\"\n\necho \"Signed release manifest, archive, SKILL.md, and skill.json verified.\"\n```\n\nOnly install or extract the archive after this verification succeeds.\n\n## Quick Reference\n\n| Release Type | Command | Tag Format |\n|-------------|---------|------------|\n| Skill release | `./scripts/release-skill.sh <name> <version>` | `<name>-v<version>` |\n| Pre-release | `./scripts/release-skill.sh <name> 1.0.0-beta1` | `<name>-v1.0.0-beta1` |\n\n---\n\n## Release Workflow\n\n### Step 1: Determine Version Type\n\nAsk what changed:\n- **Bug fixes only** \u2192 Patch (1.0.0 \u2192 1.0.1)\n- **New features, backward compatible** \u2192 Minor (1.0.0 \u2192 1.1.0)\n- **Breaking changes** \u2192 Major (1.0.0 \u2192 2.0.0)\n- **Testing/unstable** \u2192 Pre-release (1.0.0-beta1, 1.0.0-rc1)\n\n### Step 2: Pre-flight Checks\n\n```bash\n# Check for uncommitted changes\ngit status\n\n# Verify skill directory exists\nls skills/<skill-name>/skill.json\n\n# Get current version\njq -r '.version' skills/<skill-name>/skill.json\n```\n\n### Step 3: Run Release Script\n\n```bash\n./scripts/release-skill.sh <skill-name> <new-version>\n```\n\nThe script will:\n1. Validate version format (semver)\n2. Check tag doesn't already exist\n3. Update skill.json version\n4. Update SKILL.md frontmatter version (if file exists)\n5. Update hardcoded version URLs (feed_url)\n6. Commit changes\n7. Create annotated git tag\n\n### Step 4: Push Release\n\n```bash\ngit push && git push origin <skill-name>-v<version>\n```\n\n### Step 5: Verify Release\n\nAfter pushing, the CI/CD pipeline will:\n1. Validate skill exists\n2. Verify version matches skill.json\n3. Verify version matches SKILL.md frontmatter (if exists)\n4. Generate checksums from SBOM\n5. Create .skill package (ZIP)\n6. Create GitHub Release\n7. Trigger website rebuild (for non-internal skills)\n\nVerify at:\n- **GitHub Releases:** `https://github.com/prompt-security/clawsec/releases/tag/<skill-name>-v<version>`\n- **GitHub Actions:** Check workflow run status\n\n---\n\n## Undo a Release (Before Push)\n\nIf you need to undo before pushing:\n\n```bash\ngit tag -d <skill-name>-v<version>\ngit reset --soft HEAD~1\n```\n\n`git reset --soft` preserves the release changes in your working tree so you can inspect or amend them without discarding data.\n\n---\n\n## Pre-release Versions\n\nFor beta, alpha, or release candidates:\n\n```bash\n./scripts/release-skill.sh <skill-name> 1.2.0-beta1\n./scripts/release-skill.sh <skill-name> 1.2.0-alpha1\n./scripts/release-skill.sh <skill-name> 1.2.0-rc1\n```\n\nPre-releases are automatically marked in GitHub Releases.\n\n---\n\n## Common Issues\n\n| Error | Solution |\n|-------|----------|\n| `Tag already exists` | Choose a different version number |\n| `Version mismatch in CI` | Ensure you used the release script (not manual tagging) |\n| `SKILL.md version mismatch` | Ensure you used the release script which updates both skill.json and SKILL.md |\n| `Uncommitted changes` | Commit or stash first: `git stash` or `git add . && git commit` |\n| `skill.json not found` | Verify skill directory path is correct |\n\n---\n\n## Internal Skills\n\nSkills with `\"internal\": true` in their `openclaw` section:\n- Are released normally via GitHub Releases\n- Are NOT shown in the public skills catalog website\n- Can still be downloaded directly from release URLs\n\nThis skill (`claw-release`) is an internal skill.\n\n---\n\n## Existing Skills\n\n| Skill | Category | Internal |\n|-------|----------|----------|\n| clawsec-feed | security | No |\n| clawtributor | security | No |\n| openclaw-audit-watchdog | security | No |\n| soul-guardian | security | No |\n| claw-release | utility | Yes |\n\n---\n\n## Verification Checklist\n\nAfter release, confirm:\n- [ ] GitHub Release exists with correct tag\n- [ ] Release has: skill.json, SKILL.md, checksums.json, .skill package\n- [ ] Release is marked as pre-release if applicable\n- [ ] GitHub Actions workflow completed successfully\n- [ ] Website updated (for non-internal skills only)\n\n---\n\n## License\n\nGNU AGPL v3.0 or later - See repository for details.\n\nBuilt by the [Prompt Security](https://prompt.security) team.\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "claw-release",
-    "version": "0.0.3",
-    "description": "Release automation for Claw skills and website. Guides through version bumping, tagging, and release verification.",
-    "homepage": "https://clawsec.prompt.security",
-    "metadata": "{\"openclaw\":{\"emoji\":\"\ud83d\ude80\",\"category\":\"utility\",\"internal\":true}}",
-    "clawdis": "",
-    "emoji": "\ud83d\ude80",
-    "requires": "",
-    "bins": "[bash, git, jq, gh]"
+  "author": "agentpm",
+  "version": "0.0.3",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

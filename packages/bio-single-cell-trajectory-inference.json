@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009432",
   "name": "bio-single-cell-trajectory-inference",
   "slug": "bio-single-cell-trajectory-inference",
   "description": "Infer developmental trajectories and pseudotime from single-cell RNA-seq data using Monocle3, Slingshot, and scVelo for RNA velocity analysis. Use when inferring developmental trajectories or pseudotime.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: Cell Ranger 8.0+, scanpy 1.10+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n- R: `packageVersion('<pkg>')` then `?function_name` to verify parameters\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Trajectory Inference\n\n## Monocle3 (R)\n\n**Goal:** Infer developmental trajectories and pseudotime ordering using Monocle3's principal graph approach.\n\n**Approach:** Learn a principal graph through the data manifold, order cells along the graph from a root state, and extract pseudotime values.\n\n**\"Find the developmental trajectory in my data\"** \u2192 Construct a tree-like graph through the cell embedding, assign pseudotime from a root population, and identify branch points.\n\n```r\nlibrary(monocle3)\n\n# Create cell_data_set from Seurat\ncds <- as.cell_data_set(seurat_obj)\n\n# Preprocess (if not already done)\ncds <- preprocess_cds(cds, num_dim = 50)\ncds <- reduce_dimension(cds, reduction_method = 'UMAP')\n\n# Cluster cells\ncds <- cluster_cells(cds)\n\n# Learn trajectory graph\ncds <- learn_graph(cds)\n\n# Order cells (select root interactively or programmatically)\ncds <- order_cells(cds, root_cells = root_cell_ids)\n\n# Plot trajectory with pseudotime\nplot_cells(cds, color_cells_by = 'pseudotime', label_branch_points = TRUE, label_leaves = TRUE)\n\n# Get pseudotime values\npseudotime <- pseudotime(cds)\n```\n\n## Set Root Programmatically\n\n**Goal:** Automatically select the trajectory root node based on a known progenitor cluster.\n\n**Approach:** Identify the principal graph node closest to cells in the specified progenitor cluster and use it as the root for pseudotime ordering.\n\n```r\n# Find root by marker gene expression\nget_earliest_principal_node <- function(cds, cluster_name) {\n    cell_ids <- which(colData(cds)$seurat_clusters == cluster_name)\n    closest_vertex <- cds@principal_graph_aux[['UMAP']]$pr_graph_cell_proj_closest_vertex\n    closest_vertex <- as.matrix(closest_vertex[cell_ids, ])\n    root_pr_nodes <- igraph::V(principal_graph(cds)[['UMAP']])$name[as.numeric(names(which.max(table(closest_vertex))))]\n    root_pr_nodes\n}\n\ncds <- order_cells(cds, root_pr_nodes = get_earliest_principal_node(cds, 'stem_cluster'))\n```\n\n## Slingshot (R)\n\n**Goal:** Infer smooth lineage trajectories and pseudotime using Slingshot's minimum spanning tree and principal curves.\n\n**Approach:** Build a minimum spanning tree through cluster centroids to define lineage structure, then fit smooth principal curves for per-lineage pseudotime.\n\n```r\nlibrary(slingshot)\nlibrary(SingleCellExperiment)\n\n# From Seurat object\nsce <- as.SingleCellExperiment(seurat_obj)\nreducedDims(sce)$UMAP <- Embeddings(seurat_obj, 'umap')\n\n# Run slingshot\nsce <- slingshot(sce, clusterLabels = 'seurat_clusters', reducedDim = 'UMAP')\n\n# Get pseudotime for each lineage\npseudotime_mat <- slingPseudotime(sce)\n\n# Get lineage curves\ncurves <- slingCurves(sce)\n\n# Plot trajectories\nplot(reducedDims(sce)$UMAP, col = sce$seurat_clusters, pch = 16)\nlines(SlingshotDataSet(sce), lwd = 2)\n```\n\n## Slingshot with Start/End Clusters\n\n```r\n# Specify starting cluster\nsce <- slingshot(sce, clusterLabels = 'seurat_clusters', reducedDim = 'UMAP', start.clus = 'HSC')\n\n# Specify start and end\nsce <- slingshot(sce, clusterLabels = 'seurat_clusters', reducedDim = 'UMAP',\n                 start.clus = 'HSC', end.clus = c('Erythroid', 'Myeloid'))\n```\n\n## scVelo RNA Velocity (Python)\n\n**Goal:** Estimate RNA velocity to predict future cell states from spliced/unspliced transcript ratios.\n\n**Approach:** Model the dynamics of splicing using stochastic or dynamical models, compute velocity vectors, and project directional flow onto UMAP.\n\n```python\nimport scvelo as scv\nimport scanpy as sc\n\n# Load data with spliced/unspliced counts\nadata = scv.read('data.h5ad')\n\n# Or merge loom files from velocyto\nldata = scv.read('velocyto_output.loom')\nadata = scv.utils.merge(adata, ldata)\n\n# Preprocess\nscv.pp.filter_and_normalize(adata, min_shared_counts=20, n_top_genes=2000)\nscv.pp.moments(adata, n_pcs=30, n_neighbors=30)\n\n# Compute velocity (stochastic model)\nscv.tl.velocity(adata, mode='stochastic')\nscv.tl.velocity_graph(adata)\n\n# Visualize velocity streams\nscv.pl.velocity_embedding_stream(adata, basis='umap', color='clusters')\n```\n\n## scVelo Dynamical Model\n\n```python\n# More accurate but slower\nscv.tl.recover_dynamics(adata, n_jobs=8)\nscv.tl.velocity(adata, mode='dynamical')\nscv.tl.velocity_graph(adata)\n\n# Latent time (pseudotime)\nscv.tl.latent_time(adata)\nscv.pl.scatter(adata, color='latent_time', cmap='gnuplot')\n\n# Velocity confidence\nscv.tl.velocity_confidence(adata)\nscv.pl.scatter(adata, color=['velocity_confidence', 'velocity_length'])\n```\n\n## Gene Dynamics Along Trajectory\n\n```r\n# Monocle3: Find genes varying over pseudotime\ngraph_test_res <- graph_test(cds, neighbor_graph = 'principal_graph', cores = 4)\nsig_genes <- graph_test_res %>% filter(q_value < 0.05) %>% arrange(desc(morans_I))\n\n# Plot gene expression over pseudotime\nplot_genes_in_pseudotime(cds[rownames(cds) %in% top_genes, ], color_cells_by = 'cluster')\n```\n\n```python\n# scVelo: Top likelihood genes\nscv.tl.rank_velocity_genes(adata, groupby='clusters', min_corr=0.3)\ntop_genes = adata.uns['rank_velocity_genes']['names']\n\n# Plot phase portraits\nscv.pl.velocity(adata, var_names=['gene1', 'gene2'], basis='umap')\n```\n\n## Branch Point Analysis\n\n```r\n# Monocle3: Genes differentially expressed at branch points\nbranch_genes <- graph_test(cds, neighbor_graph = 'principal_graph', cores = 4)\n\n# Slingshot + tradeSeq for branch analysis\nlibrary(tradeSeq)\nsce <- fitGAM(sce, nknots = 6)\nbranch_res <- earlyDETest(sce, knots = c(3, 4))\n```\n\n## Velocyto Preprocessing\n\n```bash\n# Generate loom file with spliced/unspliced counts\nvelocyto run10x -m repeat_mask.gtf /path/to/cellranger_output annotation.gtf\n\n# For SmartSeq2\nvelocyto run_smartseq2 -o output -m repeat_mask.gtf -e sample bam_files/*.bam annotation.gtf\n```\n\n## PAGA Trajectory (Scanpy)\n\n```python\nimport scanpy as sc\n\n# Compute PAGA\nsc.tl.paga(adata, groups='leiden')\nsc.pl.paga(adata, color='leiden', threshold=0.03)\n\n# PAGA-initialized UMAP\nsc.tl.draw_graph(adata, init_pos='paga')\nsc.pl.draw_graph(adata, color='leiden')\n\n# Diffusion pseudotime\nadata.uns['iroot'] = np.flatnonzero(adata.obs['leiden'] == 'root_cluster')[0]\nsc.tl.dpt(adata)\nsc.pl.draw_graph(adata, color='dpt_pseudotime')\n```\n\n## Related Skills\n\n- single-cell/clustering - Prerequisite clustering\n- single-cell/cell-communication - Downstream signaling analysis\n- differential-expression/deseq2-basics - DE along trajectory\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-single-cell-trajectory-inference",
-    "description": "Infer developmental trajectories and pseudotime from single-cell RNA-seq data using Monocle3, Slingshot, and scVelo for RNA velocity analysis. Use when inferring developmental trajectories or pseudotime.",
-    "tool_type": "mixed",
-    "primary_tool": "Monocle3"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

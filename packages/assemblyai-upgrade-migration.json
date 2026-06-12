@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031359",
   "name": "assemblyai-upgrade-migration",
   "slug": "assemblyai-upgrade-migration",
   "description": "Analyze, plan, and execute AssemblyAI SDK upgrades with breaking change",
   "content": "# AssemblyAI Upgrade & Migration\n\n## Overview\n\nGuide for upgrading the `assemblyai` npm package and migrating between SDK versions, including the major v3 to v4 migration and speech model transitions.\n\n## Prerequisites\n\n- Current `assemblyai` package installed\n- Git for version control\n- Test suite available\n\n## Instructions\n\n### Step 1: Check Current Version\n\n```bash\n# Check installed version\nnpm list assemblyai\n\n# Check latest available version\nnpm view assemblyai version\n\n# See what changed\nnpm view assemblyai --json | jq '.versions[-5:]'\n```\n\n### Step 2: Review Changelog\n\n```bash\n# View release notes\nopen https://github.com/AssemblyAI/assemblyai-node-sdk/releases\n\n# Or check from CLI\ngh release list --repo AssemblyAI/assemblyai-node-sdk --limit 10\n```\n\n### Step 3: Create Upgrade Branch\n\n```bash\ngit checkout -b upgrade/assemblyai-sdk-v$(npm view assemblyai version)\nnpm install assemblyai@latest\nnpm test\n```\n\n### Step 4: Major Migration \u2014 Old SDK to Current (v4.x)\n\nIf migrating from `@assemblyai/sdk` (old package) to `assemblyai` (current):\n\n```typescript\n// BEFORE (old package \u2014 @assemblyai/sdk)\nimport { AssemblyAI as OldClient } from '@assemblyai/sdk';\nconst client = new OldClient({ apiKey: '...' });\n\n// AFTER (current package \u2014 assemblyai)\nimport { AssemblyAI } from 'assemblyai';\nconst client = new AssemblyAI({ apiKey: '...' });\n```\n\n```bash\n# Remove old package, install new\nnpm uninstall @assemblyai/sdk\nnpm install assemblyai\n```\n\n**Key changes in the migration:**\n\n| Old (`@assemblyai/sdk`) | New (`assemblyai`) |\n|--------------------------|---------------------|\n| `import { AssemblyAI } from '@assemblyai/sdk'` | `import { AssemblyAI } from 'assemblyai'` |\n| `client.transcripts.create()` | `client.transcripts.transcribe()` (blocks until done) |\n| Manual polling with `client.transcripts.get()` | `transcribe()` auto-polls, `submit()` for manual control |\n| `RealtimeTranscriber` class | `client.streaming.createService()` |\n| `client.realtime.createTemporaryToken()` | `client.streaming.createTemporaryToken()` |\n\n### Step 5: Transcription Method Changes\n\n```typescript\n// v3 pattern: create + poll loop\nconst job = await client.transcripts.create({ audio_url: url });\nlet transcript;\nwhile (true) {\n  transcript = await client.transcripts.get(job.id);\n  if (transcript.status === 'completed' || transcript.status === 'error') break;\n  await new Promise(r => setTimeout(r, 3000));\n}\n\n// v4 pattern: transcribe() handles everything\nconst transcript = await client.transcripts.transcribe({\n  audio: url,  // Note: 'audio' not 'audio_url'\n});\n\n// v4 pattern: submit() for webhook-based (no polling)\nconst submitted = await client.transcripts.submit({\n  audio: url,\n  webhook_url: 'https://your-app.com/webhook',\n});\n```\n\n### Step 6: Streaming Migration\n\n```typescript\n// v3 pattern: RealtimeTranscriber class\nimport { RealtimeTranscriber } from 'assemblyai';\nconst rt = new RealtimeTranscriber({ apiKey: '...' });\nrt.on('transcript', (msg) => { /* ... */ });\nawait rt.connect();\n\n// v4 pattern: client.streaming.createService()\nconst transcriber = client.streaming.createService({\n  speech_model: 'nova-3',\n  sample_rate: 16000,\n});\ntranscriber.on('transcript', (msg) => { /* ... */ });\nawait transcriber.connect();\n```\n\n### Step 7: Speech Model Migration\n\n```typescript\n// Switch from legacy models to Universal-3\nconst transcript = await client.transcripts.transcribe({\n  audio: audioUrl,\n  speech_model: 'best',    // Uses Universal-3 (highest accuracy)\n  // Other options: 'nano' (fastest, lowest cost)\n  // Note: 'best' supports word_boost (up to 1000 terms)\n});\n\n// For streaming: nova-3 or nova-3-pro\nconst transcriber = client.streaming.createService({\n  speech_model: 'nova-3-pro',  // Most accurate streaming model\n  sample_rate: 16000,\n});\n```\n\n### Step 8: Verify After Upgrade\n\n```typescript\nimport { AssemblyAI } from 'assemblyai';\n\nasync function verifyUpgrade() {\n  const client = new AssemblyAI({ apiKey: process.env.ASSEMBLYAI_API_KEY! });\n\n  // Test async transcription\n  const transcript = await client.transcripts.transcribe({\n    audio: 'https://storage.googleapis.com/aai-web-samples/5_common_sports_702.wav',\n  });\n  console.assert(transcript.status === 'completed', 'Transcription should complete');\n  console.assert(transcript.text && transcript.text.length > 0, 'Should have text');\n\n  // Test LeMUR\n  const { response } = await client.lemur.task({\n    transcript_ids: [transcript.id],\n    prompt: 'What is this about? Reply in one sentence.',\n  });\n  console.assert(response.length > 0, 'LeMUR should respond');\n\n  // Test transcript listing\n  const page = await client.transcripts.list({ limit: 1 });\n  console.assert(page.transcripts.length > 0, 'Should list transcripts');\n\n  console.log('All checks passed.');\n}\n\nverifyUpgrade().catch(console.error);\n```\n\n## Output\n\n- Updated `assemblyai` package to latest version\n- Migrated import paths and method calls\n- Updated streaming setup to current patterns\n- Verified all API endpoints work post-upgrade\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `Cannot find module 'assemblyai'` | Old package name | `npm uninstall @assemblyai/sdk && npm install assemblyai` |\n| `transcripts.create is not a function` | API changed in v4 | Use `transcripts.transcribe()` or `transcripts.submit()` |\n| `audio_url` not recognized | Parameter renamed | Use `audio` instead of `audio_url` |\n| Streaming not connecting | API changed | Use `client.streaming.createService()` |\n| TypeScript errors | Type definitions changed | Update imports to match new types |\n\n## Resources\n\n- [AssemblyAI Node SDK Releases](https://github.com/AssemblyAI/assemblyai-node-sdk/releases)\n- [AssemblyAI SDK Migration Guide](https://github.com/AssemblyAI/assemblyai-node-sdk/blob/main/MIGRATION.md)\n- [AssemblyAI npm Package](https://www.npmjs.com/package/assemblyai)\n\n## Next Steps\n\nFor CI integration during upgrades, see `assemblyai-ci-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "assemblyai-upgrade-migration",
-    "description": "Analyze, plan, and execute AssemblyAI SDK upgrades with breaking change",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(git:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

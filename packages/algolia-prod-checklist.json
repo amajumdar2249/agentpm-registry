@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031204",
   "name": "algolia-prod-checklist",
   "slug": "algolia-prod-checklist",
   "description": "Execute Algolia production readiness checklist: index settings, key",
   "content": "# Algolia Production Checklist\n\n## Overview\n\nComplete checklist for deploying Algolia search to production. Covers index configuration, API key security, replica setup, monitoring, and rollback procedures.\n\n## Pre-Production Checklist\n\n### Index Configuration\n\n- [ ] `searchableAttributes` ordered by priority (first = highest)\n- [ ] `attributesForFaceting` set for all filterable attributes\n- [ ] `customRanking` configured (business metrics as tie-breakers)\n- [ ] `unretrievableAttributes` set for fields that should be searchable but not returned\n- [ ] `attributesToRetrieve` limited to fields needed by the UI\n- [ ] `typoTolerance` tested (default: enabled, min 4 chars for 1 typo, min 8 for 2)\n- [ ] `removeStopWords` configured for your language(s)\n- [ ] `distinct` set if deduplication needed (e.g., one result per product group)\n\n```typescript\n// Verify production settings\nconst settings = await client.getSettings({ indexName: 'products' });\nconsole.log(JSON.stringify(settings, null, 2));\n```\n\n### API Key Security\n\n- [ ] Admin key in backend env vars only (never frontend)\n- [ ] Search-Only key used in frontend with `referers` restriction\n- [ ] `maxQueriesPerIPPerHour` set on all public keys\n- [ ] `maxHitsPerQuery` limited on search keys\n- [ ] Secured API keys used for multi-tenant data isolation\n- [ ] Keys restricted to specific `indexes` where possible\n\n### Replicas (Alternate Sorting)\n\n```typescript\n// Replicas give users alternate sort orders\nawait client.setSettings({\n  indexName: 'products',\n  indexSettings: {\n    // Standard replicas: share parent's data, use their own relevance settings\n    replicas: [\n      'products_price_asc',    // Sort by price ascending\n      'products_price_desc',   // Sort by price descending\n      'products_newest',       // Sort by newest first\n    ],\n  },\n});\n\n// Configure each replica's ranking\nawait client.setSettings({\n  indexName: 'products_price_asc',\n  indexSettings: {\n    ranking: [\n      'asc(price)',    // Primary: price ascending\n      'typo', 'geo', 'words', 'filters', 'proximity', 'attribute', 'exact', 'custom',\n    ],\n  },\n});\n```\n\n### Monitoring\n\n- [ ] Health check endpoint tests Algolia connectivity\n- [ ] Alert on error rate > 1% over 5 minutes\n- [ ] Alert on P95 latency > 200ms (Algolia is typically < 50ms)\n- [ ] Dashboard shows queries/sec, latency, error rate\n- [ ] [status.algolia.com](https://status.algolia.com) RSS/webhook configured\n\n```typescript\n// Health check endpoint\nasync function algoliaHealthCheck() {\n  const start = Date.now();\n  try {\n    const { items } = await client.listIndices();\n    const latencyMs = Date.now() - start;\n    return {\n      status: 'healthy',\n      latencyMs,\n      indexCount: items.length,\n      totalRecords: items.reduce((sum, i) => sum + (i.entries || 0), 0),\n    };\n  } catch (error) {\n    return { status: 'unhealthy', error: String(error), latencyMs: Date.now() - start };\n  }\n}\n```\n\n### Graceful Degradation\n\n```typescript\n// If Algolia is down, fall back to database search\nasync function searchWithFallback(query: string) {\n  try {\n    const { hits } = await client.searchSingleIndex({\n      indexName: 'products',\n      searchParams: { query, hitsPerPage: 20 },\n    });\n    return { source: 'algolia', results: hits };\n  } catch (error) {\n    console.error('Algolia unavailable, falling back to DB', error);\n    const dbResults = await db.products.find({\n      name: { $regex: query, $options: 'i' },\n    }).limit(20);\n    return { source: 'database', results: dbResults };\n  }\n}\n```\n\n### Pre-Deploy Verification Script\n\n```bash\n#!/bin/bash\necho \"=== Algolia Production Pre-Flight ===\"\n\n# 1. Verify connectivity\nHTTP_CODE=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n  \"https://${ALGOLIA_APP_ID}-dsn.algolia.net/1/indexes\" \\\n  -H \"X-Algolia-Application-Id: ${ALGOLIA_APP_ID}\" \\\n  -H \"X-Algolia-API-Key: ${ALGOLIA_ADMIN_KEY}\")\necho \"API connectivity: HTTP $HTTP_CODE\"\n[ \"$HTTP_CODE\" != \"200\" ] && echo \"FAIL: Cannot reach Algolia\" && exit 1\n\n# 2. Check Algolia service status\nSTATUS=$(curl -s https://status.algolia.com/api/v2/status.json | jq -r '.status.indicator')\necho \"Algolia status: $STATUS\"\n[ \"$STATUS\" != \"none\" ] && echo \"WARNING: Algolia reporting issues\"\n\n# 3. Verify index has data\nRECORDS=$(curl -s \"https://${ALGOLIA_APP_ID}-dsn.algolia.net/1/indexes/products\" \\\n  -H \"X-Algolia-Application-Id: ${ALGOLIA_APP_ID}\" \\\n  -H \"X-Algolia-API-Key: ${ALGOLIA_ADMIN_KEY}\" | jq '.entries')\necho \"Products index: $RECORDS records\"\n[ \"$RECORDS\" -lt 1 ] && echo \"FAIL: Index is empty\" && exit 1\n\necho \"\"\necho \"All checks passed. Ready to deploy.\"\n```\n\n## Error Handling\n\n| Alert | Condition | Severity | Action |\n|-------|-----------|----------|--------|\n| Search errors | 5xx or 403 errors > 5/min | P1 | Check API keys, Algolia status |\n| High latency | P95 > 200ms for 5+ min | P2 | Check index size, network |\n| Rate limited | 429 errors > 10/min | P2 | Reduce request rate, check key limits |\n| Index stale | Last updated > 1 hour ago | P3 | Check sync pipeline |\n\n## Resources\n\n- [Algolia Dashboard](https://dashboard.algolia.com)\n- [Algolia Status](https://status.algolia.com)\n- [Index Settings Reference](https://www.algolia.com/doc/api-reference/settings-api-parameters/)\n\n## Next Steps\n\nFor version upgrades, see `algolia-upgrade-migration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "algolia-prod-checklist",
-    "description": "Execute Algolia production readiness checklist: index settings, key",
-    "Trigger": "algolia production\", \"deploy algolia\", \"algolia go-live\",",
-    "allowed-tools": "Read, Bash(curl:*), Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

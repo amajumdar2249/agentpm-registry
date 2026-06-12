@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000010892",
   "name": "loop-diagnosis",
   "slug": "loop-diagnosis",
   "description": "Diagnose and fix stalled agent loops using the joelclaw CLI. Use when loops appear stuck, stories aren't progressing, or the event chain broke. Triggers on \"loop stalled\", \"why isn't the loop progressing\", \"diagnose loops\", \"fix stuck loop\", \"loop not moving\", \"what happened to the loop\", \"stories stuck at pending\", or any request to debug loop infrastructure.",
   "content": "\n# Loop Diagnosis\n\nDiagnose and fix stalled agent coding loops. This skill covers the diagnostic CLI, common failure modes, and the observability patterns that prevent silent stalls.\n\n## Quick Commands\n\n```bash\n# Diagnose all active loops at once\njoelclaw loop diagnose all -c\n\n# Diagnose a specific loop\njoelclaw loop diagnose <loop-id> -c\n\n# Diagnose AND auto-fix\njoelclaw loop diagnose all -c --fix\n\n# Full JSON output (for detailed inspection)\njoelclaw loop diagnose <loop-id>\n```\n\n## What Diagnosis Checks\n\nThe `diagnose` command runs 6 checks in order:\n\n1. **Redis state** \u2014 PRD stories (pass/skip/pending), progress entries, active claims\n2. **Worktree** \u2014 exists? commits? uncommitted changes? .out files?\n3. **Inngest runs** \u2014 running/failed agent-loop-* functions, recent plan runs\n4. **Agent processes** \u2014 any claude/codex processes still alive?\n5. **Worker health** \u2014 function_count from localhost:3111/api/inngest\n6. **Diagnosis** \u2014 pattern-matches the above into a root cause\n\n## Failure Modes & Fixes\n\n| Diagnosis | Root Cause | Auto-Fix |\n|-----------|-----------|----------|\n| `CHAIN_BROKEN` | Judge sent `story.passed` but plan never received it. Event lost in transit. | Re-fires `agent/loop.story.passed` \u2192 plan picks next story |\n| `ORPHANED_CLAIM` | Story claimed by an event, but agent died and no Inngest run is active. | Clears claim + re-fires plan event |\n| `STUCK_RUN` | Inngest run marked RUNNING but agent process is dead. Run won't complete. | Clears claims + re-fires (manual run cancellation may be needed in Inngest dashboard) |\n| `WORKER_UNHEALTHY` | Worker registering fewer functions than expected. Missing imports or crash loop. | Restarts `system-bus-worker` deployment in k8s |\n| `NO_PRD` | Loop has no PRD in Redis \u2014 was nuked or never created. | None \u2014 start a new loop |\n| `COMPLETE` | All stories passed or skipped. Nothing to do. | None \u2014 run `joelclaw loop nuke dead` to clean up |\n\n## When to Use (vs Other Skills)\n\n- **loop-diagnosis** \u2192 Loop is stuck/stalled, need to figure out why and fix it\n- **loop-nanny** \u2192 Loop is running, need to monitor progress and clean up after\n- **agent-loop** \u2192 Need to START a new loop\n\n## The Event Chain\n\nUnderstanding the chain helps diagnose WHERE it broke:\n\n```\nagent/loop.started\n  \u2192 plan (picks story, dispatches test-writer)\n    \u2192 agent/loop.story.dispatched\n      \u2192 test-writer (writes acceptance tests)\n        \u2192 agent/loop.tests.written\n          \u2192 implement (codex/claude writes code)\n            \u2192 agent/loop.story.implemented\n              \u2192 review (runs tests, typecheck, claude review)\n                \u2192 agent/loop.story.reviewed\n                  \u2192 judge (pass/fail/retry decision)\n                    \u2192 agent/loop.story.passed  \u2190\u2500\u2500 feeds back to plan\n                    \u2192 agent/loop.story.failed  \u2190\u2500\u2500 feeds back to plan\n                    \u2192 agent/loop.story.retry   \u2190\u2500\u2500 feeds back to implement\n```\n\n**Most common break point**: `judge \u2192 plan`. The `agent/loop.story.passed` event fires but plan never picks it up. This happens when:\n- Inngest is restarting during the event\n- Worker was restarted between judge and plan\n- k8s pod restart dropped the event\n\n## Observability Patterns\n\n### Passive: Failure Events\nEvery loop function should emit failure events via `onFailure` handlers (being added by harden loop). These fire `agent/loop.function.failed` which gets logged to slog.\n\n### Active: Watchdog (Future)\nA periodic Inngest function (`system/loop-watchdog`) that:\n1. Scans all loops in Redis with pending stories\n2. Checks if any events were emitted in the last 10 minutes\n3. If not \u2192 auto-runs diagnose + fix\n4. Logs to slog + daily log\n\n### Manual: The Diagnostic Session\nWhen an agent needs to debug loops manually, follow this sequence:\n\n```bash\n# 1. Quick overview\njoelclaw loop diagnose all -c\n\n# 2. If fix needed\njoelclaw loop diagnose all -c --fix\n\n# 3. Verify fix worked (wait ~30s for plan to fire)\njoelclaw loop status <loop-id> -c\n\n# 4. If still stuck, check worker\ncurl -s localhost:3111/api/inngest | python3 -c \"import json,sys; print(json.load(sys.stdin)['function_count'])\"\n\n# 5. Nuclear option: full restart\njoelclaw loop restart <loop-id>\n```\n\n## Making Loops More Resilient\n\nThe root cause of most stalls is **lost events in the judge\u2192plan chain**. Solutions being implemented:\n\n1. **onFailure handlers** \u2014 every function gets one, logs failure + emits diagnostic event\n2. **Loop watchdog** \u2014 periodic check for silent stalls\n3. **Debounce on content-sync** \u2014 prevents event storms that can crowd out loop events\n4. **Singleton on backfill** \u2014 prevents resource contention during loops\n\n## Cross-References\n\n- [agent-loop skill](/Users/joel/.pi/agent/skills/agent-loop/SKILL.md) \u2014 starting loops\n- [loop-nanny skill](/Users/joel/.pi/agent/skills/loop-nanny/SKILL.md) \u2014 monitoring + cleanup\n- [joelclaw skill](../joelclaw/SKILL.md) \u2014 full CLI reference\n- [ADR-0028](/Users/joel/Vault/docs/decisions/0028-inngest-reliability-patterns.md) \u2014 reliability patterns\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "loop-diagnosis",
-    "description": "Diagnose and fix stalled agent loops using the joelclaw CLI. Use when loops appear stuck, stories aren't progressing, or the event chain broke. Triggers on \"loop stalled\", \"why isn't the loop progressing\", \"diagnose loops\", \"fix stuck loop\", \"loop not moving\", \"what happened to the loop\", \"stories stuck at pending\", or any request to debug loop infrastructure."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

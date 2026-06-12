@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000034498",
   "name": "unity-modding",
   "slug": "unity-modding-2",
   "description": "|",
   "content": "\n# Unity Modding Architecture\n\n## Overview\n\nGuide for designing Unity games that support community modding. Covers asset loading systems, scripted mod APIs, mod manager patterns, distribution platforms, and techniques for modding existing games.\n\n## Modding Architecture Tiers\n\n| Tier | What Modders Can Do | Complexity |\n|------|---------------------|------------|\n| **Data Mods** | Replace textures, sounds, configs (JSON/XML) | Low |\n| **Asset Mods** | Add new models, maps, items via Asset Bundles | Medium |\n| **Script Mods** | Custom game logic via Lua/scripting API | High |\n| **Code Mods** | Patch game assemblies via Harmony/BepInEx | Expert |\n\nDesign your game to support at least Tier 1-2 from the start. Tiers 3-4 require deliberate API design.\n\n## Asset Loading for Mods\n\n### Addressables (Recommended)\n\nAddressables provide a unified API for loading assets from local bundles, remote servers, or mod directories.\n\n```csharp\n// Load a mod's asset catalog at runtime\npublic async Awaitable LoadModCatalog(string modPath)\n{\n    string catalogPath = Path.Combine(modPath, \"catalog.json\");\n    var locator = await Addressables.LoadContentCatalogAsync(catalogPath);\n    Debug.Log($\"Loaded mod catalog with {locator.Keys.Count()} assets\");\n}\n\n// Load an asset by address (works for both base game and mods)\nvar prefab = await Addressables.LoadAssetAsync<GameObject>(\"enemies/goblin\");\nInstantiate(prefab);\n```\n\n**Mod workflow:**\n1. Modders use a Unity project with Addressables configured\n2. Build Addressable groups into Asset Bundles\n3. Ship the catalog.json + .bundle files\n4. Game loads catalogs at runtime from the mod directory\n\n### Asset Bundles (Legacy but Simpler)\n\n```csharp\npublic async Awaitable<AssetBundle> LoadModBundle(string path)\n{\n    var request = AssetBundle.LoadFromFileAsync(path);\n    await request;\n    return request.assetBundle;\n}\n\n// Load specific asset from bundle\nvar bundle = await LoadModBundle(\"mods/weapons/swords.bundle\");\nvar swordPrefab = bundle.LoadAsset<GameObject>(\"BroadSword\");\n```\n\n**Key rules:**\n- Never load the same bundle twice (track loaded bundles)\n- Unload bundles when mods are disabled: `bundle.Unload(true)`\n- Use `AssetBundle.LoadFromFileAsync` for local files (not `LoadFromMemory`)\n\n### Hot-Reloadable Data Mods\n\nFor simple data mods (JSON configs, CSV tables):\n\n```csharp\npublic T LoadModConfig<T>(string modPath, string fileName)\n{\n    string filePath = Path.Combine(modPath, fileName);\n    if (!File.Exists(filePath)) return default;\n    string json = File.ReadAllText(filePath);\n    return JsonUtility.FromJson<T>(json);\n}\n```\n\nUse `FileSystemWatcher` to detect changes and hot-reload during development.\n\n## Lua Scripting with MoonSharp\n\nMoonSharp is a Lua interpreter written in C# that runs on all Unity platforms.\n\n### Setup\n\nInstall via NuGet or download the DLL. Register safe API surfaces for modders:\n\n```csharp\npublic class ModScriptEngine\n{\n    Script _lua;\n\n    public void Initialize()\n    {\n        _lua = new Script();\n\n        // Register safe game API\n        _lua.Globals[\"SpawnEntity\"] = (Func<string, float, float, float, bool>)SpawnEntity;\n        _lua.Globals[\"GetPlayerHealth\"] = (Func<float>)(() => player.Health);\n        _lua.Globals[\"ShowMessage\"] = (Action<string>)ShowMessage;\n        _lua.Globals[\"RegisterEvent\"] = (Action<string, DynValue>)RegisterEvent;\n    }\n\n    public void LoadMod(string luaFilePath)\n    {\n        string code = File.ReadAllText(luaFilePath);\n        _lua.DoString(code);\n    }\n\n    bool SpawnEntity(string id, float x, float y, float z)\n    {\n        // Validate and spawn - never trust mod input\n        if (!entityRegistry.Contains(id)) return false;\n        var pos = new Vector3(x, y, z);\n        if (!IsValidSpawnPosition(pos)) return false;\n        entityRegistry.Spawn(id, pos);\n        return true;\n    }\n}\n```\n\n### Modder-Side Lua\n\n```lua\n-- my_mod/init.lua\nRegisterEvent(\"OnPlayerEnterZone\", function(zoneName)\n    if zoneName == \"boss_arena\" then\n        SpawnEntity(\"dragon_boss\", 0, 5, 0)\n        ShowMessage(\"A dragon appears!\")\n    end\nend)\n```\n\n### Security Considerations\n\n| Risk | Mitigation |\n|------|-----------|\n| File system access | Do NOT expose System.IO to Lua |\n| Infinite loops | Set instruction count limits: `script.Options.InstructionLimit = 100000` |\n| Memory abuse | Limit table sizes, monitor allocation |\n| Network access | Never expose HTTP/socket APIs |\n| Reflection abuse | MoonSharp sandboxes by default, but validate registered types |\n\n## Mod Manager Pattern\n\n### Architecture\n\n```text\nGame\n\u251c\u2500\u2500 ModManager (singleton)\n\u2502   \u251c\u2500\u2500 DiscoverMods(modsFolder)     // Scan for mod manifests\n\u2502   \u251c\u2500\u2500 ValidateMod(manifest)        // Version compat, dependencies\n\u2502   \u251c\u2500\u2500 LoadMod(modId)               // Load assets + scripts\n\u2502   \u251c\u2500\u2500 UnloadMod(modId)             // Clean teardown\n\u2502   \u2514\u2500\u2500 GetLoadOrder()               // Dependency-sorted order\n\u251c\u2500\u2500 ModManifest (ScriptableObject / JSON)\n\u2502   \u251c\u2500\u2500 id, name, version, author\n\u2502   \u251c\u2500\u2500 dependencies[]\n\u2502   \u251c\u2500\u2500 gameVersionMin / gameVersionMax\n\u2502   \u2514\u2500\u2500 entryPoint (script path)\n\u2514\u2500\u2500 ModSandbox\n    \u251c\u2500\u2500 Lua scripting environment\n    \u2514\u2500\u2500 Restricted API surface\n```\n\n### Mod Manifest Format\n\n```json\n{\n    \"id\": \"com.author.mymod\",\n    \"name\": \"My Awesome Mod\",\n    \"version\": \"1.2.0\",\n    \"author\": \"ModAuthor\",\n    \"description\": \"Adds new enemies and weapons\",\n    \"gameVersionMin\": \"1.0.0\",\n    \"gameVersionMax\": \"2.0.0\",\n    \"dependencies\": [\"com.author.corelib@1.0.0\"],\n    \"entryPoint\": \"scripts/init.lua\",\n    \"assets\": \"bundles/\"\n}\n```\n\n## Steam Workshop Integration\n\nUse Steamworks.NET or Facepunch.Steamworks for Steam Workshop integration:\n\n1. **Upload:** Modder packages mod folder, calls `SteamUGC.CreateItem` + `SteamUGC.SubmitItemUpdate`\n2. **Subscribe:** Players subscribe in Steam Workshop UI\n3. **Download:** Game queries `SteamUGC.GetSubscribedItems()` at startup\n4. **Load:** Read from `SteamUGC.GetItemInstallInfo` path into ModManager\n\n## Harmony Patching (Modding Existing Games)\n\nHarmony is used by modders (via BepInEx/MelonLoader) to patch compiled game code at runtime.\n\n```csharp\n[HarmonyPatch(typeof(PlayerHealth), \"TakeDamage\")]\nclass DamageModifier\n{\n    // Prefix: runs before original method\n    static bool Prefix(ref float damage)\n    {\n        damage *= 0.5f; // Halve all damage\n        return true;    // true = continue to original\n    }\n\n    // Postfix: runs after original method\n    static void Postfix(PlayerHealth __instance)\n    {\n        Debug.Log($\"Health after damage: {__instance.CurrentHealth}\");\n    }\n}\n```\n\nIf designing a game intended to be modded via Harmony, avoid aggressive code obfuscation and keep method signatures stable across updates.\n\n## Additional Resources\n\n### Reference Files\n- **`references/mod-framework-detail.md`** -- Complete mod manager implementation, dependency resolution algorithm, mod load ordering, versioned API patterns, hot-reload systems, mod testing frameworks, BepInEx/MelonLoader setup guide\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "unity-modding",
-    "description": "|",
-    "PROACTIVELY activate for": "(1) adding modding support to a Unity game, (2) Asset Bundles for mods, (3) Addressables for mod content, (4) Lua scripting via MoonSharp, (5) Harmony patching for runtime IL injection, (6) Steam Workshop integration, (7) mod manager UI, (8) plugin architecture for user-generated content (UGC), (9) custom content loading at runtime, (10) sandboxing and security for untrusted mods.",
-    "Provides": "AssetBundle vs Addressables tradeoffs, MoonSharp setup, Harmony patch patterns, Steam Workshop SDK integration, mod manager templates, and security guidelines."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

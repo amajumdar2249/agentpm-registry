@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033535",
   "name": "webflow-sdk-patterns",
   "slug": "webflow-sdk-patterns",
   "description": "Apply production-ready Webflow SDK patterns \\u2014 singleton client,\\",
   "content": "# Webflow SDK Patterns\n\n## Overview\n\nProduction-ready patterns for the `webflow-api` SDK (v3.x). Covers singleton client,\ntyped error handling, pagination, raw response headers, and multi-tenant factory.\n\n## Prerequisites\n\n- `webflow-api` v3.x installed\n- TypeScript 5+ project\n- Familiarity with async/await and the Webflow Data API v2\n\n## Instructions\n\n### Pattern 1: Singleton Client with Configuration\n\n```typescript\n// src/webflow/client.ts\nimport { WebflowClient } from \"webflow-api\";\n\ninterface WebflowConfig {\n  accessToken: string;\n  timeout?: number;   // Request timeout in ms (default: SDK default)\n  maxRetries?: number; // Auto-retry on 429/5xx (default: 2)\n}\n\nlet instance: WebflowClient | null = null;\n\nexport function getWebflowClient(config?: Partial<WebflowConfig>): WebflowClient {\n  if (!instance) {\n    const token = config?.accessToken || process.env.WEBFLOW_API_TOKEN;\n    if (!token) throw new Error(\"WEBFLOW_API_TOKEN required\");\n\n    instance = new WebflowClient({\n      accessToken: token,\n      // The SDK supports timeout and maxRetries natively\n      ...(config?.timeout && { timeout: config.timeout }),\n      ...(config?.maxRetries !== undefined && { maxRetries: config.maxRetries }),\n    });\n  }\n  return instance;\n}\n\n// Reset client (useful for token rotation)\nexport function resetWebflowClient(): void {\n  instance = null;\n}\n```\n\n### Pattern 2: Typed Error Handling\n\nThe SDK throws `WebflowError` subclasses. Handle them by type:\n\n```typescript\nimport { WebflowClient } from \"webflow-api\";\n\n// SDK errors are subclasses of WebflowError\n// Common HTTP status codes: 400, 401, 403, 404, 409, 429, 500\n\nasync function safeWebflowCall<T>(\n  operation: () => Promise<T>,\n  context: string\n): Promise<{ data: T | null; error: string | null }> {\n  try {\n    const data = await operation();\n    return { data, error: null };\n  } catch (err: any) {\n    const statusCode = err.statusCode || err.status;\n    const message = err.message || String(err);\n\n    // Log with context for debugging\n    console.error(`[Webflow] ${context} failed:`, {\n      status: statusCode,\n      message,\n      body: err.body,\n    });\n\n    // Classify the error\n    switch (statusCode) {\n      case 401:\n        console.error(\"Token invalid or revoked. Rotate token.\");\n        break;\n      case 403:\n        console.error(\"Missing required scope. Check token scopes.\");\n        break;\n      case 404:\n        console.error(\"Resource not found. Verify IDs.\");\n        break;\n      case 409:\n        console.error(\"Conflict \u2014 item may already exist with this slug.\");\n        break;\n      case 429:\n        console.error(\"Rate limited. SDK will auto-retry with backoff.\");\n        break;\n      default:\n        if (statusCode >= 500) {\n          console.error(\"Webflow server error. Retry later.\");\n        }\n    }\n\n    return { data: null, error: message };\n  }\n}\n\n// Usage\nconst { data: sites, error } = await safeWebflowCall(\n  () => webflow.sites.list(),\n  \"sites.list\"\n);\n```\n\n### Pattern 3: Pagination Helper\n\nWebflow v2 uses offset-based pagination. Iterate through all pages:\n\n```typescript\ninterface PaginatedResult<T> {\n  items: T[];\n  pagination: { limit: number; offset: number; total: number };\n}\n\nasync function fetchAllItems<T>(\n  fetcher: (offset: number, limit: number) => Promise<PaginatedResult<T>>,\n  pageSize = 100\n): Promise<T[]> {\n  const allItems: T[] = [];\n  let offset = 0;\n\n  while (true) {\n    const result = await fetcher(offset, pageSize);\n    allItems.push(...result.items);\n\n    if (allItems.length >= result.pagination.total) break;\n    offset += pageSize;\n  }\n\n  return allItems;\n}\n\n// Usage: Fetch all items from a collection\nconst allItems = await fetchAllItems((offset, limit) =>\n  webflow.collections.items.listItems(collectionId, { offset, limit })\n    .then(res => ({\n      items: res.items || [],\n      pagination: res.pagination || { limit, offset, total: 0 },\n    }))\n);\n```\n\n### Pattern 4: Raw Response Access (Headers)\n\nAccess rate limit headers using `.withRawResponse()`:\n\n```typescript\nasync function getWithRateLimitInfo(siteId: string) {\n  // .withRawResponse() returns { data, rawResponse }\n  const response = await webflow.sites.get(siteId)\n    // @ts-ignore \u2014 withRawResponse is available on all SDK methods\n    ;\n\n  // For rate limit monitoring, use a wrapper that extracts headers\n  const rawFetch = await fetch(\n    `https://api.webflow.com/v2/sites/${siteId}`,\n    {\n      headers: {\n        Authorization: `Bearer ${process.env.WEBFLOW_API_TOKEN}`,\n        \"Content-Type\": \"application/json\",\n      },\n    }\n  );\n\n  const rateLimitRemaining = rawFetch.headers.get(\"X-RateLimit-Remaining\");\n  const rateLimitLimit = rawFetch.headers.get(\"X-RateLimit-Limit\");\n  const retryAfter = rawFetch.headers.get(\"Retry-After\");\n\n  console.log(`Rate limit: ${rateLimitRemaining}/${rateLimitLimit}`);\n\n  return rawFetch.json();\n}\n```\n\n### Pattern 5: Multi-Tenant Factory\n\nFor apps serving multiple Webflow workspaces:\n\n```typescript\nconst clients = new Map<string, WebflowClient>();\n\nexport function getClientForTenant(tenantId: string): WebflowClient {\n  if (!clients.has(tenantId)) {\n    const token = getTenantToken(tenantId); // From your DB/vault\n\n    clients.set(\n      tenantId,\n      new WebflowClient({ accessToken: token })\n    );\n  }\n  return clients.get(tenantId)!;\n}\n\n// Rotate a tenant's token without downtime\nexport function rotateTenantToken(tenantId: string, newToken: string): void {\n  clients.set(\n    tenantId,\n    new WebflowClient({ accessToken: newToken })\n  );\n}\n```\n\n### Pattern 6: Bulk Operations Helper\n\nThe CMS bulk endpoints accept up to 100 items per request:\n\n```typescript\nasync function bulkCreateItems(\n  collectionId: string,\n  items: Array<{ fieldData: Record<string, any>; isDraft?: boolean }>,\n  batchSize = 100\n): Promise<string[]> {\n  const createdIds: string[] = [];\n\n  for (let i = 0; i < items.length; i += batchSize) {\n    const batch = items.slice(i, i + batchSize);\n\n    const result = await webflow.collections.items.createItemsBulk(\n      collectionId,\n      { items: batch }\n    );\n\n    if (result.items) {\n      createdIds.push(...result.items.map(item => item.id!));\n    }\n\n    console.log(`Created batch ${Math.floor(i / batchSize) + 1}: ${batch.length} items`);\n  }\n\n  return createdIds;\n}\n```\n\n### Pattern 7: Zod Validation for API Responses\n\n```typescript\nimport { z } from \"zod\";\n\nconst WebflowSiteSchema = z.object({\n  id: z.string(),\n  displayName: z.string(),\n  shortName: z.string(),\n  lastPublished: z.string().nullable(),\n  customDomains: z.array(z.object({\n    url: z.string(),\n  })).optional(),\n});\n\nconst WebflowCollectionItemSchema = z.object({\n  id: z.string(),\n  isDraft: z.boolean(),\n  isArchived: z.boolean(),\n  createdOn: z.string(),\n  lastUpdated: z.string(),\n  fieldData: z.record(z.unknown()),\n});\n\n// Validate API responses at runtime\nasync function getValidatedSite(siteId: string) {\n  const site = await webflow.sites.get(siteId);\n  return WebflowSiteSchema.parse(site);\n}\n```\n\n## Output\n\n- Type-safe singleton client with configuration\n- Structured error handling by HTTP status code\n- Pagination helper for large collections\n- Rate limit header monitoring\n- Multi-tenant client factory\n- Bulk CMS operations (100 items/batch)\n- Runtime response validation with Zod\n\n## Error Handling\n\n| Pattern | Use Case | Benefit |\n|---------|----------|---------|\n| Safe wrapper | All API calls | Prevents uncaught exceptions |\n| Status classification | Error triage | Clear remediation path |\n| Pagination helper | Large datasets | No missed items |\n| Zod validation | Response integrity | Catches API changes |\n| Token rotation | Security compliance | Zero-downtime rotation |\n\n## Resources\n\n- [SDK npm package](https://www.npmjs.com/package/webflow-api)\n- [SDK GitHub repo](https://github.com/webflow/js-webflow-api)\n- [API Reference](https://developers.webflow.com/data/reference/rest-introduction)\n- [Zod Documentation](https://zod.dev/)\n\n## Next Steps\n\nApply patterns in `webflow-core-workflow-a` for CMS content management.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "webflow-sdk-patterns",
-    "description": "Apply production-ready Webflow SDK patterns \\u2014 singleton client,\\",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

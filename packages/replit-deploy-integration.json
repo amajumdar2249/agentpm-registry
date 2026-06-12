@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033042",
   "name": "replit-deploy-integration",
   "slug": "replit-deploy-integration",
   "description": "Deploy Replit apps with Autoscale, Reserved VM, and Static deployment",
   "content": "# Replit Deploy Integration\n\n## Overview\n\nDeploy applications on Replit's hosting platform. Three deployment types: Static (free, frontend-only), Autoscale (scales to zero, pay per request), and Reserved VM (always-on, fixed cost). Includes custom domain setup, health checks, rollbacks, and deployment monitoring.\n\n## Prerequisites\n\n- Replit Core, Pro, or Teams plan (deployment access)\n- Application working in Workspace (\"Run\" button)\n- Custom domain (optional) with DNS access\n\n## Deployment Types\n\n| Type | Best For | Pricing | Scale |\n|------|----------|---------|-------|\n| **Static** | HTML/CSS/JS frontends | Free | CDN-backed, auto-cached |\n| **Autoscale** | Variable traffic APIs | Per request | 0 to N instances |\n| **Reserved VM** | Always-on services | $0.20+/day | Fixed resources |\n\n## Instructions\n\n### Step 1: Configure `.replit` for Deployment\n\n```toml\n# .replit \u2014 Autoscale deployment (most common)\nentrypoint = \"src/index.ts\"\nrun = \"npx tsx src/index.ts\"\n\n[nix]\nchannel = \"stable-24_05\"\n\n[env]\nNODE_ENV = \"production\"\n\n[deployment]\nrun = [\"sh\", \"-c\", \"npx tsx src/index.ts\"]\nbuild = [\"sh\", \"-c\", \"npm ci --production && npm run build\"]\ndeploymentTarget = \"autoscale\"\n```\n\n**Reserved VM:**\n\n```toml\n[deployment]\nrun = [\"sh\", \"-c\", \"node dist/index.js\"]\nbuild = [\"sh\", \"-c\", \"npm ci && npm run build\"]\ndeploymentTarget = \"cloudrun\"\n```\n\n**Static:**\n\n```toml\n[deployment]\ndeploymentTarget = \"static\"\npublicDir = \"dist\"\nbuild = [\"sh\", \"-c\", \"npm ci && npm run build\"]\n```\n\n### Step 2: Configure Secrets for Production\n\n```markdown\nWorkspace Secrets auto-sync to Deployments (2025+).\n\n1. Click lock icon (Secrets) in sidebar\n2. Add production secrets:\n   - DATABASE_URL (auto-populated by Replit PostgreSQL)\n   - API_KEY, JWT_SECRET, etc.\n3. Verify in Deployment Settings > Environment Variables\n```\n\n### Step 3: Add Health Check Endpoint\n\nReplit monitors your deployment via health checks. Always include one:\n\n```typescript\n// src/routes/health.ts\nimport { Router } from 'express';\nimport { pool } from '../services/db';\n\nconst router = Router();\n\nrouter.get('/health', async (req, res) => {\n  const checks: Record<string, any> = {\n    status: 'ok',\n    uptime: process.uptime(),\n    timestamp: new Date().toISOString(),\n  };\n\n  // Check database if configured\n  if (process.env.DATABASE_URL) {\n    try {\n      await pool.query('SELECT 1');\n      checks.database = 'connected';\n    } catch {\n      checks.database = 'disconnected';\n      checks.status = 'degraded';\n    }\n  }\n\n  // Replit-specific metadata\n  checks.repl = process.env.REPL_SLUG;\n  checks.region = process.env.REPLIT_DEPLOYMENT_REGION;\n\n  const statusCode = checks.status === 'ok' ? 200 : 503;\n  res.status(statusCode).json(checks);\n});\n\nexport default router;\n```\n\n### Step 4: Deploy\n\n```markdown\nVia Replit UI:\n1. Click \"Deploy\" button in the top bar\n2. Select deployment type:\n   - Static: for frontend-only apps\n   - Autoscale: scales to zero when idle\n   - Reserved VM: always-on, choose machine size\n3. Configure machine size (Autoscale/VM):\n   - 0.25 vCPU / 512 MB \u2014 lightweight APIs\n   - 0.5 vCPU / 1 GB \u2014 standard web apps\n   - 2 vCPU / 4 GB \u2014 compute-heavy apps\n   - 4+ vCPU / 8-16 GB \u2014 production workloads\n4. Click \"Deploy\"\n5. Monitor build output in the deploy console\n```\n\n### Step 5: Custom Domain Setup\n\n```markdown\n1. Go to Deployment Settings > Custom Domain\n2. Enter your domain: app.example.com\n3. Add DNS record at your registrar:\n   Type: CNAME\n   Name: app\n   Value: your-repl-slug.replit.app\n4. Wait for SSL auto-provisioning (1-5 minutes)\n5. Verify:\n```\n\n```bash\n# Verify DNS\ndig app.example.com CNAME\n\n# Verify SSL\ncurl -I https://app.example.com\n\n# Verify health\ncurl -sf https://app.example.com/health | jq .\n```\n\nFor Replit-purchased domains:\n\n- DNS managed in Replit dashboard\n- MX records supported for custom email\n- SSL auto-provisioned\n\n### Step 6: Deployment Rollback\n\nReplit supports one-click rollback to any previous successful deployment.\n\n```markdown\n1. Go to Deployment Settings > History\n2. View list of past deployments with timestamps\n3. Click \"Rollback\" on the desired version\n4. Deployment reverts immediately\n5. Verify health endpoint after rollback\n```\n\n### Step 7: Post-Deploy Verification\n\n```bash\nset -euo pipefail\nDEPLOY_URL=\"https://your-app.replit.app\"\n\necho \"=== Deployment Verification ===\"\n\n# Health check\necho -n \"Health: \"\ncurl -sf \"$DEPLOY_URL/health\" | jq -r '.status'\n\n# Response time\necho -n \"Response time: \"\ncurl -s -o /dev/null -w \"%{time_total}s\\n\" \"$DEPLOY_URL/\"\n\n# SSL certificate\necho -n \"SSL: \"\ncurl -sI \"$DEPLOY_URL\" | grep -i \"strict-transport\" && echo \"OK\" || echo \"Missing HSTS\"\n\n# Autoscale cold start test\necho \"Cold start test: wait 10 min, then curl again\"\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Deploy fails at build | Dependency error | Test `npm ci && npm run build` locally first |\n| 503 after deploy | App crashes on start | Check deployment logs, verify secrets |\n| Port mismatch | Not using PORT env | `app.listen(process.env.PORT \\|\\| 3000)` |\n| Cold start slow (>10s) | Heavy imports on startup | Lazy-load non-critical modules |\n| Custom domain 404 | DNS not propagated | Wait, or verify CNAME record |\n| SSL not provisioning | Wrong DNS record | Must be CNAME to `.replit.app` |\n\n## Resources\n\n- [Autoscale Deployments](https://blog.replit.com/autoscale)\n- [Reserved VM Deployments](https://docs.replit.com/cloud-services/deployments/reserved-vm-deployments)\n- [Static Deployments](https://docs.replit.com/cloud-services/deployments/static-deployments)\n- [Deployment Rollbacks](https://blog.replit.com/introducing-deployment-rollbacks)\n- [Custom Domains](https://docs.replit.com/hosting/custom-domains)\n- [Monitoring Deployments](https://docs.replit.com/cloud-services/deployments/monitoring-a-deployment)\n\n## Next Steps\n\nFor multi-environment setup, see `replit-multi-env-setup`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "replit-deploy-integration",
-    "description": "Deploy Replit apps with Autoscale, Reserved VM, and Static deployment",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

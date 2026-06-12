@@ -1,15 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000010894",
   "name": "memory-system",
   "slug": "memory-system",
   "description": "Operate and extend the joelclaw agent memory system \u2014 observation pipeline, write gates, vector store, retrieval, reflection, and nightly maintenance. Use when working on memory functions, debugging recall, tuning observation quality, or evolving the memory architecture.",
   "content": "\n# Memory System\n\nOperational reference for the joelclaw memory pipeline (session signal \u2192 durable recall \u2192 curated MEMORY.md).\n\n## When to use\n\nUse this skill when working on memory capture, write gates, Typesense-backed recall, reflection/promote flows, or nightly maintenance.\n\n## Canonical flow\n\n```text\nsessions \u2192 observe \u2192 write-gate \u2192 store \u2192 decay/rank \u2192 retrieve \u2192 inject\n    \u2191                                                              \u2193\n    \u2514\u2500\u2500\u2500\u2500 nightly maintenance (dedup + stale pruning + stats) \u2500\u2500\u2500\u2500\u2500\u2518\n                       \u2193\n               observe \u2192 reflect \u2192 propose \u2192 triage \u2192 MEMORY.md\n```\n\n**Guiding filter:** \u201cwill this fact still be true and useful next month?\u201d\n\n## 1) Write gate states (allow / hold / discard)\n\n| State | Persist | Default retrieval | Rules |\n|---|---|---|---|\n| `allow` | yes | yes | Durable, reusable facts (constraints, architecture truths, operational fixes, explicit user rules). |\n| `hold` | yes | no (unless explicitly requested) | Ambiguous/contextual signal worth keeping but not auto-injecting. |\n| `discard` | no | no | Noise, tool traces, instruction artifacts, ephemeral chatter. |\n\nRules to enforce:\n- Very short/low-information observations (e.g. <12 chars) \u2192 `discard`.\n- Instruction-edit artifacts/raw tool traces (`<toolCall>`, command dumps, \u201creplace X with Y\u201d) \u2192 `discard`.\n- Facts with ADR IDs, concrete file paths, or explicit runnable commands bias toward `allow`.\n- If gate annotation parsing fails, mark `write_gate_fallback=true` and track drift (high fallback rate is a health smell).\n\n## 2) Vector store schema (Typesense only)\n\n**Backend:** `memory_observations` in Typesense. Qdrant is retired (per slog, 2026-02-28).\n\nMinimum operational fields:\n- Identity/source: `id`, `session_id`, `source`, `timestamp`, `updated_at`\n- Content: `observation`, `observation_type`, `embedding`\n- Write gate: `write_verdict`, `write_confidence`, `write_reason`, `write_gate_version`, `write_gate_fallback`\n- Taxonomy: `category_id`, `category_confidence`, `category_source`, `taxonomy_version`\n- Ranking/lifecycle: `merged_count`, `recall_count`, `retrieval_priority`, `stale`, `stale_tagged_at`, `last_used_at`, `superseded_by`, `supersedes`\n\n## 3) Category taxonomy (7 categories)\n\nUse taxonomy v1 IDs:\n1. `jc:preferences`\n2. `jc:rules-conventions`\n3. `jc:system-architecture`\n4. `jc:operations`\n5. `jc:memory-system`\n6. `jc:projects`\n7. `jc:people-relationships`\n\n## 4) Retrieval pipeline\n\n1. **Query rewrite** (fast model, hard timeout, fail-open to original query).\n2. **Hybrid search** (keyword + vector over `memory_observations`).\n3. **Time decay** ranking:\n   `final_score = raw_score \u00d7 exp(-0.01 \u00d7 days_since_created)`\n   - stale memories get extra downweight.\n4. **Cap** results before injection (protect context budget).\n5. **Budget profile**:\n   - `lean`: 2\u20133 hits, no rewrite, low-latency checks\n   - `balanced`: 5\u20137 hits, default interactive mode\n   - `deep`: 10\u201315 hits, complex debugging/research\n   - `auto`: choose profile from query complexity/context\n\n## 5) Reflection cycle\n\n`observe \u2192 reflect \u2192 propose \u2192 triage (3 tiers) \u2192 promote to MEMORY.md`\n\nTriage tiers:\n- **Tier 1 auto-action:** auto-promote / auto-reject / auto-merge using deterministic rules.\n- **Tier 2 LLM batch review:** batch adjudication for undecided proposals.\n- **Tier 3 human review:** only ambiguous/risky proposals; then promote/edit/reject.\n\nGoal: keep `MEMORY.md` small, durable, and high-signal.\n\n## 6) Nightly maintenance\n\nRun idempotent maintenance to keep recall quality high:\n1. **Dedup sweep** (semantic similarity merge; maintain supersession chain).\n2. **Stale pruning** (mark old never-recalled observations stale; prune very old stale records conservatively).\n3. **Stats emission** (observation count, merges, stale volume, category distribution).\n\n## 7) ADR map (read before changing architecture)\n\n- **ADR-0021** \u2014 memory system foundation.\n- **ADR-0068** \u2014 auto-triage pipeline.\n- **ADR-0077** \u2014 next phase (reflection + maintenance).\n- **ADR-0082** \u2014 Typesense as memory backend (Qdrant replaced).\n- **ADR-0094 \u2192 ADR-0100** \u2014 proposed evolution (write gate governance, taxonomy/budgets, forward triggers, graph/dual-search roadmap).\n\n## 8) Writing observations (mandatory at session end)\n\n**Every session that produces a durable pattern, operational fix, or architectural insight MUST write observations before closing.**\n\n```bash\njoelclaw send \"memory/observation.submitted\" -d '{\n  \"observation\": \"<what was learned \u2014 concrete, reusable, future-tense useful>\",\n  \"category\": \"jc:operations\",\n  \"source\": \"pi-session\",\n  \"tags\": [\"stripe\", \"payout\"]\n}'\n```\n\nUse one `send` call per distinct observation. Batch is fine \u2014 fire them in a loop.\n\n### Category cheatsheet\n\n| Category | Use for |\n|---|---|\n| `jc:operations` | How things work, API quirks, CLI patterns, operational fixes |\n| `jc:rules-conventions` | Conventions, SOPs, team/project rules |\n| `jc:system-architecture` | Topology, wiring, how components connect |\n| `jc:projects` | Per-project facts, payout rates, product catalogs |\n| `jc:preferences` | Joel's explicit preferences |\n| `jc:people-relationships` | People, contacts, roles |\n| `jc:memory-system` | Memory system itself |\n\n### What makes a good observation\n\n- **Concrete**: \"Stripe Report Run requires explicit `payment_metadata[product]` column in `columns` param or it returns blank\" \u2014 not \"Stripe has metadata\"\n- **Reusable**: will this still be true next month?\n- **Actionable**: an agent reading this cold should know what to do differently\n- Not a transcript: no \"the user asked me to\", no raw tool output, no \"I discovered that\"\n\n### What to skip\n\n- Instruction artifacts, tool traces, ephemeral command outputs\n- Facts already in skills or ADRs (skills are the durable home; observations are for recall/search)\n- Anything under 12 chars \u2014 the write gate discards it\n\n## 9) Operations commands (slog + recall)\n\n```bash\n# Record memory-system changes\nslog write --action configure --tool memory-system --detail \"<what changed>\" --reason \"<why>\"\n\n# Inspect recent operational history\nslog tail --count 50\n\n# Default recall\njoelclaw recall \"<query>\" --budget balanced --limit 7\n\n# Deep recall for hard debugging\njoelclaw recall \"<query>\" --budget deep --limit 10\n\n# Inspect memory-system category specifically\njoelclaw recall \"<query>\" --category jc:memory-system --limit 10\n\n# Include held memories when needed\njoelclaw recall \"<query>\" --include-hold --raw\n```\n\n## 9) Canonical code paths\n\n- Observe: `packages/system-bus/src/inngest/functions/observe.ts`\n- Write gate: `packages/system-bus/src/memory/write-gate.ts`\n- Taxonomy: `packages/system-bus/src/memory/taxonomy-v1.ts`\n- Recall adapter: `packages/cli/src/capabilities/adapters/typesense-recall.ts`\n- Reflect/propose: `packages/system-bus/src/inngest/functions/reflect.ts`, `promote.ts`\n- Nightly maintenance: `packages/system-bus/src/inngest/functions/memory/nightly-maintenance.ts`\n\n## 10) Non-negotiables\n\n- Memory stores **patterns**, not transcript noise.\n- No silent failure paths: emit telemetry on every transition.\n- Keep retrieval bounded; never flood context windows.\n- Keep `MEMORY.md` curated; do not auto-append raw observations.\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "memory-system",
-    "displayName": "Memory System",
-    "description": "Operate and extend the joelclaw agent memory system \u2014 observation pipeline, write gates, vector store, retrieval, reflection, and nightly maintenance. Use when working on memory functions, debugging recall, tuning observation quality, or evolving the memory architecture.",
-    "version": "0.1.0",
-    "author": "joel",
-    "tags": ""
+  "author": "joel",
+  "version": "0.1.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

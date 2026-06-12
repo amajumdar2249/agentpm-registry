@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032295",
   "name": "instantly-deploy-integration",
   "slug": "instantly-deploy-integration",
   "description": "Deploy Instantly.ai webhook receivers and API integrations to cloud",
   "content": "# Instantly Deploy Integration\n\n## Overview\n\nDeploy Instantly API v2 integrations \u2014 primarily webhook receivers and automation services \u2014 to cloud platforms. Instantly webhooks require a public HTTPS endpoint that responds within 30 seconds (3 retries on failure). This skill covers Vercel serverless functions, Google Cloud Run containers, and Fly.io deployments.\n\n## Prerequisites\n\n- Completed `instantly-install-auth` setup\n- Working Instantly integration tested locally (see `instantly-local-dev-loop`)\n- Cloud platform account (Vercel, GCP, or Fly.io)\n- Domain or HTTPS URL for webhook endpoint\n\n## Instructions\n\n### Option A: Vercel Serverless Functions\n\n```typescript\n// api/webhooks/instantly.ts \u2014 Vercel serverless function\nimport type { VercelRequest, VercelResponse } from \"@vercel/node\";\n\nexport default async function handler(req: VercelRequest, res: VercelResponse) {\n  if (req.method !== \"POST\") {\n    return res.status(405).json({ error: \"Method not allowed\" });\n  }\n\n  // Validate webhook secret\n  const secret = req.headers[\"x-webhook-secret\"];\n  if (secret !== process.env.INSTANTLY_WEBHOOK_SECRET) {\n    return res.status(401).json({ error: \"Unauthorized\" });\n  }\n\n  const { event_type, data } = req.body;\n\n  // Respond immediately \u2014 Instantly expects 2xx within 30s\n  res.status(200).json({ received: true });\n\n  // Process event asynchronously\n  try {\n    switch (event_type) {\n      case \"reply_received\":\n        await syncReplyToCRM(data);\n        break;\n      case \"email_bounced\":\n        await handleBounce(data);\n        break;\n      case \"lead_interested\":\n        await notifySalesTeam(data);\n        break;\n      case \"lead_unsubscribed\":\n        await addToBlockList(data);\n        break;\n    }\n  } catch (err) {\n    console.error(`Webhook processing error: ${event_type}`, err);\n  }\n}\n\nasync function addToBlockList(data: { lead_email: string }) {\n  await fetch(\"https://api.instantly.ai/api/v2/block-lists-entries\", {\n    method: \"POST\",\n    headers: {\n      Authorization: `Bearer ${process.env.INSTANTLY_API_KEY}`,\n      \"Content-Type\": \"application/json\",\n    },\n    body: JSON.stringify({ bl_value: data.lead_email }),\n  });\n}\n```\n\n```bash\n# Deploy to Vercel\nvercel env add INSTANTLY_API_KEY\nvercel env add INSTANTLY_WEBHOOK_SECRET\nvercel deploy --prod\n```\n\n### Option B: Google Cloud Run\n\n```dockerfile\n# Dockerfile\nFROM node:20-alpine AS builder\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci --production=false\nCOPY . .\nRUN npm run build\n\nFROM node:20-alpine\nWORKDIR /app\nCOPY --from=builder /app/dist ./dist\nCOPY --from=builder /app/node_modules ./node_modules\nCOPY package*.json ./\nEXPOSE 8080\nENV PORT=8080\nCMD [\"node\", \"dist/server.js\"]\n```\n\n```typescript\n// src/server.ts \u2014 Express server for Cloud Run\nimport express from \"express\";\nimport { instantly } from \"./instantly\";\n\nconst app = express();\napp.use(express.json());\n\napp.get(\"/health\", (_, res) => res.json({ status: \"ok\" }));\n\napp.post(\"/webhooks/instantly\", async (req, res) => {\n  const secret = req.headers[\"x-webhook-secret\"];\n  if (secret !== process.env.INSTANTLY_WEBHOOK_SECRET) {\n    return res.status(401).json({ error: \"Unauthorized\" });\n  }\n\n  res.status(200).json({ received: true });\n\n  const { event_type, data } = req.body;\n  console.log(`Webhook: ${event_type}`, JSON.stringify(data).slice(0, 200));\n\n  // Process based on event type\n  if (event_type === \"reply_received\") {\n    // Update lead interest status\n    await instantly(\"/leads/update-interest-status\", {\n      method: \"POST\",\n      body: JSON.stringify({\n        lead_email: data.lead_email,\n        campaign_id: data.campaign_id,\n        interest_value: 1, // Interested\n      }),\n    });\n  }\n});\n\nconst PORT = process.env.PORT || 8080;\napp.listen(PORT, () => console.log(`Listening on port ${PORT}`));\n```\n\n```bash\nset -euo pipefail\n# Deploy to Cloud Run\ngcloud run deploy instantly-webhooks \\\n  --source . \\\n  --region us-central1 \\\n  --allow-unauthenticated \\\n  --set-env-vars \"INSTANTLY_API_KEY=${INSTANTLY_API_KEY},INSTANTLY_WEBHOOK_SECRET=${INSTANTLY_WEBHOOK_SECRET}\" \\\n  --min-instances 1 \\\n  --max-instances 10 \\\n  --memory 256Mi \\\n  --cpu 1\n```\n\n### Option C: Fly.io\n\n```toml\n# fly.toml\napp = \"instantly-webhooks\"\nprimary_region = \"iad\"\n\n[build]\n  dockerfile = \"Dockerfile\"\n\n[http_service]\n  internal_port = 8080\n  force_https = true\n  auto_stop_machines = true\n  auto_start_machines = true\n  min_machines_running = 1\n\n[env]\n  NODE_ENV = \"production\"\n```\n\n```bash\nset -euo pipefail\nfly launch --name instantly-webhooks\nfly secrets set INSTANTLY_API_KEY=\"your-key\" INSTANTLY_WEBHOOK_SECRET=\"your-secret\"\nfly deploy\n```\n\n### Step 2: Register Webhook After Deployment\n\n```typescript\nasync function registerProductionWebhook(deployedUrl: string) {\n  const webhook = await instantly<{ id: string; name: string }>(\"/webhooks\", {\n    method: \"POST\",\n    body: JSON.stringify({\n      name: \"Production CRM Sync\",\n      target_hook_url: `${deployedUrl}/webhooks/instantly`,\n      event_type: \"all_events\",\n      headers: {\n        \"X-Webhook-Secret\": process.env.INSTANTLY_WEBHOOK_SECRET,\n      },\n    }),\n  });\n\n  console.log(`Webhook registered: ${webhook.id}`);\n\n  // Test the webhook\n  await instantly(`/webhooks/${webhook.id}/test`, { method: \"POST\" });\n  console.log(\"Test webhook sent \u2014 check your endpoint logs\");\n}\n```\n\n### Step 3: Post-Deploy Verification\n\n```bash\nset -euo pipefail\nDEPLOY_URL=\"https://instantly-webhooks-abc123.run.app\"\n\n# Health check\ncurl -s ${DEPLOY_URL}/health | jq .\n\n# Test webhook endpoint\ncurl -X POST ${DEPLOY_URL}/webhooks/instantly \\\n  -H \"Content-Type: application/json\" \\\n  -H \"X-Webhook-Secret: ${INSTANTLY_WEBHOOK_SECRET}\" \\\n  -d '{\"event_type\":\"reply_received\",\"data\":{\"lead_email\":\"test@example.com\"}}'\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Webhook delivery fails | Endpoint returns non-2xx | Ensure 200 response before async processing |\n| Cold start timeout | Serverless function too slow | Set `min-instances=1` or use always-on |\n| Secret not available | Env var not set | Verify with `fly secrets list` or cloud console |\n| Webhook retries flooding | Processing takes >30s | Return 200 immediately, process async |\n\n## Resources\n\n- [Instantly Webhooks API](https://developer.instantly.ai/api/v2/webhook)\n- [Cloud Run Docs](https://cloud.google.com/run/docs)\n- [Vercel Serverless Functions](https://vercel.com/docs/functions)\n\n## Next Steps\n\nFor webhook event handling patterns, see `instantly-webhooks-events`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "instantly-deploy-integration",
-    "description": "Deploy Instantly.ai webhook receivers and API integrations to cloud",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

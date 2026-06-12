@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032671",
   "name": "navan-core-workflow-a",
   "slug": "navan-core-workflow-a",
   "description": "Manage the complete Navan travel booking lifecycle via REST API.",
   "content": "# Navan \u2014 Travel Booking & Management\n\n## Overview\n\nThis skill provides the complete travel booking workflow through the Navan REST API. Navan has no public SDK \u2014 all access is via raw HTTP calls using OAuth 2.0 bearer tokens. This skill covers trip retrieval for both user and admin scopes, itinerary PDF downloads, invoice access, and trip filtering by date range and status. Every booking is keyed by a UUID primary key that must be tracked for deduplication and updates.\n\n## Prerequisites\n\n- Navan account with API credentials (client_id + client_secret)\n- Credentials created in Admin > Travel admin > Settings > Integrations > Navan API Credentials\n- OAuth 2.0 token obtained via POST `/ta-auth/oauth/token` (see `navan-install-auth`)\n- Node.js 18+ with `node-fetch` or Python 3.8+ with `requests`\n- Environment variables: `NAVAN_CLIENT_ID`, `NAVAN_CLIENT_SECRET`, `NAVAN_BASE_URL`\n- `NAVAN_BASE_URL` should be set to `https://api.navan.com`\n\n## Instructions\n\n### Step 1: Authenticate and Obtain Bearer Token\n\n```typescript\nconst tokenRes = await fetch(`${process.env.NAVAN_BASE_URL}/ta-auth/oauth/token`, {\n  method: 'POST',\n  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },\n  body: new URLSearchParams({\n    grant_type: 'client_credentials',\n    client_id: process.env.NAVAN_CLIENT_ID!,\n    client_secret: process.env.NAVAN_CLIENT_SECRET!,\n  }),\n});\nconst { access_token } = await tokenRes.json();\nconst headers = { Authorization: `Bearer ${access_token}` };\n```\n\n### Step 2: Retrieve Bookings\n\n```typescript\n// GET /v1/bookings \u2014 returns booking records (paginated via page + size)\n// Response: records in .data array, primary key uuid\nconst bookingsRes = await fetch(\n  `${process.env.NAVAN_BASE_URL}/v1/bookings?page=0&size=50`,\n  { headers }\n);\nconst { data: bookings } = await bookingsRes.json();\n\nbookings.forEach((booking: any) => {\n  console.log(`UUID: ${booking.uuid}`);\n  console.log(`  Route: ${booking.origin} -> ${booking.destination}`);\n  console.log(`  Status: ${booking.status}`);\n  console.log(`  Dates: ${booking.start_date} to ${booking.end_date}`);\n});\n```\n\n### Step 3: Retrieve Bookings with Date Filtering\n\n```typescript\n// GET /v1/bookings with createdFrom/createdTo for incremental pulls\nconst filteredRes = await fetch(\n  `${process.env.NAVAN_BASE_URL}/v1/bookings?createdFrom=2026-01-01&createdTo=2026-03-31&page=0&size=50`,\n  { headers }\n);\nconst { data: filteredBookings } = await filteredRes.json();\nconsole.log(`Total bookings in range: ${filteredBookings.length}`);\n```\n\n### Step 4: Paginate Through All Bookings\n\n```typescript\n// Paginate using page + size query params (start from page 0, page_size 50)\nasync function getAllBookings(): Promise<any[]> {\n  const allBookings: any[] = [];\n  let page = 0;\n  const size = 50;\n\n  while (true) {\n    const res = await fetch(\n      `${process.env.NAVAN_BASE_URL}/v1/bookings?page=${page}&size=${size}`,\n      { headers }\n    );\n    const { data } = await res.json();\n    if (!data || data.length === 0) break;\n    allBookings.push(...data);\n    if (data.length < size) break; // last page\n    page++;\n  }\n  return allBookings;\n}\n\nconst allBookings = await getAllBookings();\nconsole.log(`Total bookings: ${allBookings.length}`);\n```\n\n### Step 5: Token Refresh\n\n```typescript\n// Re-authenticate by requesting a new token (same client_credentials flow)\nconst refreshRes = await fetch(`${process.env.NAVAN_BASE_URL}/ta-auth/oauth/token`, {\n  method: 'POST',\n  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },\n  body: new URLSearchParams({\n    grant_type: 'client_credentials',\n    client_id: process.env.NAVAN_CLIENT_ID!,\n    client_secret: process.env.NAVAN_CLIENT_SECRET!,\n  }),\n});\nconst refreshed = await refreshRes.json();\nconsole.log('Token refreshed successfully');\n```\n\n## Output\n\nSuccessful execution returns:\n\n- Booking objects in `.data` array with UUID primary keys, origin/destination, dates, and status\n- Paginated results using `page` + `size` query params\n- Incremental filtering via `createdFrom` / `createdTo` params\n\n## Error Handling\n\n| Error | HTTP Code | Cause | Solution |\n|-------|-----------|-------|----------|\n| Unauthorized | 401 | Expired or invalid bearer token | Re-authenticate via POST /ta-auth/oauth/token |\n| Forbidden | 403 | Insufficient API scope | Verify credentials have correct permissions |\n| Not Found | 404 | Invalid endpoint or UUID | Confirm endpoint path starts with /v1/ |\n| Rate Limited | 429 | Too many requests | Implement exponential backoff (start at 1s) |\n| Server Error | 500 | Navan platform issue | Retry with backoff; check Navan status page |\n\n## Examples\n\n**Python \u2014 Retrieve trips with date filtering:**\n\n```python\nimport requests\nimport os\n\nbase_url = os.environ.get('NAVAN_BASE_URL', 'https://api.navan.com')\n\n# Authenticate (form-encoded, not JSON)\nauth = requests.post(f'{base_url}/ta-auth/oauth/token', data={\n    'grant_type': 'client_credentials',\n    'client_id': os.environ['NAVAN_CLIENT_ID'],\n    'client_secret': os.environ['NAVAN_CLIENT_SECRET'],\n})\ntoken = auth.json()['access_token']\nheaders = {'Authorization': f'Bearer {token}'}\n\n# Get bookings for Q1 (records in .data array)\nresp = requests.get(\n    f'{base_url}/v1/bookings',\n    params={'createdFrom': '2026-01-01', 'createdTo': '2026-03-31', 'page': 0, 'size': 50},\n    headers=headers,\n).json()\n\nfor booking in resp['data']:\n    print(f\"{booking['uuid']}: {booking.get('origin')} -> {booking.get('destination')}\")\n```\n\n## Resources\n\n- [Navan Help Center](https://app.navan.com/app/helpcenter) \u2014 Official documentation and support articles\n- [Booking Data Integration](https://app.navan.com/app/helpcenter/articles/travel/admin/other-integrations/booking-data-integration) \u2014 Booking data export configuration\n- [Navan Integrations](https://navan.com/integrations) \u2014 Available third-party integrations\n\n## Next Steps\n\nAfter retrieving trip data, proceed to `navan-core-workflow-b` for expense management or `navan-data-handling` for bulk data extraction patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "navan-core-workflow-a",
-    "description": "Manage the complete Navan travel booking lifecycle via REST API.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

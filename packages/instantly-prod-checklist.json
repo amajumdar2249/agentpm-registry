@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032305",
   "name": "instantly-prod-checklist",
   "slug": "instantly-prod-checklist",
   "description": "Execute Instantly.ai production launch checklist and pre-flight validation.",
   "content": "# Instantly Production Checklist\n\n## Overview\n\nPre-flight checklist for launching Instantly cold email campaigns in production. Covers account warmup verification, deliverability testing, lead list hygiene, campaign configuration, webhook setup, and monitoring. Skip any step that doesn't apply to your use case.\n\n## Prerequisites\n\n- Completed `instantly-install-auth` setup\n- Email accounts connected and warmed up (minimum 14 days recommended)\n- Lead list prepared with verified emails\n\n## Production Launch Checklist\n\n### Phase 1: Account Health (2-4 weeks before launch)\n\n```typescript\nimport { instantly } from \"./src/instantly\";\n\nasync function phase1AccountHealth() {\n  console.log(\"=== Phase 1: Account Health ===\\n\");\n\n  // 1. Verify all accounts have healthy SMTP/IMAP\n  const accounts = await instantly<Array<{ email: string }>>(\n    \"/accounts?limit=100\"\n  );\n  const vitals = await instantly(\"/accounts/test/vitals\", {\n    method: \"POST\",\n    body: JSON.stringify({ accounts: accounts.map((a) => a.email) }),\n  }) as Array<{ email: string; smtp_status: string; imap_status: string }>;\n\n  const broken = vitals.filter((v) => v.smtp_status !== \"ok\" || v.imap_status !== \"ok\");\n  console.log(`Accounts: ${accounts.length} total, ${broken.length} broken`);\n  if (broken.length > 0) {\n    console.log(\"FIX THESE FIRST:\");\n    broken.forEach((v) => console.log(`  ${v.email}: SMTP=${v.smtp_status} IMAP=${v.imap_status}`));\n    return false;\n  }\n\n  // 2. Verify warmup is active and healthy\n  const warmup = await instantly(\"/accounts/warmup-analytics\", {\n    method: \"POST\",\n    body: JSON.stringify({ emails: accounts.map((a) => a.email) }),\n  }) as Array<{ email: string; warmup_emails_landed_inbox: number; warmup_emails_sent: number }>;\n\n  for (const w of warmup) {\n    const inboxRate = (w.warmup_emails_landed_inbox / (w.warmup_emails_sent || 1)) * 100;\n    const healthy = inboxRate >= 80;\n    console.log(`  ${w.email}: inbox rate ${inboxRate.toFixed(1)}% ${healthy ? \"OK\" : \"LOW \u2014 extend warmup\"}`);\n  }\n\n  // 3. Check daily limits are set\n  const acctDetails = await instantly<Array<{ email: string; daily_limit: number | null }>>(\n    \"/accounts?limit=100\"\n  );\n  const noLimit = acctDetails.filter((a) => !a.daily_limit);\n  if (noLimit.length > 0) {\n    console.log(`\\nWARNING: ${noLimit.length} accounts have no daily limit set`);\n  }\n\n  return broken.length === 0;\n}\n```\n\n### Phase 2: Campaign Configuration (1 week before)\n\n```typescript\nasync function phase2CampaignConfig(campaignId: string) {\n  console.log(\"\\n=== Phase 2: Campaign Configuration ===\\n\");\n  const campaign = await instantly<{\n    name: string;\n    sequences: Array<{ steps: Array<{ variants: Array<{ subject: string; body: string }> }> }>;\n    campaign_schedule: { schedules: any[] };\n    daily_limit: number | null;\n    stop_on_reply: boolean;\n    link_tracking: boolean;\n    open_tracking: boolean;\n    stop_on_auto_reply: boolean;\n    email_gap: number;\n  }>(`/campaigns/${campaignId}`);\n\n  const checks = [\n    { label: \"Has sequences\", pass: campaign.sequences?.length > 0 },\n    { label: \"Has email steps\", pass: campaign.sequences?.[0]?.steps?.length > 0 },\n    { label: \"Has schedule\", pass: campaign.campaign_schedule?.schedules?.length > 0 },\n    { label: \"Stop on reply enabled\", pass: campaign.stop_on_reply === true },\n    { label: \"Link tracking disabled\", pass: campaign.link_tracking === false },\n    { label: \"Open tracking enabled\", pass: campaign.open_tracking === true },\n    { label: \"Daily limit set\", pass: (campaign.daily_limit ?? 0) > 0 },\n    { label: \"Email gap >= 60s\", pass: (campaign.email_gap ?? 0) >= 60 },\n  ];\n\n  let allPass = true;\n  for (const check of checks) {\n    console.log(`  ${check.pass ? \"PASS\" : \"FAIL\"}: ${check.label}`);\n    if (!check.pass) allPass = false;\n  }\n\n  // Check A/B variants\n  const step1 = campaign.sequences?.[0]?.steps?.[0];\n  if (step1) {\n    console.log(`  INFO: Step 1 has ${step1.variants.length} variant(s)`);\n  }\n\n  return allPass;\n}\n```\n\n### Phase 3: Lead List Hygiene\n\n```typescript\nasync function phase3LeadHygiene(campaignId: string) {\n  console.log(\"\\n=== Phase 3: Lead List Hygiene ===\\n\");\n\n  // Check lead count\n  const analytics = await instantly<{ total_leads: number }>(\n    `/campaigns/analytics?id=${campaignId}`\n  );\n  console.log(`Total leads: ${analytics.total_leads}`);\n\n  // Check block list\n  const blocklist = await instantly<Array<{ bl_value: string }>>(\n    \"/block-lists-entries?limit=10\"\n  );\n  console.log(`Block list entries: ${blocklist.length}+`);\n\n  // Verify no internal domains are in lead list\n  console.log(\"\\nChecklist:\");\n  console.log(\"  [ ] Leads verified with email verification service\");\n  console.log(\"  [ ] Company domains in block list (your own + competitors)\");\n  console.log(\"  [ ] No role-based emails (info@, admin@, support@)\");\n  console.log(\"  [ ] Personalization variables populated (firstName, companyName)\");\n  console.log(\"  [ ] Test lead (your own email) included for QA\");\n}\n```\n\n### Phase 4: Test Email & Webhook Verification\n\n```typescript\nasync function phase4TestAndWebhooks(campaignId: string) {\n  console.log(\"\\n=== Phase 4: Test & Webhooks ===\\n\");\n\n  // Send test email\n  const accounts = await instantly<Array<{ email: string }>>(\n    \"/accounts?limit=1\"\n  );\n  if (accounts.length > 0) {\n    await instantly(\"/emails/test\", {\n      method: \"POST\",\n      body: JSON.stringify({\n        eaccount: accounts[0].email,\n        to_address_email_list: [process.env.TEST_EMAIL || \"test@yourdomain.com\"],\n        subject: \"Production Test \u2014 Instantly Integration\",\n        body: \"This is a test email from the Instantly integration. If you received this, the setup is working correctly.\",\n      }),\n    });\n    console.log(\"Test email sent from:\", accounts[0].email);\n  }\n\n  // Verify webhooks are registered\n  const webhooks = await instantly<Array<{\n    name: string; event_type: string; target_hook_url: string;\n  }>>(\"/webhooks?limit=50\");\n  console.log(`\\nWebhooks registered: ${webhooks.length}`);\n  for (const w of webhooks) {\n    console.log(`  ${w.name}: ${w.event_type} -> ${w.target_hook_url}`);\n  }\n\n  // Test webhook delivery\n  if (webhooks.length > 0) {\n    for (const w of webhooks.slice(0, 2) as Array<{ id: string; name: string }>) {\n      try {\n        await instantly(`/webhooks/${w.id}/test`, { method: \"POST\" });\n        console.log(`  Tested: ${w.name} \u2014 check your endpoint`);\n      } catch (e: any) {\n        console.log(`  FAILED: ${w.name} \u2014 ${e.message}`);\n      }\n    }\n  }\n}\n```\n\n### Phase 5: Launch & Monitor\n\n```typescript\nasync function phase5Launch(campaignId: string) {\n  console.log(\"\\n=== Phase 5: Launch ===\\n\");\n\n  // Final confirmation\n  const campaign = await instantly<{ name: string; status: number }>(\n    `/campaigns/${campaignId}`\n  );\n  console.log(`Campaign: ${campaign.name} (status: ${campaign.status})`);\n\n  // Activate\n  await instantly(`/campaigns/${campaignId}/activate`, { method: \"POST\" });\n  console.log(\"Campaign ACTIVATED\");\n\n  // Verify sending status\n  const status = await instantly(`/campaigns/${campaignId}/sending-status`);\n  console.log(\"Sending status:\", JSON.stringify(status));\n\n  // Monitor for first hour\n  console.log(\"\\nPost-launch monitoring:\");\n  console.log(\"  [ ] Check analytics after 1 hour for send activity\");\n  console.log(\"  [ ] Monitor bounce rate (should be <3%)\");\n  console.log(\"  [ ] Verify webhook events are arriving\");\n  console.log(\"  [ ] Check Unibox for replies\");\n}\n\n// Run full checklist\nasync function main() {\n  const campaignId = process.env.CAMPAIGN_ID!;\n  const accountsOk = await phase1AccountHealth();\n  if (!accountsOk) { console.log(\"\\nFix account issues before proceeding.\"); return; }\n  const configOk = await phase2CampaignConfig(campaignId);\n  await phase3LeadHygiene(campaignId);\n  await phase4TestAndWebhooks(campaignId);\n  if (configOk) await phase5Launch(campaignId);\n}\n\nmain().catch(console.error);\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Campaign won't activate | Missing sequences/accounts/leads | Run Phase 2 checks |\n| Test email not received | Account SMTP broken | Run vitals test |\n| Webhook test fails | Target URL unreachable | Verify endpoint is public HTTPS |\n| High bounce rate post-launch | Unverified leads | Pause campaign, clean list |\n\n## Resources\n\n- [Instantly Campaign Options](https://help.instantly.ai/en/articles/6222396-campaign-options)\n- [Instantly Quick Start](https://help.instantly.ai/en/articles/6451970-quick-start-guide-all-in-one)\n- [Instantly API v2 Docs](https://developer.instantly.ai/)\n\n## Next Steps\n\nFor version migration, see `instantly-upgrade-migration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "instantly-prod-checklist",
-    "description": "Execute Instantly.ai production launch checklist and pre-flight validation.",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

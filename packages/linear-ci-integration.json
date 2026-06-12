@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032495",
   "name": "linear-ci-integration",
   "slug": "linear-ci-integration",
   "description": "Integrate Linear with GitHub Actions CI/CD pipelines.",
   "content": "# Linear CI Integration\n\n## Overview\n\nIntegrate Linear into GitHub Actions CI/CD pipelines: run integration tests against the Linear API, automatically link PRs to issues, transition issue states on PR events, and create Linear issues from build failures.\n\n## Prerequisites\n\n- GitHub repository with Actions enabled\n- Linear API key stored as GitHub secret\n- npm/pnpm project with `@linear/sdk` configured\n\n## Instructions\n\n### Step 1: Store Secrets in GitHub\n\n```bash\n# Using GitHub CLI\ngh secret set LINEAR_API_KEY --body \"lin_api_xxxxxxxxxxxx\"\ngh secret set LINEAR_WEBHOOK_SECRET --body \"whsec_xxxxxxxxxxxx\"\n\n# Store team ID for CI-created issues\ngh variable set LINEAR_TEAM_ID --body \"team-uuid-here\"\n```\n\n### Step 2: Integration Test Workflow\n\n```yaml\n# .github/workflows/linear-tests.yml\nname: Linear Integration Tests\n\non:\n  push:\n    branches: [main]\n  pull_request:\n\nenv:\n  LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n\n      - run: npm ci\n      - run: npm run test:linear\n        env:\n          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}\n\n      - uses: actions/upload-artifact@v4\n        if: always()\n        with:\n          name: test-results\n          path: test-results/\n```\n\n### Step 3: Integration Test Suite\n\n```typescript\n// tests/linear.integration.test.ts\nimport { describe, it, expect, beforeAll, afterAll } from \"vitest\";\nimport { LinearClient } from \"@linear/sdk\";\n\ndescribe(\"Linear Integration\", () => {\n  let client: LinearClient;\n  let teamId: string;\n  const cleanup: string[] = [];\n\n  beforeAll(async () => {\n    const apiKey = process.env.LINEAR_API_KEY;\n    if (!apiKey) throw new Error(\"LINEAR_API_KEY required for integration tests\");\n    client = new LinearClient({ apiKey });\n\n    const teams = await client.teams();\n    teamId = teams.nodes[0].id;\n  });\n\n  afterAll(async () => {\n    for (const id of cleanup) {\n      try { await client.deleteIssue(id); } catch {}\n    }\n  });\n\n  it(\"authenticates successfully\", async () => {\n    const viewer = await client.viewer;\n    expect(viewer.name).toBeDefined();\n    expect(viewer.email).toBeDefined();\n  });\n\n  it(\"creates an issue\", async () => {\n    const result = await client.createIssue({\n      teamId,\n      title: `[CI] ${new Date().toISOString()}`,\n      description: \"Created by CI pipeline\",\n    });\n    expect(result.success).toBe(true);\n    const issue = await result.issue;\n    expect(issue?.identifier).toBeDefined();\n    if (issue) cleanup.push(issue.id);\n  });\n\n  it(\"queries issues with filtering\", async () => {\n    const issues = await client.issues({\n      first: 10,\n      filter: { team: { id: { eq: teamId } } },\n    });\n    expect(issues.nodes.length).toBeGreaterThan(0);\n  });\n\n  it(\"lists workflow states\", async () => {\n    const teams = await client.teams();\n    const states = await teams.nodes[0].states();\n    expect(states.nodes.length).toBeGreaterThan(0);\n    expect(states.nodes.some(s => s.type === \"completed\")).toBe(true);\n  });\n});\n```\n\n### Step 4: PR-to-Issue Linking Workflow\n\nAutomatically update Linear issues when PRs are opened, merged, or closed. Extracts issue identifiers from branch names (e.g., `feature/ENG-123-description`).\n\n```yaml\n# .github/workflows/linear-pr-sync.yml\nname: Sync PR to Linear\n\non:\n  pull_request:\n    types: [opened, closed]\n\njobs:\n  sync:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n\n      - name: Extract Linear issue ID from branch\n        id: extract\n        run: |\n          BRANCH=\"${{ github.head_ref }}\"\n          ISSUE_ID=$(echo \"$BRANCH\" | grep -oE '[A-Z]+-[0-9]+' | head -1 || true)\n          echo \"issue_id=$ISSUE_ID\" >> $GITHUB_OUTPUT\n\n      - name: Update Linear issue\n        if: steps.extract.outputs.issue_id\n        env:\n          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}\n        run: |\n          npx tsx scripts/sync-pr-to-linear.ts \\\n            --issue \"${{ steps.extract.outputs.issue_id }}\" \\\n            --pr \"${{ github.event.pull_request.number }}\" \\\n            --action \"${{ github.event.action }}\" \\\n            --merged \"${{ github.event.pull_request.merged }}\"\n```\n\n### Step 5: PR Sync Script\n\n```typescript\n// scripts/sync-pr-to-linear.ts\nimport { LinearClient } from \"@linear/sdk\";\nimport { parseArgs } from \"util\";\n\nconst { values } = parseArgs({\n  options: {\n    issue: { type: \"string\" },\n    pr: { type: \"string\" },\n    action: { type: \"string\" },\n    merged: { type: \"string\" },\n  },\n});\n\nasync function main() {\n  const client = new LinearClient({ apiKey: process.env.LINEAR_API_KEY! });\n\n  // Find issue by identifier search\n  const results = await client.issueSearch(values.issue!);\n  const issue = results.nodes[0];\n  if (!issue) {\n    console.log(`Issue ${values.issue} not found \u2014 skipping`);\n    return;\n  }\n\n  const prUrl = `https://github.com/${process.env.GITHUB_REPOSITORY}/pull/${values.pr}`;\n\n  // Add comment linking to PR\n  await client.createComment({\n    issueId: issue.id,\n    body: `PR #${values.pr} ${values.action}: [View PR](${prUrl})`,\n  });\n\n  // Transition state based on PR action\n  const team = await issue.team;\n  const states = await team!.states();\n\n  if (values.action === \"opened\") {\n    const reviewState = states.nodes.find(s =>\n      s.name.toLowerCase().includes(\"review\") || s.name.toLowerCase().includes(\"in progress\")\n    );\n    if (reviewState) await client.updateIssue(issue.id, { stateId: reviewState.id });\n  } else if (values.action === \"closed\" && values.merged === \"true\") {\n    const doneState = states.nodes.find(s => s.type === \"completed\");\n    if (doneState) await client.updateIssue(issue.id, { stateId: doneState.id });\n  }\n\n  console.log(`Updated ${values.issue} for PR #${values.pr} (${values.action})`);\n}\n\nmain().catch(console.error);\n```\n\n### Step 6: Create Issue on CI Failure\n\n```yaml\n# .github/workflows/issue-on-failure.yml\nname: Create Linear Issue on Failure\n\non:\n  workflow_run:\n    workflows: [\"CI\"]\n    types: [completed]\n\njobs:\n  create-issue:\n    if: ${{ github.event.workflow_run.conclusion == 'failure' }}\n    runs-on: ubuntu-latest\n    steps:\n      - name: Create Linear issue for build failure\n        env:\n          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}\n        run: |\n          curl -s -X POST https://api.linear.app/graphql \\\n            -H \"Authorization: $LINEAR_API_KEY\" \\\n            -H \"Content-Type: application/json\" \\\n            -d '{\n              \"query\": \"mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { identifier url } } }\",\n              \"variables\": {\n                \"input\": {\n                  \"teamId\": \"${{ vars.LINEAR_TEAM_ID }}\",\n                  \"title\": \"[CI] Build failure: ${{ github.event.workflow_run.head_branch }}\",\n                  \"description\": \"Build failed on branch `${{ github.event.workflow_run.head_branch }}`.\\n\\n[View run](${{ github.event.workflow_run.html_url }})\",\n                  \"priority\": 1\n                }\n              }\n            }'\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `Secret not found` | Missing GitHub secret | Add `LINEAR_API_KEY` to repo Settings > Secrets > Actions |\n| Issue not found | Wrong identifier or workspace | Verify branch naming convention matches team key |\n| `Permission denied` | API key lacks write scope | Regenerate key with write access |\n| Duplicate CI issues | Failure workflow runs repeatedly | Add deduplication check before creating |\n\n## Examples\n\n### PR Template for Linear Integration\n\n```markdown\n<!-- .github/PULL_REQUEST_TEMPLATE.md -->\n## Linear Issue\n<!-- Use magic words: Fixes, Closes, Resolves -->\nFixes ENG-XXX\n\n## Changes\n-\n\n## Testing\n- [ ] Unit tests pass\n- [ ] Integration tests pass\n```\n\n## Resources\n\n- [GitHub Actions Documentation](https://docs.github.com/en/actions)\n- [Linear GitHub Integration](https://linear.app/docs/github)\n- [Linear API Authentication](https://linear.app/developers/graphql)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "linear-ci-integration",
-    "description": "Integrate Linear with GitHub Actions CI/CD pipelines.",
-    "Trigger": "linear CI\", \"linear GitHub Actions\", \"linear CI/CD\",",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

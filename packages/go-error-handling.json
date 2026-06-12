@@ -1,16 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000006764",
   "name": "go-error-handling",
   "slug": "go-error-handling",
   "description": "Use when writing Go code that returns, wraps, or handles errors \u2014 choosing between sentinel errors, custom types, and fmt.Errorf (%w vs %v), structuring error flow, or deciding whether to log or return. Also use when propagating errors across package boundaries or using errors.Is/As, even if the user doesn't ask about error strategy. Does not cover panic/recover patterns (see go-defensive).",
   "content": "\n# Go Error Handling\n\n## Available Scripts\n\n- **`scripts/check-errors.sh`** \u2014 Detects error handling anti-patterns: string comparison on `err.Error()`, bare `return err` without context, and log-and-return violations. Run `bash scripts/check-errors.sh --help` for options.\n\nIn Go, [errors are values](https://go.dev/blog/errors-are-values) \u2014 they are\ncreated by code and consumed by code.\n\n## Choosing an Error Strategy\n\n1. System boundary (RPC, IPC, storage)? \u2192 Wrap with `%v` to avoid leaking internals\n2. Caller needs to match specific conditions? \u2192 Sentinel or typed error, wrap with `%w`\n3. Caller just needs debugging context? \u2192 `fmt.Errorf(\"...: %w\", err)`\n4. Leaf function, no wrapping needed? \u2192 Return the error directly\n\n**Default**: wrap with `%w` and place it at the end of the format string.\n\n---\n\n## Core Rules\n\n### Never Return Concrete Error Types\n\n**Never return concrete error types from exported functions** \u2014 a concrete `nil`\npointer can become a non-nil interface:\n\n```go\n// Bad: Concrete type can cause subtle bugs\nfunc Bad() *os.PathError { /*...*/ }\n\n// Good: Always return the error interface\nfunc Good() error { /*...*/ }\n```\n\n### Error Strings\n\nError strings should **not** be capitalized and should **not** end with\npunctuation. Exception: exported names, proper nouns, or acronyms.\n\n```go\n// Bad\nerr := fmt.Errorf(\"Something bad happened.\")\n\n// Good\nerr := fmt.Errorf(\"something bad happened\")\n```\n\nFor displayed messages (logs, test failures, API responses), capitalization is\nappropriate.\n\n### Return Values on Error\n\nWhen a function returns an error, callers must treat all non-error return values\nas unspecified unless explicitly documented.\n\n**Tip**: Functions taking a `context.Context` should usually return an `error`\nso callers can determine if the context was cancelled.\n\n---\n\n## Handling Errors\n\nWhen encountering an error, make a **deliberate choice** \u2014 do not discard\nwith `_`:\n\n1. **Handle immediately** \u2014 address the error and continue\n2. **Return to caller** \u2014 optionally wrapped with context\n3. **In exceptional cases** \u2014 `log.Fatal` or `panic`\n\nTo intentionally ignore: add a comment explaining why.\n\n```go\nn, _ := b.Write(p) // never returns a non-nil error\n```\n\nFor related concurrent operations, use\n[`errgroup`](https://pkg.go.dev/golang.org/x/sync/errgroup):\n\n```go\ng, ctx := errgroup.WithContext(ctx)\ng.Go(func() error { return task1(ctx) })\ng.Go(func() error { return task2(ctx) })\nif err := g.Wait(); err != nil { return err }\n```\n\n### Avoid In-Band Errors\n\nDon't return `-1`, `nil`, or empty string to signal errors. Use multiple\nreturns:\n\n```go\n// Bad: In-band error value\nfunc Lookup(key string) int  // returns -1 for missing\n\n// Good: Explicit error or ok value\nfunc Lookup(key string) (string, bool)\n```\n\nThis prevents callers from writing `Parse(Lookup(key))` \u2014 it causes a\ncompile-time error since `Lookup(key)` has 2 outputs.\n\n---\n\n## Error Flow\n\nHandle errors before normal code. Early returns keep the happy path unindented:\n\n```go\n// Good: Error first, normal code unindented\nif err != nil {\n    return err\n}\n// normal code\n```\n\n**Handle errors once** \u2014 either log or return, never both:\n\n```\nError encountered?\n\u251c\u2500 Caller can act on it? \u2192 Return (with context via %w)\n\u251c\u2500 Top of call chain? \u2192 Log and handle\n\u2514\u2500 Neither? \u2192 Log at appropriate level, continue\n```\n\n> Read [references/ERROR-FLOW.md](references/ERROR-FLOW.md) when structuring complex error flows, deciding between logging vs returning, implementing the handle-once pattern, or choosing structured logging levels.\n\n---\n\n## Error Types\n\n> **Advisory**: Recommended best practice.\n\n| Caller needs to match? | Message type | Use |\n|------------------------|--------------|-----|\n| No | static | `errors.New(\"message\")` |\n| No | dynamic | `fmt.Errorf(\"msg: %v\", val)` |\n| Yes | static | `var ErrFoo = errors.New(\"...\")` |\n| Yes | dynamic | custom `error` type |\n\n**Default**: Wrap with `fmt.Errorf(\"...: %w\", err)`. Escalate to sentinels for\n`errors.Is()`, to custom types for `errors.As()`.\n\n> Read [references/ERROR-TYPES.md](references/ERROR-TYPES.md) when defining sentinel errors, creating custom error types, or choosing error strategies for a package API.\n\n---\n\n## Error Wrapping\n\n> **Advisory**: Recommended best practice.\n\n- **Use `%v`**: At system boundaries, for logging, to hide internal details\n- **Use `%w`**: To preserve error chain for `errors.Is`/`errors.As`\n\n**Key rules**: Place `%w` at the end. Add context callers don't have. If\nannotation adds nothing, return `err` directly.\n\n> Read [references/WRAPPING.md](references/WRAPPING.md) when deciding between %v and %w, wrapping errors across package boundaries, or adding contextual information.\n\n> **Validation**: After implementing error handling, run `bash scripts/check-errors.sh` to detect common anti-patterns. Then run `go vet ./...` to catch additional issues.\n\n---\n\n## Related Skills\n\n- **Error naming**: See [go-naming](../go-naming/SKILL.md) when naming sentinel errors (`ErrFoo`) or custom error types\n- **Testing errors**: See [go-testing](../go-testing/SKILL.md) when testing error semantics with `errors.Is`/`errors.As` or writing error-checking helpers\n- **Panic handling**: See [go-defensive](../go-defensive/SKILL.md) when deciding between panic and error returns, or writing recover guards\n- **Guard clauses**: See [go-control-flow](../go-control-flow/SKILL.md) when structuring early-return error flow or reducing nesting\n- **Logging decisions**: See [go-logging](../go-logging/SKILL.md) when choosing log levels, configuring structured logging, or deciding what context to include in log messages\n\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "go-error-handling",
-    "description": "Use when writing Go code that returns, wraps, or handles errors \u2014 choosing between sentinel errors, custom types, and fmt.Errorf (%w vs %v), structuring error flow, or deciding whether to log or return. Also use when propagating errors across package boundaries or using errors.Is/As, even if the user doesn't ask about error strategy. Does not cover panic/recover patterns (see go-defensive).",
-    "license": "Apache-2.0",
-    "compatibility": "Requires Go 1.13+ for errors.Is/errors.As and fmt.Errorf %w wrapping. Structured logging examples use slog (Go 1.21+).",
-    "metadata": "",
-    "sources": "Google Style Guide, Uber Style Guide",
-    "allowed-tools": "Bash(bash:*)"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "Apache-2.0",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

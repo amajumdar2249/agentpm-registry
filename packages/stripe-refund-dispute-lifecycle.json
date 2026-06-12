@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000011144",
   "name": "stripe-refund-dispute-lifecycle",
   "slug": "stripe-refund-dispute-lifecycle",
   "description": "|",
   "content": "\n## Quick Reference\n\n| Event | Action | Key rule |\n|--|--|--|\n| `charge.refunded` | Revoke credits proportional to refund delta | G2 \u2014 `previous_attributes.amount_refunded` |\n| `charge.dispute.created` | Set user `past_due` + store checkpoint | G1 + G9 |\n| `charge.dispute.closed` | `won` / `warning_closed` / `prevented` -> restore; `lost` -> no-op (charge.refunded handles); else -> no-op | G5 + G7 |\n\n| Refund source priority | When to use |\n|--|--|\n| `event.data.previous_attributes.amount_refunded` (G2) | Primary \u2014 always prefer |\n| `charge.refunds.data` (sorted by created desc) | Fallback when `previous_attributes` absent |\n| `stripe.refunds.list({charge, limit:1})` | Last resort when embedded missing |\n| `charge.amount_refunded` alone | NEVER (cumulative, not per-event) |\n\n## When to Use This Skill\n\nUse when implementing any handler that revokes credits or mutates a paid-status column in response to Stripe refund or dispute events.\n\n**Related skills:**\n- For `getRefundDelta` (the G2 delta helper): `stripe-billing-master:stripe-list-pagination-previous-attributes`\n- For the canonical refund helper and audit-row invariant: `stripe-billing-master:stripe-credit-audit-trail`\n- For the G1 checkpoint pattern every dispute handler wraps: `stripe-billing-master:stripe-webhook-idempotency`\n\n## Core Rules\n\n### G2: refund delta\n\nUse `getRefundDelta()` from `stripe-billing-master:stripe-list-pagination-previous-attributes` \u2014 that skill owns the delta-computation helper. Key guarantee: the helper returns `null` when no source is available, and the handler MUST skip revocation rather than guess.\n\n### G7: exhaustive `shouldRestoreStatus`\n\n```ts\nconst shouldRestoreMap = {\n  won: true,\n  warning_closed: true,\n  prevented: true,\n  lost: false,\n  needs_response: false,\n  under_review: false,\n  warning_needs_response: false,\n  warning_under_review: false,\n  charge_refunded: false,\n} satisfies Record<Stripe.Dispute.Status, boolean>;\n\nexport const shouldRestoreStatus = (s: Stripe.Dispute.Status): boolean => shouldRestoreMap[s];\n```\n\nWhen Stripe adds a new status in a future SDK version, this object is a compile error until you add the key \u2014 forcing a conscious G5 allowlist decision.\n\n### Credit-pack vs subscription refund\n\n```ts\nasync function resolveCreditsToRevoke(charge: Stripe.Charge, refundAmount: number) {\n  const sessions = await stripe.checkout.sessions.list({\n    payment_intent: charge.payment_intent as string,\n    limit: 1,\n    expand: [\"data.line_items\"],\n  });\n  const session = sessions.data[0];\n  if (session?.mode !== \"subscription\") {\n    const pack = CREDIT_PACKS.find(p => session?.line_items?.data?.[0]?.price?.id === p.priceId);\n    if (pack && session.amount_total && session.amount_total > 0) {\n      // Proportional revocation: if they refunded 50% of the pack, revoke 50% of the credits\n      return Math.round(pack.credits * (refundAmount / session.amount_total));\n    }\n  }\n  // Subscription: 1 credit = 1 cent at cash-equivalent\n  return refundAmount;\n}\n```\n\nNotes on the credit-pack math: proportional revocation matters because packs are bulk-priced (e.g., 1000 credits for $9 instead of $10) \u2014 a flat `refundAmount -> credits` conversion over-revokes. Always look up the originating Checkout Session to distinguish `mode: \"subscription\"` (cash-equivalent) from `mode: \"payment\"` with a known pack price ID (proportional).\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "stripe-refund-dispute-lifecycle",
-    "description": "|",
-    "PROACTIVELY activate for": "(1) charge.refunded handler design, (2) charge.dispute.created / charge.dispute.closed handlers, (3) Refund delta computation from event.data.previous_attributes.amount_refunded, (4) Dispute-hold past_due status management, (5) shouldRestoreStatus predicate with satisfies Record<Stripe.Dispute.Status, boolean>, (6) Credit-pack vs subscription refund differentiation, (7) Checkout Session lookup for refund proportion math, (8) Allowlist default-deny for external enums, (9) stripe.checkout.sessions.list({payment_intent}) pattern, (10) Dispute outcome branch logic (won / lost / warning_closed / prevented).",
-    "Provides": "full handler patterns for all three events, predicate examples, credit-pack vs subscription math, exhaustive switch patterns."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

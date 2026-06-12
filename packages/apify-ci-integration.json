@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031259",
   "name": "apify-ci-integration",
   "slug": "apify-ci-integration",
   "description": "Configure CI/CD pipelines for Apify Actor builds and deployments.",
   "content": "# Apify CI Integration\n\n## Overview\n\nAutomate Apify Actor builds, tests, and deployments using GitHub Actions. Covers test-on-PR, deploy-on-merge, integration testing with live Apify API, and Actor build verification.\n\n## Prerequisites\n\n- GitHub repository with Actions enabled\n- Apify API token stored as GitHub secret\n- Actor code in the repository\n\n## Instructions\n\n### Step 1: Configure GitHub Secrets\n\n```bash\n# Store Apify token for CI\ngh secret set APIFY_TOKEN --body \"apify_api_YOUR_CI_TOKEN\"\n\n# Optional: separate tokens for test vs production\ngh secret set APIFY_TOKEN_TEST --body \"apify_api_test_token\"\ngh secret set APIFY_TOKEN_PROD --body \"apify_api_prod_token\"\n```\n\n### Step 2: Create Test Workflow\n\nCreate `.github/workflows/apify-test.yml`:\n\n```yaml\nname: Apify Tests\n\non:\n  pull_request:\n    branches: [main]\n  push:\n    branches: [main]\n\njobs:\n  unit-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n      - run: npm run build\n      - run: npm test -- --coverage\n\n  integration-tests:\n    runs-on: ubuntu-latest\n    if: github.event_name == 'push'  # Only on merge to main\n    env:\n      APIFY_TOKEN: ${{ secrets.APIFY_TOKEN_TEST }}\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n\n      - name: Verify Apify connection\n        run: |\n          curl -sf -H \"Authorization: Bearer $APIFY_TOKEN\" \\\n            https://api.apify.com/v2/users/me | jq '.data.username'\n\n      - name: Run integration tests\n        run: npm run test:integration\n        timeout-minutes: 10\n```\n\n### Step 3: Create Deploy Workflow\n\nCreate `.github/workflows/apify-deploy.yml`:\n\n```yaml\nname: Deploy Actor\n\non:\n  push:\n    branches: [main]\n    paths:\n      - 'src/**'\n      - 'package.json'\n      - 'package-lock.json'\n      - '.actor/**'\n\n  workflow_dispatch:  # Manual trigger\n\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    env:\n      APIFY_TOKEN: ${{ secrets.APIFY_TOKEN_PROD }}\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n\n      - run: npm ci\n      - run: npm run build\n      - run: npm test\n\n      - name: Install Apify CLI\n        run: npm install -g apify-cli\n\n      - name: Login to Apify\n        run: apify login --token $APIFY_TOKEN\n\n      - name: Push Actor to Apify\n        run: apify push\n\n      - name: Verify deployment\n        run: |\n          # Get latest build status\n          ACTOR_ID=$(jq -r '.name' .actor/actor.json)\n          echo \"Deployed Actor: $ACTOR_ID\"\n\n          # Run a smoke test with minimal input\n          apify actors call $ACTOR_ID \\\n            --input='{\"startUrls\":[{\"url\":\"https://example.com\"}],\"maxItems\":1}' \\\n            --timeout=120\n\n      - name: Notify on failure\n        if: failure()\n        run: |\n          echo \"::error::Actor deployment failed! Check build logs.\"\n```\n\n### Step 4: Write Integration Tests\n\n```typescript\n// tests/integration/apify.test.ts\nimport { describe, it, expect, beforeAll } from 'vitest';\nimport { ApifyClient } from 'apify-client';\n\nconst SKIP_INTEGRATION = !process.env.APIFY_TOKEN;\n\ndescribe.skipIf(SKIP_INTEGRATION)('Apify Integration', () => {\n  let client: ApifyClient;\n\n  beforeAll(() => {\n    client = new ApifyClient({ token: process.env.APIFY_TOKEN });\n  });\n\n  it('should authenticate successfully', async () => {\n    const user = await client.user().get();\n    expect(user.username).toBeTruthy();\n  });\n\n  it('should run a test Actor', async () => {\n    const run = await client.actor('apify/website-content-crawler').call(\n      {\n        startUrls: [{ url: 'https://example.com' }],\n        maxCrawlPages: 1,\n      },\n      { timeout: 120, memory: 256 },\n    );\n\n    expect(run.status).toBe('SUCCEEDED');\n    expect(run.defaultDatasetId).toBeTruthy();\n\n    const { items } = await client.dataset(run.defaultDatasetId).listItems();\n    expect(items.length).toBeGreaterThan(0);\n  }, 180_000); // 3 minute timeout for this test\n\n  it('should create and delete a named dataset', async () => {\n    const name = `ci-test-${Date.now()}`;\n    const dataset = await client.datasets().getOrCreate(name);\n    expect(dataset.id).toBeTruthy();\n\n    await client.dataset(dataset.id).pushItems([\n      { test: true, timestamp: new Date().toISOString() },\n    ]);\n\n    const { items } = await client.dataset(dataset.id).listItems();\n    expect(items).toHaveLength(1);\n\n    // Cleanup\n    await client.dataset(dataset.id).delete();\n  });\n});\n```\n\n### Step 5: Actor Build Verification in CI\n\n```yaml\n# .github/workflows/verify-build.yml\nname: Verify Actor Build\n\non:\n  pull_request:\n    paths: ['src/**', '.actor/**', 'Dockerfile']\n\njobs:\n  docker-build:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n\n      - name: Build Actor Docker image\n        run: |\n          docker build -t actor-test -f .actor/Dockerfile .\n\n      - name: Verify entry point\n        run: |\n          # Check that the built image can at least start\n          docker run --rm actor-test node -e \"\n            const { Actor } = require('apify');\n            console.log('Actor module loaded successfully');\n          \"\n```\n\n## CI Configuration for apify-client Apps\n\nFor applications that call Actors (not Actor development):\n\n```yaml\n# .github/workflows/test.yml\nname: Test Apify Integration\n\non: [push, pull_request]\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n      - run: npm test\n        env:\n          # Unit tests should mock apify-client\n          # Only set token for integration test job\n          APIFY_TOKEN: ''\n\n  integration:\n    needs: test\n    if: github.ref == 'refs/heads/main'\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n      - run: npm run test:integration\n        env:\n          APIFY_TOKEN: ${{ secrets.APIFY_TOKEN }}\n```\n\n## Branch Protection Rules\n\n```bash\n# Require CI to pass before merging\ngh api repos/{owner}/{repo}/branches/main/protection -X PUT \\\n  --input - <<EOF\n{\n  \"required_status_checks\": {\n    \"strict\": true,\n    \"contexts\": [\"unit-tests\", \"docker-build\"]\n  },\n  \"enforce_admins\": true,\n  \"required_pull_request_reviews\": null\n}\nEOF\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `APIFY_TOKEN` not set | Secret not configured | `gh secret set APIFY_TOKEN` |\n| Integration test timeout | Slow Actor run | Increase timeout, use smaller input |\n| Docker build fails in CI | Local-only deps | Commit `package-lock.json` |\n| `apify push` fails | Not logged in | Add `apify login --token` step |\n| Flaky integration tests | External service issues | Add retries, use `test.retry(2)` |\n\n## Resources\n\n- [GitHub Actions Documentation](https://docs.github.com/en/actions)\n- [Apify CLI Reference](https://docs.apify.com/cli/docs/reference)\n- [Actor Deployment](https://docs.apify.com/platform/actors/development/deployment)\n\n## Next Steps\n\nFor deployment patterns, see `apify-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "apify-ci-integration",
-    "description": "Configure CI/CD pipelines for Apify Actor builds and deployments.",
-    "Trigger": "apify CI\", \"apify GitHub Actions\", \"apify automated deploy\",",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*), Bash(npm:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

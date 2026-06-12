@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031685",
   "name": "coreweave-upgrade-migration",
   "slug": "coreweave-upgrade-migration",
   "description": "Upgrade CoreWeave deployments and migrate between GPU types.",
   "content": "# CoreWeave Upgrade & Migration\n\n## Overview\n\nCoreWeave is a GPU-specialized cloud provider running Kubernetes-native infrastructure. Migrations involve upgrading between GPU instance types (A100 to H100), updating CUDA driver versions, and handling Kubernetes API version changes across namespaces. Tracking API versions is critical because CoreWeave's instance type labels and resource quotas change between platform releases, and deploying to a deprecated instance class will cause scheduling failures.\n\n## Version Detection\n\n```typescript\nimport { KubeConfig, CoreV1Api } from \"@kubernetes/client-node\";\n\nasync function detectCoreWeaveVersion(): Promise<void> {\n  const kc = new KubeConfig();\n  kc.loadFromDefault();\n  const k8sApi = kc.makeApiClient(CoreV1Api);\n\n  // Check current namespace GPU allocations\n  const pods = await k8sApi.listNamespacedPod(\"my-namespace\");\n  for (const pod of pods.body.items) {\n    const gpuClass = pod.spec?.nodeSelector?.[\"gpu.nvidia.com/class\"];\n    const cudaVersion = pod.metadata?.labels?.[\"cuda-version\"];\n    console.log(`Pod ${pod.metadata?.name}: GPU=${gpuClass}, CUDA=${cudaVersion}`);\n  }\n\n  // Detect deprecated instance types\n  const deprecated = [\"A100_PCIE_40GB\", \"V100_PCIE_16GB\", \"RTX_A5000\"];\n  const activeGpus = pods.body.items\n    .map((p) => p.spec?.nodeSelector?.[\"gpu.nvidia.com/class\"])\n    .filter(Boolean);\n  const stale = activeGpus.filter((g) => deprecated.includes(g!));\n  if (stale.length > 0) console.warn(`Deprecated GPU types in use: ${stale.join(\", \")}`);\n}\n```\n\n## Migration Checklist\n\n- [ ] Review CoreWeave release notes for deprecated instance types\n- [ ] Audit all deployments for `gpu.nvidia.com/class` node selectors\n- [ ] Verify CUDA version compatibility with target GPU (see matrix below)\n- [ ] Update container base images to match new CUDA/cuDNN requirements\n- [ ] Test inference latency on new GPU type in staging namespace\n- [ ] Update resource requests (`nvidia.com/gpu`) for new instance memory\n- [ ] Migrate persistent volumes if switching regions or availability zones\n- [ ] Update Kubernetes API version in manifests (e.g., `apps/v1` changes)\n- [ ] Validate HPA scaling behavior on new instance type throughput\n- [ ] Run canary deployment with traffic split before full cutover\n\n## Schema Migration\n\n```typescript\n// CoreWeave instance type labels changed in 2025 platform update\n// Old: gpu.nvidia.com/class: \"A100_PCIE_80GB\"\n// New: gpu.nvidia.com/class: \"H100_SXM5_80GB\"\n\ninterface DeploymentMigration {\n  oldSelector: Record<string, string>;\n  newSelector: Record<string, string>;\n  cudaMinVersion: string;\n}\n\nconst GPU_MIGRATIONS: DeploymentMigration[] = [\n  {\n    oldSelector: { \"gpu.nvidia.com/class\": \"A100_PCIE_80GB\" },\n    newSelector: { \"gpu.nvidia.com/class\": \"H100_SXM5_80GB\" },\n    cudaMinVersion: \"12.4\",\n  },\n  {\n    oldSelector: { \"gpu.nvidia.com/class\": \"A100_SXM4_80GB\" },\n    newSelector: { \"gpu.nvidia.com/class\": \"H100_SXM5_80GB\" },\n    cudaMinVersion: \"12.4\",\n  },\n];\n\nfunction migrateNodeSelector(manifest: any, migration: DeploymentMigration): any {\n  const selector = manifest.spec?.template?.spec?.nodeSelector;\n  if (!selector) return manifest;\n  for (const [key, oldVal] of Object.entries(migration.oldSelector)) {\n    if (selector[key] === oldVal) {\n      selector[key] = migration.newSelector[key];\n    }\n  }\n  return manifest;\n}\n```\n\n## Rollback Strategy\n\n```typescript\nimport { AppsV1Api, KubeConfig } from \"@kubernetes/client-node\";\n\nasync function rollbackDeployment(namespace: string, name: string): Promise<void> {\n  const kc = new KubeConfig();\n  kc.loadFromDefault();\n  const appsApi = kc.makeApiClient(AppsV1Api);\n\n  // Kubernetes rollout undo \u2014 reverts to previous revision\n  const deployment = await appsApi.readNamespacedDeployment(name, namespace);\n  const currentRevision = deployment.body.metadata?.annotations?.[\"deployment.kubernetes.io/revision\"];\n  console.log(`Rolling back ${name} from revision ${currentRevision}`);\n\n  // Patch to trigger rollback via revision annotation\n  await appsApi.patchNamespacedDeployment(name, namespace, {\n    spec: { template: { metadata: { annotations: { \"kubectl.kubernetes.io/restartedAt\": new Date().toISOString() } } } },\n  }, undefined, undefined, undefined, undefined, undefined, { headers: { \"Content-Type\": \"application/strategic-merge-patch+json\" } });\n  console.log(`Rollback initiated for ${name} in ${namespace}`);\n}\n```\n\n## Error Handling\n\n| Migration Issue | Symptom | Fix |\n|----------------|---------|-----|\n| GPU class not schedulable | Pod stuck in `Pending` with `Insufficient nvidia.com/gpu` | Verify instance type exists in target region; check quota |\n| CUDA version mismatch | Container crashes with `CUDA driver version is insufficient` | Rebuild container with CUDA matching target GPU driver |\n| Namespace quota exceeded | `Forbidden: exceeded quota` on deployment | Request quota increase for new instance type via CoreWeave dashboard |\n| PVC migration failure | `VolumeAttachment` timeout on new node | Detach old PVC, recreate in target availability zone |\n| API version deprecated | `no matches for kind \"Deployment\" in version \"extensions/v1beta1\"` | Update manifest to `apps/v1` and adjust spec fields |\n\n## Resources\n\n- [CoreWeave GPU Instances](https://docs.coreweave.com/docs/platform/instances/gpu-instances)\n- [CoreWeave Kubernetes Docs](https://docs.coreweave.com/docs/platform/kubernetes)\n- [CoreWeave Changelog](https://docs.coreweave.com/docs/release-notes)\n\n## Next Steps\n\nFor CI/CD pipeline integration, see `coreweave-ci-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "coreweave-upgrade-migration",
-    "description": "Upgrade CoreWeave deployments and migrate between GPU types.",
-    "allowed-tools": "Read, Write, Edit, Bash(kubectl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

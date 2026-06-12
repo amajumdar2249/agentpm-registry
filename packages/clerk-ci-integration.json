@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031543",
   "name": "clerk-ci-integration",
   "slug": "clerk-ci-integration",
   "description": "Configure Clerk CI/CD integration with GitHub Actions and testing.",
   "content": "# Clerk CI Integration\n\n## Overview\n\nSet up CI/CD pipelines with Clerk authentication testing. Covers GitHub Actions workflows, Playwright E2E tests with Clerk auth, test user management, and CI secrets configuration.\n\n## Prerequisites\n\n- GitHub repository with Actions enabled\n- Clerk test API keys (`pk_test_` / `sk_test_`)\n- npm/pnpm project configured\n\n## Instructions\n\n### Step 1: GitHub Actions Workflow\n\n```yaml\n# .github/workflows/test.yml\nname: Test with Clerk Auth\non:\n  pull_request:\n    branches: [main]\n  push:\n    branches: [main]\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${{ secrets.CLERK_PK_TEST }}\n      CLERK_SECRET_KEY: ${{ secrets.CLERK_SK_TEST }}\n      CLERK_WEBHOOK_SECRET: ${{ secrets.CLERK_WEBHOOK_SECRET_TEST }}\n\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 20\n          cache: npm\n\n      - run: npm ci\n      - run: npm run build\n      - run: npm test\n\n      - name: Install Playwright\n        run: npx playwright install --with-deps chromium\n\n      - name: Run E2E tests\n        run: npx playwright test\n        env:\n          CLERK_TEST_USER_EMAIL: ${{ secrets.CLERK_TEST_USER_EMAIL }}\n          CLERK_TEST_USER_PASSWORD: ${{ secrets.CLERK_TEST_USER_PASSWORD }}\n```\n\n### Step 2: Configure GitHub Secrets\n\nAdd these secrets in GitHub repo > Settings > Secrets:\n\n| Secret | Value |\n|--------|-------|\n| `CLERK_PK_TEST` | `pk_test_...` from dev instance |\n| `CLERK_SK_TEST` | `sk_test_...` from dev instance |\n| `CLERK_WEBHOOK_SECRET_TEST` | `whsec_...` from dev webhooks |\n| `CLERK_TEST_USER_EMAIL` | `ci-test@yourapp.com` |\n| `CLERK_TEST_USER_PASSWORD` | Strong test password |\n\n### Step 3: Playwright Auth Setup\n\n```typescript\n// e2e/auth.setup.ts\nimport { test as setup, expect } from '@playwright/test'\nimport path from 'path'\n\nconst authFile = path.join(__dirname, '.auth/user.json')\n\nsetup('authenticate', async ({ page }) => {\n  await page.goto('/sign-in')\n\n  // Fill Clerk sign-in form\n  await page.fill('input[name=\"identifier\"]', process.env.CLERK_TEST_USER_EMAIL!)\n  await page.click('button:has-text(\"Continue\")')\n  await page.fill('input[name=\"password\"]', process.env.CLERK_TEST_USER_PASSWORD!)\n  await page.click('button:has-text(\"Continue\")')\n\n  // Wait for redirect to authenticated page\n  await page.waitForURL('/dashboard')\n  await expect(page.locator('text=Dashboard')).toBeVisible()\n\n  // Save auth state for reuse across tests\n  await page.context().storageState({ path: authFile })\n})\n```\n\n### Step 4: Playwright Config with Auth State\n\n```typescript\n// playwright.config.ts\nimport { defineConfig } from '@playwright/test'\n\nexport default defineConfig({\n  testDir: './e2e',\n  projects: [\n    { name: 'setup', testMatch: 'auth.setup.ts' },\n    {\n      name: 'authenticated',\n      testMatch: '*.spec.ts',\n      dependencies: ['setup'],\n      use: {\n        storageState: 'e2e/.auth/user.json',\n      },\n    },\n  ],\n  webServer: {\n    command: 'npm run dev',\n    port: 3000,\n    reuseExistingServer: !process.env.CI,\n  },\n})\n```\n\n### Step 5: E2E Test Examples\n\n```typescript\n// e2e/dashboard.spec.ts\nimport { test, expect } from '@playwright/test'\n\ntest('authenticated user sees dashboard', async ({ page }) => {\n  await page.goto('/dashboard')\n  await expect(page.locator('h1')).toContainText('Dashboard')\n  await expect(page.locator('[data-clerk-user-button]')).toBeVisible()\n})\n\ntest('unauthenticated user is redirected to sign-in', async ({ browser }) => {\n  // Create fresh context without saved auth state\n  const context = await browser.newContext()\n  const page = await context.newPage()\n\n  await page.goto('/dashboard')\n  await expect(page).toHaveURL(/sign-in/)\n\n  await context.close()\n})\n\ntest('protected API returns data', async ({ page }) => {\n  const response = await page.request.get('/api/data')\n  expect(response.status()).toBe(200)\n  const data = await response.json()\n  expect(data.userId).toBeTruthy()\n})\n```\n\n### Step 6: Test User Seed Script for CI\n\n```typescript\n// scripts/seed-ci-user.ts\nimport { createClerkClient } from '@clerk/backend'\n\nconst clerk = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY! })\n\nasync function ensureTestUser() {\n  const email = process.env.CLERK_TEST_USER_EMAIL!\n  const password = process.env.CLERK_TEST_USER_PASSWORD!\n\n  const existing = await clerk.users.getUserList({ emailAddress: [email] })\n  if (existing.totalCount > 0) {\n    console.log('Test user already exists')\n    return\n  }\n\n  await clerk.users.createUser({\n    emailAddress: [email],\n    password,\n    firstName: 'CI',\n    lastName: 'TestUser',\n  })\n  console.log('Test user created')\n}\n\nensureTestUser()\n```\n\n## Output\n\n- GitHub Actions workflow with Clerk env vars from secrets\n- Playwright auth setup saving session state for reuse\n- E2E tests covering authenticated and unauthenticated flows\n- Test user seed script for CI environments\n- Protected API endpoint test\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Secret not found in CI | Missing GitHub secret | Add in repo Settings > Secrets and variables > Actions |\n| Test user sign-in fails | User not created or wrong password | Run seed script, verify credentials |\n| Timeout on sign-in page | Clerk SDK not loaded in CI build | Ensure `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` is set |\n| E2E auth state stale | Cached session expired | Delete `.auth/` directory, re-run setup |\n\n## Examples\n\n### Vitest Unit Test with Mocked Clerk\n\n```typescript\n// __tests__/api.test.ts\nimport { describe, it, expect, vi } from 'vitest'\n\nvi.mock('@clerk/nextjs/server', () => ({\n  auth: vi.fn().mockResolvedValue({ userId: 'user_test_123', has: () => true }),\n}))\n\ndescribe('Protected API', () => {\n  it('returns data for authenticated user', async () => {\n    const { GET } = await import('@/app/api/data/route')\n    const response = await GET()\n    expect(response.status).toBe(200)\n  })\n})\n```\n\n## Resources\n\n- [Clerk Testing Guide](https://clerk.com/docs/testing/overview)\n- [Playwright Authentication](https://playwright.dev/docs/auth)\n- [GitHub Actions Secrets](https://docs.github.com/en/actions/security-guides/encrypted-secrets)\n\n## Next Steps\n\nProceed to `clerk-deploy-integration` for deployment platform setup.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clerk-ci-integration",
-    "description": "Configure Clerk CI/CD integration with GitHub Actions and testing.",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

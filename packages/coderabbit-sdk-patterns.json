@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031635",
   "name": "coderabbit-sdk-patterns",
   "slug": "coderabbit-sdk-patterns",
   "description": "Apply production-ready CodeRabbit automation patterns using GitHub API",
   "content": "# CodeRabbit SDK Patterns\n\n## Overview\n\nCodeRabbit does not have a traditional SDK. You interact with it through `.coderabbit.yaml` configuration, PR comment commands (`@coderabbitai`), and the GitHub/GitLab API to process its review output. These patterns show how to automate around CodeRabbit reviews programmatically.\n\n## Prerequisites\n\n- CodeRabbit installed on repository (see `coderabbit-install-auth`)\n- GitHub CLI (`gh`) or GitHub API access via personal access token\n- Node.js 18+ for automation scripts\n\n## Instructions\n\n### Step 1: Fetch CodeRabbit Reviews via GitHub API\n\n```typescript\n// scripts/fetch-coderabbit-reviews.ts\nimport { Octokit } from \"@octokit/rest\";\n\nconst octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });\n\nasync function getCodeRabbitReview(owner: string, repo: string, prNumber: number) {\n  const reviews = await octokit.pulls.listReviews({ owner, repo, pull_number: prNumber });\n\n  const coderabbitReview = reviews.data.find(\n    (r) => r.user?.login === \"coderabbitai[bot]\"\n  );\n\n  if (!coderabbitReview) {\n    console.log(\"No CodeRabbit review found yet. Review typically takes 2-5 minutes.\");\n    return null;\n  }\n\n  return {\n    state: coderabbitReview.state,      // \"APPROVED\" | \"CHANGES_REQUESTED\" | \"COMMENTED\"\n    body: coderabbitReview.body,         // Walkthrough summary\n    submittedAt: coderabbitReview.submitted_at,\n  };\n}\n```\n\n### Step 2: Extract Line-Level Comments\n\n```typescript\nasync function getCodeRabbitComments(owner: string, repo: string, prNumber: number) {\n  const comments = await octokit.pulls.listReviewComments({\n    owner, repo, pull_number: prNumber,\n  });\n\n  const coderabbitComments = comments.data\n    .filter((c) => c.user?.login === \"coderabbitai[bot]\")\n    .map((c) => ({\n      file: c.path,\n      line: c.line || c.original_line,\n      body: c.body,\n      severity: categorizeSeverity(c.body),\n      url: c.html_url,\n    }));\n\n  return coderabbitComments;\n}\n\nfunction categorizeSeverity(body: string): \"critical\" | \"warning\" | \"suggestion\" {\n  const lower = body.toLowerCase();\n  if (lower.includes(\"security\") || lower.includes(\"vulnerability\") || lower.includes(\"injection\")) {\n    return \"critical\";\n  }\n  if (lower.includes(\"bug\") || lower.includes(\"error\") || lower.includes(\"issue\")) {\n    return \"warning\";\n  }\n  return \"suggestion\";\n}\n```\n\n### Step 3: Post Commands to CodeRabbit via PR Comments\n\n```typescript\n// Programmatically trigger CodeRabbit actions\nasync function sendCodeRabbitCommand(\n  owner: string, repo: string, prNumber: number, command: string\n) {\n  await octokit.issues.createComment({\n    owner, repo, issue_number: prNumber,\n    body: `@coderabbitai ${command}`,\n  });\n}\n\n// Available commands:\n// \"full review\"                    - Complete review from scratch\n// \"summary\"                        - Generate walkthrough summary\n// \"resolve\"                        - Mark all comments resolved\n// \"generate-docstrings\"            - Generate docstrings for functions\n// \"configuration\"                  - Show current config as YAML\n// \"run <recipe>\"                   - Run a finishing touch recipe\n```\n\n### Step 4: Build a Review Dashboard Script\n\n```bash\n#!/bin/bash\n# scripts/coderabbit-dashboard.sh - Review metrics for last 50 PRs\nset -euo pipefail\n\nORG=\"${1:?Usage: $0 <org> <repo>}\"\nREPO=\"${2:?Usage: $0 <org> <repo>}\"\n\necho \"=== CodeRabbit Review Dashboard ===\"\necho \"Repository: $ORG/$REPO\"\necho \"\"\n\n# Count PRs with CodeRabbit reviews\nTOTAL=$(gh api \"repos/$ORG/$REPO/pulls?state=closed&per_page=50\" --jq 'length')\nREVIEWED=0\n\nfor PR_NUM in $(gh api \"repos/$ORG/$REPO/pulls?state=closed&per_page=50\" --jq '.[].number'); do\n  HAS_CR=$(gh api \"repos/$ORG/$REPO/pulls/$PR_NUM/reviews\" \\\n    --jq '[.[] | select(.user.login==\"coderabbitai[bot]\")] | length' 2>/dev/null || echo \"0\")\n  [ \"$HAS_CR\" -gt 0 ] && REVIEWED=$((REVIEWED + 1))\ndone\n\necho \"Review Coverage: $REVIEWED/$TOTAL PRs reviewed ($(( REVIEWED * 100 / TOTAL ))%)\"\n```\n\n### Step 5: GitHub Actions Automation\n\n```yaml\n# .github/workflows/coderabbit-gate.yml\n# Block merge until CodeRabbit has reviewed\nname: CodeRabbit Review Gate\n\non:\n  pull_request_review:\n    types: [submitted]\n\njobs:\n  check-coderabbit:\n    if: github.event.review.user.login == 'coderabbitai[bot]'\n    runs-on: ubuntu-latest\n    steps:\n      - name: Check review state\n        uses: actions/github-script@v7\n        with:\n          script: |\n            const { data: reviews } = await github.rest.pulls.listReviews({\n              owner: context.repo.owner,\n              repo: context.repo.repo,\n              pull_number: context.issue.number,\n            });\n            const crReview = reviews.find(r => r.user.login === 'coderabbitai[bot]');\n            if (crReview?.state === 'CHANGES_REQUESTED') {\n              core.setFailed('CodeRabbit requested changes. Address feedback before merging.');\n            } else {\n              core.info(`CodeRabbit review state: ${crReview?.state || 'pending'}`);\n            }\n```\n\n## Output\n\n- GitHub API integration for fetching CodeRabbit review data\n- Automated command posting to trigger CodeRabbit actions\n- Review metrics dashboard script\n- CI gate that enforces CodeRabbit approval before merge\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Review not found | PR too new | Wait 2-5 minutes for review to complete |\n| 403 from GitHub API | Token missing scopes | Ensure `repo` scope on personal access token |\n| Bot login doesn't match | Different app slug | Check with `coderabbitai[bot]` (includes `[bot]` suffix) |\n| Rate limited by GitHub | Too many API calls | Use pagination and caching for bulk queries |\n\n## Resources\n\n- [CodeRabbit Review Commands](https://docs.coderabbit.ai/reference/review-commands)\n- [GitHub REST API - Pull Reviews](https://docs.github.com/en/rest/pulls/reviews)\n- [Octokit.js](https://github.com/octokit/octokit.js)\n\n## Next Steps\n\nApply patterns in `coderabbit-core-workflow-a` for real-world review workflows.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "coderabbit-sdk-patterns",
-    "description": "Apply production-ready CodeRabbit automation patterns using GitHub API",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*), Bash(node:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

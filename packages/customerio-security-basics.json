@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031738",
   "name": "customerio-security-basics",
   "slug": "customerio-security-basics",
   "description": "Apply Customer.io security best practices.",
   "content": "# Customer.io Security Basics\n\n## Overview\n\nImplement security best practices for Customer.io: secrets management for API credentials, PII sanitization before sending data, webhook signature verification (HMAC-SHA256), API key rotation, and GDPR/CCPA data deletion compliance.\n\n## Prerequisites\n\n- Customer.io account with admin access\n- Understanding of your data classification (what is PII)\n- Secrets management system (recommended for production)\n\n## Instructions\n\n### Step 1: Secure Credential Storage\n\n```typescript\n// lib/customerio-secrets.ts\n// NEVER hardcode credentials \u2014 use environment variables or a secrets manager\n\n// Option A: Environment variables (acceptable for most apps)\nconst siteId = process.env.CUSTOMERIO_SITE_ID;\nconst trackKey = process.env.CUSTOMERIO_TRACK_API_KEY;\n\n// Option B: GCP Secret Manager (recommended for production)\nimport { SecretManagerServiceClient } from \"@google-cloud/secret-manager\";\n\nconst secretClient = new SecretManagerServiceClient();\n\nasync function getSecret(name: string): Promise<string> {\n  const [version] = await secretClient.accessSecretVersion({\n    name: `projects/my-project/secrets/${name}/versions/latest`,\n  });\n  return version.payload?.data?.toString() ?? \"\";\n}\n\nasync function createCioClient() {\n  const [siteId, trackKey] = await Promise.all([\n    getSecret(\"customerio-site-id\"),\n    getSecret(\"customerio-track-api-key\"),\n  ]);\n\n  return new TrackClient(siteId, trackKey, { region: RegionUS });\n}\n```\n\n### Step 2: PII Sanitization\n\n```typescript\n// lib/customerio-sanitize.ts\n// Sanitize user data BEFORE sending to Customer.io\n\nconst NEVER_SEND = new Set([\n  \"ssn\", \"social_security\", \"tax_id\",\n  \"credit_card\", \"card_number\", \"cvv\",\n  \"password\", \"password_hash\",\n  \"bank_account\", \"routing_number\",\n]);\n\nconst HASH_FIELDS = new Set([\n  \"phone\", \"phone_number\",\n  \"ip_address\", \"ip\",\n  \"address\", \"street_address\",\n]);\n\nimport { createHash } from \"crypto\";\n\nfunction hashValue(value: string): string {\n  return createHash(\"sha256\").update(value).digest(\"hex\").substring(0, 16);\n}\n\nexport function sanitizeAttributes(\n  attrs: Record<string, any>\n): Record<string, any> {\n  const clean: Record<string, any> = {};\n\n  for (const [key, value] of Object.entries(attrs)) {\n    const lowerKey = key.toLowerCase();\n\n    // Strip highly sensitive fields entirely\n    if (NEVER_SEND.has(lowerKey)) continue;\n\n    // Hash PII fields\n    if (HASH_FIELDS.has(lowerKey) && typeof value === \"string\") {\n      clean[`${key}_hash`] = hashValue(value);\n      continue;\n    }\n\n    clean[key] = value;\n  }\n\n  return clean;\n}\n\n// Usage\nimport { TrackClient, RegionUS } from \"customerio-node\";\n\nconst cio = new TrackClient(siteId, trackKey, { region: RegionUS });\n\nawait cio.identify(\"user-123\", sanitizeAttributes({\n  email: \"user@example.com\",         // Kept (needed for email delivery)\n  first_name: \"Jane\",                // Kept\n  phone: \"+1-555-0123\",              // Hashed \u2192 phone_hash\n  ssn: \"123-45-6789\",                // STRIPPED entirely\n  plan: \"pro\",                       // Kept\n}));\n```\n\n### Step 3: Webhook Signature Verification\n\nCustomer.io signs webhook payloads with HMAC-SHA256. Always verify before processing.\n\n```typescript\n// middleware/customerio-webhook.ts\nimport { createHmac, timingSafeEqual } from \"crypto\";\nimport { Request, Response, NextFunction } from \"express\";\n\nconst WEBHOOK_SECRET = process.env.CUSTOMERIO_WEBHOOK_SECRET!;\n\nexport function verifyCioWebhook(\n  req: Request,\n  res: Response,\n  next: NextFunction\n): void {\n  const signature = req.headers[\"x-cio-signature\"] as string;\n  if (!signature) {\n    res.status(401).json({ error: \"Missing signature header\" });\n    return;\n  }\n\n  // req.body must be the raw buffer \u2014 configure Express accordingly\n  const rawBody = (req as any).rawBody as Buffer;\n  if (!rawBody) {\n    res.status(500).json({ error: \"Raw body not available\" });\n    return;\n  }\n\n  const expected = createHmac(\"sha256\", WEBHOOK_SECRET)\n    .update(rawBody)\n    .digest(\"hex\");\n\n  const valid = timingSafeEqual(\n    Buffer.from(signature),\n    Buffer.from(expected)\n  );\n\n  if (!valid) {\n    res.status(401).json({ error: \"Invalid signature\" });\n    return;\n  }\n\n  next();\n}\n\n// Express setup \u2014 raw body required for signature verification\nimport express from \"express\";\nconst app = express();\n\napp.use(\"/webhooks/customerio\", express.raw({ type: \"application/json\" }));\napp.post(\"/webhooks/customerio\", verifyCioWebhook, (req, res) => {\n  const event = JSON.parse((req as any).rawBody.toString());\n  // Process verified webhook event\n  res.sendStatus(200);\n});\n```\n\n### Step 4: API Key Rotation\n\n```typescript\n// scripts/rotate-cio-keys.ts\n// Rotation procedure \u2014 zero downtime\n\nasync function rotateKeys() {\n  console.log(\"Customer.io Key Rotation Procedure:\");\n  console.log(\"1. Go to Settings > Workspace Settings > API & Webhook Credentials\");\n  console.log(\"2. Click 'Regenerate' next to the key you want to rotate\");\n  console.log(\"3. Copy the NEW key\");\n  console.log(\"4. Update your secrets manager:\");\n  console.log(\"   - GCP: gcloud secrets versions add customerio-track-api-key --data-file=-\");\n  console.log(\"   - AWS: aws ssm put-parameter --name /cio/track-api-key --value NEW_KEY --overwrite\");\n  console.log(\"5. Deploy your application (or restart to pick up new secrets)\");\n  console.log(\"6. Verify: run the connectivity test script\");\n  console.log(\"7. The old key is immediately invalidated upon regeneration\");\n  console.log(\"\");\n  console.log(\"IMPORTANT: Regenerating a key IMMEDIATELY invalidates the old key.\");\n  console.log(\"Update secrets BEFORE regenerating, or plan for brief downtime.\");\n}\n```\n\n### Step 5: GDPR/CCPA Data Deletion\n\n```typescript\n// services/customerio-gdpr.ts\nimport { TrackClient, RegionUS } from \"customerio-node\";\n\nconst cio = new TrackClient(\n  process.env.CUSTOMERIO_SITE_ID!,\n  process.env.CUSTOMERIO_TRACK_API_KEY!,\n  { region: RegionUS }\n);\n\n// GDPR Right to Erasure / CCPA Delete My Data\nasync function handleDeletionRequest(userId: string): Promise<void> {\n  // 1. Suppress \u2014 stop all messaging immediately\n  await cio.suppress(userId);\n  console.log(`User ${userId} suppressed (no more messages)`);\n\n  // 2. Destroy \u2014 remove profile and all data from Customer.io\n  await cio.destroy(userId);\n  console.log(`User ${userId} deleted from Customer.io`);\n\n  // 3. Log the deletion for compliance audit trail\n  console.log(`GDPR deletion completed for ${userId} at ${new Date().toISOString()}`);\n}\n\n// Bulk deletion (e.g., processing deletion requests from a queue)\nasync function bulkDelete(userIds: string[]): Promise<void> {\n  for (const userId of userIds) {\n    try {\n      await handleDeletionRequest(userId);\n    } catch (err: any) {\n      // Log but continue \u2014 don't let one failure block others\n      console.error(`Deletion failed for ${userId}: ${err.message}`);\n    }\n    // Respect rate limits\n    await new Promise((r) => setTimeout(r, 100));\n  }\n}\n```\n\n## Security Checklist\n\n- [ ] API keys stored in secrets manager (not `.env` in production)\n- [ ] API key rotation schedule set (every 90 days)\n- [ ] Webhook signatures verified (HMAC-SHA256 with `timingSafeEqual`)\n- [ ] PII sanitized before sending to Customer.io\n- [ ] Highly sensitive data (SSN, credit card) never sent\n- [ ] GDPR deletion endpoint implemented (`suppress` + `destroy`)\n- [ ] `.env` files in `.gitignore`\n- [ ] Audit log for deletion requests\n- [ ] Minimum necessary data principle applied\n\n## Error Handling\n\n| Issue | Solution |\n|-------|----------|\n| Credentials exposed in git | Rotate immediately, scan git history with `trufflehog` |\n| PII accidentally sent | Delete user with `destroy()`, update sanitization rules |\n| Webhook signature mismatch | Verify webhook secret matches Customer.io dashboard |\n| Key rotation causes downtime | Update secrets manager BEFORE regenerating in dashboard |\n\n## Resources\n\n- [Customer.io Security](https://customer.io/security/)\n- [API Credential Management](https://docs.customer.io/accounts-and-workspaces/managing-credentials/)\n- [API Credential Rotation](https://customer.io/blog/api-credential-rotation/)\n- [Suppression API](https://docs.customer.io/integrations/api/track/)\n\n## Next Steps\n\nAfter implementing security, proceed to `customerio-prod-checklist` for production readiness.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "customerio-security-basics",
-    "description": "Apply Customer.io security best practices.",
-    "Trigger": "customer.io security\", \"customer.io pii\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Glob, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

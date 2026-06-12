@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033519",
   "name": "webflow-cost-tuning",
   "slug": "webflow-cost-tuning",
   "description": "Optimize Webflow costs through plan selection, CDN read optimization,",
   "content": "# Webflow Cost Tuning\n\n## Overview\n\nOptimize Webflow costs through smart plan selection, CDN-cached reads, bulk endpoint\nusage, and proactive API usage monitoring. The biggest lever: **CDN-cached live item\nreads are free and unlimited** \u2014 shift reads to the Content Delivery API.\n\n## Prerequisites\n\n- Access to Webflow dashboard (billing section)\n- Understanding of your integration's read/write patterns\n- `webflow-api` SDK configured\n\n## Webflow Pricing Context\n\n### Site Plans (affect API limits)\n\n| Plan | Monthly | CMS Items | Rate Limits | Key for API |\n|------|---------|-----------|-------------|-------------|\n| Starter | $0 | 50 items | Standard | Testing only |\n| Basic | $18 | 2,000 items | Standard | Small sites |\n| CMS | $29 | 10,000 items | Standard | Content-heavy |\n| Business | $49 | 10,000 items | Higher limits | Production apps |\n| Enterprise | Custom | Unlimited | Custom limits | High-volume |\n\n### Ecommerce Plans (additional)\n\n| Plan | Monthly | Products | Transaction Fee |\n|------|---------|----------|----------------|\n| Standard | $42 | 500 | 2% |\n| Plus | $84 | 1,000 | 0% |\n| Advanced | $235 | 3,000 | 0% |\n\n### Workspace Plans (affect developer access)\n\n| Plan | Monthly | Sites | Members |\n|------|---------|-------|---------|\n| Starter | $0 | 2 | 1 |\n| Core | $28 | 10 | 3 |\n| Growth | $60 | Unlimited | 9 |\n| Enterprise | Custom | Unlimited | Unlimited |\n\n## Instructions\n\n### Strategy 1: Shift Reads to CDN (Free and Unlimited)\n\nThe single biggest cost reduction: use the Content Delivery API for reads.\n\n```typescript\n// EXPENSIVE: Staged item reads count against rate limits\nconst { items } = await webflow.collections.items.listItems(collectionId);\n\n// FREE: CDN-cached live item reads have no rate limits\nconst { items } = await webflow.collections.items.listItemsLive(collectionId);\n```\n\nFor public-facing content (blogs, product pages, team members), always use live\nitem endpoints. Only use staged endpoints when you need draft items.\n\n### Strategy 2: Bulk Endpoints (100x Fewer API Calls)\n\n```typescript\n// EXPENSIVE: 1000 items = 1000 API calls\nfor (const item of items) {\n  await webflow.collections.items.createItem(collectionId, { fieldData: item });\n}\n\n// CHEAP: 1000 items = 10 API calls (100 per batch)\nfor (let i = 0; i < items.length; i += 100) {\n  await webflow.collections.items.createItemsBulk(collectionId, {\n    items: items.slice(i, i + 100).map(item => ({ fieldData: item })),\n  });\n}\n```\n\n### Strategy 3: Cache Collection Schemas\n\nCollection schemas change rarely \u2014 cache them aggressively:\n\n```typescript\nimport { LRUCache } from \"lru-cache\";\n\nconst schemaCache = new LRUCache<string, any>({\n  max: 50,\n  ttl: 60 * 60 * 1000, // 1 hour \u2014 schemas change very rarely\n});\n\nasync function getCollectionSchema(siteId: string) {\n  const key = `schema:${siteId}`;\n  let schema = schemaCache.get(key);\n\n  if (!schema) {\n    const { collections } = await webflow.collections.list(siteId);\n    schema = collections;\n    schemaCache.set(key, schema);\n  }\n\n  return schema;\n}\n```\n\n### Strategy 4: API Usage Monitoring\n\n```typescript\nclass WebflowUsageTracker {\n  private calls = new Map<string, number>();\n  private startTime = Date.now();\n\n  track(operation: string) {\n    const count = this.calls.get(operation) || 0;\n    this.calls.set(operation, count + 1);\n  }\n\n  getReport() {\n    const totalCalls = Array.from(this.calls.values()).reduce((a, b) => a + b, 0);\n    const elapsedMinutes = (Date.now() - this.startTime) / 60000;\n    const callsPerMinute = totalCalls / elapsedMinutes;\n\n    return {\n      totalCalls,\n      callsPerMinute: callsPerMinute.toFixed(1),\n      byOperation: Object.fromEntries(this.calls),\n      topOperations: Array.from(this.calls.entries())\n        .sort((a, b) => b[1] - a[1])\n        .slice(0, 5),\n    };\n  }\n\n  reset() {\n    this.calls.clear();\n    this.startTime = Date.now();\n  }\n}\n\nconst tracker = new WebflowUsageTracker();\n\n// Wrap your client to auto-track\nfunction trackedCall<T>(operation: string, fn: () => Promise<T>): Promise<T> {\n  tracker.track(operation);\n  return fn();\n}\n\n// Usage\nconst items = await trackedCall(\"listItemsLive\", () =>\n  webflow.collections.items.listItemsLive(collectionId)\n);\n\n// Periodic report\nsetInterval(() => {\n  console.log(\"API Usage:\", tracker.getReport());\n  tracker.reset();\n}, 60 * 60 * 1000); // Hourly\n```\n\n### Strategy 5: Webhook-Driven Updates (Replace Polling)\n\n```typescript\n// EXPENSIVE: Polling every minute = 1,440 calls/day per collection\nsetInterval(async () => {\n  const { items } = await webflow.collections.items.listItems(collectionId);\n  await processChanges(items);\n}, 60 * 1000);\n\n// CHEAP: Webhook-driven = only called when something changes\n// Register webhook: collection_item_changed\n// Your webhook handler:\napp.post(\"/webhooks/webflow\", async (req, res) => {\n  const event = req.body;\n  if (event.triggerType === \"collection_item_changed\") {\n    await processChanges([event.payload]);\n  }\n  res.status(200).send();\n});\n```\n\n### Strategy 6: Plan Right-Sizing\n\n```typescript\n// Estimate which plan you need based on usage\nfunction recommendPlan(usage: {\n  cmsItems: number;\n  monthlyApiCalls: number;\n  ecommerceProducts: number;\n}) {\n  // CMS items determine minimum site plan\n  if (usage.cmsItems > 10000) return { site: \"Enterprise\", reason: \"CMS item limit\" };\n  if (usage.cmsItems > 2000) return { site: \"CMS or Business\", reason: \"CMS item limit\" };\n  if (usage.cmsItems > 50) return { site: \"Basic\", reason: \"CMS item limit\" };\n\n  // High API volume may need higher rate limits\n  if (usage.monthlyApiCalls > 100000) return { site: \"Business+\", reason: \"Rate limits\" };\n\n  // Ecommerce products\n  if (usage.ecommerceProducts > 1000) return { ecommerce: \"Advanced\", reason: \"Product limit\" };\n  if (usage.ecommerceProducts > 500) return { ecommerce: \"Plus\", reason: \"Product limit\" };\n\n  return { site: \"Basic\", reason: \"Sufficient for usage\" };\n}\n```\n\n## Cost Reduction Checklist\n\n- [ ] Read-heavy endpoints use `listItemsLive` (CDN, no rate limit)\n- [ ] Bulk endpoints used for multi-item operations\n- [ ] Collection schemas cached (1-hour TTL minimum)\n- [ ] Polling replaced with webhooks where possible\n- [ ] API usage tracked and monitored\n- [ ] Plan matches actual usage (not over-provisioned)\n- [ ] Unnecessary API calls eliminated (no redundant fetches)\n\n## Output\n\n- CDN-cached reads for published content (free, unlimited)\n- Bulk operations reducing API calls 100x\n- Schema caching eliminating redundant reads\n- Usage monitoring with operation-level tracking\n- Plan right-sizing recommendations\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Unexpected rate limits | Too many staged reads | Switch to live item endpoints |\n| High API call count | No caching | Add LRU or Redis cache |\n| CMS item limit exceeded | Wrong plan | Upgrade plan or archive old items |\n| Polling costs | No webhook setup | Implement webhook-driven updates |\n\n## Resources\n\n- [Webflow Pricing](https://webflow.com/pricing)\n- [Content Delivery API](https://developers.webflow.com/data/docs/working-with-the-cms/content-delivery)\n- [Rate Limits](https://developers.webflow.com/data/reference/rate-limits)\n\n## Next Steps\n\nFor architecture patterns, see `webflow-reference-architecture`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "webflow-cost-tuning",
-    "description": "Optimize Webflow costs through plan selection, CDN read optimization,",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

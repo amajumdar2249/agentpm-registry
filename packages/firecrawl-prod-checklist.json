@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031973",
   "name": "firecrawl-prod-checklist",
   "slug": "firecrawl-prod-checklist",
   "description": "Execute Firecrawl production deployment checklist and rollback procedures.",
   "content": "# Firecrawl Production Checklist\n\n## Overview\n\nPre-deployment validation checklist for applications using Firecrawl's scrape, crawl, map, and extract APIs. Covers credential management, crawl safety limits, error handling, monitoring, and rollback.\n\n## Prerequisites\n\n- Staging environment tested and passing\n- Production API key from [firecrawl.dev/app](https://firecrawl.dev/app)\n- Monitoring infrastructure ready\n\n## Pre-Deployment Checklist\n\n### Credentials & Security\n\n- [ ] Production `FIRECRAWL_API_KEY` in secure vault (not in code or .env)\n- [ ] Key starts with `fc-` and is scoped to production\n- [ ] Different API keys for dev/staging/production\n- [ ] `.env` files in `.gitignore`\n- [ ] Webhook secrets stored securely\n- [ ] Git history scanned for leaked keys\n\n### Crawl Safety\n\n- [ ] All `crawlUrl` calls have `limit` parameter set\n- [ ] `maxDepth` configured to prevent unbounded crawling\n- [ ] `includePaths` / `excludePaths` filters applied where appropriate\n- [ ] Credit budget tracking implemented (daily limit alerts)\n- [ ] No hardcoded URLs in production code\n\n### Error Handling\n\n- [ ] 429 rate limit handling with exponential backoff\n- [ ] 402 credit exhaustion handled gracefully (no crash)\n- [ ] 401 auth failure logged and alerted\n- [ ] Async crawl jobs have timeout with deadline\n- [ ] Fallback from crawl to individual scrape on failure\n- [ ] Empty markdown detection (JS rendering issues)\n\n### Monitoring & Alerting\n\n- [ ] Scrape success/failure rate tracked\n- [ ] Credit consumption monitored\n- [ ] Crawl job completion rate tracked\n- [ ] Alert on credit balance below threshold\n- [ ] Alert on error rate > 5%\n- [ ] Webhook delivery failures logged\n\n## Instructions\n\n### Step 1: Verify API Connectivity\n\n```bash\nset -euo pipefail\n# Test production key\ncurl -s https://api.firecrawl.dev/v1/scrape \\\n  -H \"Authorization: Bearer $FIRECRAWL_API_KEY_PROD\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"url\":\"https://example.com\",\"formats\":[\"markdown\"]}' | jq '.success'\n\n# Check credit balance\ncurl -s https://api.firecrawl.dev/v1/team/credits \\\n  -H \"Authorization: Bearer $FIRECRAWL_API_KEY_PROD\" | jq .\n```\n\n### Step 2: Health Check Endpoint\n\n```typescript\nimport FirecrawlApp from \"@mendable/firecrawl-js\";\n\nconst firecrawl = new FirecrawlApp({\n  apiKey: process.env.FIRECRAWL_API_KEY!,\n});\n\nexport async function healthCheck() {\n  const start = Date.now();\n  try {\n    const result = await firecrawl.scrapeUrl(\"https://example.com\", {\n      formats: [\"markdown\"],\n    });\n    return {\n      status: result.success ? \"healthy\" : \"degraded\",\n      latencyMs: Date.now() - start,\n      hasContent: (result.markdown?.length || 0) > 0,\n    };\n  } catch (error: any) {\n    return {\n      status: \"unhealthy\",\n      latencyMs: Date.now() - start,\n      error: error.statusCode || error.message,\n    };\n  }\n}\n```\n\n### Step 3: Production-Safe Crawl Wrapper\n\n```typescript\nexport async function productionCrawl(url: string, opts: {\n  maxPages: number;\n  paths?: string[];\n  timeout?: number;\n}) {\n  // Hard credit safety \u2014 never exceed configured limit\n  const limit = Math.min(opts.maxPages, 500);\n\n  const job = await firecrawl.asyncCrawlUrl(url, {\n    limit,\n    maxDepth: 3,\n    includePaths: opts.paths,\n    scrapeOptions: { formats: [\"markdown\"], onlyMainContent: true },\n  });\n\n  // Poll with timeout\n  const deadline = Date.now() + (opts.timeout || 600000);\n  let pollInterval = 2000;\n  let status = await firecrawl.checkCrawlStatus(job.id);\n\n  while (status.status === \"scraping\" && Date.now() < deadline) {\n    await new Promise(r => setTimeout(r, pollInterval));\n    pollInterval = Math.min(pollInterval * 1.5, 30000);\n    status = await firecrawl.checkCrawlStatus(job.id);\n  }\n\n  if (status.status !== \"completed\") {\n    throw new Error(`Crawl ${job.id} did not complete: ${status.status}`);\n  }\n  return status;\n}\n```\n\n### Step 4: Rollback Procedure\n\n```bash\nset -euo pipefail\n# Immediate rollback \u2014 disable Firecrawl integration\nkubectl set env deployment/app FIRECRAWL_ENABLED=false\nkubectl rollout restart deployment/app\n\n# Verify rollback\ncurl -s https://app.example.com/health | jq '.services.firecrawl'\n```\n\n## Alerting Rules\n\n| Alert | Condition | Severity |\n|-------|-----------|----------|\n| API unreachable | Health check fails 3x | P1 |\n| Credits < 1000 | Balance check | P2 |\n| Error rate > 5% | 429/5xx rate | P2 |\n| Crawl timeout | Job stuck > 10min | P3 |\n| Auth failure | Any 401 response | P1 |\n\n## Resources\n\n- [Firecrawl Dashboard](https://firecrawl.dev/app)\n- [Firecrawl Rate Limits](https://docs.firecrawl.dev/rate-limits)\n- [Firecrawl API Reference](https://docs.firecrawl.dev/api-reference/introduction)\n\n## Next Steps\n\nFor version upgrades, see `firecrawl-upgrade-migration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "firecrawl-prod-checklist",
-    "description": "Execute Firecrawl production deployment checklist and rollback procedures.",
-    "allowed-tools": "Read, Bash(kubectl:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

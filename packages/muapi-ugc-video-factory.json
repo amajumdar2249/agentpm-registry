@@ -1,14 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000018421",
   "name": "muapi-ugc-video-factory",
   "slug": "muapi-ugc-video-factory",
   "description": "Turn a person photo + a product photo + an optional script into a vertical 9:16 UGC-style video ad. Generates a lifestyle hero image (Nano-Banana Pro Edit), then animates it with native audio using Seedance 2.0 VIP image-to-video.",
   "content": "\n\n# UGC Video Factory\n\n**Turn a person photo + product photo (+ optional script & environment) into a vertical 9:16 UGC-style video ad with native dialogue audio.**\n\nA three-stage pipeline:\n1. **GPT** writes a director-grade ultra-realistic lifestyle photography prompt from your inputs.\n2. **Nano-Banana Pro Edit** fuses the person + product into a single hero photo (1K, 9:16).\n3. **Seedance 2.0 VIP Image-to-Video** animates the hero photo into a 10s vertical UGC clip with synced spoken audio.\n\n## Inputs\n\n| Name | Type | Required | Default | Description |\n|:---|:---|:---|:---|:---|\n| `person` | image_url | yes | \u2014 | Photo of the person who will appear in the ad (face + upper body works best). |\n| `product` | image_url | yes | \u2014 | Clear photo of the product (preferably on neutral background, logo/text legible). |\n| `script` | text | no | `Okay\u2026 first of all, ship happens. And this hat is honestly my favorite. It also comes in navy and black, so you can pick your vibe.` | The exact line the on-screen person will say (kept short \u2014 1\u20132 sentences fit 10s comfortably). |\n| `environment` | text | no | `study room, laptop in front of it` | Scene / context where the person is using the product (e.g. \"bathroom mirror, morning routine\", \"coffee shop window seat\"). |\n\nIf `person` or `product` is missing, ask the user to upload them (`muapi upload file <path>`) or offer to generate placeholders before continuing.\n\n\n## Steps\n\nRun the three steps sequentially \u2014 each step's output feeds the next.\n\n### Step 1 \u2014 Director Prompt (GPT)\n\nUse a GPT model (`gpt-5.1` or whichever chat model is available to the executing agent) with **temperature 0** and **max ~200 tokens** to produce the hero-image prompt.\n\n**System prompt:** `You are a helpful assistant.`\n\n**User prompt** (substitute `{{person}}`, `{{product}}`, `{{environment}}`):\n\n```\nUploaded images are being analyzed. Ultra-realistic lifestyle photography with {{person}} and {{product}} and {{environment}}.\n\nIf the product is wearable (e.g., hat, glasses, hooded sweatshirt), the person wears the product naturally.\n\nIf the product is carried in the hand (e.g., cream, bottle, thermos), the person holds the product naturally.\n\nThe product is clearly visible and is the main focus of the image. The logo or text on the product must be legible.\n\nThe person has a natural and modern look with a minimalist style.\n\nThe scene is consistent with the context of the product's use: {{environment}}.\n\nLighting: soft natural daylight.\nBackground: clean, aesthetic, slightly blurred (shallow depth of field).\nStyle: high-end commercial lifestyle photography, realistic textures, 4K quality, vertical 9:16 composition, social-media advertising style. The background and environment should be appropriate to the product (e.g. a woman with a serum could be at home). The person's facial details and the product must remain unchanged.\n```\n\nCapture the GPT response as `{{step1_prompt}}`.\n\n### Step 2 \u2014 Hero Image (Nano-Banana Pro Edit)\n\nSubmit a `muapi image edit` call against the `nano-banana-pro-edit` model:\n\n- **Reference images** (`image_urls`): `[ {{person}}, {{product}} ]` \u2014 order matters; person first.\n- **Prompt**: `{{step1_prompt}}` from Step 1.\n- **Aspect ratio**: `9:16`\n- **Num images**: `1`\n- **Resolution**: `1K`\n- **Output format**: `jpeg`\n\nCapture the resulting image URL as `{{hero_image}}`. Briefly show it to the user for approval before kicking off the video step.\n\n### Step 3 \u2014 UGC Video (Seedance 2.0 VIP Image-to-Video)\n\nSubmit a `muapi video from-image` call against **`seedance-2-vip-image-to-video`** (or the `-fast` variant if the executing agent wants lower latency).\n\n- **Start image**: `{{hero_image}}` from Step 2.\n- **Aspect ratio**: `9:16`\n- **Duration**: `10` seconds.\n- **Generate audio**: `true` (native dialogue).\n- **CFG scale**: `0.5`\n- **Negative prompt**: `blur, distort, low quality`\n- **Prompt** (substitute `{{script}}`):\n\n```\nCreate a 10-second vertical UGC-style video (9:16).\n\nA person is interacting naturally with their setting and product.\n\nThe product is used naturally:\n- If wearable \u2192 the person is wearing it.\n- If handheld \u2192 the person is holding or applying it.\n\nThe video is a single, uninterrupted shot. No cuts. No color changes. No text on screen.\n\nThe person looks directly at the camera with a relaxed and natural expression.\nThey interact comfortably with the product using their hands (adjusting, holding, pointing).\n\nThey say in a natural, conversational tone:\n\n\"{{script}}\"\n\nSubtle hand gestures while speaking.\nEnd with a small smile or nod.\n\nStyle: authentic UGC, handheld phone feel, light natural movement, soft daylight, shallow depth of field, TikTok/Reels aesthetic.\n```\n\nPoll the result with `muapi predict wait <request_id>` and download to the user's outputs directory.\n\n## Notes\n\n- VIP tier supports 9:16 and durations 4\u201315s; 10s is the sweet spot for a 1\u20132 sentence script.\n- Keep the script short \u2014 Seedance 2.0 will compress longer scripts and clip words.\n- Seedance VIP tolerates realistic human faces in references (unlike Chinese tier), making it the right choice for UGC.\n- If you want lower latency at the same quality, swap to `seedance-2-vip-image-to-video-fast`.\n- For multi-shot ads, generate several `{{hero_image}}` variations in Step 2 and animate each independently \u2014 Seedance VIP does not multi-image i2v at 9:16 + audio.\n\n## Trigger Keywords\n\n`ugc video factory`, `ugc video ad`, `person plus product video`, `talking product ad`, `ugc reel`, `lifestyle product video`, `vertical ugc video`\n\n\n---\n\n## Notes for the Executing Agent\n\n- This recipe is LLM-orchestrated: read each phase, gather any missing inputs from the user, then call `muapi` CLI commands. Run `muapi auth configure` first if `MUAPI_API_KEY` is unset.\n- For local files supplied by the user, upload them first: `muapi upload file <path> --output-json --jq '.url'`.\n- Substitute `{{input_name}}` placeholders with the user's actual inputs before issuing each call.\n- If the `muapi` CLI does not yet alias `nano-banana-pro-edit` or `seedance-2-vip-image-to-video`, fall back to the raw API: `curl -X POST https://api.muapi.ai/api/v1/<endpoint> -H \"x-api-key: $MUAPI_API_KEY\" -H 'content-type: application/json' -d '{...}'`, then poll with `muapi predict wait <request_id>`.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "slug": "muapi-ugc-video-factory",
-    "name": "muapi-ugc-video-factory",
-    "version": "1.0.0",
-    "description": "Turn a person photo + a product photo + an optional script into a vertical 9:16 UGC-style video ad. Generates a lifestyle hero image (Nano-Banana Pro Edit), then animates it with native audio using Seedance 2.0 VIP image-to-video.",
-    "acceptLicenseTerms": "true"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

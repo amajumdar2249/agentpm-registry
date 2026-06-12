@@ -1,15 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000039954",
   "name": "tirith-config",
   "slug": "tirith-config-2",
   "description": "Operate a tirith setup \u2014 the terminal command analyzer guarding against homograph URLs, ANSI injection, and pipe-to-shell exploits. Use when editing ~/.config/tirith/policy.yaml, debugging a blocked command, choosing between allowlist / tirith run / TIRITH=0 bypass, or verifying with tirith doctor.",
   "content": "\n# tirith-config\n\nTirith intercepts shell commands and pasted content to catch homograph URLs (Cyrillic lookalikes, mixed scripts), ANSI escape injection, and `curl | bash`\u2013style pipe-to-shell patterns. This skill encodes operating procedure \u2014 decision logic, verification rituals, and inherent gotchas. The current allowlist and tool version are not encoded here; query them at runtime.\n\n## Operating model\n\nTirith has four moving parts. Treat the live config as source of truth, not memory:\n\n- **Shell hook** \u2014 sourced via `eval \"$(tirith init --shell zsh)\"` in the user's shell profile. This is what wires per-command interception. Hook source files at `~/.local/share/tirith/shell/` are inert until the eval line is added to the profile.\n- **Policy file** \u2014 `~/.config/tirith/policy.yaml` (global) and `.tirith/policy.yaml` (per-project, walks up from cwd). The per-project file wins when present.\n- **Audit log** \u2014 `~/.local/share/tirith/log.jsonl`. Redacted previews, not full commands.\n- **Receipts** \u2014 created by `tirith run <url>`. Verifiable later with `tirith receipt verify <sha256>`.\n\n`tirith doctor` is the canonical health check; it surfaces hook status, policy detection, and bypass mode in one shot.\n\n## Decision tree: a command was blocked\n\nThree responses, each appropriate for a different shape of problem:\n\n1. **Allowlist the hostname** \u2014 only when the vendor is trusted *and* you'll pipe-shell from them repeatedly. Add to `allowlist:` in `~/.config/tirith/policy.yaml`. Reserve for canonical installer domains (e.g., `get.docker.com`, `sh.rustup.rs`). Allowlist only suppresses pipe-shell rules for that exact hostname; content-level checks (homograph, mixed-script, ANSI) still run.\n2. **`tirith run <url>`** \u2014 for one-off installs you want to inspect. Downloads to a temp file, shows SHA256, runs static analysis, opens in a pager for review, executes only after confirmation, and writes a receipt.\n3. **`TIRITH=0 <cmd>` prefix** \u2014 per-command bypass when you've already vetted the script elsewhere or are operating in a known-safe context. The variable only persists for that single command. Disabled if `allow_bypass: false` in policy.\n\nIf none of these fit, the command probably shouldn't run.\n\n## Adding to the allowlist\n\n```yaml\nallowlist:\n  - \"vendor.example.com\"   # one entry per line, exact hostname\n```\n\nHostnames only \u2014 no globs, no path-aware matching. After editing:\n\n```bash\ntirith doctor                                              # confirm policies: still resolves\ntirith check -- curl -fsSL https://vendor.example.com \\| bash  # should exit 0\ntirith check -- curl -fsSL https://vendor-not-listed.com \\| bash  # should still exit 1 with curl_pipe_shell\n```\n\nBoth checks together confirm the allowlist took effect *and* didn't accidentally widen the policy.\n\n## Anti-patterns for the allowlist\n\n- **Don't allowlist broad CDNs.** `raw.githubusercontent.com`, `gist.githubusercontent.com`, `cdn.jsdelivr.net`, `s3.amazonaws.com`, `*.vercel.app` \u2014 anyone can host arbitrary scripts on these. Allowlisting them gives a security tool a wide blind spot. Use `tirith run` or `TIRITH=0` for one-off scripts hosted on shared infrastructure.\n- **Don't allowlist subdomains preemptively.** Add what you actually use, not what you might use someday.\n- **Don't allowlist as a way to silence noise.** If tirith blocks something repeatedly that you don't actually trust, the right move is to stop running that command, not to suppress the warning.\n\n## Verification ritual after any config change\n\nRun all three:\n\n```bash\ntirith doctor                          # hook status: configured / policies: <path>\ntirith check -- <a known-blocked cmd>  # confirm rules still fire\ntirith check -- <an allowlisted cmd>   # confirm allowlist still works\n```\n\n`tirith doctor` alone is not sufficient \u2014 it reports config detection, not rule behavior.\n\n## After a brew upgrade\n\n`brew upgrade tirith` may re-materialize hook source files. The shell profile line stays put, so usually nothing breaks, but verify:\n\n```bash\ntirith --version\ntirith doctor\n```\n\nIf `hook status` ever drops back to `NOT CONFIGURED` after an upgrade, re-run `eval \"$(tirith init --shell zsh)\"` and confirm the profile line is still present. Do not blindly append a duplicate.\n\n## Reading the audit log\n\n```bash\ntail -20 ~/.local/share/tirith/log.jsonl | jq .   # last 20 events\ntirith why                                         # explains last triggered rule\ntirith receipt last                                # last `tirith run` receipt\ntirith receipt list                                # all receipts\n```\n\nThe log only stores redacted command previews \u2014 not full commands, env vars, or file contents. Disable logging entirely with `export TIRITH_LOG=0`.\n\n## Per-project policies\n\nFor client work where defaults differ from the global config, drop a `.tirith/policy.yaml` at the project root. Tirith walks up from the current directory and uses the first match, so the per-project file fully overrides the global one \u2014 it doesn't merge. Re-declare any global allowlist entries the project also needs.\n\n## Inherent gotchas\n\n- **Profile edits affect new shells only.** After modifying the shell profile, open a fresh terminal tab or `source ~/.zshrc`. The current shell will not pick up the change.\n- **`tirith check -- <cmd>`** \u2014 the `--` is required. Without it, flags on `<cmd>` (e.g., `-sSL`) get parsed as tirith's own flags.\n- **Shell quoting matters in `tirith check`.** Pipe characters and parens need escaping (`\\|`, `\\(`) since the command is parsed by your shell first.\n- **`fail_mode: open`** allows commands through when tirith itself errors internally. Use `fail_mode: closed` only in environments where blocking on parser errors is acceptable.\n- **License key absence is normal.** OSS rules work without one; only paid features (e.g., team audit) require activation.\n\n## What this skill deliberately does not encode\n\n- **The current allowlist contents** \u2014 read `~/.config/tirith/policy.yaml` directly.\n- **The current tirith version** \u2014 `tirith --version`.\n- **Whether the hook is currently configured** \u2014 `tirith doctor`.\n- **Specific zshrc line text** \u2014 `tirith init --shell zsh` always prints the current correct line; pipe its output rather than copy-pasting from anywhere.\n\nThe skill is a stable operating manual. Live state is queried at runtime.\n",
+  "author": "nweii",
   "version": "1.0.0",
-  "metadata": {
-    "name": "tirith-config",
-    "description": "Operate a tirith setup \u2014 the terminal command analyzer guarding against homograph URLs, ANSI injection, and pipe-to-shell exploits. Use when editing ~/.config/tirith/policy.yaml, debugging a blocked command, choosing between allowlist / tirith run / TIRITH=0 bypass, or verifying with tirith doctor.",
-    "metadata": "",
-    "author": "nweii",
-    "version": "1.0.0",
-    "internal": "true"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

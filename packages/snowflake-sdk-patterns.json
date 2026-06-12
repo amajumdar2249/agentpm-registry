@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033301",
   "name": "snowflake-sdk-patterns",
   "slug": "snowflake-sdk-patterns",
   "description": "Apply production-ready Snowflake SDK patterns for snowflake-sdk and",
   "content": "# Snowflake SDK Patterns\n\n## Overview\n\nProduction-ready patterns for `snowflake-sdk` (Node.js) and `snowflake-connector-python` using real driver APIs.\n\n## Prerequisites\n\n- Completed `snowflake-install-auth` setup\n- Understanding of callback-to-promise conversion patterns\n- Familiarity with Snowflake's callback-based Node.js API\n\n## Instructions\n\n### Step 1: Connection Pool (Node.js)\n\n```typescript\n// src/snowflake/pool.ts\nimport snowflake from 'snowflake-sdk';\n\ninterface PoolConfig {\n  max: number;\n  idleTimeoutMs: number;\n}\n\nclass SnowflakePool {\n  private pool: snowflake.Connection[] = [];\n  private available: snowflake.Connection[] = [];\n  private waiting: ((conn: snowflake.Connection) => void)[] = [];\n  private config: PoolConfig;\n\n  constructor(\n    private connConfig: snowflake.ConnectionOptions,\n    config: Partial<PoolConfig> = {}\n  ) {\n    this.config = { max: 10, idleTimeoutMs: 60000, ...config };\n  }\n\n  async acquire(): Promise<snowflake.Connection> {\n    // Return available connection\n    if (this.available.length > 0) {\n      return this.available.pop()!;\n    }\n    // Create new if under limit\n    if (this.pool.length < this.config.max) {\n      const conn = snowflake.createConnection(this.connConfig);\n      await new Promise<void>((resolve, reject) => {\n        conn.connect((err) => (err ? reject(err) : resolve()));\n      });\n      this.pool.push(conn);\n      return conn;\n    }\n    // Wait for one to become available\n    return new Promise((resolve) => {\n      this.waiting.push(resolve);\n    });\n  }\n\n  release(conn: snowflake.Connection): void {\n    if (this.waiting.length > 0) {\n      const next = this.waiting.shift()!;\n      next(conn);\n    } else {\n      this.available.push(conn);\n    }\n  }\n\n  async withConnection<T>(fn: (conn: snowflake.Connection) => Promise<T>): Promise<T> {\n    const conn = await this.acquire();\n    try {\n      return await fn(conn);\n    } finally {\n      this.release(conn);\n    }\n  }\n}\n\n// Singleton pool\nexport const pool = new SnowflakePool({\n  account: process.env.SNOWFLAKE_ACCOUNT!,\n  username: process.env.SNOWFLAKE_USER!,\n  password: process.env.SNOWFLAKE_PASSWORD!,\n  warehouse: process.env.SNOWFLAKE_WAREHOUSE || 'COMPUTE_WH',\n  database: process.env.SNOWFLAKE_DATABASE!,\n  schema: process.env.SNOWFLAKE_SCHEMA || 'PUBLIC',\n});\n```\n\n### Step 2: Promise-Based Query Helper\n\n```typescript\n// src/snowflake/query.ts\nimport snowflake from 'snowflake-sdk';\n\ninterface QueryResult<T = Record<string, any>> {\n  rows: T[];\n  statement: snowflake.Statement;\n  sqlText: string;\n}\n\nexport function query<T = Record<string, any>>(\n  conn: snowflake.Connection,\n  sqlText: string,\n  binds?: snowflake.Binds\n): Promise<QueryResult<T>> {\n  return new Promise((resolve, reject) => {\n    conn.execute({\n      sqlText,\n      binds,\n      complete: (err, stmt, rows) => {\n        if (err) {\n          reject(Object.assign(err, { sqlText }));\n        } else {\n          resolve({ rows: (rows || []) as T[], statement: stmt, sqlText });\n        }\n      },\n    });\n  });\n}\n\n// Multi-statement execution\nexport async function multiQuery(\n  conn: snowflake.Connection,\n  statements: string[]\n): Promise<QueryResult[]> {\n  const results: QueryResult[] = [];\n  for (const sql of statements) {\n    results.push(await query(conn, sql));\n  }\n  return results;\n}\n```\n\n### Step 3: Streaming for Large Result Sets\n\n```typescript\n// src/snowflake/stream.ts\nexport async function* streamQuery<T = Record<string, any>>(\n  conn: snowflake.Connection,\n  sqlText: string,\n  binds?: snowflake.Binds\n): AsyncGenerator<T> {\n  const stmt = await new Promise<snowflake.Statement>((resolve, reject) => {\n    conn.execute({\n      sqlText,\n      binds,\n      streamResult: true,\n      complete: (err, stmt) => {\n        if (err) reject(err);\n        else resolve(stmt);\n      },\n    });\n  });\n\n  const stream = stmt.streamRows();\n  for await (const row of stream) {\n    yield row as T;\n  }\n}\n\n// Usage: process millions of rows without memory pressure\n// for await (const row of streamQuery(conn, 'SELECT * FROM big_table')) {\n//   await processRow(row);\n// }\n```\n\n### Step 4: Python Context Manager Pattern\n\n```python\n# src/snowflake_pool.py\nimport snowflake.connector\nfrom contextlib import contextmanager\nfrom typing import Generator, Any\n\nclass SnowflakePool:\n    def __init__(self, **conn_params):\n        self._params = conn_params\n\n    @contextmanager\n    def connection(self) -> Generator[snowflake.connector.SnowflakeConnection, None, None]:\n        conn = snowflake.connector.connect(**self._params)\n        try:\n            yield conn\n        finally:\n            conn.close()\n\n    @contextmanager\n    def cursor(self) -> Generator[snowflake.connector.cursor.SnowflakeCursor, None, None]:\n        with self.connection() as conn:\n            cur = conn.cursor()\n            try:\n                yield cur\n            finally:\n                cur.close()\n\n    def execute(self, sql: str, params: tuple = ()) -> list[dict[str, Any]]:\n        with self.cursor() as cur:\n            cur.execute(sql, params)\n            columns = [desc[0] for desc in cur.description] if cur.description else []\n            return [dict(zip(columns, row)) for row in cur.fetchall()]\n\n    def execute_many(self, sql: str, params_list: list[tuple]) -> int:\n        \"\"\"Batch insert \u2014 much faster than individual inserts.\"\"\"\n        with self.cursor() as cur:\n            cur.executemany(sql, params_list)\n            return cur.rowcount\n\n# Usage\npool = SnowflakePool(\n    account=os.environ['SNOWFLAKE_ACCOUNT'],\n    user=os.environ['SNOWFLAKE_USER'],\n    password=os.environ['SNOWFLAKE_PASSWORD'],\n    warehouse='COMPUTE_WH',\n    database='MY_DB',\n    schema='PUBLIC',\n)\n\nusers = pool.execute(\"SELECT * FROM users WHERE status = %s\", ('active',))\n```\n\n### Step 5: Error Handling Wrapper\n\n```typescript\n// src/snowflake/errors.ts\nexport class SnowflakeQueryError extends Error {\n  constructor(\n    message: string,\n    public readonly sqlState: string,\n    public readonly code: number,\n    public readonly sqlText: string,\n    public readonly retryable: boolean\n  ) {\n    super(message);\n    this.name = 'SnowflakeQueryError';\n  }\n}\n\nconst RETRYABLE_CODES = new Set([\n  390114, // Connection token expired \u2014 reconnect\n  390503, // Service unavailable\n]);\n\nexport async function safeQuery<T>(\n  conn: snowflake.Connection,\n  sqlText: string,\n  binds?: snowflake.Binds,\n  maxRetries = 3\n): Promise<T[]> {\n  for (let attempt = 1; attempt <= maxRetries; attempt++) {\n    try {\n      const { rows } = await query<T>(conn, sqlText, binds);\n      return rows;\n    } catch (err: any) {\n      const retryable = RETRYABLE_CODES.has(err.code);\n      if (!retryable || attempt === maxRetries) {\n        throw new SnowflakeQueryError(\n          err.message, err.sqlState, err.code, sqlText, retryable\n        );\n      }\n      const delay = 1000 * Math.pow(2, attempt - 1);\n      await new Promise((r) => setTimeout(r, delay));\n    }\n  }\n  throw new Error('Unreachable');\n}\n```\n\n## Error Handling\n\n| Pattern | Use Case | Benefit |\n|---------|----------|---------|\n| Connection pool | High concurrency apps | Reuses connections, prevents exhaustion |\n| Promise wrapper | All Node.js code | Clean async/await instead of callbacks |\n| Streaming | Large result sets (>100K rows) | Constant memory usage |\n| Context manager | All Python code | Guarantees connection cleanup |\n| Retry with backoff | Transient failures | Handles token expiry, service blips |\n\n## Resources\n\n- [Node.js Driver Execute](https://docs.snowflake.com/en/developer-guide/node-js/nodejs-driver-execute)\n- [Node.js Consuming Results](https://docs.snowflake.com/en/developer-guide/node-js/nodejs-driver-consume)\n- [Python Connector API](https://docs.snowflake.com/en/developer-guide/python-connector/python-connector-api)\n\n## Next Steps\n\nApply patterns in `snowflake-core-workflow-a` for real-world data pipeline usage.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "snowflake-sdk-patterns",
-    "description": "Apply production-ready Snowflake SDK patterns for snowflake-sdk and",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032386",
   "name": "klingai-batch-processing",
   "slug": "klingai-batch-processing",
   "description": "Process multiple video generation requests efficiently with Kling AI.",
   "content": "# Kling AI Batch Processing\n\n## Overview\n\nGenerate multiple videos efficiently using controlled parallelism, rate-limit-aware submission, progress tracking, and result collection. All requests go through `https://api.klingai.com/v1`.\n\n## Batch Submission with Rate Limiting\n\n```python\nimport jwt, time, os, requests\n\nBASE = \"https://api.klingai.com/v1\"\n\ndef get_headers():\n    ak, sk = os.environ[\"KLING_ACCESS_KEY\"], os.environ[\"KLING_SECRET_KEY\"]\n    token = jwt.encode(\n        {\"iss\": ak, \"exp\": int(time.time()) + 1800, \"nbf\": int(time.time()) - 5},\n        sk, algorithm=\"HS256\", headers={\"alg\": \"HS256\", \"typ\": \"JWT\"}\n    )\n    return {\"Authorization\": f\"Bearer {token}\", \"Content-Type\": \"application/json\"}\n\ndef submit_batch(prompts, model=\"kling-v2-master\", duration=\"5\",\n                 mode=\"standard\", max_concurrent=3, delay=2.0):\n    \"\"\"Submit batch with controlled concurrency and pacing.\"\"\"\n    tasks = []\n    active = []\n\n    for i, prompt in enumerate(prompts):\n        # Wait if at concurrency limit\n        while len(active) >= max_concurrent:\n            active = [t for t in active if not check_complete(t[\"task_id\"])]\n            if len(active) >= max_concurrent:\n                time.sleep(5)\n\n        response = requests.post(f\"{BASE}/videos/text2video\", headers=get_headers(), json={\n            \"model_name\": model,\n            \"prompt\": prompt,\n            \"duration\": duration,\n            \"mode\": mode,\n        })\n        data = response.json()[\"data\"]\n        task = {\"task_id\": data[\"task_id\"], \"prompt\": prompt, \"index\": i}\n        tasks.append(task)\n        active.append(task)\n        print(f\"[{i+1}/{len(prompts)}] Submitted: {data['task_id']}\")\n        time.sleep(delay)  # pace requests\n\n    return tasks\n\ndef check_complete(task_id):\n    r = requests.get(f\"{BASE}/videos/text2video/{task_id}\", headers=get_headers()).json()\n    return r[\"data\"][\"task_status\"] in (\"succeed\", \"failed\")\n```\n\n## Collect Results\n\n```python\ndef collect_results(tasks, timeout=600):\n    \"\"\"Wait for all tasks and collect results.\"\"\"\n    results = {}\n    start = time.monotonic()\n\n    while len(results) < len(tasks) and time.monotonic() - start < timeout:\n        for task in tasks:\n            if task[\"task_id\"] in results:\n                continue\n            r = requests.get(\n                f\"{BASE}/videos/text2video/{task['task_id']}\", headers=get_headers()\n            ).json()\n            status = r[\"data\"][\"task_status\"]\n            if status == \"succeed\":\n                results[task[\"task_id\"]] = {\n                    \"status\": \"succeed\",\n                    \"url\": r[\"data\"][\"task_result\"][\"videos\"][0][\"url\"],\n                    \"prompt\": task[\"prompt\"],\n                }\n            elif status == \"failed\":\n                results[task[\"task_id\"]] = {\n                    \"status\": \"failed\",\n                    \"error\": r[\"data\"].get(\"task_status_msg\", \"Unknown\"),\n                    \"prompt\": task[\"prompt\"],\n                }\n        if len(results) < len(tasks):\n            time.sleep(15)\n\n    return results\n```\n\n## Async Batch with asyncio\n\n```python\nimport asyncio\nimport aiohttp\n\nasync def async_batch(prompts, max_concurrent=3):\n    \"\"\"Async batch processing with semaphore-controlled concurrency.\"\"\"\n    semaphore = asyncio.Semaphore(max_concurrent)\n    results = {}\n\n    async def generate_one(prompt, index):\n        async with semaphore:\n            async with aiohttp.ClientSession() as session:\n                # Submit\n                async with session.post(\n                    f\"{BASE}/videos/text2video\",\n                    headers=get_headers(),\n                    json={\"model_name\": \"kling-v2-master\", \"prompt\": prompt,\n                          \"duration\": \"5\", \"mode\": \"standard\"},\n                ) as resp:\n                    data = (await resp.json())[\"data\"]\n                    task_id = data[\"task_id\"]\n\n                # Poll\n                while True:\n                    await asyncio.sleep(10)\n                    async with session.get(\n                        f\"{BASE}/videos/text2video/{task_id}\",\n                        headers=get_headers(),\n                    ) as resp:\n                        data = (await resp.json())[\"data\"]\n                        if data[\"task_status\"] == \"succeed\":\n                            results[index] = data[\"task_result\"][\"videos\"][0][\"url\"]\n                            return\n                        elif data[\"task_status\"] == \"failed\":\n                            results[index] = f\"FAILED: {data.get('task_status_msg')}\"\n                            return\n\n    await asyncio.gather(*[generate_one(p, i) for i, p in enumerate(prompts)])\n    return results\n```\n\n## Batch with Callbacks (No Polling)\n\n```python\ndef submit_batch_with_callbacks(prompts, callback_url):\n    \"\"\"Submit batch with webhook callbacks -- no polling needed.\"\"\"\n    tasks = []\n    for prompt in prompts:\n        r = requests.post(f\"{BASE}/videos/text2video\", headers=get_headers(), json={\n            \"model_name\": \"kling-v2-master\",\n            \"prompt\": prompt,\n            \"duration\": \"5\",\n            \"mode\": \"standard\",\n            \"callback_url\": callback_url,\n        }).json()\n        tasks.append(r[\"data\"][\"task_id\"])\n        time.sleep(2)  # rate limit pacing\n    return tasks\n```\n\n## Cost Estimation Before Batch\n\n```python\ndef estimate_batch_cost(count, duration=5, mode=\"standard\", audio=False):\n    credits_map = {(5, \"standard\"): 10, (5, \"professional\"): 35,\n                   (10, \"standard\"): 20, (10, \"professional\"): 70}\n    per_video = credits_map.get((duration, mode), 10)\n    if audio:\n        per_video *= 5\n    total = count * per_video\n    print(f\"Batch: {count} videos x {per_video} credits = {total} credits\")\n    print(f\"Estimated cost: ${total * 0.14:.2f}\")\n    return total\n\n# Check before submitting\nneeded = estimate_batch_cost(50, duration=5, mode=\"standard\")\n```\n\n## Resources\n\n- [API Reference](https://app.klingai.com/global/dev/document-api/apiReference/model/textToVideo)\n- [Developer Portal](https://app.klingai.com/global/dev)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "klingai-batch-processing",
-    "description": "Process multiple video generation requests efficiently with Kling AI.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

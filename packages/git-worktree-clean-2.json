@@ -1,14 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000028497",
   "name": "git-worktree-clean",
   "slug": "git-worktree-clean-2",
   "description": "Clean up stale git worktrees with merged branch detection and disk usage report",
   "content": "\n# Git Worktree Clean\n\nBatch cleanup of stale git worktrees. Safely removes merged branches, reports disk usage, and handles unmerged branches interactively.\n\n**Core principle:** Auto-clean merged worktrees, interactive review for unmerged, always report what was reclaimed.\n\n**Part of:** [Worktree Lifecycle Suite](./git-worktree.md) | [`/git-worktree`](./git-worktree.md) | [`/git-worktree-status`](./git-worktree-status.md) | [`/git-worktree-remove`](./git-worktree-remove.md)\n\n## Process\n\n1. **List All Worktrees**: `git worktree list`\n2. **Classify Each**: merged vs unmerged vs protected\n3. **Calculate Disk Usage**: Per-worktree size\n4. **Auto Mode**: Remove all merged worktrees (safe)\n5. **Interactive Mode**: Review unmerged worktrees one by one\n6. **Database Cleanup Reminder**: List DB branches to clean\n7. **Report**: Summary of actions taken and space reclaimed\n\n## Flags\n\n| Flag | Effect |\n|------|--------|\n| `--dry-run` | Preview what would be cleaned, no changes |\n| `--all` | Include unmerged worktrees (interactive confirmation each) |\n| `--force` | Remove all worktrees without confirmation (dangerous) |\n\n## Worktree Discovery\n\n```bash\n# Get main branch name\nMAIN_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')\nMAIN_BRANCH=${MAIN_BRANCH:-main}\n\n# Protected branches (never auto-clean)\nPROTECTED=\"main master develop staging production\"\n\n# List all worktrees (skip main working tree)\ngit worktree list --porcelain | while read line; do\n  # Parse worktree path and branch\n  # Skip the main worktree (first entry)\ndone\n```\n\n## Classification\n\n```bash\nfor WORKTREE in $WORKTREES; do\n  BRANCH=$(git -C \"$WORKTREE\" rev-parse --abbrev-ref HEAD)\n\n  # Skip protected\n  if echo \"$PROTECTED\" | grep -qw \"$BRANCH\"; then\n    echo \"PROTECTED: $BRANCH (skipped)\"\n    continue\n  fi\n\n  # Check merge status\n  if git merge-base --is-ancestor \"$BRANCH\" \"$MAIN_BRANCH\" 2>/dev/null; then\n    echo \"MERGED: $BRANCH \u2192 safe to remove\"\n    MERGED_LIST=\"$MERGED_LIST $WORKTREE\"\n  else\n    echo \"UNMERGED: $BRANCH \u2192 requires review\"\n    UNMERGED_LIST=\"$UNMERGED_LIST $WORKTREE\"\n  fi\ndone\n```\n\n## Disk Usage Calculation\n\n```bash\nfor WORKTREE in $ALL_WORKTREES; do\n  # Calculate size excluding symlinked node_modules\n  SIZE=$(du -sh --exclude='node_modules' \"$WORKTREE\" 2>/dev/null | cut -f1)\n  # Or on macOS:\n  SIZE=$(du -sh -I 'node_modules' \"$WORKTREE\" 2>/dev/null | cut -f1)\n  echo \"  $WORKTREE: $SIZE\"\ndone\n```\n\n## Dry Run Mode\n\n```bash\n# --dry-run: show what would happen without making changes\n\necho \"=== Dry Run ===\"\necho \"\"\necho \"Would remove (merged):\"\nfor WT in $MERGED_LIST; do\n  echo \"  $WT ($BRANCH) - $SIZE\"\ndone\necho \"\"\necho \"Would ask about (unmerged):\"\nfor WT in $UNMERGED_LIST; do\n  echo \"  $WT ($BRANCH) - $SIZE - last commit: $(git log -1 --format='%s' $BRANCH)\"\ndone\necho \"\"\necho \"Total space to reclaim: $TOTAL_SIZE\"\necho \"\"\necho \"Run without --dry-run to execute.\"\n```\n\n## Auto Mode (Default)\n\n**Only removes merged worktrees. Safe by default.**\n\n```bash\necho \"Cleaning merged worktrees...\"\n\nfor WORKTREE in $MERGED_LIST; do\n  BRANCH=$(git -C \"$WORKTREE\" rev-parse --abbrev-ref HEAD)\n\n  # Remove worktree\n  git worktree remove \"$WORKTREE\"\n\n  # Delete local branch\n  git branch -d \"$BRANCH\" 2>/dev/null\n\n  # Delete remote branch\n  git push origin --delete \"$BRANCH\" 2>/dev/null\n\n  echo \"  Removed: $WORKTREE ($BRANCH)\"\ndone\n\n# Report unmerged (not touched)\nif [ -n \"$UNMERGED_LIST\" ]; then\n  echo \"\"\n  echo \"Unmerged worktrees (kept):\"\n  for WT in $UNMERGED_LIST; do\n    echo \"  $WT - use /git-worktree-remove or --all to review\"\n  done\nfi\n```\n\n## Interactive Mode (--all)\n\n**Reviews unmerged worktrees one by one:**\n\n```bash\nfor WORKTREE in $UNMERGED_LIST; do\n  BRANCH=$(git -C \"$WORKTREE\" rev-parse --abbrev-ref HEAD)\n  LAST_COMMIT=$(git log -1 --format='%h %s (%cr)' \"$BRANCH\")\n  AHEAD=$(git rev-list --count \"$MAIN_BRANCH\"..\"$BRANCH\")\n\n  echo \"\"\n  echo \"Unmerged: $WORKTREE\"\n  echo \"  Branch: $BRANCH ($AHEAD commits ahead of $MAIN_BRANCH)\"\n  echo \"  Last commit: $LAST_COMMIT\"\n  echo \"  Size: $SIZE\"\n  echo \"\"\n  echo \"  [r]emove  [k]eep  [s]kip remaining\"\n\n  # Wait for user decision per worktree\ndone\n```\n\n## Report Format\n\n**After cleanup:**\n\n```\n=== Worktree Cleanup Report ===\n\nRemoved (merged):\n  .worktrees/feat/auth (feat/auth) - 2.3 MB\n  .worktrees/fix/login-bug (fix/login-bug) - 1.1 MB\n  .worktrees/chore/deps-update (chore/deps-update) - 0.8 MB\n\nKept (unmerged):\n  .worktrees/feat/experimental (feat/experimental) - 4.2 MB\n    Last commit: a1b2c3d \"WIP: new auth flow\" (3 days ago)\n\nKept (protected):\n  .worktrees/develop (develop)\n\nSpace reclaimed: 4.2 MB\nWorktrees remaining: 2\nReferences pruned: yes\n\nDB branches to clean:\n  neonctl branches delete feat-auth\n  neonctl branches delete fix-login-bug\n  neonctl branches delete chore-deps-update\n```\n\n**Dry run report:**\n\n```\n=== Dry Run - No Changes Made ===\n\nWould remove (3 merged):\n  .worktrees/feat/auth - 2.3 MB\n  .worktrees/fix/login-bug - 1.1 MB\n  .worktrees/chore/deps-update - 0.8 MB\n\nWould keep (1 unmerged):\n  .worktrees/feat/experimental - 4.2 MB\n\nWould keep (1 protected):\n  .worktrees/develop\n\nPotential space savings: 4.2 MB\n```\n\n## Quick Reference\n\n| Situation | Action |\n|-----------|--------|\n| Default (no flags) | Remove merged worktrees only |\n| `--dry-run` | Preview without changes |\n| `--all` | Merged (auto) + unmerged (interactive) |\n| `--force` | Remove everything except protected |\n| Protected branch | Always kept |\n| Merged branch | Auto-removed |\n| Unmerged branch | Kept (default) or interactive (--all) |\n| DB branches detected | Reminder with exact commands |\n\n## Common Mistakes\n\n**Running `--force` without `--dry-run` first**\n- Always preview with `--dry-run` before force-cleaning\n\n**Forgetting DB branch cleanup**\n- Worktree cleanup doesn't auto-delete DB branches. Follow the reminder commands.\n\n**Not running cleanup regularly**\n- Stale worktrees accumulate disk space. Run `/git-worktree-clean --dry-run` weekly.\n\n## Usage\n\n```\n/git-worktree-clean\n/git-worktree-clean --dry-run\n/git-worktree-clean --all\n```\n\nFlags: $ARGUMENTS",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "git-worktree-clean",
-    "description": "Clean up stale git worktrees with merged branch detection and disk usage report",
-    "argument-hint": "[--dry-run]",
-    "effort": "low",
-    "disable-model-invocation": "true"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031670",
   "name": "coreweave-deploy-integration",
   "slug": "coreweave-deploy-integration",
   "description": "Deploy inference services on CoreWeave with Helm charts and Kustomize.",
   "content": "# CoreWeave Deploy Integration\n\n## Overview\n\nDeploy GPU-accelerated inference services on CoreWeave Kubernetes (CKS). This skill covers containerizing inference workloads with NVIDIA CUDA base images, configuring GPU resource limits and node affinity for A100/H100 scheduling, setting up health checks that validate GPU availability and model loading, and executing rolling updates that respect GPU node draining. CoreWeave's scheduler requires explicit GPU resource requests to place pods on the correct hardware tier.\n\n## Docker Configuration\n\n```dockerfile\nFROM nvidia/cuda:12.4.0-runtime-ubuntu22.04 AS base\nRUN apt-get update && apt-get install -y --no-install-recommends \\\n    python3 python3-pip curl && rm -rf /var/lib/apt/lists/*\nWORKDIR /app\nCOPY requirements.txt ./\nRUN pip3 install --no-cache-dir -r requirements.txt\n\nFROM base\nRUN groupadd -r app && useradd -r -g app app\nCOPY --chown=app:app src/ ./src/\nCOPY --chown=app:app models/ ./models/\nUSER app\nEXPOSE 8080\nHEALTHCHECK --interval=30s --timeout=10s --retries=3 \\\n  CMD curl -f http://localhost:8080/health || exit 1\nCMD [\"python3\", \"src/server.py\"]\n```\n\n## Environment Variables\n\n```bash\nexport COREWEAVE_API_KEY=\"cw_xxxxxxxxxxxx\"\nexport COREWEAVE_NAMESPACE=\"tenant-my-org\"\nexport MODEL_NAME=\"meta-llama/Llama-3.1-8B-Instruct\"\nexport GPU_TYPE=\"A100_PCIE_80GB\"\nexport GPU_COUNT=\"1\"\nexport LOG_LEVEL=\"info\"\nexport PORT=\"8080\"\n```\n\n## Health Check Endpoint\n\n```typescript\nimport express from 'express';\nimport { execSync } from 'child_process';\n\nconst app = express();\n\napp.get('/health', async (req, res) => {\n  try {\n    const gpuInfo = execSync('nvidia-smi --query-gpu=name,memory.used --format=csv,noheader').toString().trim();\n    const modelLoaded = globalThis.modelReady === true;\n    if (!modelLoaded) throw new Error('Model not loaded');\n    res.json({ status: 'healthy', gpu: gpuInfo, model: process.env.MODEL_NAME, timestamp: new Date().toISOString() });\n  } catch (error) {\n    res.status(503).json({ status: 'unhealthy', error: (error as Error).message });\n  }\n});\n```\n\n## Deployment Steps\n\n### Step 1: Build\n\n```bash\ndocker build -t registry.coreweave.com/my-org/inference-svc:latest .\ndocker push registry.coreweave.com/my-org/inference-svc:latest\n```\n\n### Step 2: Run\n\n```yaml\n# k8s/deployment.yaml\nresources:\n  limits:\n    nvidia.com/gpu: 1\n    cpu: \"4\"\n    memory: \"48Gi\"\nnodeSelector:\n  gpu.nvidia.com/class: A100_PCIE_80GB\n```\n\n```bash\nkubectl apply -f k8s/deployment.yaml -n tenant-my-org\n```\n\n### Step 3: Verify\n\n```bash\nkubectl get pods -n tenant-my-org -l app=inference-svc\ncurl -s http://inference-svc.tenant-my-org.svc.cluster.local:8080/health | jq .\n```\n\n### Step 4: Rolling Update\n\n```bash\nkubectl set image deployment/inference-svc \\\n  inference=registry.coreweave.com/my-org/inference-svc:v2 \\\n  -n tenant-my-org\nkubectl rollout status deployment/inference-svc -n tenant-my-org --timeout=600s\n```\n\n## Error Handling\n\n| Issue | Cause | Fix |\n|-------|-------|-----|\n| `Pending` pod stuck | No GPU nodes available for requested type | Check `kubectl describe node` for allocatable GPUs or switch GPU tier |\n| `OOMKilled` | Model exceeds GPU memory | Reduce model size, enable quantization, or request larger GPU |\n| `nvidia-smi` not found | Missing NVIDIA device plugin | Verify CoreWeave namespace has GPU operator installed |\n| `401 Unauthorized` | Invalid API key or expired credentials | Regenerate key in CoreWeave dashboard |\n| Slow rolling update | GPU nodes take time to drain | Set `terminationGracePeriodSeconds: 300` in deployment spec |\n\n## Resources\n\n- [CoreWeave CKS Docs](https://docs.coreweave.com/docs/products/cks)\n- [CoreWeave GPU Types](https://docs.coreweave.com/docs/products/compute/gpu)\n\n## Next Steps\n\nSee `coreweave-webhooks-events`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "coreweave-deploy-integration",
-    "description": "Deploy inference services on CoreWeave with Helm charts and Kustomize.",
-    "allowed-tools": "Read, Write, Edit, Bash(helm:*), Bash(kubectl:*), Bash(kustomize:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

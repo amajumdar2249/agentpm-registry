@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033275",
   "name": "snowflake-advanced-troubleshooting",
   "slug": "snowflake-advanced-troubleshooting",
   "description": "Apply advanced Snowflake debugging with query profiling, spill analysis,",
   "content": "# Snowflake Advanced Troubleshooting\n\n## Overview\n\nDeep debugging techniques for complex Snowflake issues: query profile analysis, spill detection, lock contention, transaction conflicts, and metadata operation bottlenecks.\n\n## Instructions\n\n### Step 1: Query Profile Deep Dive\n\n```sql\n-- Get detailed execution stats for a specific query\nSELECT *\nFROM TABLE(GET_QUERY_OPERATOR_STATS('<query_id>'));\n\n-- Key operators to look for:\n-- TableScan: Check partitions_scanned vs partitions_total\n-- Sort: Check spilling_to_local_storage, spilling_to_remote_storage\n-- Join: Check type (broadcast vs hash), probe/build side sizes\n-- Aggregate: Check if grouping cardinality causes spill\n\n-- Identify queries with excessive spilling\nSELECT query_id, query_text,\n       bytes_spilled_to_local_storage / 1e9 AS local_spill_gb,\n       bytes_spilled_to_remote_storage / 1e9 AS remote_spill_gb,\n       total_elapsed_time / 1000 AS seconds,\n       warehouse_size\nFROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY\nWHERE (bytes_spilled_to_local_storage > 0 OR bytes_spilled_to_remote_storage > 0)\n  AND start_time >= DATEADD(hours, -24, CURRENT_TIMESTAMP())\nORDER BY bytes_spilled_to_remote_storage DESC\nLIMIT 20;\n\n-- Remote spill = warehouse too small for the query\n-- Fix: Scale up warehouse or optimize query to reduce intermediate data\n```\n\n### Step 2: Lock and Transaction Contention\n\n```sql\n-- Find blocked/waiting queries\nSELECT query_id, query_text, blocked_query_id,\n       DATEDIFF('second', start_time, CURRENT_TIMESTAMP()) AS wait_seconds,\n       user_name, warehouse_name\nFROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY\nWHERE execution_status = 'BLOCKED'\n  AND start_time >= DATEADD(minutes, -30, CURRENT_TIMESTAMP());\n\n-- Find long-running transactions (holding locks)\nSELECT *\nFROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY\nWHERE execution_status = 'RUNNING'\n  AND DATEDIFF('minute', start_time, CURRENT_TIMESTAMP()) > 30\nORDER BY start_time;\n\n-- Kill a blocking query\nSELECT SYSTEM$CANCEL_QUERY('<blocking_query_id>');\n\n-- Common lock scenarios:\n-- DDL on table blocks DML (ALTER TABLE blocks INSERT)\n-- Concurrent MERGE on same table \u2192 serialization\n-- Long COPY INTO blocks other COPY INTO on same table\n```\n\n### Step 3: Metadata Operation Analysis\n\n```sql\n-- Cloud services credit spike (metadata-heavy operations)\nSELECT DATE_TRUNC('hour', start_time) AS hour,\n       SUM(credits_used_cloud_services) AS cloud_credits,\n       COUNT(*) AS query_count,\n       SUM(credits_used_cloud_services) / NULLIF(COUNT(*), 0) AS credits_per_query\nFROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY\nWHERE start_time >= DATEADD(hours, -24, CURRENT_TIMESTAMP())\n  AND credits_used_cloud_services > 0\nGROUP BY hour\nORDER BY cloud_credits DESC;\n\n-- Excessive metadata queries (SHOW, DESCRIBE, INFORMATION_SCHEMA)\nSELECT query_type, COUNT(*) AS count,\n       AVG(total_elapsed_time) AS avg_ms\nFROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY\nWHERE start_time >= DATEADD(hours, -24, CURRENT_TIMESTAMP())\n  AND query_type IN ('SHOW', 'DESCRIBE', 'GET_DDL')\nGROUP BY query_type\nORDER BY count DESC;\n-- If very high, consider caching INFORMATION_SCHEMA results in your app\n```\n\n### Step 4: Partition Pruning Analysis\n\n```sql\n-- Queries scanning too many partitions (candidate for clustering)\nSELECT query_id,\n       SUBSTR(query_text, 1, 200) AS query_preview,\n       partitions_scanned,\n       partitions_total,\n       ROUND(partitions_scanned * 100.0 / NULLIF(partitions_total, 0), 1) AS scan_pct,\n       bytes_scanned / 1e9 AS gb_scanned,\n       total_elapsed_time / 1000 AS seconds\nFROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY\nWHERE partitions_total > 100\n  AND partitions_scanned > partitions_total * 0.5\n  AND start_time >= DATEADD(hours, -24, CURRENT_TIMESTAMP())\n  AND query_type = 'SELECT'\nORDER BY partitions_scanned DESC\nLIMIT 10;\n\n-- Check if table would benefit from clustering\nSELECT SYSTEM$CLUSTERING_INFORMATION('my_db.my_schema.orders', '(order_date)');\n-- Look at average_depth: > 5 means clustering would help\n-- Look at partition_depth_histogram: should be concentrated at depth 1-2\n```\n\n### Step 5: Network and Connectivity Debugging\n\n```bash\n# DNS resolution test\ndig +short $(echo $SNOWFLAKE_ACCOUNT).snowflakecomputing.com\n\n# TLS handshake test\nopenssl s_client -connect ${SNOWFLAKE_ACCOUNT}.snowflakecomputing.com:443 \\\n  -servername ${SNOWFLAKE_ACCOUNT}.snowflakecomputing.com < /dev/null 2>/dev/null \\\n  | openssl x509 -noout -subject -dates\n\n# Latency test\ncurl -o /dev/null -s -w \"DNS: %{time_namelookup}s\\nConnect: %{time_connect}s\\nTLS: %{time_appconnect}s\\nTotal: %{time_total}s\\n\" \\\n  \"https://${SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/\"\n\n# Check if OCSP responder is reachable (Snowflake uses OCSP for cert validation)\ncurl -s -o /dev/null -w \"%{http_code}\" \"http://ocsp.snowflakecomputing.com/ocsp\"\n```\n\n### Step 6: Driver-Level Debugging\n\n```typescript\n// Enable debug logging in Node.js driver\nimport snowflake from 'snowflake-sdk';\n\nsnowflake.configure({\n  logLevel: 'TRACE',  // DEBUG, INFO, WARN, ERROR, TRACE\n});\n\n// Log all SQL statements with timing\nconst originalExecute = connection.execute.bind(connection);\nconnection.execute = function(opts: any) {\n  const start = Date.now();\n  const sql = opts.sqlText;\n  console.log(`[SF] Executing: ${sql.substring(0, 200)}`);\n\n  const originalComplete = opts.complete;\n  opts.complete = (err: any, stmt: any, rows: any) => {\n    const duration = Date.now() - start;\n    if (err) {\n      console.error(`[SF] FAILED (${duration}ms): ${err.code} ${err.message}`);\n    } else {\n      console.log(`[SF] OK (${duration}ms): ${rows?.length || 0} rows`);\n    }\n    originalComplete(err, stmt, rows);\n  };\n\n  return originalExecute(opts);\n};\n```\n\n```python\n# Enable debug logging in Python connector\nimport logging\nlogging.basicConfig(level=logging.DEBUG)\nlogger = logging.getLogger('snowflake.connector')\nlogger.setLevel(logging.DEBUG)\n\n# Connection with debug parameters\nconn = snowflake.connector.connect(\n    # ...\n    login_timeout=30,\n    network_timeout=60,\n    socket_timeout=60,\n)\n```\n\n### Step 7: Systematic Isolation Checklist\n\n```\n1. Can you connect at all? \u2192 SELECT 1;\n2. Can you reach the right context? \u2192 SELECT CURRENT_DATABASE(), CURRENT_ROLE();\n3. Does the object exist? \u2192 SHOW TABLES LIKE 'xxx';\n4. Do you have permissions? \u2192 SHOW GRANTS TO ROLE xxx;\n5. Is the warehouse available? \u2192 SHOW WAREHOUSES LIKE 'xxx';\n6. Does a simple query work? \u2192 SELECT COUNT(*) FROM table;\n7. Does the specific query work on smaller data? \u2192 Add LIMIT 100\n8. Is there spilling? \u2192 Check bytes_spilled_to_remote_storage\n9. Is there partition skew? \u2192 Check partition scan ratio\n10. Is there contention? \u2192 Check blocked queries\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Remote spilling | Warehouse too small | Scale up, or optimize query |\n| Blocked queries | Lock contention | Cancel blocking query, serialize DDL |\n| High cloud services credits | Too many metadata ops | Cache metadata, batch DDL |\n| Partition full scan | No clustering or wrong filter | Add clustering key on filter columns |\n| Intermittent timeout | Network/proxy issue | Check OCSP, proxy config |\n\n## Resources\n\n- [Query Profile](https://docs.snowflake.com/en/user-guide/ui-query-profile)\n- [Monitoring Warehouse Load](https://docs.snowflake.com/en/user-guide/warehouses-load-monitoring)\n- [GET_QUERY_OPERATOR_STATS](https://docs.snowflake.com/en/sql-reference/functions/get_query_operator_stats)\n\n## Next Steps\n\nFor load testing, see `snowflake-load-scale`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "snowflake-advanced-troubleshooting",
-    "description": "Apply advanced Snowflake debugging with query profiling, spill analysis,",
-    "allowed-tools": "Read, Grep, Bash(snowsql:*), Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000017377",
   "name": "dx-harness",
   "slug": "dx-harness",
   "description": "Use this skill whenever the user mentions developer-experience friction, slow onboarding, repeated manual setup steps, missing bootstrap/reset/seed scripts, undiscoverable conventions, or asks to audit/fix/maintain a repository's dev harness. Triggers on phrases like \"audit dx\", \"fix dev friction\", \"time to first commit\", \"set up the harness\", \"I keep doing X manually\", \"every time I reset the db I have to...\", and on new-repo bootstrapping. Even if the user doesn't say \"DX\" \u2014 if they describe a repeated manual chore in their dev loop, this skill applies. The skill audits the repo, scores findings, scaffolds canonical fixes (bootstrap.sh, reset.sh, seed.sh, AGENTS.md, task-runner entries), then verifies the harness end-to-end in a scratch worktree against a 60-second time-to-first-commit target.",
   "content": "\n# DX Harness\n\nAudits, scaffolds, and maintains the developer-experience harness of a repository. The harness is the meta-tooling that makes a dev loop fast: one-command bootstrap, one-command reset, one-command seed, discoverable conventions, agent-friendly entry points.\n\nThis skill exists because dev-experience attrition is real: harnesses rot, manual steps creep back in, conventions drift, and the cost is paid in micro-friction every day. The skill detects attrition systematically and applies canonical fixes.\n\n## When to Apply\n\nTrigger this skill when:\n\n- A user describes a **repeated manual chore** (\"every time I reset the db I have to re-register\", \"I always run these three commands before working\")\n- A user mentions **slow onboarding** or asks \"how do I get this running\"\n- A new repo is being **bootstrapped** and needs a harness from day one\n- A user explicitly asks to **audit DX** or **measure time-to-first-commit (TTFC)**\n- A user asks to **fix** missing bootstrap/reset/seed scripts or AGENTS.md\n- A periodic **maintenance pass** is needed (e.g., after a release, after onboarding a new engineer)\n\n## Workflow Overview\n\n```\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2502  1. DISCOVER     scripts/discover.sh \u2192 repo-fingerprint    \u2502\n\u2502  2. AUDIT        scripts/audit.sh    \u2192 dx-audit.json       \u2502\n\u2502  3. PRIORITIZE   scripts/prioritize.sh \u2192 ranked findings   \u2502\n\u2502  4. SCAFFOLD     scripts/scaffold-*.sh \u2192 scratch dir       \u2502\n\u2502  5. CONFIRM      show diff to user; user picks what to apply\u2502\n\u2502  6. VERIFY       scripts/verify.sh \u2192 assertions + timing   \u2502\n\u2502  7. TRACK        scripts/track-attrition.sh \u2192 audit log    \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n```\n\nAll scaffolded edits land in a scratch directory first (`${TMPDIR}/dx-harness-<timestamp>/`). The user reviews the diff and chooses what to copy back into the repo. No surprise writes to the working tree.\n\n## Tool Requirements\n\nRequired: `bash`, `git`, `node`, `jq`.\n\nDetected at runtime (the skill adapts \u2014 it never forces a migration):\n\n| Toolchain | Detection signal |\n|-----------|------------------|\n| npm/pnpm/yarn/bun | `package.json`, `pnpm-lock.yaml`, `yarn.lock`, `bun.lockb` |\n| cargo | `Cargo.toml` |\n| go modules | `go.mod` |\n| Python (uv/poetry/pip) | `pyproject.toml`, `uv.lock`, `poetry.lock`, `requirements.txt` |\n| just | `Justfile` or `justfile` |\n| make | `Makefile` |\n| docker compose | `docker-compose.yml`, `compose.yaml` |\n| database (postgres) | `docker-compose.yml` services, `DATABASE_URL` env reference |\n\n## Risk Level\n\n**Write.** The skill writes files but does not delete user data, force-push, or run destructive ops. Default mode stages everything in a scratch directory; the user explicitly approves each application. Verification runs in a separate git worktree so timing measurements never touch the working tree.\n\n## Setup\n\nOn first invocation, the skill checks `config.json` and prompts via `AskUserQuestion` for any empty required fields. See [config.json](config.json) for fields and defaults.\n\nKey defaults:\n- `ttfc_target_seconds: 60` \u2014 the time-to-first-commit goal in seconds\n- `apply_mode: \"scratch\"` \u2014 scaffolded edits go to scratch dir first; user copies in\n- `audit_log_path: \"${CLAUDE_PLUGIN_DATA}/dx-harness/audits.log\"` \u2014 persistent attrition history\n\n## Quick Reference\n\n### Run a full audit + scaffold pass\n```bash\nbash scripts/discover.sh > /tmp/fingerprint.json\nbash scripts/audit.sh /tmp/fingerprint.json > /tmp/audit.json\nbash scripts/prioritize.sh /tmp/audit.json\n```\n\n### Scaffold one specific harness piece\n```bash\nbash scripts/scaffold-bootstrap.sh   /tmp/fingerprint.json\nbash scripts/scaffold-reset.sh       /tmp/fingerprint.json\nbash scripts/scaffold-seed.sh        /tmp/fingerprint.json\nbash scripts/scaffold-agents-md.sh   /tmp/fingerprint.json\nbash scripts/scaffold-justfile.sh    /tmp/fingerprint.json\n```\n\n### Verify the harness works end-to-end\n```bash\nbash scripts/verify.sh\n# runs bootstrap in a scratch worktree, times it, asserts TTFC < target\n```\n\n### Track attrition over time\n```bash\nbash scripts/track-attrition.sh /tmp/audit.json\n# appends to audits.log, prints diff vs previous run\n```\n\n## How to Use\n\nThe workflow scripts produce JSON between steps so they compose. The agent should read [references/workflow.md](references/workflow.md) for full step-by-step orchestration, including error handling and when to stop and ask the user.\n\nFor deeper context:\n\n| File | Read When |\n|------|-----------|\n| [references/workflow.md](references/workflow.md) | Executing the workflow (always start here) |\n| [references/audit-checklist.md](references/audit-checklist.md) | Understanding what `audit.sh` checks and why |\n| [references/fix-recipes.md](references/fix-recipes.md) | Choosing which scaffold script applies for a finding |\n| [references/attrition-patterns.md](references/attrition-patterns.md) | Reading git history for DX-rot signals |\n\n## Gotchas\n\nSee [gotchas.md](gotchas.md) \u2014 accumulated failure points discovered over time. Always append new ones rather than rewriting.\n\n## Related Skills\n\n- `dev-skill:*` \u2014 for creating new agent-friendly skills (often the *output* of an AGENTS.md scaffolding pass references skills)\n- `bug-review` \u2014 pairs naturally: bad DX often surfaces as repeat bug categories\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "dx-harness",
-    "description": "Use this skill whenever the user mentions developer-experience friction, slow onboarding, repeated manual setup steps, missing bootstrap/reset/seed scripts, undiscoverable conventions, or asks to audit/fix/maintain a repository's dev harness. Triggers on phrases like \"audit dx\", \"fix dev friction\", \"time to first commit\", \"set up the harness\", \"I keep doing X manually\", \"every time I reset the db I have to...\", and on new-repo bootstrapping. Even if the user doesn't say \"DX\" \u2014 if they describe a repeated manual chore in their dev loop, this skill applies. The skill audits the repo, scores findings, scaffolds canonical fixes (bootstrap.sh, reset.sh, seed.sh, AGENTS.md, task-runner entries), then verifies the harness end-to-end in a scratch worktree against a 60-second time-to-first-commit target."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

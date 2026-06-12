@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031929",
   "name": "figma-sdk-patterns",
   "slug": "figma-sdk-patterns",
   "description": "Production-ready patterns for the Figma REST API and Plugin API.",
   "content": "# Figma SDK Patterns\n\n## Overview\n\nProduction patterns for the Figma REST API (external tools) and Plugin API (in-editor plugins). Figma has no official Node.js SDK -- you call `https://api.figma.com` directly with `fetch`. These patterns give you type safety, error handling, and reusable abstractions.\n\n## Prerequisites\n\n- `FIGMA_PAT` environment variable set\n- TypeScript 5+ project\n- Understanding of Figma node types\n\n## Instructions\n\n### Step 1: Typed REST API Client\n\n```typescript\n// src/figma-client.ts\nexport class FigmaClient {\n  private baseUrl = 'https://api.figma.com';\n\n  constructor(private token: string) {\n    if (!token) throw new Error('Figma token is required');\n  }\n\n  private async request<T>(path: string, init?: RequestInit): Promise<T> {\n    const res = await fetch(`${this.baseUrl}${path}`, {\n      ...init,\n      headers: {\n        'X-Figma-Token': this.token,\n        'Content-Type': 'application/json',\n        ...init?.headers,\n      },\n    });\n\n    if (res.status === 429) {\n      const retryAfter = parseInt(res.headers.get('Retry-After') || '60');\n      throw new FigmaRateLimitError(retryAfter);\n    }\n    if (res.status === 403) throw new FigmaAuthError('Invalid or expired token');\n    if (res.status === 404) throw new FigmaNotFoundError(path);\n    if (!res.ok) throw new FigmaApiError(res.status, await res.text());\n\n    return res.json();\n  }\n\n  async getFile(fileKey: string) {\n    return this.request<FigmaFileResponse>(`/v1/files/${fileKey}`);\n  }\n\n  async getFileNodes(fileKey: string, nodeIds: string[]) {\n    const ids = encodeURIComponent(nodeIds.join(','));\n    return this.request<FigmaNodesResponse>(`/v1/files/${fileKey}/nodes?ids=${ids}`);\n  }\n\n  async getImages(fileKey: string, nodeIds: string[], opts?: ImageOptions) {\n    const params = new URLSearchParams({\n      ids: nodeIds.join(','),\n      format: opts?.format ?? 'png',\n      scale: String(opts?.scale ?? 2),\n    });\n    return this.request<FigmaImagesResponse>(`/v1/images/${fileKey}?${params}`);\n  }\n\n  async getComments(fileKey: string) {\n    return this.request<FigmaCommentsResponse>(`/v1/files/${fileKey}/comments`);\n  }\n\n  async postComment(fileKey: string, message: string, nodeId?: string) {\n    return this.request(`/v1/files/${fileKey}/comments`, {\n      method: 'POST',\n      body: JSON.stringify({\n        message,\n        ...(nodeId && { client_meta: { node_id: nodeId } }),\n      }),\n    });\n  }\n\n  async getLocalVariables(fileKey: string) {\n    return this.request<FigmaVariablesResponse>(\n      `/v1/files/${fileKey}/variables/local`\n    );\n  }\n}\n```\n\n### Step 2: Custom Error Classes\n\n```typescript\n// src/figma-errors.ts\nexport class FigmaApiError extends Error {\n  constructor(public status: number, public body: string) {\n    super(`Figma API error ${status}: ${body}`);\n    this.name = 'FigmaApiError';\n  }\n}\n\nexport class FigmaRateLimitError extends FigmaApiError {\n  constructor(public retryAfterSeconds: number) {\n    super(429, `Rate limited. Retry after ${retryAfterSeconds}s`);\n    this.name = 'FigmaRateLimitError';\n  }\n}\n\nexport class FigmaAuthError extends FigmaApiError {\n  constructor(message: string) {\n    super(403, message);\n    this.name = 'FigmaAuthError';\n  }\n}\n\nexport class FigmaNotFoundError extends FigmaApiError {\n  constructor(path: string) {\n    super(404, `Resource not found: ${path}`);\n    this.name = 'FigmaNotFoundError';\n  }\n}\n```\n\n### Step 3: Type Definitions\n\n```typescript\n// src/figma-types.ts\nexport interface FigmaNode {\n  id: string;\n  name: string;\n  type: string;\n  children?: FigmaNode[];\n  fills?: Paint[];\n  strokes?: Paint[];\n  absoluteBoundingBox?: { x: number; y: number; width: number; height: number };\n  characters?: string;         // TEXT nodes\n  style?: TypeStyle;           // TEXT nodes\n  componentId?: string;        // INSTANCE nodes\n  backgroundColor?: Color;     // CANVAS nodes\n}\n\nexport interface FigmaFileResponse {\n  name: string;\n  lastModified: string;\n  version: string;\n  thumbnailUrl: string;\n  document: FigmaNode;\n  components: Record<string, ComponentMeta>;\n  styles: Record<string, StyleMeta>;\n}\n\nexport interface FigmaNodesResponse {\n  nodes: Record<string, { document: FigmaNode; components: Record<string, ComponentMeta> }>;\n}\n\nexport interface FigmaImagesResponse {\n  images: Record<string, string | null>;  // nodeId -> URL (null = render failed)\n}\n\nexport interface ImageOptions {\n  format?: 'png' | 'svg' | 'jpg' | 'pdf';\n  scale?: number;  // 0.01 to 4. SVG always exports at 1x.\n}\n\ninterface Paint { type: string; color?: Color; opacity?: number }\ninterface Color { r: number; g: number; b: number; a?: number }\ninterface TypeStyle { fontFamily: string; fontSize: number; fontWeight: number }\ninterface ComponentMeta { key: string; name: string; description: string }\ninterface StyleMeta { key: string; name: string; style_type: 'FILL' | 'TEXT' | 'EFFECT' | 'GRID' }\n```\n\n### Step 4: Node Tree Walker\n\n```typescript\n// Walk the Figma document tree with a visitor pattern\nfunction walkNodes(node: FigmaNode, visitor: (n: FigmaNode) => void) {\n  visitor(node);\n  if (node.children) {\n    for (const child of node.children) {\n      walkNodes(child, visitor);\n    }\n  }\n}\n\n// Example: find all TEXT nodes\nfunction findTextNodes(root: FigmaNode): FigmaNode[] {\n  const results: FigmaNode[] = [];\n  walkNodes(root, (n) => {\n    if (n.type === 'TEXT') results.push(n);\n  });\n  return results;\n}\n\n// Example: find all COMPONENT nodes\nfunction findComponents(root: FigmaNode): FigmaNode[] {\n  const results: FigmaNode[] = [];\n  walkNodes(root, (n) => {\n    if (n.type === 'COMPONENT') results.push(n);\n  });\n  return results;\n}\n```\n\n### Step 5: Singleton with Retry\n\n```typescript\n// Singleton instance with automatic retry on transient errors\nlet client: FigmaClient | null = null;\n\nexport function getFigmaClient(): FigmaClient {\n  if (!client) {\n    client = new FigmaClient(process.env.FIGMA_PAT!);\n  }\n  return client;\n}\n\nexport async function withRetry<T>(\n  fn: () => Promise<T>,\n  maxRetries = 3\n): Promise<T> {\n  for (let attempt = 0; attempt <= maxRetries; attempt++) {\n    try {\n      return await fn();\n    } catch (err) {\n      if (err instanceof FigmaRateLimitError) {\n        await new Promise(r => setTimeout(r, err.retryAfterSeconds * 1000));\n        continue;\n      }\n      if (attempt === maxRetries) throw err;\n      await new Promise(r => setTimeout(r, 1000 * Math.pow(2, attempt)));\n    }\n  }\n  throw new Error('Unreachable');\n}\n```\n\n## Output\n\n- Typed Figma REST API client with full error handling\n- Custom error hierarchy for rate limits, auth, not found\n- Node tree walker for extracting design data\n- Singleton pattern with retry logic\n\n## Error Handling\n\n| Pattern | Use Case | Benefit |\n|---------|----------|---------|\n| Typed errors | `catch (e) { if (e instanceof FigmaRateLimitError) }` | Targeted recovery |\n| Node walker | Traversing arbitrarily deep trees | Handles any file structure |\n| Retry wrapper | Transient 429/5xx errors | Automatic recovery |\n| Singleton | Shared client across modules | Consistent config, one token |\n\n## Resources\n\n- [Figma REST API Reference](https://developers.figma.com/docs/rest-api/)\n- [Figma REST API OpenAPI Spec](https://github.com/figma/rest-api-spec)\n- [figma-api npm package](https://www.npmjs.com/package/figma-api) (community SDK)\n\n## Next Steps\n\nApply patterns in `figma-core-workflow-a` for real-world file inspection.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "figma-sdk-patterns",
-    "description": "Production-ready patterns for the Figma REST API and Plugin API.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

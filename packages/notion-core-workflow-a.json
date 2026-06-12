@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032700",
   "name": "notion-core-workflow-a",
   "slug": "notion-core-workflow-a",
   "description": "Query, filter, and manage Notion databases and pages.",
   "content": "# Notion Core Workflow A \u2014 Databases & Pages\n\n## Overview\n\nPrimary workflow for Notion integrations: querying databases with filters/sorts, creating pages with typed properties, updating page properties, and retrieving page content.\n\n## Prerequisites\n\n- Completed `notion-install-auth` setup\n- A Notion database shared with your integration\n- Understanding of your database's property schema\n\n## Instructions\n\n### Step 1: Retrieve Database Schema\n\n```typescript\nimport { Client } from '@notionhq/client';\n\nconst notion = new Client({ auth: process.env.NOTION_TOKEN });\n\nasync function getDatabaseSchema(databaseId: string) {\n  const db = await notion.databases.retrieve({ database_id: databaseId });\n  // db.properties contains the schema\n  for (const [name, prop] of Object.entries(db.properties)) {\n    console.log(`${name}: ${prop.type}`);\n    // For select/multi_select, show options:\n    if (prop.type === 'select') {\n      console.log('  Options:', prop.select.options.map(o => o.name));\n    }\n  }\n  return db.properties;\n}\n```\n\n### Step 2: Query with Filters\n\nNotion filters use a unique nested structure based on property type:\n\n```typescript\nasync function queryWithFilters(databaseId: string) {\n  const response = await notion.databases.query({\n    database_id: databaseId,\n    filter: {\n      and: [\n        {\n          property: 'Status',\n          select: { equals: 'In Progress' },\n        },\n        {\n          property: 'Priority',\n          select: { does_not_equal: 'Low' },\n        },\n        {\n          or: [\n            {\n              property: 'Assignee',\n              people: { contains: 'user-uuid-here' },\n            },\n            {\n              property: 'Tags',\n              multi_select: { contains: 'Urgent' },\n            },\n          ],\n        },\n      ],\n    },\n    sorts: [\n      { property: 'Priority', direction: 'ascending' },\n      { property: 'Created', direction: 'descending' },\n    ],\n    page_size: 50,\n  });\n\n  return response.results;\n}\n```\n\n### Step 3: Filter Syntax by Property Type\n\n```typescript\n// Text (title, rich_text, url, email, phone_number)\n{ property: 'Name', title: { contains: 'search term' } }\n{ property: 'Description', rich_text: { starts_with: 'Draft' } }\n{ property: 'Email', email: { equals: 'user@example.com' } }\n\n// Number\n{ property: 'Score', number: { greater_than: 80 } }\n{ property: 'Price', number: { less_than_or_equal_to: 100 } }\n\n// Select / Multi-select\n{ property: 'Status', select: { equals: 'Done' } }\n{ property: 'Tags', multi_select: { contains: 'Bug' } }\n\n// Date\n{ property: 'Due Date', date: { before: '2026-04-01' } }\n{ property: 'Created', date: { past_week: {} } }\n{ property: 'Updated', date: { on_or_after: '2026-01-01' } }\n\n// Checkbox\n{ property: 'Archived', checkbox: { equals: false } }\n\n// People\n{ property: 'Assignee', people: { contains: 'user-uuid' } }\n\n// Relation\n{ property: 'Project', relation: { contains: 'page-uuid' } }\n\n// Formula (filter on the result type)\n{ property: 'Computed', formula: { number: { greater_than: 0 } } }\n\n// Rollup (filter on the aggregated result)\n{ property: 'Total', rollup: { number: { greater_than: 100 } } }\n\n// Timestamp (no property name needed)\n{ timestamp: 'last_edited_time', last_edited_time: { after: '2026-03-01' } }\n```\n\n### Step 4: Create a Page with All Property Types\n\n```typescript\nasync function createFullPage(databaseId: string) {\n  return notion.pages.create({\n    parent: { database_id: databaseId },\n    icon: { emoji: '\ud83d\udccb' },\n    properties: {\n      // Title (required \u2014 every database has exactly one)\n      Name: {\n        title: [{ text: { content: 'New Task' } }],\n      },\n      // Rich text\n      Description: {\n        rich_text: [\n          { text: { content: 'This is ' } },\n          { text: { content: 'important' }, annotations: { bold: true, color: 'red' } },\n        ],\n      },\n      // Number\n      Score: { number: 95 },\n      // Select\n      Status: { select: { name: 'In Progress' } },\n      // Multi-select\n      Tags: {\n        multi_select: [{ name: 'API' }, { name: 'Backend' }],\n      },\n      // Date (with optional end and timezone)\n      'Due Date': {\n        date: { start: '2026-04-15', end: '2026-04-20' },\n      },\n      // Checkbox\n      Urgent: { checkbox: true },\n      // URL\n      Link: { url: 'https://developers.notion.com' },\n      // Email\n      Contact: { email: 'team@example.com' },\n      // People (array of user objects)\n      Assignee: {\n        people: [{ id: 'user-uuid-here' }],\n      },\n      // Relation (array of page references)\n      Project: {\n        relation: [{ id: 'related-page-uuid' }],\n      },\n    },\n  });\n}\n```\n\n### Step 5: Update Page Properties\n\n```typescript\nasync function updatePage(pageId: string) {\n  return notion.pages.update({\n    page_id: pageId,\n    properties: {\n      Status: { select: { name: 'Done' } },\n      Score: { number: 100 },\n      Urgent: { checkbox: false },\n    },\n  });\n}\n\n// Archive (soft delete) a page\nasync function archivePage(pageId: string) {\n  return notion.pages.update({\n    page_id: pageId,\n    archived: true,\n  });\n}\n```\n\n### Step 6: Paginate Through All Results\n\n```typescript\nasync function getAllPages(databaseId: string) {\n  const allPages = [];\n  let cursor: string | undefined = undefined;\n\n  do {\n    const response = await notion.databases.query({\n      database_id: databaseId,\n      start_cursor: cursor,\n      page_size: 100, // max is 100\n    });\n    allPages.push(...response.results);\n    cursor = response.has_more ? response.next_cursor ?? undefined : undefined;\n  } while (cursor);\n\n  return allPages;\n}\n```\n\n## Output\n\n- Database schema retrieved with property types and options\n- Filtered and sorted query results\n- Pages created with typed properties\n- Pages updated and archived\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `validation_error` | Property name mismatch or wrong type | Use `databases.retrieve` to check schema |\n| `object_not_found` | Database not shared with integration | Add integration via Connections |\n| `rate_limited` (429) | >3 requests/second average | Respect `Retry-After` header |\n| Empty `results` | Filter too restrictive or no data | Test with no filter first |\n\n## Examples\n\n### Extract Property Values Helper\n\n```typescript\nfunction getPropertyValue(property: any): string | number | boolean | null {\n  switch (property.type) {\n    case 'title':\n      return property.title.map((t: any) => t.plain_text).join('');\n    case 'rich_text':\n      return property.rich_text.map((t: any) => t.plain_text).join('');\n    case 'number':\n      return property.number;\n    case 'select':\n      return property.select?.name ?? null;\n    case 'multi_select':\n      return property.multi_select.map((s: any) => s.name).join(', ');\n    case 'date':\n      return property.date?.start ?? null;\n    case 'checkbox':\n      return property.checkbox;\n    case 'url':\n      return property.url;\n    case 'email':\n      return property.email;\n    case 'formula':\n      return property.formula?.[property.formula.type] ?? null;\n    default:\n      return null;\n  }\n}\n```\n\n## Resources\n\n- [Query a Database](https://developers.notion.com/reference/post-database-query)\n- [Filter Database Entries](https://developers.notion.com/reference/post-database-query-filter)\n- [Create a Page](https://developers.notion.com/reference/post-page)\n- [Page Property Values](https://developers.notion.com/reference/page-property-values)\n- [Database Object](https://developers.notion.com/reference/database)\n\n## Next Steps\n\nFor block-level content operations, see `notion-core-workflow-b`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "notion-core-workflow-a",
-    "description": "Query, filter, and manage Notion databases and pages.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

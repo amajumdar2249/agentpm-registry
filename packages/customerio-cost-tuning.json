@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031721",
   "name": "customerio-cost-tuning",
   "slug": "customerio-cost-tuning",
   "description": "Optimize Customer.io costs and usage efficiency.",
   "content": "# Customer.io Cost Tuning\n\n## Overview\n\nOptimize Customer.io costs by managing profile count (the primary billing driver), suppressing/deleting inactive users, deduplicating events, reducing unnecessary API calls, and monitoring usage trends.\n\n## How Customer.io Pricing Works\n\nCustomer.io bills based on **profile count** (number of identified people in your workspace) and **email/SMS volume**. Key cost drivers:\n\n| Factor | Impact | Optimization Strategy |\n|--------|--------|----------------------|\n| Total profiles | Primary cost driver | Delete inactive profiles |\n| Email sends | Per-email cost above tier | Suppress unengaged users |\n| SMS sends | Per-SMS cost | Only send to opt-in users |\n| Overidentification | Creates unnecessary profiles | Don't identify users who'll never receive messages |\n| Event volume | Can increase processing costs | Deduplicate and sample |\n\n## Instructions\n\n### Step 1: Profile Audit\n\n```typescript\n// scripts/cio-profile-audit.ts\n// Audit your Customer.io integration for cost optimization opportunities\n\nimport { TrackClient, RegionUS } from \"customerio-node\";\n\nconst cio = new TrackClient(\n  process.env.CUSTOMERIO_SITE_ID!,\n  process.env.CUSTOMERIO_TRACK_API_KEY!,\n  { region: RegionUS }\n);\n\n// Check: Are you identifying users who'll never receive messages?\nconst AUDIT_RULES = {\n  // Users without email can't receive email campaigns\n  noEmail: \"Don't identify users without email unless using push/SMS\",\n\n  // Test users should be cleaned up\n  testUsers: \"Suppress and delete test-*, ci-*, dev-* prefixed users\",\n\n  // Anonymous users that never convert inflate profile count\n  staleAnonymous: \"Delete anonymous profiles older than 90 days without conversion\",\n\n  // Inactive users who haven't opened email in 6+ months\n  unengaged: \"Suppress users with no email opens in 180+ days\",\n};\n\nconsole.log(\"=== Customer.io Cost Audit Rules ===\\n\");\nfor (const [rule, action] of Object.entries(AUDIT_RULES)) {\n  console.log(`${rule}: ${action}`);\n}\nconsole.log(\"\\nRun these checks in Customer.io dashboard:\");\nconsole.log(\"1. People > Segments > Create 'Inactive 90 days' segment\");\nconsole.log(\"2. People > Segments > Create 'No email attribute' segment\");\nconsole.log(\"3. People > Filter by created_at < 90 days ago AND email_opened = 0\");\n```\n\n### Step 2: Suppress and Delete Inactive Users\n\n```typescript\n// scripts/cio-cleanup-inactive.ts\nimport { TrackClient, RegionUS } from \"customerio-node\";\n\nconst cio = new TrackClient(\n  process.env.CUSTOMERIO_SITE_ID!,\n  process.env.CUSTOMERIO_TRACK_API_KEY!,\n  { region: RegionUS }\n);\n\ninterface CleanupTarget {\n  userId: string;\n  reason: string;\n}\n\nasync function cleanupInactiveUsers(\n  targets: CleanupTarget[],\n  dryRun: boolean = true\n): Promise<void> {\n  let suppressed = 0;\n  let deleted = 0;\n  let errors = 0;\n\n  for (const target of targets) {\n    if (dryRun) {\n      console.log(`[DRY RUN] Would suppress+delete: ${target.userId} (${target.reason})`);\n      continue;\n    }\n\n    try {\n      // Step 1: Suppress \u2014 stops all messaging immediately\n      await cio.suppress(target.userId);\n      suppressed++;\n\n      // Step 2: Destroy \u2014 removes from billing\n      await cio.destroy(target.userId);\n      deleted++;\n\n      // Rate limit to 50/sec for bulk operations\n      await new Promise((r) => setTimeout(r, 20));\n    } catch (err: any) {\n      errors++;\n      console.error(`Failed ${target.userId}: ${err.message}`);\n    }\n\n    if ((suppressed + errors) % 100 === 0) {\n      console.log(`Progress: ${suppressed} deleted, ${errors} errors`);\n    }\n  }\n\n  console.log(`\\nResult: ${suppressed} suppressed, ${deleted} deleted, ${errors} errors`);\n}\n\n// Usage: Build target list from your database\n// const inactiveUsers = await db.query(`\n//   SELECT id FROM users\n//   WHERE last_login_at < NOW() - INTERVAL '180 days'\n//   AND email_verified = false\n// `);\n```\n\n### Step 3: Event Deduplication\n\n```typescript\n// lib/customerio-dedup-events.ts\n// Prevent sending duplicate events that inflate volume\n\nimport { createHash } from \"crypto\";\nimport { TrackClient, RegionUS } from \"customerio-node\";\n\nconst cio = new TrackClient(\n  process.env.CUSTOMERIO_SITE_ID!,\n  process.env.CUSTOMERIO_TRACK_API_KEY!,\n  { region: RegionUS }\n);\n\n// Simple LRU dedup (use Redis in production)\nconst recentEvents = new Map<string, number>();\nconst MAX_CACHE = 50_000;\nconst DEDUP_WINDOW_MS = 60 * 1000;  // 1 minute window\n\nfunction isDuplicate(userId: string, eventName: string, data?: any): boolean {\n  const hash = createHash(\"sha256\")\n    .update(`${userId}:${eventName}:${JSON.stringify(data ?? {})}`)\n    .digest(\"hex\")\n    .substring(0, 12);\n\n  const last = recentEvents.get(hash);\n  if (last && Date.now() - last < DEDUP_WINDOW_MS) {\n    return true;\n  }\n\n  recentEvents.set(hash, Date.now());\n\n  // Prevent unbounded growth\n  if (recentEvents.size > MAX_CACHE) {\n    const cutoff = Date.now() - DEDUP_WINDOW_MS;\n    for (const [key, time] of recentEvents) {\n      if (time < cutoff) recentEvents.delete(key);\n    }\n  }\n\n  return false;\n}\n\nexport async function trackDeduped(\n  userId: string,\n  name: string,\n  data?: Record<string, any>\n): Promise<void> {\n  if (isDuplicate(userId, name, data)) {\n    return; // Skip duplicate\n  }\n  await cio.track(userId, { name, data });\n}\n```\n\n### Step 4: Event Sampling for High-Volume Events\n\n```typescript\n// lib/customerio-sampling.ts\n// Sample high-volume events to reduce API calls\n\nconst EVENT_SAMPLE_RATES: Record<string, number> = {\n  page_viewed: 0.1,          // Sample 10% of page views\n  button_clicked: 0.25,      // Sample 25% of clicks\n  search_performed: 0.5,     // Sample 50% of searches\n  signed_up: 1.0,            // Always track signups\n  checkout_completed: 1.0,   // Always track purchases\n  subscription_cancelled: 1.0, // Always track cancellations\n};\n\nexport function shouldTrack(eventName: string): boolean {\n  const rate = EVENT_SAMPLE_RATES[eventName] ?? 1.0;\n  return Math.random() < rate;\n}\n\n// Usage\nif (shouldTrack(\"page_viewed\")) {\n  await cio.track(userId, {\n    name: \"page_viewed\",\n    data: { url: \"/pricing\", sampled: true },\n  });\n}\n```\n\n### Step 5: Usage Monitoring\n\n```typescript\n// scripts/cio-usage-monitor.ts\n// Track your Customer.io usage trends\n\ninterface UsageMetrics {\n  identifyCalls: number;\n  trackCalls: number;\n  transactionalSends: number;\n  broadcastTriggers: number;\n  webhooksReceived: number;\n}\n\nclass UsageMonitor {\n  private metrics: UsageMetrics = {\n    identifyCalls: 0,\n    trackCalls: 0,\n    transactionalSends: 0,\n    broadcastTriggers: 0,\n    webhooksReceived: 0,\n  };\n\n  increment(metric: keyof UsageMetrics): void {\n    this.metrics[metric]++;\n  }\n\n  report(): void {\n    console.log(\"\\n=== Customer.io Usage Report ===\");\n    console.log(`Period: ${new Date().toISOString()}`);\n    for (const [key, value] of Object.entries(this.metrics)) {\n      console.log(`  ${key}: ${value.toLocaleString()}`);\n    }\n    const total = Object.values(this.metrics).reduce((a, b) => a + b, 0);\n    console.log(`  TOTAL API calls: ${total.toLocaleString()}`);\n  }\n\n  reset(): void {\n    for (const key of Object.keys(this.metrics)) {\n      this.metrics[key as keyof UsageMetrics] = 0;\n    }\n  }\n}\n\nexport const usageMonitor = new UsageMonitor();\n```\n\n## Cost Savings Estimates\n\n| Optimization | Typical Savings | Implementation Effort |\n|--------------|-----------------|----------------------|\n| Delete inactive profiles (180+ days) | 15-30% profile cost | Low |\n| Event deduplication | 5-15% event volume | Low |\n| Event sampling (analytics events) | 50-80% event volume for sampled events | Low |\n| Suppress bounced emails | 2-5% email cost | Low |\n| Don't identify email-less users | 5-20% profile cost | Medium |\n| Annual billing | 10-20% total cost | None |\n\n## Monthly Cost Review Checklist\n\n- [ ] Review profile count trend (People > Overview)\n- [ ] Identify and delete stale test profiles\n- [ ] Review segment for users with no email attribute\n- [ ] Check bounce rate and suppress chronic bouncers\n- [ ] Review event volume by type (optimize high-volume/low-value events)\n- [ ] Compare plan tier vs actual usage\n\n## Resources\n\n- [Customer.io Pricing](https://customer.io/pricing/)\n- [Track API - Suppress/Destroy](https://docs.customer.io/integrations/api/track/)\n\n## Next Steps\n\nAfter cost optimization, proceed to `customerio-reference-architecture` for enterprise patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "customerio-cost-tuning",
-    "description": "Optimize Customer.io costs and usage efficiency.",
-    "Trigger": "customer.io cost\", \"reduce customer.io spend\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(npx:*), Glob, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

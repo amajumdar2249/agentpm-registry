@@ -1,19 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009504",
   "name": "bio-workflows-hic-pipeline",
   "slug": "bio-workflows-hic-pipeline",
   "description": "End-to-end Hi-C analysis workflow from contact pairs to compartments, TADs, and loops. Covers cooler matrices, cooltools analysis, and visualization. Use when processing Hi-C data to compartments and TADs.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: BWA-MEM2 2.2.1+, cooler 0.9+, cooltools 0.6+, matplotlib 3.8+, numpy 1.26+, pairtools 1.1+, pandas 2.2+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Hi-C Pipeline\n\n**\"Analyze my Hi-C data from FASTQ to 3D genome features\"** \u2192 Orchestrate read alignment, contact matrix generation, normalization, TAD calling, loop detection, compartment analysis, and differential interaction testing.\n\nComplete workflow for Hi-C chromosome conformation capture analysis.\n\n## Workflow Overview\n\n```\nHi-C FASTQ files\n    |\n    v\n[1. Alignment & Pairs] --> bwa-mem2 + pairtools\n    |\n    v\n[2. Matrix Generation] --> cooler\n    |\n    v\n[3. Normalization] -----> ICE balancing\n    |\n    v\n[4. Compartments] ------> Eigenvector analysis\n    |\n    v\n[5. TADs] --------------> Insulation score\n    |\n    v\n[6. Loops] -------------> Dot calling\n    |\n    v\nHi-C features\n```\n\n## Step 1: Alignment and Pair Processing\n\n```bash\n# Align Hi-C reads (each end separately, then combine)\nbwa-mem2 mem -SP5M -t 16 reference.fa reads_R1.fastq.gz | \\\n    pairtools parse --min-mapq 40 --walks-policy 5unique \\\n    --max-inter-align-gap 30 --nproc-in 8 --nproc-out 8 \\\n    --chroms-path reference.genome | \\\n    pairtools sort --nproc 16 --tmpdir ./tmp | \\\n    pairtools dedup --nproc-in 8 --nproc-out 8 \\\n    --mark-dups --output-stats stats.txt | \\\n    pairtools split --nproc-in 8 --output-pairs sample.pairs.gz\n\n# Alternative: align both ends\nbwa-mem2 mem -SP5M -t 16 reference.fa \\\n    reads_R1.fastq.gz reads_R2.fastq.gz | \\\n    pairtools parse --min-mapq 40 --walks-policy 5unique \\\n    --max-inter-align-gap 30 --chroms-path reference.genome | \\\n    pairtools sort | \\\n    pairtools dedup --mark-dups --output-stats stats.txt | \\\n    pairtools split --output-pairs sample.pairs.gz\n```\n\n**QC Checkpoint:** Check pair statistics\n- Valid pairs >50% of total\n- Cis pairs >70% (intra-chromosomal)\n- Duplicate rate reasonable\n\n## Step 2: Generate Contact Matrix\n\n```bash\n# Create cooler file at multiple resolutions\ncooler cload pairs \\\n    -c1 2 -p1 3 -c2 4 -p2 5 \\\n    reference.genome:1000 \\\n    sample.pairs.gz \\\n    sample.1000.cool\n\n# Multi-resolution (mcool)\ncooler zoomify sample.1000.cool \\\n    -r 1000,2000,5000,10000,25000,50000,100000,250000,500000,1000000 \\\n    -o sample.mcool\n```\n\n## Step 3: Normalization (ICE Balancing)\n\n```python\nimport cooler\nimport cooltools\n\n# Load matrix\nclr = cooler.Cooler('sample.mcool::resolutions/10000')\n\n# Balance (ICE normalization)\ncooltools.balance_cooler(clr, store=True, mad_max=5)\n\n# Or via command line\n# cooler balance sample.mcool::resolutions/10000\n```\n\n## Step 4: Compartment Analysis\n\n```python\nimport cooler\nimport cooltools\nimport numpy as np\n\n# Load balanced matrix\nclr = cooler.Cooler('sample.mcool::resolutions/100000')\n\n# Calculate expected (for O/E)\nexpected = cooltools.expected_cis(clr, view_df=None, nproc=4)\n\n# Compute eigenvector (compartments)\neig = cooltools.eigs_cis(\n    clr,\n    phasing_track='gc_content.bw',  # Optional: orient by GC\n    n_eigs=3,\n    nproc=4\n)\n\n# A/B compartments\neig_values, eig_vectors = eig\ncompartments = eig_vectors[['E1']].copy()\ncompartments['compartment'] = np.where(compartments['E1'] > 0, 'A', 'B')\ncompartments.to_csv('compartments.tsv', sep='\\t')\n```\n\n## Step 5: TAD Detection\n\n```python\nimport cooltools\n\n# Load matrix at TAD resolution\nclr = cooler.Cooler('sample.mcool::resolutions/10000')\n\n# Calculate insulation score\ninsulation = cooltools.insulation(clr, window_bp=[100000, 200000, 500000])\n\n# Call boundaries\nboundaries = cooltools.find_boundaries(insulation)\nboundaries.to_csv('tad_boundaries.tsv', sep='\\t')\n\n# Alternative: use HiCExplorer\n# hicFindTADs -m sample.h5 --outPrefix tads --correctForMultipleTesting fdr\n```\n\n## Step 6: Loop Calling\n\n```python\nimport cooltools\n\n# Load high-resolution matrix\nclr = cooler.Cooler('sample.mcool::resolutions/10000')\n\n# Call loops using expected\nexpected = cooltools.expected_cis(clr)\nloops = cooltools.dots(\n    clr,\n    expected,\n    max_loci_separation=2000000,\n    nproc=4\n)\n\nloops.to_csv('loops.tsv', sep='\\t')\n\n# Alternative: use chromosight\n# chromosight detect --pattern loops sample.mcool::resolutions/10000 loops\n```\n\n## Step 7: Visualization\n\n```python\nimport matplotlib.pyplot as plt\nimport cooltools.lib.plotting\n\n# Plot contact matrix region\nfig, ax = plt.subplots(figsize=(10, 10))\ncooltools.lib.plotting.pcolormesh_45deg(\n    ax, clr.matrix(balance=True).fetch('chr1:50000000-60000000'),\n    start=50000000, resolution=clr.binsize\n)\nax.set_aspect('equal')\nplt.savefig('hic_matrix.pdf')\n\n# Plot with TADs\nfrom matplotlib.patches import Polygon\n# Add TAD boundaries as triangles\n```\n\n## Complete Pipeline Script\n\n```bash\n#!/bin/bash\nset -e\n\nTHREADS=16\nREF=\"reference.fa\"\nGENOME=\"reference.genome\"\nR1=\"sample_R1.fastq.gz\"\nR2=\"sample_R2.fastq.gz\"\nOUTDIR=\"hic_results\"\n\nmkdir -p ${OUTDIR}/{pairs,cool,analysis}\n\n# Step 1: Alignment and pairs\necho \"=== Alignment ===\"\nbwa-mem2 mem -SP5M -t ${THREADS} ${REF} ${R1} ${R2} | \\\n    pairtools parse --min-mapq 40 --walks-policy 5unique \\\n    --chroms-path ${GENOME} | \\\n    pairtools sort --nproc ${THREADS} --tmpdir ./tmp | \\\n    pairtools dedup --mark-dups --output-stats ${OUTDIR}/pairs/stats.txt | \\\n    pairtools split --output-pairs ${OUTDIR}/pairs/sample.pairs.gz\n\n# Step 2: Generate matrix\necho \"=== Matrix Generation ===\"\ncooler cload pairs -c1 2 -p1 3 -c2 4 -p2 5 \\\n    ${GENOME}:1000 ${OUTDIR}/pairs/sample.pairs.gz ${OUTDIR}/cool/sample.1000.cool\n\ncooler zoomify ${OUTDIR}/cool/sample.1000.cool \\\n    -r 1000,5000,10000,25000,50000,100000,500000 \\\n    -o ${OUTDIR}/cool/sample.mcool\n\n# Step 3: Balance\necho \"=== Balancing ===\"\nfor res in 10000 25000 100000; do\n    cooler balance ${OUTDIR}/cool/sample.mcool::resolutions/${res}\ndone\n\necho \"=== Pipeline Complete ===\"\necho \"Run Python script for compartments, TADs, and loops\"\n```\n\n## Python Analysis Script\n\n```python\nimport cooler\nimport cooltools\nimport pandas as pd\nimport os\n\noutdir = 'hic_results/analysis'\nos.makedirs(outdir, exist_ok=True)\n\n# Compartments (100kb)\nprint('Compartments...')\nclr = cooler.Cooler('hic_results/cool/sample.mcool::resolutions/100000')\neig_values, eig_vectors = cooltools.eigs_cis(clr, n_eigs=3)\neig_vectors.to_csv(f'{outdir}/compartments.tsv', sep='\\t')\n\n# TADs (10kb)\nprint('TADs...')\nclr = cooler.Cooler('hic_results/cool/sample.mcool::resolutions/10000')\ninsulation = cooltools.insulation(clr, window_bp=[100000, 200000])\ninsulation.to_csv(f'{outdir}/insulation.tsv', sep='\\t')\n\n# Loops (10kb)\nprint('Loops...')\nexpected = cooltools.expected_cis(clr)\nloops = cooltools.dots(clr, expected, nproc=4)\nloops.to_csv(f'{outdir}/loops.tsv', sep='\\t')\n\nprint(f'Results saved to {outdir}/')\n```\n\n## Related Skills\n\n- hi-c-analysis/hic-data-io - Cooler file operations\n- hi-c-analysis/contact-pairs - Pairtools processing\n- hi-c-analysis/compartment-analysis - A/B compartments\n- hi-c-analysis/tad-detection - TAD calling methods\n- hi-c-analysis/loop-calling - Loop detection\n- hi-c-analysis/hic-visualization - Plotting matrices\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-workflows-hic-pipeline",
-    "description": "End-to-end Hi-C analysis workflow from contact pairs to compartments, TADs, and loops. Covers cooler matrices, cooltools analysis, and visualization. Use when processing Hi-C data to compartments and TADs.",
-    "tool_type": "mixed",
-    "primary_tool": "cooler",
-    "workflow": "true",
-    "depends_on": "",
-    "qc_checkpoints": "",
-    "- after_pairs": "Valid pairs >50%, cis >70%",
-    "- after_matrix": "Coverage uniform, no artifacts",
-    "- after_analysis": "Compartments correlate with expression"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

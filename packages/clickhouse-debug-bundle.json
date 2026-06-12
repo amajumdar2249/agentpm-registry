@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031573",
   "name": "clickhouse-debug-bundle",
   "slug": "clickhouse-debug-bundle",
   "description": "Collect ClickHouse diagnostic data \\u2014 system tables, query logs,\\",
   "content": "# ClickHouse Debug Bundle\n\n## Overview\n\nCollect comprehensive diagnostic data from ClickHouse system tables for\ntroubleshooting performance issues, merge problems, or support escalation.\n\n## Prerequisites\n\n- Access to ClickHouse with `system.*` table read permissions\n- `curl` or `clickhouse-client` available\n\n## Instructions\n\n### Step 1: Server Health Overview\n\n```sql\n-- Server version and uptime\nSELECT\n    version()                       AS version,\n    uptime()                        AS uptime_seconds,\n    formatReadableTimeDelta(uptime()) AS uptime_human,\n    currentDatabase()               AS current_db;\n\n-- Global metrics snapshot\nSELECT metric, value, description\nFROM system.metrics\nWHERE metric IN (\n    'Query', 'Merge', 'PartMutation', 'ReplicatedFetch',\n    'TCPConnection', 'HTTPConnection', 'MemoryTracking',\n    'BackgroundMergesAndMutationsPoolTask'\n);\n```\n\n### Step 2: Disk and Table Health\n\n```sql\n-- Disk usage by table (top 20)\nSELECT\n    database,\n    table,\n    formatReadableSize(sum(bytes_on_disk))  AS disk_size,\n    sum(rows)                               AS total_rows,\n    count()                                 AS active_parts,\n    max(modification_time)                  AS last_modified\nFROM system.parts\nWHERE active\nGROUP BY database, table\nORDER BY sum(bytes_on_disk) DESC\nLIMIT 20;\n\n-- Tables with too many parts (merge pressure)\nSELECT database, table, count() AS parts\nFROM system.parts WHERE active\nGROUP BY database, table\nHAVING parts > 100\nORDER BY parts DESC;\n\n-- Disk space per disk\nSELECT\n    name,\n    path,\n    formatReadableSize(total_space)     AS total,\n    formatReadableSize(free_space)      AS free,\n    round(free_space / total_space * 100, 1) AS free_pct\nFROM system.disks;\n```\n\n### Step 3: Query Performance Analysis\n\n```sql\n-- Slowest queries in the last 24 hours\nSELECT\n    event_time,\n    query_duration_ms,\n    read_rows,\n    read_bytes,\n    result_rows,\n    memory_usage,\n    substring(query, 1, 200) AS query_preview\nFROM system.query_log\nWHERE type = 'QueryFinish'\n  AND event_time >= now() - INTERVAL 24 HOUR\nORDER BY query_duration_ms DESC\nLIMIT 20;\n\n-- Failed queries (last 24h)\nSELECT\n    event_time,\n    exception_code,\n    exception,\n    substring(query, 1, 200) AS query_preview\nFROM system.query_log\nWHERE type = 'ExceptionWhileProcessing'\n  AND event_time >= now() - INTERVAL 24 HOUR\nORDER BY event_time DESC\nLIMIT 20;\n\n-- Query patterns (group by normalized query)\nSELECT\n    normalized_query_hash,\n    count()                          AS executions,\n    avg(query_duration_ms)           AS avg_ms,\n    max(query_duration_ms)           AS max_ms,\n    sum(read_rows)                   AS total_rows_read,\n    formatReadableSize(sum(read_bytes)) AS total_read,\n    any(substring(query, 1, 150))    AS sample_query\nFROM system.query_log\nWHERE type = 'QueryFinish'\n  AND event_time >= now() - INTERVAL 24 HOUR\nGROUP BY normalized_query_hash\nORDER BY sum(query_duration_ms) DESC\nLIMIT 20;\n```\n\n### Step 4: Merge and Mutation Status\n\n```sql\n-- Active merges\nSELECT\n    database, table, elapsed, progress,\n    num_parts, result_part_name,\n    formatReadableSize(total_size_bytes_compressed) AS size\nFROM system.merges;\n\n-- Pending mutations\nSELECT database, table, mutation_id, command, create_time, is_done\nFROM system.mutations\nWHERE NOT is_done\nORDER BY create_time DESC;\n\n-- Replication health (if using ReplicatedMergeTree)\nSELECT\n    database, table,\n    is_leader, total_replicas, active_replicas,\n    queue_size, inserts_in_queue, merges_in_queue\nFROM system.replicas\nWHERE active_replicas < total_replicas OR queue_size > 0;\n```\n\n### Step 5: Automated Debug Script\n\n```bash\n#!/bin/bash\n# clickhouse-debug-bundle.sh\nset -euo pipefail\n\nCH_HOST=\"${CLICKHOUSE_HOST:-http://localhost:8123}\"\nCH_USER=\"${CLICKHOUSE_USER:-default}\"\nCH_PASS=\"${CLICKHOUSE_PASSWORD:-}\"\nBUNDLE=\"ch-debug-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE\"\n\nch_query() {\n  curl -sS \"${CH_HOST}\" \\\n    --user \"${CH_USER}:${CH_PASS}\" \\\n    --data-binary \"$1\" 2>&1\n}\n\necho \"Collecting ClickHouse diagnostics...\"\n\nch_query \"SELECT version(), uptime(), currentDatabase()\" > \"$BUNDLE/version.txt\"\nch_query \"SELECT * FROM system.metrics FORMAT TabSeparatedWithNames\" > \"$BUNDLE/metrics.tsv\"\nch_query \"SELECT * FROM system.events FORMAT TabSeparatedWithNames\" > \"$BUNDLE/events.tsv\"\nch_query \"SELECT database, table, count() AS parts, sum(rows) AS rows, \\\n  formatReadableSize(sum(bytes_on_disk)) AS size FROM system.parts \\\n  WHERE active GROUP BY database, table ORDER BY sum(bytes_on_disk) DESC \\\n  FORMAT TabSeparatedWithNames\" > \"$BUNDLE/tables.tsv\"\nch_query \"SELECT * FROM system.merges FORMAT TabSeparatedWithNames\" > \"$BUNDLE/merges.tsv\"\nch_query \"SELECT * FROM system.query_log WHERE type IN ('ExceptionWhileProcessing') \\\n  AND event_time >= now() - INTERVAL 1 HOUR ORDER BY event_time DESC LIMIT 50 \\\n  FORMAT TabSeparatedWithNames\" > \"$BUNDLE/errors.tsv\"\nch_query \"SELECT * FROM system.replicas FORMAT TabSeparatedWithNames\" > \"$BUNDLE/replicas.tsv\" 2>/dev/null || true\n\ntar -czf \"${BUNDLE}.tar.gz\" \"$BUNDLE\"\nrm -rf \"$BUNDLE\"\necho \"Bundle created: ${BUNDLE}.tar.gz\"\n```\n\n### Step 6: Node.js Debug Collector\n\n```typescript\nimport { createClient } from '@clickhouse/client';\n\nasync function collectDebugBundle(client: ReturnType<typeof createClient>) {\n  const queries = {\n    version: 'SELECT version() AS ver, uptime() AS up',\n    tables: `SELECT database, table, count() AS parts, sum(rows) AS rows\n             FROM system.parts WHERE active GROUP BY database, table\n             ORDER BY sum(bytes_on_disk) DESC LIMIT 20`,\n    slow: `SELECT query_duration_ms, substring(query,1,200) AS q\n           FROM system.query_log WHERE type='QueryFinish'\n           AND event_time >= now() - INTERVAL 1 HOUR\n           ORDER BY query_duration_ms DESC LIMIT 10`,\n    errors: `SELECT exception_code, exception, substring(query,1,200) AS q\n             FROM system.query_log WHERE type='ExceptionWhileProcessing'\n             AND event_time >= now() - INTERVAL 1 HOUR LIMIT 10`,\n    merges: 'SELECT * FROM system.merges',\n  };\n\n  const bundle: Record<string, unknown> = {};\n  for (const [key, sql] of Object.entries(queries)) {\n    try {\n      const rs = await client.query({ query: sql, format: 'JSONEachRow' });\n      bundle[key] = await rs.json();\n    } catch (e) {\n      bundle[key] = { error: (e as Error).message };\n    }\n  }\n\n  return bundle;\n}\n```\n\n## Key System Tables\n\n| Table | Purpose |\n|-------|---------|\n| `system.parts` | Data parts per table (size, rows, merge status) |\n| `system.query_log` | Query history with timing and errors |\n| `system.metrics` | Real-time server metrics (gauges) |\n| `system.events` | Cumulative server counters |\n| `system.merges` | Currently running merges |\n| `system.mutations` | ALTER TABLE mutations (UPDATE/DELETE) |\n| `system.replicas` | Replication status per table |\n| `system.processes` | Currently executing queries |\n| `system.disks` | Disk space and health |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `system.query_log` empty | Logging disabled | Set `log_queries = 1` |\n| Permission denied on system tables | Restricted user | Grant `SELECT ON system.*` |\n| Bundle too large | Too much history | Narrow time window |\n\n## Resources\n\n- [System Tables Reference](https://clickhouse.com/docs/operations/system-tables)\n- [Query Log](https://clickhouse.com/docs/operations/system-tables/query_log)\n- [Server Metrics](https://clickhouse.com/docs/operations/system-tables/metrics)\n\n## Next Steps\n\nFor connection and concurrency issues, see `clickhouse-rate-limits`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clickhouse-debug-bundle",
-    "description": "Collect ClickHouse diagnostic data \\u2014 system tables, query logs,\\",
-    "\\ evidence for ClickHouse support.\\nTrigger": "\\\"clickhouse debug\\\", \\\"clickhouse\\",
-    "allowed-tools": "Read, Bash(grep:*), Bash(curl:*), Bash(tar:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

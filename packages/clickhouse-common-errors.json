@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031568",
   "name": "clickhouse-common-errors",
   "slug": "clickhouse-common-errors",
   "description": "Diagnose and fix the top 15 ClickHouse errors \\u2014 query failures,\\",
   "content": "# ClickHouse Common Errors\n\n## Overview\n\nQuick reference for the most common ClickHouse errors with real error codes,\ndiagnostic queries, and proven solutions.\n\n## Prerequisites\n\n- Access to ClickHouse (client or HTTP interface)\n- Ability to query `system.*` tables\n\n## Error Reference\n\n### 1. Too Many Parts (Code 252)\n\n```\nDB::Exception: Too many parts (600). Merges are processing significantly slower than inserts.\n```\n\n**Cause:** Each INSERT creates a new data part. Hundreds of tiny inserts per second\noverwhelm the merge process.\n\n**Fix:**\n\n```sql\n-- Check current part count per table\nSELECT database, table, count() AS part_count\nFROM system.parts WHERE active GROUP BY database, table ORDER BY part_count DESC;\n\n-- Temporary: raise the limit\nALTER TABLE events MODIFY SETTING parts_to_throw_insert = 1000;\n\n-- Permanent: batch your inserts (10K+ rows per INSERT)\n-- See clickhouse-sdk-patterns for batching code\n```\n\n### 2. Memory Limit Exceeded (Code 241)\n\n```\nDB::Exception: Memory limit (for query) exceeded: ... (MEMORY_LIMIT_EXCEEDED)\n```\n\n**Cause:** Query allocates more RAM than `max_memory_usage` (default ~10GB).\n\n**Fix:**\n\n```sql\n-- Check what's consuming memory\nSELECT query, memory_usage, peak_memory_usage\nFROM system.processes ORDER BY peak_memory_usage DESC;\n\n-- Option A: Increase limit for this query\nSET max_memory_usage = 20000000000;  -- 20GB\n\n-- Option B: Reduce data scanned\nSELECT ... FROM events\nWHERE created_at >= today() - 7  -- Add time filters\nLIMIT 10000;                      -- Cap result size\n\n-- Option C: Enable disk spill for large sorts/GROUP BY\nSET max_bytes_before_external_sort = 10000000000;\nSET max_bytes_before_external_group_by = 10000000000;\n```\n\n### 3. Syntax Error (Code 62)\n\n```\nDB::Exception: Syntax error: ... Expected ... before ... (SYNTAX_ERROR)\n```\n\n**Common causes:**\n\n```sql\n-- Wrong: using backticks for identifiers (MySQL habit)\nSELECT `user_id` FROM events;\n-- Fix: use double-quotes or no quotes\nSELECT \"user_id\" FROM events;\nSELECT user_id FROM events;\n\n-- Wrong: LIMIT with OFFSET keyword\nSELECT * FROM events LIMIT 10, 20;\n-- Fix: use LIMIT ... OFFSET\nSELECT * FROM events LIMIT 10 OFFSET 20;\n\n-- Wrong: using != in older versions\nWHERE status != 'active';\n-- Fix: use <>\nWHERE status <> 'active';\n```\n\n### 4. Unknown Table (Code 60)\n\n```\nDB::Exception: Table default.events does not exist. (UNKNOWN_TABLE)\n```\n\n**Fix:**\n\n```sql\n-- List all tables in the database\nSHOW TABLES FROM default;\n\n-- Check all databases\nSHOW DATABASES;\n\n-- The table might be in a different database\nSELECT database, name FROM system.tables WHERE name LIKE '%events%';\n```\n\n### 5. Timeout Exceeded (Code 159)\n\n```\nDB::Exception: Timeout exceeded: elapsed ... seconds, max ... (TIMEOUT_EXCEEDED)\n```\n\n**Fix:**\n\n```sql\n-- Increase timeout for this query\nSET max_execution_time = 120;  -- seconds\n\n-- Find slow queries in history\nSELECT\n    query,\n    query_duration_ms,\n    read_rows,\n    result_rows,\n    memory_usage\nFROM system.query_log\nWHERE type = 'QueryFinish'\nORDER BY query_duration_ms DESC\nLIMIT 10;\n```\n\n### 6. Cannot Parse DateTime\n\n```\nDB::Exception: Cannot parse datetime ... (CANNOT_PARSE_DATETIME)\n```\n\n**Fix:**\n\n```sql\n-- ClickHouse expects: YYYY-MM-DD HH:MM:SS\n-- Wrong: ISO 8601 with T and Z\nINSERT INTO events (created_at) VALUES ('2025-01-15T10:30:00Z');\n\n-- Fix: strip T and Z\nINSERT INTO events (created_at) VALUES ('2025-01-15 10:30:00');\n\n-- Or parse it explicitly\nSELECT parseDateTimeBestEffort('2025-01-15T10:30:00Z');\n```\n\n### 7. Readonly Mode (Code 164)\n\n```\nDB::Exception: ... is in readonly mode (READONLY)\n```\n\n**Cause:** User lacks write permissions or server is in readonly mode.\n\n**Fix:**\n\n```sql\n-- Check user permissions\nSHOW GRANTS FOR CURRENT_USER;\n\n-- Check server setting\nSELECT name, value FROM system.settings WHERE name = 'readonly';\n```\n\n### 8. No Such Column (Code 16)\n\n```\nDB::Exception: Missing columns: 'user_name' ... (NO_SUCH_COLUMN_IN_TABLE)\n```\n\n**Fix:**\n\n```sql\n-- Inspect actual column names\nDESCRIBE TABLE events;\n\n-- Check column types too\nSELECT name, type, default_kind, default_expression\nFROM system.columns WHERE database = 'default' AND table = 'events';\n```\n\n### 9. Type Mismatch on Insert\n\n```\nDB::Exception: Cannot convert ... to UInt64 (TYPE_MISMATCH)\n```\n\n**Fix:**\n\n```sql\n-- Check expected types\nDESCRIBE TABLE events;\n\n-- Cast in your INSERT if needed\nINSERT INTO events (user_id) VALUES (toUInt64('12345'));\n\n-- In Node.js, ensure numeric types:\nawait client.insert({\n  table: 'events',\n  values: [{ user_id: 42 }],  // number, not \"42\"\n  format: 'JSONEachRow',\n});\n```\n\n### 10. Distributed Table Errors\n\n```\nDB::Exception: All connection tries failed. ... (ALL_CONNECTION_TRIES_FAILED)\n```\n\n**Fix:**\n\n```sql\n-- Check cluster health\nSELECT * FROM system.clusters;\n\n-- Check replica status\nSELECT database, table, is_leader, total_replicas, active_replicas\nFROM system.replicas;\n```\n\n## Diagnostic Queries\n\n```sql\n-- Currently running queries\nSELECT query_id, user, query, elapsed, read_rows, memory_usage\nFROM system.processes;\n\n-- Kill a stuck query\nKILL QUERY WHERE query_id = 'abc-123';\n\n-- Recent errors from query log\nSELECT event_time, query, exception_code, exception\nFROM system.query_log\nWHERE type = 'ExceptionWhileProcessing'\nORDER BY event_time DESC\nLIMIT 20;\n\n-- Disk usage by table\nSELECT\n    database, table,\n    formatReadableSize(sum(bytes_on_disk)) AS size,\n    sum(rows) AS total_rows,\n    count() AS parts\nFROM system.parts WHERE active\nGROUP BY database, table\nORDER BY sum(bytes_on_disk) DESC;\n\n-- Merge health\nSELECT database, table, progress, elapsed, num_parts\nFROM system.merges;\n```\n\n## Error Handling\n\n| Error Code | Name | Category |\n|------------|------|----------|\n| 16 | NO_SUCH_COLUMN_IN_TABLE | Schema |\n| 60 | UNKNOWN_TABLE | Schema |\n| 62 | SYNTAX_ERROR | Query |\n| 159 | TIMEOUT_EXCEEDED | Performance |\n| 164 | READONLY | Permissions |\n| 202 | TOO_MANY_SIMULTANEOUS_QUERIES | Concurrency |\n| 241 | MEMORY_LIMIT_EXCEEDED | Resources |\n| 252 | TOO_MANY_PARTS | Insert pattern |\n\n## Resources\n\n- [Error Codes Reference](https://clickhouse.com/docs/knowledgebase)\n- [System Tables](https://clickhouse.com/docs/operations/system-tables)\n- [Query Log](https://clickhouse.com/docs/operations/system-tables/query_log)\n\n## Next Steps\n\nFor comprehensive debugging, see `clickhouse-debug-bundle`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clickhouse-common-errors",
-    "description": "Diagnose and fix the top 15 ClickHouse errors \\u2014 query failures,\\",
-    "Trigger": "\\\"clickhouse error\\\", \\\"fix clickhouse\\\", \\\"clickhouse not working\\\",\\n\\",
-    "allowed-tools": "Read, Grep, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

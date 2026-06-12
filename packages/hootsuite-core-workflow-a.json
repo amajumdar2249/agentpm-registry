@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032238",
   "name": "hootsuite-core-workflow-a",
   "slug": "hootsuite-core-workflow-a",
   "description": "Execute Hootsuite primary workflow: Core Workflow A.",
   "content": "# Hootsuite Publishing \u2014 Schedule Posts with Media\n\n## Overview\n\nSchedule social media posts with images and videos using the Hootsuite REST API. The publishing workflow involves: uploading media to get a media ID, then scheduling a message referencing that media.\n\n## Prerequisites\n\n- Completed `hootsuite-install-auth` setup\n- Social profiles connected in Hootsuite\n- Media files (images/videos) for upload\n\n## Instructions\n\n### Step 1: Upload Media\n\n```typescript\n// publishing.ts\nimport 'dotenv/config';\nimport fs from 'fs';\n\nconst TOKEN = process.env.HOOTSUITE_ACCESS_TOKEN!;\nconst BASE = 'https://platform.hootsuite.com/v1';\n\n// Step 1a: Create upload URL\nasync function createMediaUpload(sizeBytes: number, mimeType: string) {\n  const response = await fetch(`${BASE}/media`, {\n    method: 'POST',\n    headers: {\n      'Authorization': `Bearer ${TOKEN}`,\n      'Content-Type': 'application/json',\n    },\n    body: JSON.stringify({ sizeBytes, mimeType }),\n  });\n  const { data } = await response.json();\n  console.log('Upload URL:', data.uploadUrl);\n  console.log('Media ID:', data.id);\n  return data; // { id, uploadUrl, uploadUrlDurationSeconds }\n}\n\n// Step 1b: Upload file to the S3 URL\nasync function uploadFile(uploadUrl: string, filePath: string, mimeType: string) {\n  const fileBuffer = fs.readFileSync(filePath);\n  const response = await fetch(uploadUrl, {\n    method: 'PUT',\n    headers: { 'Content-Type': mimeType },\n    body: fileBuffer,\n  });\n  if (response.status !== 200) throw new Error(`Upload failed: ${response.status}`);\n  console.log('File uploaded successfully');\n}\n\n// Step 1c: Check media status\nasync function getMediaStatus(mediaId: string) {\n  const response = await fetch(`${BASE}/media/${mediaId}`, {\n    headers: { 'Authorization': `Bearer ${TOKEN}` },\n  });\n  const { data } = await response.json();\n  console.log('Media state:', data.state); // PENDING, READY, REJECTED\n  return data;\n}\n```\n\n### Step 2: Schedule Post with Media\n\n```typescript\nasync function scheduleWithMedia(config: {\n  profileIds: string[];\n  text: string;\n  mediaIds: string[];\n  scheduledAt: Date;\n}) {\n  const response = await fetch(`${BASE}/messages`, {\n    method: 'POST',\n    headers: {\n      'Authorization': `Bearer ${TOKEN}`,\n      'Content-Type': 'application/json',\n    },\n    body: JSON.stringify({\n      text: config.text,\n      socialProfileIds: config.profileIds,\n      scheduledSendTime: config.scheduledAt.toISOString(),\n      mediaUrls: config.mediaIds.map(id => ({ id })),\n      emailNotification: false,\n    }),\n  });\n\n  const result = await response.json();\n  for (const msg of result.data) {\n    console.log(`Message ${msg.id}: ${msg.state} \u2192 ${msg.scheduledSendTime}`);\n  }\n  return result;\n}\n```\n\n### Step 3: Complete Publishing Flow\n\n```typescript\nasync function publishPostWithImage(\n  profileId: string,\n  text: string,\n  imagePath: string,\n  scheduledAt: Date\n) {\n  // 1. Create upload URL\n  const stats = fs.statSync(imagePath);\n  const mimeType = imagePath.endsWith('.png') ? 'image/png' : 'image/jpeg';\n  const media = await createMediaUpload(stats.size, mimeType);\n\n  // 2. Upload file to S3\n  await uploadFile(media.uploadUrl, imagePath, mimeType);\n\n  // 3. Wait for media processing\n  let status = await getMediaStatus(media.id);\n  while (status.state === 'PENDING') {\n    await new Promise(r => setTimeout(r, 2000));\n    status = await getMediaStatus(media.id);\n  }\n\n  if (status.state !== 'READY') {\n    throw new Error(`Media rejected: ${status.state}`);\n  }\n\n  // 4. Schedule post with media\n  return scheduleWithMedia({\n    profileIds: [profileId],\n    text,\n    mediaIds: [media.id],\n    scheduledAt,\n  });\n}\n```\n\n### Step 4: Bulk Scheduling\n\n```typescript\ninterface ScheduledPost {\n  text: string;\n  profileIds: string[];\n  scheduledAt: Date;\n  imagePath?: string;\n}\n\nasync function bulkSchedule(posts: ScheduledPost[]) {\n  const results = [];\n  for (const post of posts) {\n    if (post.imagePath) {\n      results.push(await publishPostWithImage(post.profileIds[0], post.text, post.imagePath, post.scheduledAt));\n    } else {\n      results.push(await scheduleWithMedia({ profileIds: post.profileIds, text: post.text, mediaIds: [], scheduledAt: post.scheduledAt }));\n    }\n    await new Promise(r => setTimeout(r, 500)); // Rate limit buffer\n  }\n  return results;\n}\n```\n\n## Output\n\n- Media uploaded and processed\n- Posts scheduled with images across social profiles\n- Bulk scheduling support\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Media `REJECTED` | File too large or wrong format | Check size limits per network |\n| `422 scheduledSendTime` | Date in the past | Must be future date |\n| `413 Payload Too Large` | Image exceeds limit | Compress or resize image |\n| Missing profile | Profile disconnected | Reconnect in Hootsuite dashboard |\n\n## Resources\n\n- [Message Scheduling](https://developer.hootsuite.com/docs/message-scheduling)\n- [Media Upload](https://developer.hootsuite.com/docs/uploading-media)\n- [REST API Reference](https://apidocs.hootsuite.com/docs/api/index.html)\n\n## Next Steps\n\nFor analytics, see `hootsuite-core-workflow-b`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "hootsuite-core-workflow-a",
-    "description": "Execute Hootsuite primary workflow: Core Workflow A.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

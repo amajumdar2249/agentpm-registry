@@ -1,20 +1,50 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000008262",
   "name": "edge-commerce",
   "slug": "edge-commerce",
   "description": "Reduce latency globally by running geo-routing, A/B tests, and personalization logic at the network edge using Cloudflare Workers or Vercel",
   "content": "\n# Edge Commerce\n\n## Overview\n\nEdge computing executes code in the CDN PoP closest to each user, reducing latency from hundreds of milliseconds (round-trip to a central origin) to under 50ms. For e-commerce, this enables geo-routing (redirect UK users to a UK storefront), edge-side personalization (inject user tier into cached pages), instant A/B testing without origin round-trips, and distributed inventory caching via edge KV stores.\n\n## When to Use This Skill\n\n- When pages routed through a central origin have high TTFB (>300ms) for international users\n- When you need to redirect users to region-specific storefronts or localized product catalogs\n- When you want to run A/B tests without adding JavaScript that delays page rendering\n- When building a multi-region deployment where each region needs its own origin but shares a single domain\n\n## Core Instructions\n\n### Step 1: Determine your platform and what edge computing can do for you\n\n| Platform | Edge Capabilities | How to Use Them |\n|----------|-----------------|----------------|\n| **Shopify** | Shopify's CDN (Fastly) already serves stores from global edge locations | Use Shopify Markets for geo-routing and multi-currency without custom edge code; Markets handles currency, language, and domain routing natively |\n| **WooCommerce** | Add Cloudflare as your CDN/proxy to get edge capabilities | Cloudflare Workers (free tier: 100k requests/day) adds edge logic; configure in Cloudflare dashboard after adding your domain |\n| **BigCommerce** | BigCommerce uses Fastly CDN globally | Use BigCommerce's built-in multi-storefront feature for geo-routing; for custom edge logic add Cloudflare in front |\n| **Custom / Headless** | Full control \u2014 choose Cloudflare Workers, Vercel Edge Middleware, or Fastly Compute | Build custom geo-routing, A/B testing, and personalization at the edge; see implementation below |\n\n### Step 2: Configure geo-routing on your platform\n\n---\n\n#### Shopify: Use Shopify Markets\n\n1. Go to **Settings \u2192 Markets** in your Shopify admin\n2. Click **Add market** and select the countries/regions for your new market\n3. Configure per-market settings:\n   - **Currency**: set the local currency (Shopify handles conversion automatically)\n   - **Language**: assign a translated theme version\n   - **Domain/subdomain**: e.g., `uk.yourstore.com` routes UK visitors automatically\n4. Shopify automatically redirects users to their market based on IP geolocation \u2014 no custom code needed\n5. For manual market URL overrides: Shopify's cookie-based market selector handles users who want to change their market\n\n---\n\n#### WooCommerce: Cloudflare Workers geo-routing\n\n1. Add your domain to **Cloudflare** (free plan is sufficient for geo-routing)\n2. Go to **Workers & Pages \u2192 Create Worker** in the Cloudflare dashboard\n3. Add a simple geo-redirect rule:\n```javascript\n// Cloudflare Worker \u2014 deploy via Cloudflare dashboard\nexport default {\n  async fetch(request) {\n    const country = request.headers.get('CF-IPCountry') ?? 'US';\n    const url = new URL(request.url);\n\n    // Redirect UK users to UK store variant\n    if (country === 'GB' && !url.pathname.startsWith('/uk')) {\n      return Response.redirect(`https://${url.hostname}/uk${url.pathname}`, 302);\n    }\n\n    return fetch(request);\n  }\n};\n```\n4. In Worker settings, add a **Route** that matches your domain: `*yourstore.com/*`\n5. For currency/language: use a WooCommerce multi-currency plugin (WPML + WooCommerce Multilingual, or Aelia Currency Switcher) that reads the URL path or a cookie set by the Worker\n\n---\n\n#### Custom / Headless\n\n**Vercel Edge Middleware (Next.js) for geo-routing:**\n```typescript\n// middleware.ts \u2014 runs at the edge globally, <5ms\nimport { NextRequest, NextResponse } from 'next/server';\nimport { geolocation } from '@vercel/functions';\n\nconst REGION_MAP: Record<string, string> = {\n  GB: 'uk', DE: 'de', FR: 'fr', CA: 'ca', AU: 'au',\n};\n\nexport function middleware(request: NextRequest) {\n  const { country } = geolocation(request);\n  const region = country ? REGION_MAP[country] : null;\n\n  // Redirect root to regional store\n  if (region && request.nextUrl.pathname === '/') {\n    const url = request.nextUrl.clone();\n    url.pathname = `/${region}`;\n    return NextResponse.redirect(url, { status: 302 });\n  }\n\n  // Pass country to origin for catalog/pricing logic\n  const response = NextResponse.next();\n  if (country) response.headers.set('x-user-country', country);\n  return response;\n}\n\nexport const config = { matcher: ['/', '/products/:path*', '/collections/:path*'] };\n```\n\n**Edge A/B testing (assign variant once, persist in cookie):**\n```typescript\n// In middleware.ts \u2014 no origin round-trip needed\nconst EXPERIMENTS = [\n  { id: 'checkout-cta', buckets: [{ name: 'control', weight: 0.5 }, { name: 'variant-a', weight: 0.5 }] },\n];\n\nfunction assignVariant(buckets: Array<{name: string; weight: number}>) {\n  let r = Math.random(), cumulative = 0;\n  for (const b of buckets) {\n    cumulative += b.weight;\n    if (r < cumulative) return b.name;\n  }\n  return buckets[0].name;\n}\n\n// Add to existing middleware function:\nfor (const exp of EXPERIMENTS) {\n  const cookieName = `ab_${exp.id}`;\n  let variant = request.cookies.get(cookieName)?.value;\n  if (!variant) {\n    variant = assignVariant(exp.buckets);\n    response.cookies.set(cookieName, variant, { maxAge: 30 * 24 * 3600, httpOnly: true });\n  }\n  response.headers.set(`x-ab-${exp.id}`, variant); // available in your app for rendering\n}\n```\n\n**Cloudflare Workers KV for edge inventory caching:**\n```typescript\n// cloudflare-worker.ts \u2014 inventory cached at every Cloudflare PoP globally\nexport default {\n  async fetch(request: Request, env: Env): Promise<Response> {\n    const url = new URL(request.url);\n\n    if (url.pathname.startsWith('/api/inventory/')) {\n      const productId = url.pathname.replace('/api/inventory/', '');\n      const cached = await env.INVENTORY_KV.get(productId, 'json');\n\n      if (cached) {\n        return new Response(JSON.stringify(cached), {\n          headers: { 'Content-Type': 'application/json', 'X-Edge-Cache': 'HIT' },\n        });\n      }\n\n      // Cache miss \u2014 fetch from origin and store for 60 seconds\n      const data = await fetch(`${env.ORIGIN_URL}/api/inventory/${productId}`).then(r => r.json());\n      await env.INVENTORY_KV.put(productId, JSON.stringify(data), { expirationTtl: 60 });\n      return new Response(JSON.stringify(data), {\n        headers: { 'Content-Type': 'application/json', 'X-Edge-Cache': 'MISS' },\n      });\n    }\n\n    return fetch(request);\n  },\n};\n```\nKV namespace wrangler.toml:\n```toml\nname = \"commerce-edge\"\nmain = \"src/index.ts\"\ncompatibility_date = \"2025-01-01\"\n[[kv_namespaces]]\nbinding = \"INVENTORY_KV\"\nid = \"your-kv-namespace-id\"\n```\n\n**Vercel Edge Config for instant feature flags:**\n```typescript\n// Read feature flags at edge \u2014 ~0ms latency (stored in PoP)\nimport { get } from '@vercel/edge-config';\n\nexport async function middleware(request: NextRequest) {\n  const maintenanceMode = await get<boolean>('maintenance_mode');\n  if (maintenanceMode) {\n    return NextResponse.rewrite(new URL('/maintenance', request.url));\n  }\n  return NextResponse.next();\n}\n```\n\n### Step 3: Monitor edge performance\n\nRegardless of platform, measure these metrics:\n\n1. **TTFB from multiple regions** \u2014 use tools like WebPageTest.org with test locations in US, EU, and Asia; target under 200ms TTFB from each region\n2. **CDN cache hit rate** \u2014 Cloudflare: **Analytics \u2192 Performance \u2192 Cache hit rate** (target 90%+); Shopify: check Lighthouse via **Online Store \u2192 Themes \u2192 View report**\n3. **Edge error rate** \u2014 Cloudflare: **Workers \u2192 Metrics**; Vercel: **Deployments \u2192 Functions** tab\n4. **Geographic latency breakdown** \u2014 Cloudflare Analytics shows latency by country; use this to identify regions that would benefit from an additional origin\n\n## Best Practices\n\n- **Use edge for routing decisions, not business logic** \u2014 edge functions are best for fast decisions based on request metadata (country, cookie, header); complex business logic (pricing, inventory) belongs at the origin with a result cached at the edge\n- **Keep edge functions fast** \u2014 Cloudflare Workers have 10ms CPU limit on free plan, 30ms on paid; avoid synchronous external API calls from edge middleware on the critical path\n- **Pre-populate KV before product launches** \u2014 Workers KV has eventual consistency; pre-populate edge inventory cache before a flash sale via the KV REST API\n- **Test geo-routing from multiple locations** \u2014 use a VPN to verify redirect logic; production geo-routing mistakes affect all users in a region\n\n## Common Pitfalls\n\n| Problem | Solution |\n|---------|----------|\n| Edge making external API calls on every request | Cache external data in Edge Config or Workers KV; never make synchronous third-party API calls from edge middleware on the critical path |\n| Personalized responses cached without `Vary` header | Set `Vary: Cookie` or a custom header that differentiates personalized responses; without it, one user's content can be served to others |\n| Workers KV stale inventory causing oversells | Use edge KV only for displaying inventory status; always validate against the authoritative inventory source at checkout time |\n| A/B variant flickering on first load | Set the variant cookie in the response before the page renders; on first visit, set the cookie and redirect to ensure consistent rendering |\n\n## Related Skills\n\n- @ecommerce-caching\n- @flash-sale-scaling\n- @monitoring-alerting-commerce\n- @image-optimization-cdn\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "edge-commerce",
-    "description": "Reduce latency globally by running geo-routing, A/B tests, and personalization logic at the network edge using Cloudflare Workers or Vercel",
-    "category": "infrastructure-performance",
-    "risk": "safe",
-    "source": "curated",
-    "date_added": "2026-03-12",
-    "tags": "[edge, cloudflare-workers, vercel-edge, geo-routing, personalization, kv-store, edge-middleware, latency]",
-    "triggers": "[\"edge commerce\", \"edge computing ecommerce\", \"cloudflare workers commerce\", \"geo-routing\", \"edge personalization\", \"vercel edge functions\", \"edge caching\"]",
-    "tools": "[claude-code, cursor, gemini-cli, copilot, codex-cli, kiro, opencode]",
-    "platforms": "[shopify, woocommerce, bigcommerce, custom]",
-    "difficulty": "advanced"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "infrastructure-performance",
+  "tags": [
+    "[edge",
+    "cloudflare-workers",
+    "vercel-edge",
+    "geo-routing",
+    "personalization",
+    "kv-store",
+    "edge-middleware",
+    "latency]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

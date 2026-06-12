@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000008854",
   "name": "rag-eval",
   "slug": "rag-eval",
   "description": "Iterate on RAG systems with structured evals instead of eyeballing. This skill should be used when the user is tuning a RAG pipeline \u2014 changing retrieval prompts, swapping models, adjusting chunking, or debugging poor answers \u2014 and wants a cheap, ranked set of experiments with cost tracking and structured feedback on the stack. Also use when the user asks \"how do I know if my RAG is working?\", \"this RAG eval is burning money\", or \"what should I try next on retrieval?\".",
   "content": "\n# rag-eval\n\n## Purpose\n\nReplace the \"tweak \u2192 squint \u2192 swap model \u2192 burn credits\" loop with a single command that runs a grid of eval variants on the user's gold-set, ranks them by a cost-aware score, and returns structured feedback on architecture, stack, and likely-issues. Draws on evidence-based RAG practices and learns from the user's past runs.\n\n## When to use\n\nTrigger on: \"help me test a RAG\", \"tune my RAG\", \"my RAG is bad\", \"compare retrieval prompts\", \"how do I eval this\", \"what's the best embedding model for X\", \"my RAG eval is expensive\". Also trigger when the user reports burning OpenRouter / OpenAI credits with no clear signal of improvement.\n\n## Prerequisites \u2014 gather before running\n\nCollect these from the user before the first sweep. Many are optional with sensible defaults; always confirm the ones that gate cost.\n\n1. **RAG codebase root** \u2014 path to the repo/module under test.\n2. **Gold-set** \u2014 at least 10 Q&A pairs. If missing, offer to generate a starter gold-set from the user's dataset (LLM-synthesized, human-reviewed). See `references/best-practices.md`.\n3. **Dataset** \u2014 the corpus the RAG retrieves over.\n4. **Budget cap** \u2014 hard dollar limit per run (default: $2 if user doesn't specify). **Always confirm before any sweep.**\n5. **Provider keys** \u2014 `OPENROUTER_API_KEY` or `OPENAI_API_KEY` (read from env).\n6. **Vector-store config** \u2014 collection name, embedding model, chunk size (read from repo; confirm if ambiguous).\n7. **Eval history path** (optional) \u2014 defaults to `.rag-eval/history.jsonl` in the repo root.\n\n## Workflow\n\nFollow this order. Refer to `references/best-practices.md` for the canonical checklist and `references/evidence-base.md` for the research-backed defaults.\n\n### Step 0 \u2014 (Optional) Ingest a prior iteration session\n\nWhen the user provides a session ID (Claude Code transcript, skill-studio session, or a Fathom meeting), run the **deterministic ingest** *first* \u2014 no LLM calls. This extracts only the useful signals (models tried, prompt variants, cost events, eval results) as compact JSON, so the rest of the skill works off a tiny structured bundle instead of a long raw transcript.\n\n```bash\npython scripts/session_ingest.py <session_id> > /tmp/rag-eval-bundle.json\n# or with a direct path:\npython scripts/session_ingest.py --path /path/to/transcript.jsonl > /tmp/rag-eval-bundle.json\n```\n\nThe bundle includes: `models_tried`, `prompts_tried` (hashes only), `iterations`, `total_cost_usd`, `summary_stats`. Feed this into Step 1 \u2014 do not paste the raw transcript.\n\n**Why this matters:** transcripts can be 100k+ tokens of noise. The ingest script does regex extraction only, keeping the LLM budget for the actual audit + sweep planning. This is a hard requirement, not an optimization.\n\n### Step 1 \u2014 Audit the stack\n\nRead `references/best-practices.md` and inspect the user's repo + vector-store config. Produce a structured report covering:\n- Architecture (retrieval type: dense / hybrid / rerank; chunking strategy; prompt structure)\n- Tech stack (embedding model, LLM, vector store)\n- Resources (dataset size, gold-set size, prior eval runs)\n- Risks (known anti-patterns, missing pieces)\n\nPresent the report to the user and ask which issues to address first.\n\n### Step 2 \u2014 Propose a sweep plan\n\nBased on the audit, propose 3\u20138 variants to test. Keep the grid small on the first run (default: 2 prompts \u00d7 2 models \u00d7 1 retrieval variant = 4 cells). Estimate cost using gold-set size \u00d7 variants \u00d7 avg tokens \u00d7 provider pricing. **Present the cost estimate and wait for user confirmation before running.**\n\n### Step 3 \u2014 Run the sweep\n\nUse `scripts/eval_sweep.py` (see the script header for invocation). It reads a config YAML, runs each variant against the gold-set, records per-variant cost and answer quality, and appends to `history.jsonl`.\n\n**Guardrails:**\n- Never exceed the budget cap \u2014 halt mid-sweep if reached.\n- Never mutate the user's repo. Write all artifacts under `.rag-eval/` (gitignore it).\n- Confirm before any sweep estimated to exceed the user's cap.\n\n### Step 4 \u2014 Rank and report\n\nAfter the sweep, rank variants by a cost-aware score: `quality \u00d7 (1 / log(1 + cost))`. Present:\n- Top 3 variants with quality metrics and cost\n- What changed vs the previous best\n- Concrete next experiment to try\n\nWrite the full report to `.rag-eval/reports/<timestamp>.md`.\n\n### Step 5 \u2014 Self-improve\n\nBefore each subsequent run, read `history.jsonl` and factor in what the user has already tried. Avoid re-testing rejected variants. Surface patterns (\"models A, B, C all underperformed on multi-hop queries \u2014 next try a reranker\").\n\n## Reusable resources\n\n- `scripts/eval_sweep.py` \u2014 grid-search runner. Reads `eval_config.yaml`, writes results to `history.jsonl`.\n- `references/best-practices.md` \u2014 evidence-based RAG checklist the agent uses as an anchor.\n- `references/evidence-base.md` \u2014 pointers to recent RAG research and when each technique helps.\n- `assets/eval_config.template.yaml` \u2014 starter config to copy into the user's repo.\n- `assets/gold_set.template.jsonl` \u2014 3 example Q&A pairs to show the gold-set format.\n\n## Notes\n\n- **Cost is the main failure mode.** Never run without a confirmed budget. Err on the side of smaller sweeps; users can always run again.\n- **No repo mutation.** All outputs go under `.rag-eval/` in the target repo.\n- **When uncertain about best practices, do web research.** Use `tavily-search` or `firecrawl-research` to pull current evidence, then synthesize into the audit report.\n- **Defer to the user.** Before changing any file in the target repo, always confirm.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "rag-eval",
-    "description": "Iterate on RAG systems with structured evals instead of eyeballing. This skill should be used when the user is tuning a RAG pipeline \u2014 changing retrieval prompts, swapping models, adjusting chunking, or debugging poor answers \u2014 and wants a cheap, ranked set of experiments with cost tracking and structured feedback on the stack. Also use when the user asks \"how do I know if my RAG is working?\", \"this RAG eval is burning money\", or \"what should I try next on retrieval?\"."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

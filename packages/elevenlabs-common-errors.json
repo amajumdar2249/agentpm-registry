@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031814",
   "name": "elevenlabs-common-errors",
   "slug": "elevenlabs-common-errors",
   "description": "Diagnose and fix ElevenLabs API errors by HTTP status code.",
   "content": "# ElevenLabs Common Errors\n\n## Overview\n\nQuick diagnostic reference for ElevenLabs API errors organized by HTTP status code, with real error messages, causes, and solutions.\n\n## Prerequisites\n\n- ElevenLabs SDK installed\n- API key configured\n- Access to error logs or console output\n\n## Instructions\n\n### Step 1: Quick Diagnostic\n\n```bash\n# Test API connectivity and auth\ncurl -s -w \"\\nHTTP %{http_code}\" \\\n  https://api.elevenlabs.io/v1/user \\\n  -H \"xi-api-key: ${ELEVENLABS_API_KEY}\"\n\n# Check character quota\ncurl -s https://api.elevenlabs.io/v1/user \\\n  -H \"xi-api-key: ${ELEVENLABS_API_KEY}\" | \\\n  jq '.subscription | {tier, character_count, character_limit}'\n\n# List available voices (confirms API access)\ncurl -s https://api.elevenlabs.io/v1/voices \\\n  -H \"xi-api-key: ${ELEVENLABS_API_KEY}\" | jq '.voices | length'\n```\n\n### Step 2: Error Reference\n\n---\n\n#### HTTP 401 \u2014 Authentication / Quota\n\n**Error: `invalid_api_key`**\n\n```json\n{\n  \"detail\": {\n    \"status\": \"invalid_api_key\",\n    \"message\": \"Invalid API key\"\n  }\n}\n```\n\n**Cause:** API key is missing, malformed, or revoked.\n**Fix:**\n\n```bash\n# Verify key is set\necho \"${ELEVENLABS_API_KEY:0:8}...\"\n\n# Test with curl\ncurl -s https://api.elevenlabs.io/v1/user -H \"xi-api-key: ${ELEVENLABS_API_KEY}\"\n\n# Regenerate at: https://elevenlabs.io/app/settings/api-keys\n```\n\n**Error: `quota_exceeded`**\n\n```json\n{\n  \"detail\": {\n    \"status\": \"quota_exceeded\",\n    \"message\": \"You have insufficient quota to complete this request\"\n  }\n}\n```\n\n**Cause:** Monthly character limit reached for your plan.\n**Fix:** Check usage at https://elevenlabs.io/app/usage. Upgrade plan, or on Creator+ plans, enable usage-based billing in Subscription settings.\n\n---\n\n#### HTTP 400 \u2014 Bad Request\n\n**Error: `voice_not_found`**\n\n```json\n{\n  \"detail\": {\n    \"status\": \"voice_not_found\",\n    \"message\": \"Voice not found\"\n  }\n}\n```\n\n**Cause:** Invalid `voice_id` in request path.\n**Fix:**\n\n```bash\n# List your available voices\ncurl -s https://api.elevenlabs.io/v1/voices \\\n  -H \"xi-api-key: ${ELEVENLABS_API_KEY}\" | \\\n  jq '.voices[] | {voice_id, name, category}'\n```\n\n**Error: `text_too_long`**\n\n```json\n{\n  \"detail\": {\n    \"status\": \"text_too_long\",\n    \"message\": \"Text is too long. Maximum text length is 5000 characters.\"\n  }\n}\n```\n\n**Cause:** Single TTS request exceeds 5,000 characters.\n**Fix:** Split text into chunks. Use `previous_text` and `next_text` parameters to maintain prosody across chunks:\n\n```typescript\nconst audio = await client.textToSpeech.convert(voiceId, {\n  text: currentChunk,\n  previous_text: previousChunk,  // Helps maintain flow\n  next_text: nextChunk,          // Helps maintain flow\n  model_id: \"eleven_multilingual_v2\",\n});\n```\n\n**Error: `model_not_found`**\n\n```json\n{\n  \"detail\": {\n    \"status\": \"model_not_found\",\n    \"message\": \"Model not found\"\n  }\n}\n```\n\n**Cause:** Invalid `model_id` string.\n**Fix:** Use exact model IDs: `eleven_v3`, `eleven_multilingual_v2`, `eleven_flash_v2_5`, `eleven_turbo_v2_5`, `eleven_monolingual_v1`, `eleven_english_sts_v2`.\n\n---\n\n#### HTTP 429 \u2014 Rate Limited\n\n**Error: `too_many_concurrent_requests`**\n\n```json\n{\n  \"detail\": {\n    \"status\": \"too_many_concurrent_requests\",\n    \"message\": \"Too many concurrent requests\"\n  }\n}\n```\n\n**Cause:** Exceeded concurrent request limit for your plan.\n**Fix:** Queue requests. Concurrency limits by plan:\n\n| Plan | Concurrent Requests |\n|------|-------------------|\n| Free | 2 |\n| Starter | 3 |\n| Creator | 5 |\n| Pro | 10 |\n| Scale | 15 |\n| Business | 15 |\n\n```typescript\nimport PQueue from \"p-queue\";\nconst queue = new PQueue({ concurrency: 5 }); // Match your plan\nawait queue.add(() => client.textToSpeech.convert(voiceId, options));\n```\n\n**Error: `system_busy`**\n\n```json\n{\n  \"detail\": {\n    \"status\": \"system_busy\",\n    \"message\": \"Our services are experiencing high traffic\"\n  }\n}\n```\n\n**Cause:** ElevenLabs servers under heavy load.\n**Fix:** Retry with exponential backoff (the SDK does this automatically with `maxRetries`):\n\n```typescript\nconst client = new ElevenLabsClient({\n  maxRetries: 3, // Auto-retries 429 and 5xx\n});\n```\n\n---\n\n#### HTTP 422 \u2014 Validation Error\n\n**Error: `invalid_voice_sample`**\n\n```json\n{\n  \"detail\": {\n    \"status\": \"invalid_voice_sample\",\n    \"message\": \"Invalid audio file\"\n  }\n}\n```\n\n**Cause:** Voice cloning audio file is corrupt, too short, or wrong format.\n**Fix:** Ensure audio is MP3/WAV/M4A/FLAC, at least 30 seconds, clean speech without music.\n\n---\n\n#### WebSocket Errors\n\n**Connection fails silently:**\n\n```\nWebSocket connection to 'wss://api.elevenlabs.io/v1/text-to-speech/...' failed\n```\n\n**Cause:** Missing `xi_api_key` in the first WebSocket message, or using `eleven_v3` model (not supported for WebSocket).\n**Fix:**\n\n```typescript\nws.send(JSON.stringify({\n  text: \" \",\n  xi_api_key: process.env.ELEVENLABS_API_KEY,  // Required in WS\n  model_id: \"eleven_flash_v2_5\",  // v3 NOT supported for WS\n}));\n```\n\n### Step 3: Debug Checklist\n\n1. Verify API key: `curl -s https://api.elevenlabs.io/v1/user -H \"xi-api-key: $ELEVENLABS_API_KEY\"`\n2. Check quota: Look at `character_count` vs `character_limit` in the response\n3. Verify voice_id: `GET /v1/voices` to list valid IDs\n4. Check model_id: Must be an exact match (see table above)\n5. Check request size: Text must be under 5,000 characters\n6. Check concurrency: Are you exceeding your plan's concurrent limit?\n7. Check ElevenLabs status: https://status.elevenlabs.io\n\n## Error Handling\n\n| HTTP | Error | Retryable | Action |\n|------|-------|-----------|--------|\n| 400 | Bad request | No | Fix request parameters |\n| 401 | Auth/quota | No | Check key or upgrade plan |\n| 404 | Not found | No | Verify voice_id/model_id |\n| 422 | Validation | No | Fix input data format |\n| 429 | Rate limit | Yes | Backoff + queue requests |\n| 500+ | Server error | Yes | Retry with backoff |\n\n## Resources\n\n- [ElevenLabs Error Messages](https://elevenlabs.io/docs/developers/resources/error-messages)\n- [API Error 429 Help](https://help.elevenlabs.io/hc/en-us/articles/19571824571921)\n- [API Error 401 Help](https://help.elevenlabs.io/hc/en-us/articles/19572237925521)\n- [ElevenLabs Status](https://status.elevenlabs.io)\n\n## Next Steps\n\nFor comprehensive debugging, see `elevenlabs-debug-bundle`. For rate limit handling, see `elevenlabs-rate-limits`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "elevenlabs-common-errors",
-    "description": "Diagnose and fix ElevenLabs API errors by HTTP status code.",
-    "Trigger": "elevenlabs error\", \"fix elevenlabs\", \"elevenlabs not working\",",
-    "allowed-tools": "Read, Grep, Bash(curl:*), Bash(node:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

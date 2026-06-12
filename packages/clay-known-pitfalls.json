@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031527",
   "name": "clay-known-pitfalls",
   "slug": "clay-known-pitfalls",
   "description": "Identify and avoid the top Clay anti-patterns, gotchas, and integration",
   "content": "# Clay Known Pitfalls\n\n## Overview\n\nReal gotchas when using Clay's data enrichment platform. These are the mistakes that cost credits, waste time, or break integrations -- learned from production experience. Each pitfall includes the exact symptom, root cause, and fix.\n\n## Prerequisites\n\n- Active Clay account with tables configured\n- Understanding of Clay's credit and enrichment model\n- Experience with at least one Clay enrichment workflow\n\n## Instructions\n\n### Pitfall 1: Webhook 50K Limit Surprise\n\n**Symptom:** Webhook silently stops accepting new data. No error, no notification. New rows simply don't appear.\n\n**Root cause:** Each Clay webhook has a hard 50,000 submission lifetime limit. This limit persists even after deleting rows from the table.\n\n**Fix:**\n\n- Monitor webhook submission count in your application\n- Create a new webhook on the same table when approaching 45K\n- Use the `WebhookRotator` pattern from `clay-load-scale`\n- Set up an alert at 40K submissions\n\n---\n\n### Pitfall 2: Waterfall Burns Credits Without \"Stop on First Result\"\n\n**Symptom:** Credits consumed at 3-5x the expected rate on waterfall enrichment columns.\n\n**Root cause:** By default, waterfall enrichment may query ALL providers even after the first one finds data. You must explicitly enable \"stop on first result.\"\n\n**Fix:** In each waterfall column's settings, ensure the stop condition is configured. Without it, a 5-provider email waterfall costs 10-15 credits per row instead of 2-3.\n\n---\n\n### Pitfall 3: Personal Email Domains Waste Credits\n\n**Symptom:** Company enrichment returns empty for 30-50% of rows.\n\n**Root cause:** Rows contain gmail.com, yahoo.com, hotmail.com domains. Clay's company enrichment can't match personal email domains to companies.\n\n**Fix:**\n\n```typescript\nconst PERSONAL_DOMAINS = new Set([\n  'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com',\n  'icloud.com', 'aol.com', 'protonmail.com', 'mail.com',\n]);\n\nfunction filterBeforeEnrichment(rows: any[]) {\n  return rows.filter(r => {\n    const domain = r.domain?.toLowerCase();\n    if (PERSONAL_DOMAINS.has(domain)) {\n      console.log(`Filtered: ${domain} (personal email domain)`);\n      return false;\n    }\n    return true;\n  });\n}\n// Apply BEFORE sending to Clay. Typical savings: 20-40% of credits.\n```\n\n---\n\n### Pitfall 4: Auto-Update Re-Enriches Entire Table\n\n**Symptom:** Thousands of credits consumed overnight. Enrichment columns re-ran on rows that were already enriched.\n\n**Root cause:** Table-level auto-update was ON, and a column edit or provider reconnection triggered re-enrichment of all existing rows.\n\n**Fix:**\n\n- Turn off table-level auto-update before editing column configuration\n- Use conditional run rules: `ISEMPTY(Work Email)` to skip already-enriched rows\n- Only enable auto-update for tables with active webhook inflow\n\n---\n\n### Pitfall 5: CSV Header Case Sensitivity\n\n**Symptom:** Imported CSV data appears in wrong columns or creates new columns instead of mapping to existing ones.\n\n**Root cause:** Clay maps CSV columns by exact header name. \"Company Name\" does not match \"company_name\" or \"company name.\"\n\n**Fix:**\n\n```typescript\n// Normalize CSV headers before import\nfunction normalizeCSVHeaders(headers: string[]): string[] {\n  return headers.map(h => h.trim()); // Only trim whitespace\n  // Do NOT lowercase or change case \u2014 match the exact Clay column name\n}\n\n// Better: rename your Clay columns to match your CSV format\n// Or: use Clay's column mapping UI during CSV import to manually map\n```\n\n---\n\n### Pitfall 6: Reading Data Immediately After Webhook Write\n\n**Symptom:** Checking the table via API or UI shows the row but enrichment columns are empty.\n\n**Root cause:** Enrichment runs asynchronously after the row is created. Depending on provider speed and table queue, enrichment can take 5-60 seconds.\n\n**Fix:** Use HTTP API columns to push enriched data back to your application rather than polling. If you must poll, wait at least 30 seconds and check for populated enrichment columns before reading.\n\n---\n\n### Pitfall 7: Claygent Prompts That Are Too Vague\n\n**Symptom:** Claygent returns \"Could not find information\" or generic/wrong data.\n\n**Root cause:** Prompt says \"Research this company\" instead of specific, directed questions.\n\n**Bad prompt:** \"Research {{Company Name}}\"\n**Good prompt:** \"Go to {{domain}}/about and find the CEO's name. Then check {{domain}}/pricing for the starting price. Return: CEO Name, Starting Price.\"\n\n**Fix:**\n\n- Be specific about what page to check\n- Ask for specific data points, not general research\n- Add fallback instructions: \"If not on website, check LinkedIn\"\n- Use Navigator mode for JavaScript-heavy sites\n\n---\n\n### Pitfall 8: Not Connecting Your Own API Keys\n\n**Symptom:** Monthly Clay bill much higher than expected. Credits consumed at 2-13 per enrichment.\n\n**Root cause:** Using Clay's managed provider accounts instead of your own API keys. Every provider lookup costs Clay credits when using managed accounts.\n\n**Fix:** Go to **Settings > Connections** and add your own API keys for Apollo, Clearbit, Hunter, etc. Result: 0 Clay data credits consumed per enrichment (only 1 Action consumed).\n\n**Savings comparison for 10K enrichments/month:**\n\n| Setup | Credits Used | Approximate Cost Impact |\n|-------|-------------|----------------------|\n| All managed | ~60K credits | Full credit consumption |\n| Own API keys | 0 data credits + 10K actions | 70-80% savings |\n\n---\n\n### Pitfall 9: No Conditional Run on Expensive Columns\n\n**Symptom:** Claygent and AI columns run on every row including low-quality leads, burning expensive credits.\n\n**Root cause:** Claygent and AI columns are set to auto-run on all new rows without qualification criteria.\n\n**Fix:** Add \"Only run if\" conditions:\n\n- Claygent: `ICP Score >= 60 AND ISNOTEMPTY(Company Name)`\n- AI personalization: `ICP Score >= 70 AND ISNOTEMPTY(Work Email)`\n- Phone lookup: `ICP Score >= 80 AND ISNOTEMPTY(Work Email)`\n\nThis ensures expensive operations only run on qualified prospects.\n\n---\n\n### Pitfall 10: Formula Column References Break on Rename\n\n**Symptom:** Formula column shows `#ERROR` or `#REF` after renaming another column.\n\n**Root cause:** Clay formulas reference columns by display name (case-sensitive). Renaming a referenced column breaks the formula.\n\n**Fix:** After renaming any column, review all formula columns and update their references. Consider establishing a column naming convention and documenting it so names don't change unexpectedly.\n\n## Quick Reference Anti-Pattern Checklist\n\n| Anti-Pattern | Cost Impact | Fix Difficulty |\n|-------------|-------------|----------------|\n| No \"stop on first result\" | 3-5x credit waste | Easy (toggle) |\n| Personal domains not filtered | 20-40% credit waste | Easy (pre-filter) |\n| No own API keys | 70-80% higher cost | Easy (paste keys) |\n| Auto-update re-enrichment | Thousands of credits | Medium (conditions) |\n| Vague Claygent prompts | Low hit rate, wasted credits | Medium (rewrite) |\n| No conditional run rules | Expensive columns run on all | Easy (add conditions) |\n| Webhook 50K limit hit | Data loss | Medium (rotation) |\n\n## Resources\n\n- [Clay University -- Table Management Settings](https://university.clay.com/docs/table-management-settings)\n- [Clay University -- Actions & Data Credits](https://university.clay.com/docs/actions-data-credits)\n- [Clay Community](https://community.clay.com)\n\n## Next Steps\n\nFor comprehensive debugging when things go wrong, see `clay-advanced-troubleshooting`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clay-known-pitfalls",
-    "description": "Identify and avoid the top Clay anti-patterns, gotchas, and integration",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

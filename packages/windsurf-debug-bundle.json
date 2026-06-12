@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033547",
   "name": "windsurf-debug-bundle",
   "slug": "windsurf-debug-bundle",
   "description": "Collect Windsurf diagnostic information for troubleshooting and support",
   "content": "# Windsurf Debug Bundle\n\n## Current State\n\n!`windsurf --version 2>/dev/null || echo 'Windsurf CLI not in PATH'`\n!`node --version 2>/dev/null || echo 'N/A'`\n!`uname -a`\n\n## Overview\n\nCollect all diagnostic information needed to troubleshoot Windsurf issues or submit effective support tickets.\n\n## Prerequisites\n\n- Windsurf installed (even if malfunctioning)\n- Terminal access\n- Permission to read Windsurf config directories\n\n## Instructions\n\n### Step 1: Collect Windsurf Configuration State\n\n```bash\n#!/bin/bash\nset -euo pipefail\n\nBUNDLE=\"windsurf-debug-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE\"/{config,logs,workspace}\n\necho \"=== Windsurf Debug Bundle ===\" > \"$BUNDLE/summary.txt\"\necho \"Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$BUNDLE/summary.txt\"\n\n# 1. Windsurf version and environment\necho \"--- Environment ---\" >> \"$BUNDLE/summary.txt\"\nwindsurf --version >> \"$BUNDLE/summary.txt\" 2>&1 || echo \"windsurf CLI not found\" >> \"$BUNDLE/summary.txt\"\nnode --version >> \"$BUNDLE/summary.txt\" 2>&1\necho \"OS: $(uname -srm)\" >> \"$BUNDLE/summary.txt\"\n\n# 2. Codeium config (redacted)\necho \"--- Codeium Config ---\" >> \"$BUNDLE/summary.txt\"\nls -la ~/.codeium/ >> \"$BUNDLE/config/codeium-dir.txt\" 2>&1 || echo \"No ~/.codeium/\" >> \"$BUNDLE/config/codeium-dir.txt\"\n\n# 3. MCP server config (redacted)\nif [ -f ~/.codeium/windsurf/mcp_config.json ]; then\n  sed 's/\"[A-Za-z0-9_-]\\{20,\\}\"/\"***REDACTED***\"/g' ~/.codeium/windsurf/mcp_config.json > \"$BUNDLE/config/mcp-config-redacted.json\"\nfi\n\n# 4. Workspace config\ncp .windsurfrules \"$BUNDLE/workspace/\" 2>/dev/null || true\ncp .codeiumignore \"$BUNDLE/workspace/\" 2>/dev/null || true\nls -la .windsurf/ >> \"$BUNDLE/workspace/windsurf-dir.txt\" 2>/dev/null || true\nls -la .windsurf/rules/ >> \"$BUNDLE/workspace/rules-dir.txt\" 2>/dev/null || true\n\n# 5. Extension list\nwindsurf --list-extensions > \"$BUNDLE/config/extensions.txt\" 2>/dev/null || echo \"Cannot list extensions\" > \"$BUNDLE/config/extensions.txt\"\n```\n\n### Step 2: Collect Logs\n\n```bash\n# Windsurf logs location varies by OS:\n# macOS: ~/Library/Application Support/Windsurf/logs/\n# Linux: ~/.config/Windsurf/logs/\n# Windows: %APPDATA%/Windsurf/logs/\n\nLOG_DIR=\"${HOME}/.config/Windsurf/logs\"\n[ -d \"$LOG_DIR\" ] || LOG_DIR=\"${HOME}/Library/Application Support/Windsurf/logs\"\n\nif [ -d \"$LOG_DIR\" ]; then\n  # Copy last 1000 lines of each log (redacted)\n  for log in \"$LOG_DIR\"/*.log; do\n    tail -1000 \"$log\" 2>/dev/null | sed 's/Bearer [^ ]*/Bearer ***REDACTED***/g' > \"$BUNDLE/logs/$(basename \"$log\")\"\n  done\nfi\n\n# Codeium-specific logs\nif [ -d ~/.codeium/windsurf/logs ]; then\n  cp ~/.codeium/windsurf/logs/*.log \"$BUNDLE/logs/\" 2>/dev/null || true\nfi\n```\n\n### Step 3: Check Workspace Health\n\n```bash\n# Workspace analysis\necho \"--- Workspace Health ---\" >> \"$BUNDLE/summary.txt\"\necho \"File count: $(find . -type f -not -path '*/node_modules/*' -not -path '*/.git/*' | wc -l)\" >> \"$BUNDLE/summary.txt\"\necho \"Has .windsurfrules: $([ -f .windsurfrules ] && echo 'YES' || echo 'NO')\" >> \"$BUNDLE/summary.txt\"\necho \"Has .codeiumignore: $([ -f .codeiumignore ] && echo 'YES' || echo 'NO')\" >> \"$BUNDLE/summary.txt\"\necho \"Has .windsurf/rules/: $([ -d .windsurf/rules ] && echo 'YES' || echo 'NO')\" >> \"$BUNDLE/summary.txt\"\n\n# Check for common issues\nif [ ! -f .codeiumignore ] && [ -d node_modules ]; then\n  echo \"WARNING: No .codeiumignore but node_modules exists -- indexing will be slow\" >> \"$BUNDLE/summary.txt\"\nfi\n```\n\n### Step 4: Package and Submit\n\n```bash\ntar -czf \"$BUNDLE.tar.gz\" \"$BUNDLE\"\necho \"Debug bundle created: $BUNDLE.tar.gz\"\necho \"Review for sensitive data before submitting to support.\"\n```\n\n## Support Ticket Template\n\n```markdown\n## Windsurf Support Request\n\n**Windsurf Version:** [from debug bundle]\n**OS:** [macOS/Linux/Windows + version]\n**Plan:** [Free/Pro/Teams/Enterprise]\n\n### Issue\n[One paragraph description]\n\n### Steps to Reproduce\n1. [Step 1]\n2. [Step 2]\n\n### Expected vs Actual\n- Expected: [behavior]\n- Actual: [behavior]\n\n### Attachments\n- [ ] Debug bundle (windsurf-debug-*.tar.gz)\n- [ ] Screenshot of error (if visual)\n- [ ] Relevant .windsurfrules (if context-related)\n\n### Already Tried\n- [ ] Restart Cascade\n- [ ] Reload Window\n- [ ] Reset Indexing\n- [ ] Disable conflicting extensions\n```\n\n## Error Handling\n\n| Item | Purpose | Included |\n|------|---------|----------|\n| Windsurf version | Compatibility check | Yes |\n| Extension list | Conflict detection | Yes |\n| Workspace config | Context issues | Yes |\n| Log files (redacted) | Error analysis | Yes |\n| MCP config (redacted) | Integration issues | Yes |\n\n## Examples\n\n### ALWAYS REDACT\n\n- API keys and tokens\n- Passwords and secrets\n- Personal file paths (replace with ~/)\n- Customer data\n\n### Quick Single-Command Health Check\n\n```bash\necho \"Windsurf: $(windsurf --version 2>/dev/null || echo 'N/A')\" && \\\necho \"Rules: $([ -f .windsurfrules ] && wc -c < .windsurfrules || echo 'none')\" && \\\necho \"Ignore: $([ -f .codeiumignore ] && wc -l < .codeiumignore || echo 'none')\"\n```\n\n## Resources\n\n- [Windsurf GitHub Issues](https://github.com/Exafunction/codeium/issues)\n- [Windsurf Status](https://status.windsurf.com)\n\n## Next Steps\n\nFor rate limit issues, see `windsurf-rate-limits`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "windsurf-debug-bundle",
-    "description": "Collect Windsurf diagnostic information for troubleshooting and support",
-    "allowed-tools": "Read, Bash(grep:*), Bash(ls:*), Bash(tar:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

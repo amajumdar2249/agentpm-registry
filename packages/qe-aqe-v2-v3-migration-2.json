@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000041345",
   "name": "qe-aqe-v2-v3-migration",
   "slug": "qe-aqe-v2-v3-migration-2",
   "description": "Migrate Agentic QE projects from v2 to v3 with zero data loss",
   "content": "\n# AQE v2 to v3 Migration Skill\n\n<default_to_action>\nWhen migrating from v2 to v3:\n1. ANALYZE current v2 installation\n2. BACKUP all data before any changes\n3. MIGRATE configuration, memory, and patterns\n4. VALIDATE migration success\n5. PROVIDE rollback instructions\n\n**Never delete v2 data without explicit user confirmation.**\n</default_to_action>\n\n## Quick Reference\n\n### Migration Command\n```bash\n# When v3 becomes main release, just update the package\nnpm install agentic-qe@latest\n\n# Run migration\naqe migrate\n\n# Or use this skill\n/aqe-v2-v3-migration\n```\n\n### What Gets Migrated\n\n| Component | v2 Location | v3 Location | Auto-Migrate |\n|-----------|-------------|-------------|--------------|\n| Memory DB | `.agentic-qe/memory.db` | `.aqe/agentdb/` | Yes |\n| Config | `.agentic-qe/config.json` | `.aqe/config.json` | Yes |\n| Patterns | `.agentic-qe/patterns/` | `.aqe/reasoning-bank/` | Yes |\n| Cache | `.agentic-qe/cache/` | `.aqe/cache/` | Optional |\n| Logs | `.agentic-qe/logs/` | `.aqe/logs/` | No (fresh start) |\n\n---\n\n## Migration Checklist\n\n### Pre-Migration\n- [ ] Verify v2 installation exists (`.agentic-qe/` directory)\n- [ ] Check v2 version: `aqe --version` (should be 2.x.x)\n- [ ] Backup current data: `npm run backup` (in v2 project)\n- [ ] Note any custom configurations\n- [ ] Document current test counts and coverage\n\n### During Migration\n- [ ] Update to v3: `npm install agentic-qe@latest`\n- [ ] Run migration: `aqe migrate`\n- [ ] Review migration report\n- [ ] Verify data transferred correctly\n\n### Post-Migration\n- [ ] Run v3 tests: `aqe test`\n- [ ] Check coverage: `aqe coverage`\n- [ ] Verify patterns loaded: `aqe patterns list`\n- [ ] Test MCP integration with Claude Code\n\n---\n\n## Architecture Changes (v2 \u2192 v3)\n\n### From Monolithic to DDD\n\n```\nv2 Structure:                    v3 Structure:\n\u251c\u2500\u2500 src/mcp/tools/              \u251c\u2500\u2500 src/domains/\n\u2502   \u251c\u2500\u2500 test-*.ts (40+ tools)   \u2502   \u251c\u2500\u2500 test-generation/\n\u2502   \u2514\u2500\u2500 ...                     \u2502   \u251c\u2500\u2500 test-execution/\n\u251c\u2500\u2500 src/core/agents/            \u2502   \u251c\u2500\u2500 coverage-analysis/\n\u2502   \u251c\u2500\u2500 mixed agents            \u2502   \u251c\u2500\u2500 quality-assessment/\n\u2502   \u2514\u2500\u2500 ...                     \u2502   \u251c\u2500\u2500 defect-intelligence/\n\u2514\u2500\u2500 src/core/memory/            \u2502   \u251c\u2500\u2500 requirements-validation/\n    \u2514\u2500\u2500 scattered impls         \u2502   \u251c\u2500\u2500 code-intelligence/\n                                \u2502   \u251c\u2500\u2500 security-compliance/\n                                \u2502   \u251c\u2500\u2500 contract-testing/\n                                \u2502   \u251c\u2500\u2500 visual-accessibility/\n                                \u2502   \u251c\u2500\u2500 chaos-resilience/\n                                \u2502   \u2514\u2500\u2500 learning-optimization/\n                                \u251c\u2500\u2500 src/kernel/\n                                \u2502   \u251c\u2500\u2500 event-bus.ts\n                                \u2502   \u2514\u2500\u2500 coordinator.ts\n                                \u2514\u2500\u2500 src/mcp/\n                                    \u2514\u2500\u2500 domain-handlers.ts\n```\n\n### Key API Changes\n\n| v2 API | v3 API | Notes |\n|--------|--------|-------|\n| `aqe init` | `aqe init` | Different binary |\n| `aqe.generateTests()` | `testGeneration.generate()` | Domain-based |\n| `aqe.analyzeGaps()` | `coverageAnalysis.findGaps()` | O(log n) now |\n| `memory.store()` | `agentDB.store()` | HNSW-indexed |\n| `patterns.learn()` | `reasoningBank.record()` | With verdicts |\n\n---\n\n## Configuration Migration\n\n### v2 Config Format\n```json\n{\n  \"version\": \"2.8.2\",\n  \"memory\": {\n    \"path\": \".agentic-qe/memory.db\",\n    \"type\": \"sqlite\"\n  },\n  \"agents\": {\n    \"enabled\": [\"test-generator\", \"coverage-analyzer\"]\n  }\n}\n```\n\n### v3 Config Format\n```json\n{\n  \"version\": \"3.0.0\",\n  \"kernel\": {\n    \"eventBus\": \"in-memory\",\n    \"coordinator\": \"queen\"\n  },\n  \"domains\": {\n    \"test-generation\": { \"enabled\": true },\n    \"test-execution\": { \"enabled\": true },\n    \"coverage-analysis\": {\n      \"enabled\": true,\n      \"algorithm\": \"hnsw\",\n      \"dimensions\": 128\n    }\n  },\n  \"memory\": {\n    \"backend\": \"agentdb\",\n    \"path\": \".aqe/agentdb/\",\n    \"hnsw\": {\n      \"M\": 16,\n      \"efConstruction\": 200\n    }\n  },\n  \"learning\": {\n    \"reasoningBank\": true,\n    \"sona\": true\n  }\n}\n```\n\n---\n\n## Memory Migration\n\n### SQLite to AgentDB\n\n```typescript\n// v2: Direct SQLite access\nimport Database from 'better-sqlite3';\nconst db = new Database('.agentic-qe/memory.db');\nconst patterns = db.prepare('SELECT * FROM patterns').all();\n\n// v3: AgentDB with HNSW\nimport { AgentDB } from 'agentic-qe';\nconst db = new AgentDB('.aqe/agentdb/');\nawait db.initialize({ dimensions: 128, M: 16 });\n\n// Migration script transfers and indexes\nfor (const pattern of v2Patterns) {\n  await db.store({\n    key: pattern.id,\n    value: pattern.data,\n    embedding: await generateEmbedding(pattern.data),\n    metadata: { migratedFrom: 'v2', originalId: pattern.id }\n  });\n}\n```\n\n---\n\n## Breaking Changes\n\n### Must Update\n\n1. **Import Paths**\n   ```typescript\n   // v2\n   import { AgenticQE } from 'agentic-qe';\n\n   // v3 (when v3 becomes main release, package name is still 'agentic-qe')\n   import { TestGenerationDomain } from 'agentic-qe/domains';\n   ```\n\n2. **CLI Commands**\n   ```bash\n   # v2\n   aqe test --parallel\n\n   # v3\n   aqe test --workers=4 --topology=mesh\n   ```\n\n3. **MCP Server**\n   ```bash\n   # v2\n   claude mcp add aqe -- npx aqe-mcp\n\n   # v3 (same CLI name, enhanced capabilities)\n   claude mcp add aqe -- npx aqe mcp\n   ```\n\n### Deprecated (Will Warn)\n\n- `aqe.runTests()` \u2192 Use domain-specific methods\n- Direct memory access \u2192 Use AgentDB API\n- Flat agent list \u2192 Use domain coordinators\n\n---\n\n## Rollback Instructions\n\nIf migration fails or you need to revert:\n\n```bash\n# 1. v3 does NOT modify v2 data\n# Your .agentic-qe/ folder is untouched\n\n# 2. Downgrade to v2\nnpm install agentic-qe@2.x\nrm -rf .aqe/\n\n# 3. Continue using v2\naqe --version  # Should show 2.x.x\n```\n\n---\n\n## Agent Coordination Examples\n\n### Spawning Migration Agents\n\n```typescript\n// Use Task tool to spawn migration agents in parallel\nTask({\n  prompt: \"Analyze v2 memory.db and extract all patterns\",\n  subagent_type: \"researcher\",\n  description: \"Analyze v2 patterns\"\n});\n\nTask({\n  prompt: \"Convert v2 config to v3 format\",\n  subagent_type: \"coder\",\n  description: \"Convert config\"\n});\n\nTask({\n  prompt: \"Validate migration results\",\n  subagent_type: \"tester\",\n  description: \"Validate migration\"\n});\n```\n\n---\n\n## Troubleshooting\n\n### Common Issues\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| \"Cannot find .agentic-qe/\" | No v2 installation | Run `aqe init` first |\n| \"Memory migration failed\" | Corrupted SQLite | Use backup: `npm run backup:restore` |\n| \"HNSW index error\" | Dimension mismatch | Set `dimensions: 128` in config |\n| \"Pattern not found\" | Not migrated | Re-run: `aqe migrate --patterns` |\n\n### Debug Mode\n\n```bash\n# Run migration with debug output\nDEBUG=aqe:migrate aqe migrate\n\n# Check migration logs\ncat .aqe/logs/migration.log\n```\n\n---\n\n## Support\n\n- **Migration Issues**: Open issue with `[v2-v3-migration]` tag\n- **Documentation**: [Migration Guide](../../docs/plans/V2-TO-V3-MIGRATION-PLAN.md)\n- **Discord**: #v3-migration channel\n\n---\n\n## Version Compatibility Matrix\n\n| v2 Version | v3 Version | Migration Support |\n|------------|------------|-------------------|\n| 2.8.x | 3.0.x | Full |\n| 2.7.x | 3.0.x | Full |\n| 2.6.x | 3.0.x | Partial (config only) |\n| 2.5.x and below | 3.0.x | Manual migration |\n\n---\n\n*Skill Version: 1.0.0 | Last Updated: 2026-01-11*\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "inclusion": "auto",
-    "name": "qe-aqe-v2-v3-migration",
-    "description": "Migrate Agentic QE projects from v2 to v3 with zero data loss"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

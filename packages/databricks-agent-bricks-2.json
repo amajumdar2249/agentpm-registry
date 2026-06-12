@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000026904",
   "name": "databricks-agent-bricks",
   "slug": "databricks-agent-bricks-2",
   "description": "Create Agent Bricks: Knowledge Assistants (KA) for document Q&A and Supervisor Agents for multi-agent orchestration (MAS).",
   "content": "\n# Agent Bricks\n\nAgent Bricks are pre-built AI tiles in Databricks that provide conversational interfaces. This skill covers **Knowledge Assistants** and **Supervisor Agents**.\n\n| Brick | Purpose | This Skill |\n|-------|---------|------------|\n| **Knowledge Assistant (KA)** | Document Q&A using RAG on PDFs/text in Volumes | \u2713 |\n| **Supervisor Agent** | Orchestrates multiple agents (KA, endpoints, UC functions, MCP) | \u2713 |\n\n---\n\n## Knowledge Assistant\n\n```bash\n# Find volumes\ndatabricks volumes list CATALOG SCHEMA\ndatabricks experimental aitools tools query --warehouse WH \"LIST '/Volumes/catalog/schema/volume/'\"\n\n# Create KA\ndatabricks knowledge-assistants create-knowledge-assistant \"Name\" \"Description\"\n\n# Add knowledge source. With --json, pass ONLY the PARENT as a positional arg\n# and put display_name / description / source_type / the source body (files|index|file_table)\n# inside the JSON. Mixing positional DISPLAY_NAME/DESCRIPTION/SOURCE_TYPE with --json errors.\ndatabricks knowledge-assistants create-knowledge-source \\\n  \"knowledge-assistants/{ka_id}\" \\\n  --json '{\n    \"display_name\": \"Docs\",\n    \"description\": \"Documentation files\",\n    \"source_type\": \"files\",\n    \"files\": {\"path\": \"/Volumes/catalog/schema/volume/\"}\n  }'\n\n# Sync and check status\ndatabricks knowledge-assistants sync-knowledge-sources \"knowledge-assistants/{ka_id}\"\ndatabricks knowledge-assistants get-knowledge-assistant \"knowledge-assistants/{ka_id}\"\n\n# List/manage\ndatabricks knowledge-assistants list-knowledge-assistants\ndatabricks knowledge-assistants delete-knowledge-assistant \"knowledge-assistants/{ka_id}\"\n```\n\n**Source types:** `files` (Volume path) or `index` (Vector Search: `index.index_name`, `index.text_col`, `index.doc_uri_col`)\n\n**Status:** `CREATING` (2-5 min) \u2192 `ONLINE` \u2192 `OFFLINE`\n\n---\n\n## Supervisor Agent\n\nNative CLI: `databricks supervisor-agents` (Beta, requires CLI \u2265 0.299.2). Resource paths look like `supervisor-agents/{id}` \u2014 every command takes either that full path or a `PARENT` of that shape. `list-supervisor-agents` and `list-examples`/`list-tools` return bare JSON arrays.\n\n```bash\n# Create the supervisor agent (display name positional, description/instructions as flags)\ndatabricks supervisor-agents create-supervisor-agent \"My Supervisor\" \\\n    --description \"Routes queries to specialized agents\" \\\n    --instructions \"Route data questions to analyst, document questions to docs_agent.\"\n# \u2192 returns {name: \"supervisor-agents/<uuid>\", endpoint_name: \"mas-<short>-endpoint\", ...}\n\n# List / get / find by name\ndatabricks supervisor-agents list-supervisor-agents\ndatabricks supervisor-agents get-supervisor-agent supervisor-agents/<id>\ndatabricks supervisor-agents list-supervisor-agents | jq '.[] | select(.display_name == \"My Supervisor\")'\n\n# Update \u2014 UPDATE_MASK + new DISPLAY_NAME are positional; description/instructions optional flags\ndatabricks supervisor-agents update-supervisor-agent supervisor-agents/<id> \\\n    \"display_name,description,instructions\" \"My Supervisor (v2)\" \\\n    --description \"...\" --instructions \"...\"\n\n# Delete\ndatabricks supervisor-agents delete-supervisor-agent supervisor-agents/<id>\n```\n\n### Tools (the agents the supervisor routes to)\n\nEach tool wires the supervisor to a downstream resource. `tool_type` lives in `--json` (the CLI rejects it as a positional when `--json` is used). Each type has a type-specific block (`genie_space`, `knowledge_assistant`, etc.) whose identifier field differs by type \u2014 see the table below.\n\n```bash\n# Attach a Genie space \u2014 find its space_id with `databricks genie list-spaces`\ndatabricks supervisor-agents create-tool supervisor-agents/<id> analyst --json '{\n    \"tool_type\": \"genie_space\",\n    \"description\": \"SQL analytics on the analytics warehouse\",\n    \"genie_space\": {\"id\": \"<genie_space_id>\"}\n}'\n\n# Attach a Knowledge Assistant \u2014 find ka_id with `databricks knowledge-assistants list-knowledge-assistants`\ndatabricks supervisor-agents create-tool supervisor-agents/<id> docs_agent --json '{\n    \"tool_type\": \"knowledge_assistant\",\n    \"description\": \"Answers from product documentation\",\n    \"knowledge_assistant\": {\"knowledge_assistant_id\": \"<ka_id>\"}\n}'\n\n# List / get / delete tools\ndatabricks supervisor-agents list-tools supervisor-agents/<id>\ndatabricks supervisor-agents get-tool supervisor-agents/<id>/tools/<tool_id>\ndatabricks supervisor-agents delete-tool supervisor-agents/<id>/tools/<tool_id>\n```\n\n**Tool types** (`tool_type` value \u2192 type-specific block):\n\n| `tool_type` | Block | Use for |\n|---|---|---|\n| `genie_space` | `{\"id\": \"<space_id>\"}` | Natural language \u2192 SQL via Genie |\n| `knowledge_assistant` | `{\"knowledge_assistant_id\": \"<ka_id>\"}` | Document Q&A via a KA |\n| `uc_function` | `{\"name\": \"catalog.schema.func\"}` | UC SQL/Python function |\n| `uc_connection` | `{\"name\": \"<connection_name>\"}` | External MCP server via UC HTTP Connection |\n| `volume` | `{\"name\": \"<full_volume_name>\"}` | UC Volume browsing |\n| `app` | `{\"name\": \"<app_name>\"}` | Databricks App |\n| Other types (`serving_endpoint`, `lakeview_dashboard`, `supervisor_agent`, `uc_table`, `vector_search_index`, `catalog`, `schema`, `web_search`) | Block name and field shape vary | Run `databricks supervisor-agents create-tool --help` and probe \u2014 these were not verified end-to-end here. |\n\n### Examples (training the supervisor)\n\nExamples must use `--json` \u2014 the positional `GUIDELINES` arg doesn't accept any encoding because guidelines is a `repeated string`.\n\n```bash\ndatabricks supervisor-agents create-example supervisor-agents/<id> --json '{\n    \"question\": \"What were Q4 revenue numbers?\",\n    \"guidelines\": [\"Route to analyst Genie space\", \"Always group by region\"]\n}'\n\ndatabricks supervisor-agents list-examples supervisor-agents/<id>\ndatabricks supervisor-agents get-example supervisor-agents/<id>/examples/<ex_id>\ndatabricks supervisor-agents delete-example supervisor-agents/<id>/examples/<ex_id>\n```\n\n**Endpoint readiness:** after `create-supervisor-agent`, the serving endpoint takes up to ~10 minutes to come online before it can answer queries. `get-supervisor-agent` returns the endpoint name immediately, but querying it is gated on the endpoint's own readiness \u2014 check via `databricks serving-endpoints get <endpoint_name>`.\n\n---\n\n## Reference\n\n| Topic | File |\n|-------|------|\n| KA source types, index, troubleshooting | [1-knowledge-assistants.md](1-knowledge-assistants.md) |\n| UC functions, MCP servers, examples | [2-supervisor-agents.md](2-supervisor-agents.md) |\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "databricks-agent-bricks",
-    "description": "Create Agent Bricks: Knowledge Assistants (KA) for document Q&A and Supervisor Agents for multi-agent orchestration (MAS)."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032852",
   "name": "palantir-core-workflow-b",
   "slug": "palantir-core-workflow-b",
   "description": "Work with Palantir Foundry Ontology objects, actions, and queries via",
   "content": "# Palantir Core Workflow B \u2014 Ontology Objects & Actions\n\n## Overview\n\nQuery, filter, and mutate Ontology objects using the Foundry Platform SDK and OSDK. Covers listing objects with property filters, following links between object types, applying actions, and aggregating object data. This is the primary workflow for Ontology-driven applications.\n\n## Prerequisites\n\n- Completed `palantir-install-auth` setup\n- An Ontology with configured object types, link types, and actions\n- Familiarity with `palantir-core-workflow-a` (data pipelines feed the Ontology)\n\n## Instructions\n\n### Step 1: List and Filter Objects (REST API)\n\n```python\nimport os, foundry\n\nclient = foundry.FoundryClient(\n    auth=foundry.UserTokenAuth(\n        hostname=os.environ[\"FOUNDRY_HOSTNAME\"],\n        token=os.environ[\"FOUNDRY_TOKEN\"],\n    ),\n    hostname=os.environ[\"FOUNDRY_HOSTNAME\"],\n)\n\nONTOLOGY = \"my-company\"\n\n# List employees in Engineering, sorted by hire date\nresult = client.ontologies.OntologyObject.list(\n    ontology=ONTOLOGY,\n    object_type=\"Employee\",\n    page_size=20,\n    order_by=\"hireDate:asc\",\n    properties={\"department\": \"Engineering\"},\n)\n\nfor obj in result.data:\n    p = obj.properties\n    print(f\"{p['fullName']} | {p['department']} | hired {p['hireDate']}\")\n```\n\n### Step 2: Search Objects with Filters\n\n```python\n# Search with complex filters using the search endpoint\nsearch_result = client.ontologies.OntologyObject.search(\n    ontology=ONTOLOGY,\n    object_type=\"Employee\",\n    where={\n        \"type\": \"and\",\n        \"value\": [\n            {\"type\": \"eq\", \"field\": \"department\", \"value\": \"Engineering\"},\n            {\"type\": \"gte\", \"field\": \"salary\", \"value\": 100000},\n        ],\n    },\n    page_size=50,\n)\nprint(f\"Found {len(search_result.data)} matching employees\")\n```\n\n### Step 3: Follow Links Between Objects\n\n```python\n# Get all projects linked to an employee\nemployee_rid = \"ri.ontology.main.object.employee-001\"\n\nlinked_projects = client.ontologies.OntologyObject.list_linked_objects(\n    ontology=ONTOLOGY,\n    object_type=\"Employee\",\n    primary_key=\"EMP-001\",\n    link_type=\"assignedProjects\",\n)\n\nfor project in linked_projects.data:\n    print(f\"  Project: {project.properties['name']} \u2014 {project.properties['status']}\")\n```\n\n### Step 4: Apply Actions to Modify Objects\n\n```python\n# Promote an employee \u2014 triggers validation rules defined in Ontology\nresult = client.ontologies.Action.apply(\n    ontology=ONTOLOGY,\n    action_type=\"promoteEmployee\",\n    parameters={\n        \"employeeId\": \"EMP-001\",\n        \"newTitle\": \"Senior Engineer\",\n        \"newSalary\": 150000,\n        \"effectiveDate\": \"2026-04-01\",\n    },\n)\nprint(f\"Validation: {result.validation}\")  # VALID or INVALID with reasons\n```\n\n### Step 5: Aggregate Object Data\n\n```python\n# Aggregate salary by department\naggregation = client.ontologies.OntologyObject.aggregate(\n    ontology=ONTOLOGY,\n    object_type=\"Employee\",\n    aggregation=[\n        {\"type\": \"avg\", \"name\": \"avgSalary\", \"field\": \"salary\"},\n        {\"type\": \"count\", \"name\": \"headcount\"},\n    ],\n    group_by=[{\"field\": \"department\", \"type\": \"exact\"}],\n)\n\nfor bucket in aggregation.data:\n    grp = bucket.group\n    vals = bucket.metrics\n    print(f\"{grp['department']}: {vals['headcount']} people, avg ${vals['avgSalary']:,.0f}\")\n```\n\n### Step 6: TypeScript OSDK (Generated SDK)\n\n```typescript\nimport { createClient } from \"@osdk/client\";\nimport { Employee } from \"@my-app/sdk\";  // generated types\n\n// Type-safe queries with auto-completion\nconst engineers = await client(Employee)\n  .where({ department: { $eq: \"Engineering\" } })\n  .orderBy(e => e.hireDate.asc())\n  .fetchPage({ pageSize: 20 });\n\nfor (const emp of engineers.data) {\n  console.log(`${emp.fullName} \u2014 ${emp.title}`);\n}\n\n// Apply action with type-safe parameters\nawait client(Employee).applyAction(\"promoteEmployee\", {\n  employeeId: \"EMP-001\",\n  newTitle: \"Senior Engineer\",\n});\n```\n\n## Output\n\n- Filtered and sorted Ontology object queries\n- Cross-object navigation via link types\n- Action application with validation feedback\n- Server-side aggregations grouped by properties\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `ObjectTypeNotFound` | Wrong api_name | Check Ontology Manager for exact type names |\n| `PropertyNotFound` | Wrong property name | Properties are camelCase in API, may differ from UI |\n| `ActionValidationFailed` | Business rule violation | Read `result.validation.messages` for details |\n| `LinkTypeNotFound` | Invalid link type name | Verify link type in Ontology Manager |\n| `PermissionDenied` | Missing Ontology scope | Add `api:ontology-read` scope to your app |\n\n## Examples\n\n### Batch Action Application\n\n```python\nemployee_ids = [\"EMP-001\", \"EMP-002\", \"EMP-003\"]\nfor eid in employee_ids:\n    result = client.ontologies.Action.apply(\n        ontology=ONTOLOGY,\n        action_type=\"markReviewed\",\n        parameters={\"employeeId\": eid, \"reviewDate\": \"2026-03-22\"},\n    )\n    status = \"OK\" if result.validation == \"VALID\" else \"FAILED\"\n    print(f\"  {eid}: {status}\")\n```\n\n## Resources\n\n- [Ontology SDK Overview](https://www.palantir.com/docs/foundry/ontology-sdk/overview)\n- [Get Object API](https://www.palantir.com/docs/foundry/api/ontology-resources/objects/get-object)\n- [Python OSDK Guide](https://www.palantir.com/docs/foundry/ontology-sdk/python-osdk)\n- [Actions API](https://www.palantir.com/docs/foundry/api/ontology-resources/actions/)\n\n## Next Steps\n\n- Handle errors systematically: `palantir-common-errors`\n- Optimize query performance: `palantir-performance-tuning`\n- Secure object access with RBAC: `palantir-enterprise-rbac`\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "palantir-core-workflow-b",
-    "description": "Work with Palantir Foundry Ontology objects, actions, and queries via",
-    "allowed-tools": "Read, Write, Edit, Bash(pip:*), Bash(npm:*), Grep",
-    "version": "2.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

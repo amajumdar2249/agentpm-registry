@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000000359",
   "name": "tmux-processes",
   "slug": "tmux-processes",
   "description": "Patterns for running long-lived processes in tmux. Use when starting dev servers, watchers, tilt, or any process expected to outlive the conversation.",
   "content": "\n# tmux Process Management\n\n## Interactive Shell Requirement\n\n**Use send-keys pattern for reliable shell initialization.** Creating a session spawns an interactive shell automatically. Use `send-keys` to run commands within that shell, ensuring PATH, direnv, and other initialization runs properly.\n\n```bash\n# WRONG - inline command bypasses shell init, breaks PATH/direnv\ntmux new-session -d -s \"$SESSION\" -n main 'tilt up'\n\n# CORRECT - create session, then send command to interactive shell\ntmux new-session -d -s \"$SESSION\" -n main\ntmux send-keys -t \"$SESSION:main\" 'tilt up' Enter\n```\n\n## Session Naming Convention\n\nAlways derive session name from the project:\n\n```bash\nSESSION=$(basename $(git rev-parse --show-toplevel 2>/dev/null) || basename $PWD)\n```\n\nFor multiple processes in one project, use windows not separate sessions:\n- Session: `myapp`\n- Windows: `server`, `tests`, `logs`\n\n## Starting Processes\n\n### Single Process\n\n```bash\nSESSION=$(basename $(git rev-parse --show-toplevel 2>/dev/null) || basename $PWD)\n\n# Create session with named window, then send command\ntmux new-session -d -s \"$SESSION\" -n main\ntmux send-keys -t \"$SESSION:main\" '<command>' Enter\n```\n\n### Idempotent Start\n\nCheck if already running before starting:\n\n```bash\nSESSION=$(basename $(git rev-parse --show-toplevel 2>/dev/null) || basename $PWD)\n\nif ! tmux has-session -t \"$SESSION\" 2>/dev/null; then\n  tmux new-session -d -s \"$SESSION\" -n main\n  tmux send-keys -t \"$SESSION:main\" '<command>' Enter\nelse\n  echo \"Session $SESSION already exists\"\nfi\n```\n\n### Adding Windows to Existing Session\n\n```bash\nSESSION=$(basename $(git rev-parse --show-toplevel 2>/dev/null) || basename $PWD)\n\n# Add a new window if it doesn't exist\nif ! tmux list-windows -t \"$SESSION\" -F '#{window_name}' | grep -q \"^server$\"; then\n  tmux new-window -t \"$SESSION\" -n server\n  tmux send-keys -t \"$SESSION:server\" 'npm run dev' Enter\nelse\n  echo \"Window 'server' already exists\"\nfi\n```\n\n### Multiple Processes (Windows)\n\n```bash\nSESSION=$(basename $(git rev-parse --show-toplevel 2>/dev/null) || basename $PWD)\n\n# Create session with first process\ntmux new-session -d -s \"$SESSION\" -n server\ntmux send-keys -t \"$SESSION:server\" 'npm run dev' Enter\n\n# Add more windows\ntmux new-window -t \"$SESSION\" -n tests\ntmux send-keys -t \"$SESSION:tests\" 'npm run test:watch' Enter\n\ntmux new-window -t \"$SESSION\" -n logs\ntmux send-keys -t \"$SESSION:logs\" 'tail -f logs/app.log' Enter\n```\n\n## Monitoring Output\n\n```bash\nSESSION=$(basename $(git rev-parse --show-toplevel 2>/dev/null) || basename $PWD)\n\n# Last 50 lines from first window\ntmux capture-pane -p -t \"$SESSION\" -S -50\n\n# From specific window\ntmux capture-pane -p -t \"$SESSION:server\" -S -50\n\n# Check for errors\ntmux capture-pane -p -t \"$SESSION\" -S -100 | rg -i \"error|fail|exception\"\n\n# Check for ready indicators\ntmux capture-pane -p -t \"$SESSION:server\" -S -50 | rg -i \"listening|ready|started\"\n```\n\n## Lifecycle Management\n\n```bash\nSESSION=$(basename $(git rev-parse --show-toplevel 2>/dev/null) || basename $PWD)\n\n# List all sessions (see what exists)\ntmux ls\n\n# List windows in current session\ntmux list-windows -t \"$SESSION\"\n\n# Kill only this project's session\ntmux kill-session -t \"$SESSION\"\n\n# Kill specific window\ntmux kill-window -t \"$SESSION:tests\"\n\n# Send keys to a window (e.g., Ctrl+C to stop)\ntmux send-keys -t \"$SESSION:server\" C-c\n```\n\n## Isolation Rules\n\n- **Never** use `tmux kill-server`\n- **Never** kill sessions not matching current project\n- **Always** derive session name from git root or pwd\n- **Always** verify session name before kill operations\n- Other Claude Code instances may have their own sessions running\n\n## When to Use tmux\n\n| Scenario | Use tmux? |\n|----------|-----------|\n| `tilt up` | Yes, always |\n| Dev server (`npm run dev`, `rails s`) | Yes |\n| File watcher (`npm run watch`) | Yes |\n| Test watcher (`npm run test:watch`) | Yes |\n| Database server | Yes |\n| One-shot build (`npm run build`) | No |\n| Quick command (<10s) | No |\n| Need stdout directly in conversation | No |\n\n## Checking Process Status\n\n```bash\nSESSION=$(basename $(git rev-parse --show-toplevel 2>/dev/null) || basename $PWD)\n\n# Check session exists\ntmux has-session -t \"$SESSION\" 2>/dev/null && echo \"session exists\" || echo \"no session\"\n\n# List windows and their status\ntmux list-windows -t \"$SESSION\" -F '#{window_name}: #{pane_current_command}'\n\n# Check if specific window exists\ntmux list-windows -t \"$SESSION\" -F '#{window_name}' | grep -q \"^server$\" && echo \"server window exists\"\n```\n\n## Restarting a Process\n\n```bash\nSESSION=$(basename $(git rev-parse --show-toplevel 2>/dev/null) || basename $PWD)\n\n# Send Ctrl+C then restart command\ntmux send-keys -t \"$SESSION:server\" C-c\nsleep 1\ntmux send-keys -t \"$SESSION:server\" 'npm run dev' Enter\n```\n\n## Common Patterns\n\n### Start dev server if not running\n\n```bash\nSESSION=$(basename $(git rev-parse --show-toplevel 2>/dev/null) || basename $PWD)\n\nif ! tmux has-session -t \"$SESSION\" 2>/dev/null; then\n  tmux new-session -d -s \"$SESSION\" -n server\n  tmux send-keys -t \"$SESSION:server\" 'npm run dev' Enter\n  echo \"Started dev server in tmux session: $SESSION\"\nelif ! tmux list-windows -t \"$SESSION\" -F '#{window_name}' | grep -q \"^server$\"; then\n  tmux new-window -t \"$SESSION\" -n server\n  tmux send-keys -t \"$SESSION:server\" 'npm run dev' Enter\n  echo \"Added server window to session: $SESSION\"\nelse\n  echo \"Server already running in session: $SESSION\"\nfi\n```\n\n### Wait for server ready\n\n```bash\nSESSION=$(basename $(git rev-parse --show-toplevel 2>/dev/null) || basename $PWD)\n\n# Poll for ready message\nfor i in {1..30}; do\n  if tmux capture-pane -p -t \"$SESSION:server\" -S -20 | rg -q \"listening|ready\"; then\n    echo \"Server ready\"\n    break\n  fi\n  sleep 1\ndone\n```\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "tmux-processes",
-    "description": "Patterns for running long-lived processes in tmux. Use when starting dev servers, watchers, tilt, or any process expected to outlive the conversation."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

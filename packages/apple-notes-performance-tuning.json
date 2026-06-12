@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031335",
   "name": "apple-notes-performance-tuning",
   "slug": "apple-notes-performance-tuning",
   "description": "Optimize Apple Notes automation performance for large note collections.",
   "content": "# Apple Notes Performance Tuning\n\n## Overview\n\nApple Notes automation performance degrades linearly with note count because JXA loads all note objects into memory when you access a collection. A vault with 10,000+ notes can take 30+ seconds for a simple list operation. The primary bottleneck is the Apple Events bridge between your script and Notes.app \u2014 every property access (name, body, date) is a separate IPC call. This guide covers caching strategies, incremental sync, batch optimization, and architectural patterns to keep automation responsive at scale.\n\n## Performance Benchmarks\n\n| Operation | 100 notes | 1,000 notes | 10,000 notes |\n|-----------|----------|-------------|-------------|\n| List all (names only) | ~0.5s | ~3s | ~30s |\n| Search by name (`.whose()`) | ~0.3s | ~2s | ~20s |\n| Full-text search (body scan) | ~1s | ~8s | ~80s |\n| Create single note | ~0.2s | ~0.2s | ~0.2s |\n| Export all to JSON | ~1s | ~10s | ~100s |\n| Count notes only (`.length`) | ~0.1s | ~0.3s | ~1s |\n\n## Strategy 1: Minimize Property Access\n\n```javascript\n// BAD: Each property access is a separate Apple Event IPC call\nconst Notes = Application(\"Notes\");\nconst allNotes = Notes.defaultAccount.notes();\nallNotes.forEach(n => {\n  console.log(n.name());   // IPC call 1\n  console.log(n.body());   // IPC call 2\n  console.log(n.modificationDate()); // IPC call 3\n});\n// With 1000 notes = 3000 IPC calls\n\n// GOOD: Batch extract in a single JXA evaluation\nconst data = Notes.defaultAccount.notes().map(n => ({\n  title: n.name(),\n  modified: n.modificationDate().toISOString(),\n}));\n// Single JXA evaluation, much faster for bulk reads\n```\n\n## Strategy 2: Local SQLite Cache\n\n```bash\n#!/bin/bash\n# Export notes to SQLite for fast local queries\nDB=\"$HOME/.notes-cache.db\"\nsqlite3 \"$DB\" \"CREATE TABLE IF NOT EXISTS notes (\n  id TEXT PRIMARY KEY, title TEXT, body TEXT, folder TEXT,\n  created TEXT, modified TEXT, indexed_at TEXT\n);\"\n\nosascript -l JavaScript -e '\n  const Notes = Application(\"Notes\");\n  Notes.defaultAccount.notes().map(n => JSON.stringify({\n    id: n.id(), title: n.name(), body: n.plaintext(),\n    folder: n.container().name(),\n    created: n.creationDate().toISOString(),\n    modified: n.modificationDate().toISOString()\n  })).join(\"\\n\");\n' | while IFS= read -r line; do\n  echo \"$line\" | jq -r '[.id, .title, .body, .folder, .created, .modified, now | todate] | @csv' \\\n    | sqlite3 \"$DB\" \".import /dev/stdin notes\"\ndone 2>/dev/null\n\n# Now query locally (instant)\nsqlite3 \"$DB\" \"SELECT title FROM notes WHERE body LIKE '%project%' ORDER BY modified DESC LIMIT 10;\"\n```\n\n## Strategy 3: Incremental Sync\n\n```typescript\n// src/sync/incremental.ts\nimport { execSync } from \"child_process\";\nimport { readFileSync, writeFileSync } from \"fs\";\n\nconst LAST_SYNC_FILE = \".notes-last-sync\";\n\nfunction getLastSync(): Date {\n  try { return new Date(readFileSync(LAST_SYNC_FILE, \"utf8\").trim()); }\n  catch { return new Date(0); } // First run: sync everything\n}\n\nfunction incrementalSync(): void {\n  const lastSync = getLastSync();\n  const allNotes = JSON.parse(execSync(\n    `osascript -l JavaScript -e 'JSON.stringify(Application(\"Notes\").defaultAccount.notes().map(n => ({id: n.id(), title: n.name(), modified: n.modificationDate().toISOString()})))'`,\n    { encoding: \"utf8\" }\n  ));\n\n  const changed = allNotes.filter((n: any) => new Date(n.modified) > lastSync);\n  console.log(`${changed.length} notes modified since ${lastSync.toISOString()}`);\n\n  // Process only changed notes (fetch full body only for these)\n  for (const note of changed) {\n    console.log(`Syncing: ${note.title}`);\n    // ... process individual note\n  }\n\n  writeFileSync(LAST_SYNC_FILE, new Date().toISOString());\n}\n```\n\n## Strategy 4: Use `.whose()` for Filtered Queries\n\n```javascript\n// .whose() pushes filtering to Notes.app (faster than client-side filter)\nconst Notes = Application(\"Notes\");\n\n// Faster than loading all notes and filtering in JS\nconst recentNotes = Notes.defaultAccount.notes.whose({\n  _match: [ObjectSpecifier().modificationDate, \">\", new Date(Date.now() - 86400000)]\n});\n\n// Search by name (case-insensitive)\nconst matches = Notes.defaultAccount.notes.whose({\n  name: { _contains: \"project\" }\n});\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Script hangs for >60s | Too many notes with body() access | Use `.length` first to assess scale; use cache for large vaults |\n| Memory spike during export | All note bodies loaded into JXA runtime | Process in batches; stream to file instead of building array |\n| SQLite cache stale | Forgot to re-sync after edits | Run incremental sync on schedule via launchd |\n| `.whose()` returns wrong results | Complex predicates not supported in JXA | Fall back to full load + JS filter for complex queries |\n| iCloud sync slows writes | Each write triggers sync | Batch writes with 1s delay; use \"On My Mac\" for bulk import |\n\n## Resources\n\n- [JXA Performance Tips](https://github.com/JXA-Cookbook/JXA-Cookbook/wiki/Optimizing-JXA)\n- [Mac Automation Scripting Guide](https://developer.apple.com/library/archive/documentation/LanguagesUtilities/Conceptual/MacAutomationScriptingGuide/)\n- [SQLite Full-Text Search](https://www.sqlite.org/fts5.html)\n\n## Next Steps\n\nFor handling rate limits during bulk operations, see `apple-notes-rate-limits`. For monitoring performance trends, see `apple-notes-observability`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "apple-notes-performance-tuning",
-    "description": "Optimize Apple Notes automation performance for large note collections.",
-    "Trigger": "apple notes performance\".",
-    "allowed-tools": "Read, Write, Edit, Bash(osascript:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

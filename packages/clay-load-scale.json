@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031528",
   "name": "clay-load-scale",
   "slug": "clay-load-scale",
   "description": "Scale Clay enrichment pipelines for high-volume processing (10K-100K+",
   "content": "# Clay Load & Scale\n\n## Overview\n\nStrategies for processing 10K-100K+ leads through Clay monthly. Clay is a hosted platform -- you can't add servers. Scaling focuses on: table partitioning, webhook management, batch submission pacing, credit budgeting at scale, and multi-table architectures.\n\n## Prerequisites\n\n- Clay Growth or Enterprise plan\n- Understanding of Clay's credit model (Data Credits + Actions)\n- Queue infrastructure for batch processing (Redis, SQS, or BullMQ)\n- Monitoring for credit consumption\n\n## Instructions\n\n### Step 1: Capacity Planning\n\n```typescript\n// src/clay/capacity-planner.ts\ninterface CapacityPlan {\n  monthlyLeads: number;\n  creditsPerLead: number;\n  totalCreditsNeeded: number;\n  planRequired: string;\n  estimatedMonthlyCost: number;\n  webhooksNeeded: number;        // Each webhook has 50K lifetime limit\n  tablesRecommended: number;\n}\n\nfunction planCapacity(monthlyLeads: number, creditsPerLead = 6): CapacityPlan {\n  const totalCredits = monthlyLeads * creditsPerLead;\n\n  // Determine plan\n  let plan: string, cost: number;\n  if (totalCredits <= 2500) {\n    plan = 'Launch ($185/mo)';\n    cost = 185;\n  } else if (totalCredits <= 6000) {\n    plan = 'Growth ($495/mo)';\n    cost = 495;\n  } else {\n    plan = `Enterprise (custom pricing for ${totalCredits} credits/mo)`;\n    cost = 495 + Math.ceil((totalCredits - 6000) / 1000) * 50; // Rough estimate\n  }\n\n  // With own API keys: 0 data credits, only actions consumed\n  console.log(`TIP: With own API keys, you need 0 Data Credits.`);\n  console.log(`     Only ${monthlyLeads} Actions needed (Growth plan includes 40K).`);\n\n  return {\n    monthlyLeads,\n    creditsPerLead,\n    totalCreditsNeeded: totalCredits,\n    planRequired: plan,\n    estimatedMonthlyCost: cost,\n    webhooksNeeded: Math.ceil(monthlyLeads / 50_000 * 12), // Annual webhooks needed\n    tablesRecommended: Math.ceil(monthlyLeads / 10_000), // ~10K rows per table for manageability\n  };\n}\n\n// Example\nconst plan = planCapacity(50_000);\nconsole.log(plan);\n// Monthly leads: 50,000\n// Credits needed: 300,000 (or 0 with own API keys)\n// Webhooks needed: 12/year\n// Tables recommended: 5\n```\n\n### Step 2: Implement Batch Queue Architecture\n\n```typescript\n// src/clay/batch-processor.ts\nimport { Queue, Worker } from 'bullmq';\nimport Redis from 'ioredis';\n\nconst redis = new Redis(process.env.REDIS_URL!);\n\n// Create a queue for Clay webhook submissions\nconst clayQueue = new Queue('clay-enrichment', { connection: redis });\n\ninterface EnrichmentJob {\n  leads: Record<string, unknown>[];\n  webhookUrl: string;\n  batchId: string;\n  priority: 'high' | 'normal' | 'low';\n}\n\n// Submit a batch for processing\nasync function queueBatch(\n  leads: Record<string, unknown>[],\n  webhookUrl: string,\n  priority: 'high' | 'normal' | 'low' = 'normal',\n): Promise<string> {\n  const batchId = `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;\n\n  // Split into chunks of 100 for manageable processing\n  const chunks = [];\n  for (let i = 0; i < leads.length; i += 100) {\n    chunks.push(leads.slice(i, i + 100));\n  }\n\n  for (let i = 0; i < chunks.length; i++) {\n    await clayQueue.add(`${batchId}-chunk-${i}`, {\n      leads: chunks[i],\n      webhookUrl,\n      batchId,\n      priority,\n    }, {\n      priority: priority === 'high' ? 1 : priority === 'normal' ? 5 : 10,\n      attempts: 3,\n      backoff: { type: 'exponential', delay: 5000 },\n    });\n  }\n\n  console.log(`Queued ${leads.length} leads in ${chunks.length} chunks (batch: ${batchId})`);\n  return batchId;\n}\n\n// Worker processes queued batches\nconst worker = new Worker<EnrichmentJob>('clay-enrichment', async (job) => {\n  const { leads, webhookUrl } = job.data;\n  let sent = 0, failed = 0;\n\n  for (const lead of leads) {\n    try {\n      const res = await fetch(webhookUrl, {\n        method: 'POST',\n        headers: { 'Content-Type': 'application/json' },\n        body: JSON.stringify(lead),\n      });\n\n      if (res.status === 429) {\n        const retryAfter = parseInt(res.headers.get('Retry-After') || '60');\n        console.log(`Rate limited. Waiting ${retryAfter}s...`);\n        await new Promise(r => setTimeout(r, retryAfter * 1000));\n        // Retry this lead\n        const retry = await fetch(webhookUrl, {\n          method: 'POST',\n          headers: { 'Content-Type': 'application/json' },\n          body: JSON.stringify(lead),\n        });\n        if (retry.ok) sent++; else failed++;\n      } else if (res.ok) {\n        sent++;\n      } else {\n        failed++;\n      }\n    } catch {\n      failed++;\n    }\n\n    // Pace submissions: 200ms between rows\n    await new Promise(r => setTimeout(r, 200));\n  }\n\n  return { sent, failed, total: leads.length };\n}, { connection: redis, concurrency: 1 });\n```\n\n### Step 3: Multi-Table Strategy\n\nFor large volumes, split data across multiple Clay tables:\n\n```yaml\n# Large-volume table strategy\ntables:\n  outbound-leads-tech:\n    focus: \"Technology companies\"\n    filter: \"industry IN ('Software', 'SaaS', 'Technology')\"\n    enrichment: Full waterfall + Claygent\n    volume: ~5K rows/month\n\n  outbound-leads-finance:\n    focus: \"Financial services companies\"\n    filter: \"industry IN ('Financial Services', 'Banking', 'Insurance')\"\n    enrichment: Full waterfall (no Claygent \u2014 regulated data)\n    volume: ~3K rows/month\n\n  inbound-leads:\n    focus: \"Website form submissions\"\n    source: Webhook from web forms\n    enrichment: Company lookup + email verification only\n    volume: ~2K rows/month\n    auto_delete: true  # Stream-through: enrich, push to CRM, delete\n\n  event-attendees:\n    focus: \"Conference/webinar registrants\"\n    source: CSV import\n    enrichment: Full waterfall + AI personalization\n    volume: ~1K rows/month (batch after events)\n```\n\n### Step 4: Webhook Rotation for High Volume\n\n```typescript\n// src/clay/webhook-rotation.ts\nclass WebhookRotator {\n  private webhooks: { url: string; count: number; maxCount: number }[];\n  private currentIndex = 0;\n\n  constructor(webhookUrls: string[], maxPerWebhook = 45_000) {\n    this.webhooks = webhookUrls.map(url => ({\n      url,\n      count: 0,\n      maxCount: maxPerWebhook, // Leave 5K buffer under 50K limit\n    }));\n  }\n\n  getNextWebhook(): string {\n    // Find a webhook with remaining capacity\n    for (let i = 0; i < this.webhooks.length; i++) {\n      const idx = (this.currentIndex + i) % this.webhooks.length;\n      if (this.webhooks[idx].count < this.webhooks[idx].maxCount) {\n        this.currentIndex = idx;\n        return this.webhooks[idx].url;\n      }\n    }\n    throw new Error('All webhooks exhausted! Create new webhooks in Clay.');\n  }\n\n  recordSubmission() {\n    this.webhooks[this.currentIndex].count++;\n  }\n\n  getStatus() {\n    return this.webhooks.map((w, i) => ({\n      index: i,\n      remaining: w.maxCount - w.count,\n      percentUsed: ((w.count / w.maxCount) * 100).toFixed(1),\n    }));\n  }\n}\n\n// Usage: rotate across multiple webhooks for the same table\nconst rotator = new WebhookRotator([\n  process.env.CLAY_WEBHOOK_URL_1!,\n  process.env.CLAY_WEBHOOK_URL_2!,\n  process.env.CLAY_WEBHOOK_URL_3!,\n]);\n```\n\n### Step 5: Auto-Delete for Stream-Through Processing\n\nFor high-volume use cases where Clay enriches and pushes data onward, enable auto-delete to keep tables lean:\n\nIn Clay UI: **Table Settings > Auto-delete**\n\nWhen enabled, Clay enriches incoming webhook data, sends results via HTTP API column to your destination, then deletes the rows. This keeps Clay functioning as a streaming enrichment service rather than a database.\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Processing stuck at 400/hr | Explorer plan throttle | Upgrade to Growth (no throttle) |\n| Webhook exhausted (50K) | High volume | Rotate to new webhook, implement rotator |\n| Queue backing up | Webhook rate limiting | Reduce concurrency, increase delay |\n| Table too large to manage | 10K+ rows | Split into multiple focused tables |\n| Credit overrun | Uncontrolled batch size | Add budget check before queueing |\n\n## Resources\n\n- [Clay Plans & Billing](https://university.clay.com/docs/plans-and-billing)\n- [Clay University -- Using Clay as an API](https://www.clay.com/university/guide/using-clay-as-an-api)\n- [BullMQ Documentation](https://docs.bullmq.io/)\n\n## Next Steps\n\nFor reliability patterns, see `clay-reliability-patterns`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clay-load-scale",
-    "description": "Scale Clay enrichment pipelines for high-volume processing (10K-100K+",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Bash(node:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

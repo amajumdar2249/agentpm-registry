@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000016295",
   "name": "using-heavy-mcps",
   "slug": "using-heavy-mcps",
   "description": "Use mcporter and jq to reduce token bloat from heavy MCPs like Sanity or Brain vault. Filter and compact tool outputs outside chat to feed only essential data back to the model.",
   "content": "\n# Token-Efficient MCP Usage via MCPorter\n\nWhen working with MCPs that return large payloads\u2014like Sanity queries with full document content or Brain vault searches with entire file contents\u2014you can route these calls through `mcporter` outside of chat, trim the output with `jq`, and feed only the compact result back to the model. This avoids the 20\u201340k token bloat that comes from loading full responses into context.\n\n## When to Use This Pattern\n\nUse mcporter + jq when:\n\n- **Large responses**: Sanity queries returning full documents, Brain vault searches with file contents\n- **Repeated queries**: You need the same data multiple times and only care about specific fields\n- **Field filtering**: The MCP returns 50 fields but you only need 3\n- **Chained operations**: Multiple MCP calls where each bloats context\n- **List operations**: Getting 100 items but only needing titles and IDs\n\n**Don't use this pattern when:**\n\n- Exploring unfamiliar data (let Cursor call MCP directly to see full structure)\n- Response is already small (< 1000 tokens)\n- You need the full response for analysis\n\n## The Core Pattern\n\nThe basic workflow:\n\n1. **Run MCP outside chat** via `bunx mcporter call`\n2. **Pipe to jq** to extract only needed fields\n3. **Feed compact result** back into chat\n4. **Save as one-liner** for reuse\n\n```bash\nbunx mcporter call 'MCP-Name.tool_name(param: \"value\")' | jq 'filter'\n```\n\n**Alternative syntaxes:**\n\n```bash\n# Shorthand (infers 'call' command)\nbunx mcporter 'MCP-Name.tool_name(param: \"value\")' | jq 'filter'\n\n# Structured JSON output (useful for error handling)\nbunx mcporter call 'MCP-Name.tool_name(param: \"value\")' --output json | jq 'filter'\n```\n\n## Two Approaches: jq vs CallResult Helpers\n\nmcporter responses include built-in helpers that can replace jq for simple extractions. Choose based on your needs:\n\n### Option A: Built-in CallResult Helpers (Simpler)\n\nmcporter returns results wrapped in a `CallResult` object with helper methods:\n\n```bash\n# Extract plain text only (strips all metadata/formatting)\nbunx mcporter call 'Brain.vault(action: \"search\", query: \"portfolio\")' | node -e \"console.log(JSON.parse(require('fs').readFileSync(0)).result.text())\"\n\n# Get markdown format\n# Similar node one-liner but calling .markdown()\n\n# Get parsed JSON\n# Similar but calling .json()\n```\n\n**When to use:** Simple text extraction, when you want markdown, or when you need the full JSON object.\n\n**Limitation:** Less flexible than jq for complex filtering/transforming.\n\n### Option B: jq Filtering (More Powerful)\n\njq is a command-line JSON filter. Think of it as \"grep for JSON.\"\n\n**Basic patterns:**\n\n```bash\n# Get specific fields from each item in array\njq '[.[] | {id: ._id, title: .title}]'\n\n# Limit to first 5 results\njq '.results[:5]'\n\n# Extract nested field\njq '.results[] | .frontmatter.description'\n\n# Combine: first 3 items, specific fields\njq '.results[:3] | [.[] | {path: .path, desc: .frontmatter.description}]'\n\n# Filter by condition\njq '[.[] | select(.status == \"published\")]'\n```\n\n**When to use:** Precise field selection, transforming data structure, filtering by conditions, combining multiple operations.\n\n**Recommendation:** Start with jq since it's more flexible and works across any JSON output, not just mcporter.\n\n## Usage Examples\n\nFor concrete examples of using this pattern with Sanity and Brain Vault MCPs, see [EXAMPLES.md](EXAMPLES.md).\n\n## Integration Patterns\n\n### Pattern 1: One-liners in chat\n\nWhen you need compact data mid-conversation, run the command and paste the filtered output:\n\n```\nUser: \"Can you review my portfolio projects? Here's the data:\"\n<paste result of mcporter + jq command>\n```\n\n### Pattern 2: Embedding in other Cursor rules\n\nAdd mcporter commands to rules that need specific data:\n\n```markdown\n## Portfolio Context\n\nWhen discussing portfolio work, use this to fetch current project list:\n\n<command>\nbunx mcporter call 'Sanity Developer.query_documents(\n  resource: {projectId: \"xyz\", dataset: \"production\"},\n  query: \"*[_type == \\\"project\\\"]\"\n)' | jq '[.[] | {title: .title, role: .role}]'\n</command>\n```\n\n### Pattern 3: Save as shell alias\n\nAdd to your `.zshrc` for frequently-used queries:\n\n```bash\nalias portfolio-list='bunx mcporter call '\"'\"'Sanity Developer.query_documents(\n  resource: {projectId: \"xyz\", dataset: \"production\"},\n  query: \"*[_type == \\\"project\\\"]\"\n)'\"'\"' | jq \"[.[] | {title: .title, slug: .slug.current}]\"'\n```\n\nThen just run: `portfolio-list`\n\n## When to Just Use Cursor's MCP Calls\n\nLet Cursor call MCPs directly when:\n\n- **Exploring**: You don't know the response structure yet\n- **Small responses**: The data is already compact\n- **Interactive filtering**: You want to iteratively refine what you're looking for\n- **One-off questions**: Not worth the setup overhead\n\nThe mcporter pattern is for repeatability and token efficiency, not every MCP interaction.\n\n## Avoiding Token Waste on Failed Calls\n\n**Set timeouts to fail fast:**\n\n```bash\n# Don't wait forever for a hung MCP call\nbunx mcporter call 'Brain.vault(action: \"search\", query: \"test\")' --timeout 10000\n```\n\nDefault timeout is 30 seconds. For slow operations, increase it. For quick checks, decrease it.\n\n**Check auth before expensive queries:**\n\n```bash\n# Verify authentication status\nbunx mcporter config get \"Sanity Developer\"\n\n# If auth is required, do it once\nbunx mcporter auth \"Sanity Developer\"\n```\n\nThis prevents loading huge error messages into context when auth fails.\n\n**Use --output json for programmatic error handling:**\n\n```bash\nbunx mcporter call 'Brain.vault(action: \"search\", query: \"test\")' --output json\n```\n\nThe structured envelope makes it easier to detect failures without loading full error traces into context.\n\n## Debugging Tips\n\n**Check available MCPs:**\n\n```bash\nbunx mcporter list\n```\n\n**See tool signatures and schemas:**\n\n```bash\nbunx mcporter list Brain --schema\nbunx mcporter list \"Sanity Developer\" --schema\n```\n\n**Test without jq first:**\n\n```bash\nbunx mcporter call 'Brain.vault(action: \"search\", query: \"test\")'\n```\n\nThen add jq filtering once you see the structure.\n\n**Format jq output for readability:**\n\n```bash\n... | jq '.'\n# vs compact:\n... | jq -c '.'\n```\n\n## Real-World Token Savings\n\n**Before (direct MCP call in chat):**\n\n- Sanity query for 10 projects with full content: ~25,000 tokens\n- Brain vault search returning 5 notes: ~15,000 tokens\n\n**After (mcporter + jq):**\n\n- Same Sanity query, titles/IDs only: ~500 tokens\n- Same vault search, metadata only: ~300 tokens\n\n**Savings:** 95%+ reduction for typical filtered queries.\n\n## Additional Resources\n\n**Official mcporter documentation:** Available via Context7 at `/steipete/mcporter`\n\n**Key docs to reference:**\n\n- Call syntax and examples: [mcporter/docs/call-syntax.md](https://github.com/steipete/mcporter/blob/main/docs/call-syntax.md)\n- Tool calling guide: [mcporter/docs/tool-calling.md](https://github.com/steipete/mcporter/blob/main/docs/tool-calling.md)\n- Configuration: [mcporter/docs/config.md](https://github.com/steipete/mcporter/blob/main/docs/config.md)\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "using-heavy-mcps",
-    "description": "Use mcporter and jq to reduce token bloat from heavy MCPs like Sanity or Brain vault. Filter and compact tool outputs outside chat to feed only essential data back to the model."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

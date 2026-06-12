@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031183",
   "name": "alchemy-sdk-patterns",
   "slug": "alchemy-sdk-patterns",
   "description": "Apply production-ready Alchemy SDK patterns for Web3 applications.",
   "content": "# Alchemy SDK Patterns\n\n## Overview\n\nProduction patterns for the `alchemy-sdk` package: singleton clients, multi-chain factories, response caching, and type-safe contract wrappers.\n\n## Instructions\n\n### Step 1: Multi-Chain Client Factory\n\n```typescript\n// src/alchemy/client-factory.ts\nimport { Alchemy, Network } from 'alchemy-sdk';\n\ntype ChainName = 'ethereum' | 'polygon' | 'arbitrum' | 'optimism' | 'base';\n\nconst NETWORK_MAP: Record<ChainName, Network> = {\n  ethereum: Network.ETH_MAINNET,\n  polygon: Network.MATIC_MAINNET,\n  arbitrum: Network.ARB_MAINNET,\n  optimism: Network.OPT_MAINNET,\n  base: Network.BASE_MAINNET,\n};\n\nclass AlchemyClientFactory {\n  private static clients = new Map<string, Alchemy>();\n\n  static getClient(chain: ChainName): Alchemy {\n    if (!this.clients.has(chain)) {\n      this.clients.set(chain, new Alchemy({\n        apiKey: process.env.ALCHEMY_API_KEY,\n        network: NETWORK_MAP[chain],\n        maxRetries: 3,\n      }));\n    }\n    return this.clients.get(chain)!;\n  }\n\n  static getAllClients(): Map<ChainName, Alchemy> {\n    for (const chain of Object.keys(NETWORK_MAP) as ChainName[]) {\n      this.getClient(chain);\n    }\n    return this.clients as Map<ChainName, Alchemy>;\n  }\n}\n\nexport { AlchemyClientFactory, ChainName };\n```\n\n### Step 2: Response Caching Layer\n\n```typescript\n// src/alchemy/cache.ts\ninterface CacheEntry<T> { data: T; expiresAt: number; }\n\nclass AlchemyCache {\n  private cache = new Map<string, CacheEntry<any>>();\n  private defaultTtlMs: number;\n\n  constructor(defaultTtlMs: number = 30000) { // 30s default\n    this.defaultTtlMs = defaultTtlMs;\n  }\n\n  async getOrFetch<T>(key: string, fetcher: () => Promise<T>, ttlMs?: number): Promise<T> {\n    const cached = this.cache.get(key);\n    if (cached && cached.expiresAt > Date.now()) return cached.data;\n\n    const data = await fetcher();\n    this.cache.set(key, { data, expiresAt: Date.now() + (ttlMs || this.defaultTtlMs) });\n    return data;\n  }\n\n  invalidate(keyPrefix: string): void {\n    for (const key of this.cache.keys()) {\n      if (key.startsWith(keyPrefix)) this.cache.delete(key);\n    }\n  }\n}\n\n// Usage with Alchemy\nconst cache = new AlchemyCache();\n\nasync function getCachedBalance(alchemy: Alchemy, address: string): Promise<string> {\n  return cache.getOrFetch(\n    `balance:${address}`,\n    async () => {\n      const balance = await alchemy.core.getBalance(address);\n      return (parseInt(balance.toString()) / 1e18).toFixed(6);\n    },\n    15000 // 15s cache for balances\n  );\n}\n\nexport { AlchemyCache, getCachedBalance };\n```\n\n### Step 3: Typed NFT Query Builder\n\n```typescript\n// src/alchemy/nft-query.ts\nimport { Alchemy, NftOrdering } from 'alchemy-sdk';\n\nclass NftQueryBuilder {\n  private alchemy: Alchemy;\n  private _owner?: string;\n  private _contracts: string[] = [];\n  private _pageSize = 20;\n  private _excludeFilters: string[] = [];\n\n  constructor(alchemy: Alchemy) { this.alchemy = alchemy; }\n\n  forOwner(address: string): this { this._owner = address; return this; }\n  inCollection(contractAddress: string): this { this._contracts.push(contractAddress); return this; }\n  pageSize(size: number): this { this._pageSize = size; return this; }\n  excludeSpam(): this { this._excludeFilters.push('SPAM'); return this; }\n\n  async execute() {\n    if (!this._owner) throw new Error('Owner address required');\n\n    return this.alchemy.nft.getNftsForOwner(this._owner, {\n      contractAddresses: this._contracts.length > 0 ? this._contracts : undefined,\n      pageSize: this._pageSize,\n      excludeFilters: this._excludeFilters as any[],\n    });\n  }\n}\n\n// Usage:\n// const nfts = await new NftQueryBuilder(alchemy)\n//   .forOwner('vitalik.eth')\n//   .excludeSpam()\n//   .pageSize(50)\n//   .execute();\n```\n\n### Step 4: Error Classification\n\n```typescript\n// src/alchemy/errors.ts\ntype AlchemyErrorType = 'rate_limit' | 'auth' | 'network' | 'invalid_params' | 'server' | 'unknown';\n\nfunction classifyError(error: any): { type: AlchemyErrorType; retryable: boolean; message: string } {\n  const status = error.response?.status || error.code;\n\n  if (status === 429) return { type: 'rate_limit', retryable: true, message: 'Rate limit exceeded' };\n  if (status === 401 || status === 403) return { type: 'auth', retryable: false, message: 'Invalid API key' };\n  if (status >= 500) return { type: 'server', retryable: true, message: 'Alchemy server error' };\n  if (error.code === 'ECONNREFUSED' || error.code === 'ETIMEDOUT') return { type: 'network', retryable: true, message: 'Network error' };\n  if (error.message?.includes('invalid params')) return { type: 'invalid_params', retryable: false, message: error.message };\n  return { type: 'unknown', retryable: false, message: error.message };\n}\n\nexport { classifyError, AlchemyErrorType };\n```\n\n## Output\n\n- Multi-chain client factory with lazy initialization\n- Response cache with configurable TTL\n- Type-safe NFT query builder pattern\n- Structured error classification for retry decisions\n\n## Resources\n\n- [Alchemy SDK GitHub](https://github.com/alchemyplatform/alchemy-sdk-js)\n- [Alchemy Docs](https://www.alchemy.com/docs)\n\n## Next Steps\n\nApply patterns in `alchemy-core-workflow-a` for real portfolio tracking.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "alchemy-sdk-patterns",
-    "description": "Apply production-ready Alchemy SDK patterns for Web3 applications.",
-    "Trigger": "alchemy SDK patterns\", \"alchemy best practices\", \"alchemy code patterns\".",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

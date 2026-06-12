@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000010941",
   "name": "iterative-retrieval",
   "slug": "iterative-retrieval",
   "description": "Pattern for progressively refining context retrieval to solve the subagent context problem",
   "content": "\n# Iterative Retrieval Pattern\n\nSolves the \"context problem\" in multi-agent workflows where subagents don't know what context they need until they start working.\n\n## The Problem\n\nSubagents are spawned with limited context. They don't know:\n- Which files contain relevant code\n- What patterns exist in the codebase\n- What terminology the project uses\n\nStandard approaches fail:\n- **Send everything**: Exceeds context limits\n- **Send nothing**: Agent lacks critical information\n- **Guess what's needed**: Often wrong\n\n## The Solution: Iterative Retrieval\n\nA 4-phase loop that progressively refines context:\n\n```\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2502                                             \u2502\n\u2502   \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510      \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510            \u2502\n\u2502   \u2502 DISPATCH \u2502\u2500\u2500\u2500\u2500\u2500\u25b6\u2502 EVALUATE \u2502            \u2502\n\u2502   \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518      \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518            \u2502\n\u2502        \u25b2                  \u2502                 \u2502\n\u2502        \u2502                  \u25bc                 \u2502\n\u2502   \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510      \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510            \u2502\n\u2502   \u2502   LOOP   \u2502\u25c0\u2500\u2500\u2500\u2500\u2500\u2502  REFINE  \u2502            \u2502\n\u2502   \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518      \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518            \u2502\n\u2502                                             \u2502\n\u2502        Max 3 cycles, then proceed           \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n```\n\n### Phase 1: DISPATCH\n\nInitial broad query to gather candidate files:\n\n```javascript\n// Start with high-level intent\nconst initialQuery = {\n  patterns: ['src/**/*.ts', 'lib/**/*.ts'],\n  keywords: ['authentication', 'user', 'session'],\n  excludes: ['*.test.ts', '*.spec.ts']\n};\n\n// Dispatch to retrieval agent\nconst candidates = await retrieveFiles(initialQuery);\n```\n\n### Phase 2: EVALUATE\n\nAssess retrieved content for relevance:\n\n```javascript\nfunction evaluateRelevance(files, task) {\n  return files.map(file => ({\n    path: file.path,\n    relevance: scoreRelevance(file.content, task),\n    reason: explainRelevance(file.content, task),\n    missingContext: identifyGaps(file.content, task)\n  }));\n}\n```\n\nScoring criteria:\n- **High (0.8-1.0)**: Directly implements target functionality\n- **Medium (0.5-0.7)**: Contains related patterns or types\n- **Low (0.2-0.4)**: Tangentially related\n- **None (0-0.2)**: Not relevant, exclude\n\n### Phase 3: REFINE\n\nUpdate search criteria based on evaluation:\n\n```javascript\nfunction refineQuery(evaluation, previousQuery) {\n  return {\n    // Add new patterns discovered in high-relevance files\n    patterns: [...previousQuery.patterns, ...extractPatterns(evaluation)],\n\n    // Add terminology found in codebase\n    keywords: [...previousQuery.keywords, ...extractKeywords(evaluation)],\n\n    // Exclude confirmed irrelevant paths\n    excludes: [...previousQuery.excludes, ...evaluation\n      .filter(e => e.relevance < 0.2)\n      .map(e => e.path)\n    ],\n\n    // Target specific gaps\n    focusAreas: evaluation\n      .flatMap(e => e.missingContext)\n      .filter(unique)\n  };\n}\n```\n\n### Phase 4: LOOP\n\nRepeat with refined criteria (max 3 cycles):\n\n```javascript\nasync function iterativeRetrieve(task, maxCycles = 3) {\n  let query = createInitialQuery(task);\n  let bestContext = [];\n\n  for (let cycle = 0; cycle < maxCycles; cycle++) {\n    const candidates = await retrieveFiles(query);\n    const evaluation = evaluateRelevance(candidates, task);\n\n    // Check if we have sufficient context\n    const highRelevance = evaluation.filter(e => e.relevance >= 0.7);\n    if (highRelevance.length >= 3 && !hasCriticalGaps(evaluation)) {\n      return highRelevance;\n    }\n\n    // Refine and continue\n    query = refineQuery(evaluation, query);\n    bestContext = mergeContext(bestContext, highRelevance);\n  }\n\n  return bestContext;\n}\n```\n\n## Practical Examples\n\n### Example 1: Bug Fix Context\n\n```\nTask: \"Fix the authentication token expiry bug\"\n\nCycle 1:\n  DISPATCH: Search for \"token\", \"auth\", \"expiry\" in src/**\n  EVALUATE: Found auth.ts (0.9), tokens.ts (0.8), user.ts (0.3)\n  REFINE: Add \"refresh\", \"jwt\" keywords; exclude user.ts\n\nCycle 2:\n  DISPATCH: Search refined terms\n  EVALUATE: Found session-manager.ts (0.95), jwt-utils.ts (0.85)\n  REFINE: Sufficient context (2 high-relevance files)\n\nResult: auth.ts, tokens.ts, session-manager.ts, jwt-utils.ts\n```\n\n### Example 2: Feature Implementation\n\n```\nTask: \"Add rate limiting to API endpoints\"\n\nCycle 1:\n  DISPATCH: Search \"rate\", \"limit\", \"api\" in routes/**\n  EVALUATE: No matches - codebase uses \"throttle\" terminology\n  REFINE: Add \"throttle\", \"middleware\" keywords\n\nCycle 2:\n  DISPATCH: Search refined terms\n  EVALUATE: Found throttle.ts (0.9), middleware/index.ts (0.7)\n  REFINE: Need router patterns\n\nCycle 3:\n  DISPATCH: Search \"router\", \"express\" patterns\n  EVALUATE: Found router-setup.ts (0.8)\n  REFINE: Sufficient context\n\nResult: throttle.ts, middleware/index.ts, router-setup.ts\n```\n\n## Integration with Agents\n\nUse in agent prompts:\n\n```markdown\nWhen retrieving context for this task:\n1. Start with broad keyword search\n2. Evaluate each file's relevance (0-1 scale)\n3. Identify what context is still missing\n4. Refine search criteria and repeat (max 3 cycles)\n5. Return files with relevance >= 0.7\n```\n\n## Best Practices\n\n1. **Start broad, narrow progressively** - Don't over-specify initial queries\n2. **Learn codebase terminology** - First cycle often reveals naming conventions\n3. **Track what's missing** - Explicit gap identification drives refinement\n4. **Stop at \"good enough\"** - 3 high-relevance files beats 10 mediocre ones\n5. **Exclude confidently** - Low-relevance files won't become relevant\n\n## Related\n\n- [The Longform Guide](https://x.com/affaanmustafa/status/2014040193557471352) - Subagent orchestration section\n- `continuous-learning` skill - For patterns that improve over time\n- Agent definitions in `~/.claude/agents/`\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "iterative-retrieval",
-    "description": "Pattern for progressively refining context retrieval to solve the subagent context problem"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

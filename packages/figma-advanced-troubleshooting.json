@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031903",
   "name": "figma-advanced-troubleshooting",
   "slug": "figma-advanced-troubleshooting",
   "description": "Deep debugging for Figma API issues: network analysis, response inspection,",
   "content": "# Figma Advanced Troubleshooting\n\n## Overview\n\nDeep debugging techniques for complex Figma REST API issues that resist standard error handling: intermittent failures, unexpected response shapes, rate limit edge cases, and large file timeouts.\n\n## Prerequisites\n\n- Access to application logs\n- `curl` with verbose mode for network inspection\n- Figma API credentials for testing\n\n## Instructions\n\n### Step 1: Verbose Request Inspection\n\n```bash\n# Full HTTP request/response trace for a Figma API call\ncurl -v -H \"X-Figma-Token: ${FIGMA_PAT}\" \\\n  \"https://api.figma.com/v1/files/${FIGMA_FILE_KEY}?depth=1\" 2>&1 \\\n  | tee figma-debug-trace.txt\n\n# Extract key diagnostic info:\n# - TLS version and cipher\n# - Response status and headers\n# - Timing breakdown\ncurl -w \"\nDNS:        %{time_namelookup}s\nConnect:    %{time_connect}s\nTLS:        %{time_appconnect}s\nTTFB:       %{time_starttransfer}s\nTotal:      %{time_total}s\nSize:       %{size_download} bytes\nStatus:     %{http_code}\n\" -s -o /dev/null \\\n  -H \"X-Figma-Token: ${FIGMA_PAT}\" \\\n  \"https://api.figma.com/v1/files/${FIGMA_FILE_KEY}?depth=1\"\n```\n\n### Step 2: Response Shape Validation\n\n```typescript\n// Figma API responses can be unexpectedly shaped when:\n// - File is empty or newly created\n// - Nodes have been deleted between requests\n// - Plugin data is corrupted\n\nfunction validateFileResponse(data: any): string[] {\n  const issues: string[] = [];\n\n  if (!data.document) issues.push('Missing document root');\n  if (!data.document?.children?.length) issues.push('Document has no pages');\n  if (typeof data.name !== 'string') issues.push('Missing file name');\n  if (!data.version) issues.push('Missing version field');\n\n  // Check for null nodes (deleted between list and fetch)\n  if (data.nodes) {\n    for (const [id, node] of Object.entries(data.nodes)) {\n      if (node === null) issues.push(`Null node: ${id} (deleted or invisible)`);\n    }\n  }\n\n  // Check images response for null renders\n  if (data.images) {\n    for (const [id, url] of Object.entries(data.images)) {\n      if (url === null) issues.push(`Image render failed for node: ${id}`);\n    }\n  }\n\n  return issues;\n}\n```\n\n### Step 3: Rate Limit Edge Cases\n\n```typescript\n// Problem: Figma rate limits are per-user, per-minute, but the exact\n// limit is not published and varies by plan tier and seat type.\n\n// Diagnostic: measure your actual limit by counting successful requests\nasync function measureRateLimit(token: string): Promise<{\n  requestsMade: number;\n  firstRateLimitAt: number | null;\n  retryAfter: number | null;\n}> {\n  let count = 0;\n  let rateLimitAt: number | null = null;\n  let retryAfter: number | null = null;\n\n  // Make requests until rate limited (use a read-only endpoint)\n  while (count < 200) {\n    const res = await fetch('https://api.figma.com/v1/me', {\n      headers: { 'X-Figma-Token': token },\n    });\n\n    if (res.status === 429) {\n      rateLimitAt = count;\n      retryAfter = parseInt(res.headers.get('Retry-After') || '0');\n      break;\n    }\n\n    count++;\n    // Small delay to avoid instant burst\n    await new Promise(r => setTimeout(r, 100));\n  }\n\n  return { requestsMade: count, firstRateLimitAt: rateLimitAt, retryAfter };\n}\n```\n\n### Step 4: Large File Debugging\n\n```typescript\n// Large Figma files (1000+ components) can cause:\n// - Response timeouts (>30s)\n// - Memory issues (100+ MB JSON)\n// - Rate limits from repeated retries\n\n// Strategy: chunk the file by page\nasync function fetchLargeFileSafely(fileKey: string, token: string) {\n  // 1. Get file metadata with depth=1 (just pages, not children)\n  const meta = await fetch(\n    `https://api.figma.com/v1/files/${fileKey}?depth=1`,\n    { headers: { 'X-Figma-Token': token } }\n  ).then(r => r.json());\n\n  console.log(`File: ${meta.name}, Pages: ${meta.document.children.length}`);\n\n  // 2. Fetch each page's content individually\n  const results = [];\n  for (const page of meta.document.children) {\n    console.log(`Fetching page: ${page.name} (${page.id})`);\n\n    const pageData = await fetch(\n      `https://api.figma.com/v1/files/${fileKey}/nodes?ids=${page.id}`,\n      { headers: { 'X-Figma-Token': token } }\n    ).then(r => r.json());\n\n    results.push({ pageId: page.id, pageName: page.name, data: pageData });\n\n    // Respect rate limits between page fetches\n    await new Promise(r => setTimeout(r, 500));\n  }\n\n  return results;\n}\n```\n\n### Step 5: Support Escalation Template\n\n```markdown\n## Figma API Support Request\n\n**Account email:** [your-email]\n**Plan tier:** [Starter/Professional/Organization/Enterprise]\n**Endpoint:** [e.g., GET /v1/files/:key]\n**File key:** [file key, not sensitive]\n\n### Issue Description\n[1-2 sentences describing the problem]\n\n### Reproduction Steps\n1. Call `GET https://api.figma.com/v1/files/FILE_KEY?depth=1`\n2. Observe: [expected vs actual behavior]\n\n### Diagnostic Data\n- HTTP status: [status code]\n- Response headers: [relevant headers, especially rate limit]\n- Response time: [from curl timing]\n- Frequency: [every time / intermittent / specific conditions]\n\n### Request/Response (redacted)\n```\n\ncurl -v -H \"X-Figma-Token: [REDACTED]\" \\\n  \"https://api.figma.com/v1/files/FILE_KEY?depth=1\"\n\nHTTP/2 [status]\nx-figma-rate-limit-type: [value]\nretry-after: [value]\n\n```\n\n### Environment\n- Node.js: [version]\n- OS: [os]\n- Region: [your server region]\n- Behind proxy: [yes/no]\n```\n\n## Output\n\n- Verbose request/response traces captured\n- Response shape issues identified\n- Rate limit behavior measured\n- Large file handled with page-level chunking\n- Support ticket prepared with diagnostic data\n\n## Error Handling\n\n| Issue | Diagnostic | Solution |\n|-------|-----------|----------|\n| Intermittent 500s | Track frequency and timing | Log every request; report pattern to Figma |\n| Slow responses | curl timing breakdown | Check if DNS/TLS is the bottleneck |\n| Null image renders | Validate node visibility | Check node opacity and visibility in Figma |\n| Memory crash | Large file JSON | Use `depth=1` + per-page `/nodes` calls |\n\n## Resources\n\n- [Figma Developer Forum](https://forum.figma.com/)\n- [Figma Support](https://help.figma.com/hc/en-us/requests/new)\n- [Figma Status Page](https://status.figma.com)\n\n## Next Steps\n\nFor load testing, see `figma-load-scale`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "figma-advanced-troubleshooting",
-    "description": "Deep debugging for Figma API issues: network analysis, response inspection,",
-    "allowed-tools": "Read, Grep, Bash(curl:*), Bash(node:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033300",
   "name": "snowflake-reliability-patterns",
   "slug": "snowflake-reliability-patterns",
   "description": "Implement Snowflake reliability patterns: replication, failover, Time",
   "content": "# Snowflake Reliability Patterns\n\n## Overview\n\nProduction-grade reliability patterns for Snowflake: database replication, account failover, Time Travel recovery, and application-level circuit breakers.\n\n## Instructions\n\n### Step 1: Time Travel for Point-in-Time Recovery\n\n```sql\n-- Query historical data (up to 90 days on Enterprise Edition)\nSELECT * FROM orders\nAT (TIMESTAMP => '2026-03-21 14:00:00'::TIMESTAMP_NTZ);\n\n-- Restore a table to a previous state\nCREATE OR REPLACE TABLE orders\n  CLONE orders AT (TIMESTAMP => '2026-03-21 14:00:00'::TIMESTAMP_NTZ);\n\n-- Restore a dropped table\nUNDROP TABLE orders;\nUNDROP SCHEMA my_schema;\nUNDROP DATABASE my_database;\n\n-- Query by offset (5 minutes ago)\nSELECT * FROM orders AT (OFFSET => -300);\n\n-- Query by statement ID (before a specific query ran)\nSELECT * FROM orders BEFORE (STATEMENT => '<query_id_of_bad_update>');\n\n-- Set retention period per table\nALTER TABLE critical_data SET DATA_RETENTION_TIME_IN_DAYS = 90;\nALTER TABLE temp_staging SET DATA_RETENTION_TIME_IN_DAYS = 0;  -- No Time Travel\n```\n\n### Step 2: Database Replication Across Regions\n\n```sql\n-- Enable replication on source account (primary)\nALTER DATABASE PROD_DW ENABLE REPLICATION TO ACCOUNTS\n  myorg.us_east_account,\n  myorg.eu_west_account;\n\n-- On target account: create replica database\nCREATE DATABASE PROD_DW_REPLICA\n  AS REPLICA OF myorg.us_west_account.PROD_DW;\n\n-- Refresh replica (manual or scheduled)\nALTER DATABASE PROD_DW_REPLICA REFRESH;\n\n-- Check replication status\nSELECT * FROM TABLE(INFORMATION_SCHEMA.DATABASE_REPLICATION_USAGE_HISTORY(\n  DATE_RANGE_START => DATEADD(hours, -24, CURRENT_TIMESTAMP())\n));\n\n-- Check replication lag\nSELECT database_name, primary_snowflake_region,\n       replication_allowed, is_primary,\n       DATEDIFF('minute', snowflake_region_last_refresh_time, CURRENT_TIMESTAMP()) AS lag_minutes\nFROM TABLE(INFORMATION_SCHEMA.REPLICATION_DATABASES())\nWHERE database_name = 'PROD_DW_REPLICA';\n```\n\n### Step 3: Account Failover Groups\n\n```sql\n-- Create failover group (replicates databases, warehouses, roles, etc.)\n-- On primary account:\nCREATE FAILOVER GROUP prod_failover\n  OBJECT_TYPES = DATABASES, WAREHOUSES, ROLES, USERS, INTEGRATIONS\n  ALLOWED_DATABASES = PROD_DW\n  ALLOWED_ACCOUNTS = myorg.us_east_account\n  REPLICATION_SCHEDULE = '10 MINUTE';\n\n-- On secondary account: create as replica\nCREATE FAILOVER GROUP prod_failover\n  AS REPLICA OF myorg.us_west_account.prod_failover;\n\n-- Promote secondary to primary (during outage)\nALTER FAILOVER GROUP prod_failover PRIMARY;\n\n-- After recovery, switch back\n-- On original primary:\nALTER FAILOVER GROUP prod_failover PRIMARY;\n```\n\n### Step 4: Application-Level Connection Failover\n\n```typescript\n// src/snowflake/resilient-connection.ts\nimport snowflake from 'snowflake-sdk';\n\ninterface FailoverConfig {\n  primary: snowflake.ConnectionOptions;\n  secondary: snowflake.ConnectionOptions;\n  healthCheckIntervalMs: number;\n}\n\nclass ResilientSnowflakeConnection {\n  private activeConn: snowflake.Connection | null = null;\n  private isPrimary = true;\n  private config: FailoverConfig;\n\n  constructor(config: FailoverConfig) {\n    this.config = config;\n  }\n\n  async connect(): Promise<snowflake.Connection> {\n    try {\n      this.activeConn = await this.tryConnect(this.config.primary);\n      this.isPrimary = true;\n      return this.activeConn;\n    } catch (primaryErr) {\n      console.warn('Primary Snowflake connection failed, trying secondary');\n      try {\n        this.activeConn = await this.tryConnect(this.config.secondary);\n        this.isPrimary = false;\n        return this.activeConn;\n      } catch (secondaryErr) {\n        throw new Error(`Both Snowflake connections failed.\n          Primary: ${primaryErr.message}\n          Secondary: ${secondaryErr.message}`);\n      }\n    }\n  }\n\n  private tryConnect(opts: snowflake.ConnectionOptions): Promise<snowflake.Connection> {\n    return new Promise((resolve, reject) => {\n      const conn = snowflake.createConnection(opts);\n      conn.connect((err, conn) => (err ? reject(err) : resolve(conn)));\n    });\n  }\n\n  async healthCheck(): Promise<{ connected: boolean; isPrimary: boolean }> {\n    try {\n      await new Promise<void>((resolve, reject) => {\n        this.activeConn!.execute({\n          sqlText: 'SELECT 1',\n          complete: (err) => (err ? reject(err) : resolve()),\n        });\n      });\n      return { connected: true, isPrimary: this.isPrimary };\n    } catch {\n      return { connected: false, isPrimary: this.isPrimary };\n    }\n  }\n}\n\n// Usage\nconst resilientConn = new ResilientSnowflakeConnection({\n  primary: {\n    account: 'myorg-primary',\n    username: process.env.SNOWFLAKE_USER!,\n    password: process.env.SNOWFLAKE_PASSWORD!,\n    warehouse: 'PROD_WH',\n    database: 'PROD_DW',\n  },\n  secondary: {\n    account: 'myorg-secondary',\n    username: process.env.SNOWFLAKE_USER!,\n    password: process.env.SNOWFLAKE_PASSWORD!,\n    warehouse: 'PROD_WH',\n    database: 'PROD_DW_REPLICA',\n  },\n  healthCheckIntervalMs: 30000,\n});\n```\n\n### Step 5: Pipeline Retry and Idempotency\n\n```sql\n-- Idempotent data loading (safe to retry)\nMERGE INTO silver.orders AS target\nUSING (\n  SELECT * FROM bronze.raw_orders\n  WHERE ingestion_time >= DATEADD(hours, -1, CURRENT_TIMESTAMP())\n) AS source\nON target.order_id = source.order_id\nWHEN NOT MATCHED THEN INSERT\n  (order_id, customer_id, amount, order_date)\nVALUES\n  (source.order_id, source.customer_id, source.amount, source.order_date);\n\n-- MERGE is idempotent: running it twice with the same data produces the same result\n-- Prefer MERGE over INSERT for retry-safe pipelines\n\n-- Task retry configuration\nCREATE OR REPLACE TASK reliable_transform\n  WAREHOUSE = ETL_WH\n  SCHEDULE = '5 MINUTE'\n  ALLOW_OVERLAPPING_EXECUTION = FALSE  -- Prevent concurrent runs\n  SUSPEND_TASK_AFTER_NUM_FAILURES = 3  -- Auto-suspend after 3 failures\n  WHEN SYSTEM$STREAM_HAS_DATA('orders_stream')\nAS\n  MERGE INTO dim_orders ...;\n\nALTER TASK reliable_transform RESUME;\n```\n\n### Step 6: Backup Strategy\n\n```sql\n-- Zero-copy clone backups (instant, no extra storage until data changes)\nCREATE DATABASE PROD_DW_BACKUP_20260322\n  CLONE PROD_DW;\n\n-- Automated daily backup via task\nCREATE OR REPLACE TASK daily_backup\n  WAREHOUSE = ADMIN_WH\n  SCHEDULE = 'USING CRON 0 3 * * * UTC'\nAS\nBEGIN\n  LET backup_name VARCHAR := 'PROD_DW_BACKUP_' || TO_CHAR(CURRENT_DATE(), 'YYYYMMDD');\n  EXECUTE IMMEDIATE 'CREATE DATABASE IF NOT EXISTS ' || :backup_name || ' CLONE PROD_DW';\n  -- Clean up backups older than 7 days\n  -- (done via separate cleanup task or stored procedure)\nEND;\n```\n\n## Recovery Time Objectives\n\n| Scenario | Recovery Method | RTO | RPO |\n|----------|---------------|-----|-----|\n| Accidental table drop | UNDROP | Instant | Zero |\n| Bad data update | Time Travel CLONE | Minutes | Configurable (up to 90 days) |\n| Regional outage | Failover group | 10-30 min | Replication lag |\n| Account compromise | Contact Snowflake support | Hours | Last backup |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Time Travel expired | Past retention period | Increase DATA_RETENTION_TIME_IN_DAYS |\n| Replication lag high | Large data changes | Check replication schedule, network |\n| Failover fails | Secondary not synced | Verify failover group status |\n| UNDROP fails | Object recreated with same name | Rename current object first |\n\n## Resources\n\n- [Time Travel](https://docs.snowflake.com/en/user-guide/data-time-travel)\n- [Database Replication](https://docs.snowflake.com/en/user-guide/account-replication-intro)\n- [Failover Groups](https://docs.snowflake.com/en/user-guide/account-replication-failover-failback)\n- [Business Continuity](https://docs.snowflake.com/en/user-guide/replication-intro)\n\n## Next Steps\n\nFor policy enforcement, see `snowflake-policy-guardrails`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "snowflake-reliability-patterns",
-    "description": "Implement Snowflake reliability patterns: replication, failover, Time",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

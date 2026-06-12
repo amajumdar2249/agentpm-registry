@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032309",
   "name": "instantly-security-basics",
   "slug": "instantly-security-basics",
   "description": "Apply Instantly.ai security best practices for API keys, scopes, and",
   "content": "# Instantly Security Basics\n\n## Overview\n\nSecure your Instantly.ai integration with scoped API keys, least-privilege access, secret management, webhook validation, and audit logging. Instantly API v2 uses Bearer token auth with granular scope-based permissions.\n\n## Prerequisites\n\n- Instantly account with API access\n- Understanding of environment variable management\n- Access to Instantly dashboard Settings > Integrations\n\n## Instructions\n\n### Step 1: Least-Privilege API Key Scopes\n\nCreate separate API keys for different use cases with minimal required scopes.\n\n```typescript\n// Key scopes follow the pattern: resource:action\n// resource = campaigns, accounts, leads, etc.\n// action = read, update, all\n\n// Read-only analytics dashboard\n// Scopes needed: campaigns:read, accounts:read\nconst ANALYTICS_KEY_SCOPES = [\"campaigns:read\", \"accounts:read\"];\n\n// Campaign automation bot\n// Scopes needed: campaigns:all, leads:all\nconst AUTOMATION_KEY_SCOPES = [\"campaigns:all\", \"leads:all\"];\n\n// Webhook-only integration\n// Scopes needed: leads:read (to look up lead data on events)\nconst WEBHOOK_KEY_SCOPES = [\"leads:read\"];\n\n// AVOID: all:all gives unrestricted access \u2014 dev/test only\n```\n\n| Use Case | Recommended Scopes | Risk Level |\n|----------|-------------------|------------|\n| Analytics dashboard | `campaigns:read`, `accounts:read` | Low |\n| Lead import tool | `leads:update` | Medium |\n| Campaign launcher | `campaigns:all`, `leads:all`, `accounts:read` | High |\n| Full automation | `all:all` | Critical \u2014 dev only |\n| Webhook handler | `leads:read` | Low |\n\n### Step 2: Secret Management\n\n```typescript\n// NEVER hardcode API keys\n// BAD:\nconst client = new InstantlyClient({ apiKey: \"sk_live_abc123\" });\n\n// GOOD: environment variables\nconst client = new InstantlyClient({\n  apiKey: process.env.INSTANTLY_API_KEY!,\n});\n\n// BETTER: secret manager integration\nimport { SecretManagerServiceClient } from \"@google-cloud/secret-manager\";\n\nasync function getApiKey(): Promise<string> {\n  const client = new SecretManagerServiceClient();\n  const [version] = await client.accessSecretVersion({\n    name: \"projects/my-project/secrets/instantly-api-key/versions/latest\",\n  });\n  return version.payload?.data?.toString() || \"\";\n}\n```\n\n```bash\n# .gitignore \u2014 always exclude secrets\n.env\n.env.*\n*.key\n```\n\n### Step 3: API Key Rotation\n\n```typescript\n// Instantly supports multiple API keys \u2014 rotate without downtime\n\nasync function rotateApiKey() {\n  const oldKey = process.env.INSTANTLY_API_KEY;\n\n  // 1. Create new API key via dashboard (Settings > Integrations > API)\n  // 2. Update secret manager / env vars with new key\n  // 3. Deploy with new key\n  // 4. Verify new key works\n  const client = new InstantlyClient({ apiKey: process.env.INSTANTLY_API_KEY_NEW! });\n  await client.getCampaigns({ limit: 1 }); // test call\n\n  // 5. Delete old key via API\n  // GET /api/v2/api-keys to find the old key ID\n  const keys = await client.request<Array<{ id: string; name: string }>>(\n    \"/api-keys\"\n  );\n  const oldKeyEntry = keys.find((k) => k.name === \"old-key-name\");\n  if (oldKeyEntry) {\n    await client.request(`/api-keys/${oldKeyEntry.id}`, { method: \"DELETE\" });\n    console.log(\"Old API key deleted\");\n  }\n}\n\n// API Key management endpoints:\n// POST   /api/v2/api-keys        \u2014 Create new key (name, scopes)\n// GET    /api/v2/api-keys        \u2014 List all keys\n// DELETE /api/v2/api-keys/{id}   \u2014 Revoke a key\n```\n\n### Step 4: Webhook Security\n\n```typescript\nimport express from \"express\";\n\nconst app = express();\napp.use(express.json());\n\n// Validate webhook requests\napp.post(\"/webhooks/instantly\", (req, res) => {\n  // Option 1: Verify via custom header set during webhook creation\n  const expectedSecret = process.env.INSTANTLY_WEBHOOK_SECRET;\n  const receivedSecret = req.headers[\"x-webhook-secret\"];\n\n  if (expectedSecret && receivedSecret !== expectedSecret) {\n    console.warn(\"Webhook auth failed: invalid secret\");\n    return res.status(401).json({ error: \"Unauthorized\" });\n  }\n\n  // Option 2: IP allowlisting (check Instantly's outbound IPs)\n  // Option 3: Verify payload structure matches Instantly schema\n  const { event_type, data } = req.body;\n  if (!event_type || !data) {\n    return res.status(400).json({ error: \"Invalid payload\" });\n  }\n\n  // Process immediately, return 200 fast (Instantly retries 3x in 30s)\n  res.status(200).json({ received: true });\n\n  // Async processing\n  handleWebhookEvent(event_type, data).catch(console.error);\n});\n\n// When creating webhooks, add custom auth headers\nasync function createSecureWebhook(targetUrl: string) {\n  return instantly(\"/webhooks\", {\n    method: \"POST\",\n    body: JSON.stringify({\n      name: \"Secure CRM Sync\",\n      target_hook_url: targetUrl,\n      event_type: \"reply_received\",\n      headers: {\n        \"X-Webhook-Secret\": process.env.INSTANTLY_WEBHOOK_SECRET,\n        Authorization: `Basic ${Buffer.from(\"user:pass\").toString(\"base64\")}`,\n      },\n    }),\n  });\n}\n```\n\n### Step 5: Audit Logging\n\n```typescript\n// Instantly provides audit logs for workspace activity\nasync function checkAuditLogs() {\n  const logs = await instantly<Array<{\n    id: string;\n    action: string;\n    resource: string;\n    timestamp_created: string;\n    user: string;\n  }>>(\"/audit-logs?limit=50\");\n\n  console.log(\"Recent Audit Events:\");\n  for (const log of logs) {\n    console.log(`  ${log.timestamp_created} | ${log.action} | ${log.resource} | ${log.user}`);\n  }\n}\n```\n\n### Step 6: Workspace Member Permissions\n\n```typescript\n// Manage workspace members with role-based access\nasync function listWorkspaceMembers() {\n  const members = await instantly<Array<{\n    id: string;\n    email: string;\n    role: string;\n  }>>(\"/workspace-members\");\n\n  for (const m of members) {\n    console.log(`${m.email}: ${m.role}`);\n  }\n}\n\n// Remove a member\nasync function removeMember(memberId: string) {\n  await instantly(`/workspace-members/${memberId}`, { method: \"DELETE\" });\n}\n```\n\n## Security Checklist\n\n- [ ] API keys stored in environment variables or secret manager\n- [ ] `.env` files listed in `.gitignore`\n- [ ] Each integration has its own scoped API key\n- [ ] No `all:all` keys in production\n- [ ] Webhook endpoints validate authentication\n- [ ] API key rotation schedule (quarterly recommended)\n- [ ] Audit logs reviewed periodically\n- [ ] Workspace members have minimum necessary roles\n- [ ] Block list entries for competitor/internal domains\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `401` after rotation | Old key still in use | Verify deployment picked up new key |\n| `403` on scope-limited key | Missing required scope | Create new key with correct scopes |\n| Webhook `401` | Secret mismatch | Check `headers` field in webhook config |\n| Audit log empty | Plan doesn't include audit logs | Upgrade plan or check workspace settings |\n\n## Resources\n\n- [Instantly API Key Management](https://developer.instantly.ai/api/v2/apikey)\n- [Instantly Webhook Docs](https://developer.instantly.ai/api/v2/webhook)\n- [Audit Logs API](https://developer.instantly.ai/)\n\n## Next Steps\n\nFor production readiness, see `instantly-prod-checklist`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "instantly-security-basics",
-    "description": "Apply Instantly.ai security best practices for API keys, scopes, and",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

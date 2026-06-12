@@ -1,14 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000010312",
   "name": "pipecat",
   "slug": "pipecat",
   "description": "Pipecat realtime voice/multimodal bots. Covers pipelines/frames, transports, RTVI, Pipecat Cloud deploy. Use when building real-time voice bots (STT/LLM/TTS pipelines), multimodal AI agents, WebRTC/WebSocket transports, or deploying to Pipecat Cloud. Keywords: pipecat, pipecat-ai, RTVI, WebRTC, voice bot.",
   "content": "\n# Pipecat\n\nPipecat is an open-source Python framework for building real-time voice and multimodal bots.\nIt composes streaming speech/LLM/TTS services into a low-latency pipeline, connected via transports (WebRTC/WebSocket) and client SDKs using the RTVI message standard.\n\n## Links\n\n- [Documentation](https://docs.pipecat.ai/getting-started/introduction)\n- [Changelog](https://github.com/pipecat-ai/pipecat/blob/main/CHANGELOG.md)\n- [GitHub](https://github.com/pipecat-ai/pipecat)\n\n## Quick navigation\n\n- Installation (packages/extras/CLI): `references/installation.md`\n- Migration to 1.0: `references/migration-1-0.md`\n- Concepts & architecture: `references/core-concepts.md`\n- Session initialization (runner/bot/client): `references/session-initialization.md`\n- Pipeline & frames: `references/pipeline-and-frames.md`\n- Transports: `references/transports.md`\n- Speech input & turn detection: `references/speech-input-and-turn-detection.md`\n- Client SDKs + RTVI messaging: `references/client-sdks-rtvi.md`\n- CLI (init/tail/cloud): `references/cli.md`\n- Function calling (server): `references/function-calling.md`\n- Context management: `references/context-management.md`\n- LLM inference: `references/llm-inference.md`\n- Text to speech (TTS): `references/text-to-speech.md`\n- Deployment (pattern/platforms): `references/deployment.md`\n- Server APIs (supported services): `references/server-services.md`\n- Server Utilities (runner): `references/server-runner.md`\n- Server APIs (pipeline/task/params): `references/server-pipeline-apis.md`\n- Pipecat Cloud ops: `references/pipecat-cloud.md`\n- Troubleshooting: `references/troubleshooting.md`\n\n## Mental model (cheat sheet)\n\n- **Pipeline**: ordered **processors** that consume/emit **frames**.\n- **Frames**: the streaming units (audio/text/video/context/events) flowing through the pipeline.\n- **Transport**: connectivity + media IO + session state (WebRTC/WebSocket/provider realtime).\n- **Runner**: HTTP service that starts sessions and spawns a bot process with transport credentials.\n- **Client SDK**: starts the bot, connects transport, sends messages/requests, receives events.\n\n## Recipes\n\n### 1) Keep secrets server-side\n\n- Put provider API keys (LLM/STT/TTS) only on the server/bot container.\n- The client should call a server start endpoint (`startBot` / `startBotAndConnect`) to receive **transport credentials** (e.g., a room URL + token), not provider keys.\n\n### 2) Use WebRTC for production voice\n\n- Prefer a WebRTC transport (e.g., Daily) for resilience and media quality.\n- Use a WebSocket transport mostly for server\u2194server, prototypes, or constrained environments.\n\n### 2b) Design for streaming + overlap\n\n- Keep the pipeline fully streaming (avoid batching whole turns when you can).\n- If your services support it, start TTS from partial LLM output to reduce perceived latency.\n\n### 3) Initialize and evolve context via RTVI\n\n- Initialize the bot\u2019s pipeline context from the server start request payload.\n- For ongoing interaction, prefer a dedicated \u201csend text\u201d style API (when available) instead of deprecated context append methods.\n\n### 4) Function calling: end-to-end flow\n\n- LLM requests a function call.\n- Client registers a handler by function name.\n- Client returns a function-call result message back to the bot.\n\n### 5) Pipecat Cloud deployment basics\n\n- Build/push an image that matches the expected platform (Pipecat Cloud requires `linux/arm64` in the docs).\n- Use a deployment config file for repeatability.\n- Configure pool sizing with `min_agents` (warm capacity) and `max_agents` (hard limit).\n\n## Critical gotchas / prohibitions\n\n- Do not embed sensitive API keys in client apps.\n- Expect and handle \u201cat capacity\u201d responses (HTTP 429) when the pool is exhausted.\n- Plan for cold-start latency if `min_agents = 0`.\n- Ensure secrets and image-pull credentials are created in the same region as the deployed agent.\n- Do not assume deprecated import shims or service-specific context classes still exist in `1.0.0`; audit imports before upgrading.\n- Do not keep VAD/turn-detection logic on transport params; current releases route that control through `LLMUserAggregator` strategies.\n- Do not assume `OpenAIResponsesLLMService` is HTTP-based anymore; WebSocket is now the default implementation.\n\n## Release Highlights (0.0.109 -> 1.2.0)\n\n### Runtime and service additions\n\n- **`OpenAIResponsesLLMService`** now defaults to a persistent WebSocket connection; the prior HTTP behavior moved to `OpenAIResponsesHttpLLMService`.\n- **Inworld Realtime LLM** adds a WebSocket cascade STT/LLM/TTS path with semantic VAD and function calling.\n- **`MistralTTSService`** adds streaming Voxtral TTS, and TTS/STT services gained more runtime-update and sample-rate options.\n- The development runner now exports a module-level FastAPI `app` for custom routes before `main()`.\n\n### Tooling and context changes\n\n- Function calling now supports grouped parallel tool batches, async tool completion after interruption, and streaming intermediate tool results.\n- Context editing now has `LLMMessagesTransformFrame`, and the framework standardizes on universal `LLMContext` / `LLMContextAggregatorPair`.\n- OpenAI tool schemas can now include provider-specific `custom_tools`.\n- `1.2.0` adds `add_tool_change_messages` for LLM aggregators, widens `tool_resources` into deprecated `app_resources`, and extends async-tool compatibility across more realtime providers.\n\n### Turn-taking and client protocol\n\n- `1.2.0` adds explicit inference/finalization turn hooks (`on_user_turn_inference_triggered`, `LLMTurnCompletionUserTurnStopStrategy`, `FilterIncompleteUserTurnStrategies`) for smarter end-of-turn gating.\n- RTVI grows first-class UI Agent Protocol support with `ui-event`, `ui-snapshot`, `ui-cancel-task`, `ui-command`, and `ui-task`, bumping the protocol to `1.3.0`.\n- The development runner and runner arguments now carry a stable `session_id`, which is useful for per-session tracing across local and cloud-like flows.\n\n### Breaking migrations\n\n- Deprecated service-specific context classes, transport params, RTVI shims, frame aliases, and interruption/VAD helpers were removed across the stack.\n- Turn detection and mute behavior moved toward `LLMUserAggregator` strategies instead of transport-level configuration.\n- Some legacy providers and helpers were removed entirely (`OpenPipeLLMService`, `TTSService.say()`, `FrameProcessor.wait_for_task()`, older beta/alias modules).\n\n## Links\n\n- Docs: https://docs.pipecat.ai/getting-started/introduction\n- Full-text extract used for this skill: https://docs.pipecat.ai/llms-full.txt\n- Changelog: https://github.com/pipecat-ai/pipecat/blob/main/CHANGELOG.md\n- GitHub: https://github.com/pipecat-ai/pipecat\n- PyPI (framework): https://pypi.org/project/pipecat-ai/\n- PyPI (cloud SDK): https://pypi.org/project/pipecatcloud/\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "pipecat",
-    "description": "Pipecat realtime voice/multimodal bots. Covers pipelines/frames, transports, RTVI, Pipecat Cloud deploy. Use when building real-time voice bots (STT/LLM/TTS pipelines), multimodal AI agents, WebRTC/WebSocket transports, or deploying to Pipecat Cloud. Keywords: pipecat, pipecat-ai, RTVI, WebRTC, voice bot.",
-    "metadata": "",
-    "version": "1.2.1",
-    "release_date": "2026-05-15"
+  "author": "agentpm",
+  "version": "1.2.1",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

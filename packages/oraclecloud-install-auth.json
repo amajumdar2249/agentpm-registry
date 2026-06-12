@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032834",
   "name": "oraclecloud-install-auth",
   "slug": "oraclecloud-install-auth",
   "description": "Install and configure Oracle Cloud Infrastructure (OCI) SDK and CLI",
   "content": "# Oracle Cloud Install & Auth\n\n## Overview\n\nConfigure API key authentication for Oracle Cloud Infrastructure (OCI). OCI auth requires a `~/.oci/config` file with **five mandatory fields** \u2014 user OCID, fingerprint, tenancy OCID, region, and the path to an RSA private key. One wrong field produces the cryptic `ConfigFileNotFound` or `InvalidKeyFilePath` error with no hint about which field failed.\n\n**Purpose:** Produce a validated `~/.oci/config` file, generate an RSA key pair, upload the public key to OCI, and verify connectivity with both the Python SDK and OCI CLI.\n\n## Prerequisites\n\n- **OCI account** with an active tenancy \u2014 sign up at https://cloud.oracle.com\n- **Python 3.8+** (the OCI Python SDK is the most mature SDK)\n- **OpenSSL** installed (for RSA key generation)\n- Your **user OCID** (Profile > User Settings in the OCI Console) \u2014 format: `ocid1.user.oc1..aaaa...`\n- Your **tenancy OCID** (Administration > Tenancy Details) \u2014 format: `ocid1.tenancy.oc1..aaaa...`\n- Your **home region** (e.g., `us-ashburn-1`, `eu-frankfurt-1`)\n\n## Instructions\n\n### Step 1: Install the OCI Python SDK and CLI\n\n```bash\npip install oci oci-cli\n```\n\n### Step 2: Generate an RSA Key Pair\n\n```bash\nmkdir -p ~/.oci\nopenssl genrsa -out ~/.oci/oci_api_key.pem 2048\nchmod 600 ~/.oci/oci_api_key.pem\nopenssl rsa -pubout -in ~/.oci/oci_api_key.pem -out ~/.oci/oci_api_key_public.pem\n```\n\n### Step 3: Get the Key Fingerprint\n\n```bash\nopenssl rsa -pubout -outform DER -in ~/.oci/oci_api_key.pem | openssl md5 -c\n# Output: ab:cd:ef:12:34:56:78:90:ab:cd:ef:12:34:56:78:90\n```\n\n### Step 4: Upload Public Key to OCI Console\n\nNavigate to: **Profile (top-right) > User Settings > API Keys > Add API Key > Paste Public Key**\n\nPaste the contents of `~/.oci/oci_api_key_public.pem`. The console shows the fingerprint \u2014 it must match Step 3.\n\n### Step 5: Create the Config File\n\n```bash\ncat > ~/.oci/config << 'EOF'\n[DEFAULT]\nuser=ocid1.user.oc1..aaaa_YOUR_USER_OCID\nfingerprint=ab:cd:ef:12:34:56:78:90:ab:cd:ef:12:34:56:78:90\ntenancy=ocid1.tenancy.oc1..aaaa_YOUR_TENANCY_OCID\nregion=us-ashburn-1\nkey_file=~/.oci/oci_api_key.pem\nEOF\nchmod 600 ~/.oci/config\n```\n\nAll five fields are required. The `key_file` must point to the **private** key (not the public `.pem`).\n\n### Step 6: Verify with the Python SDK\n\n```python\nimport oci\n\nconfig = oci.config.from_file(\"~/.oci/config\")\noci.config.validate_config(config)\n\nidentity = oci.identity.IdentityClient(config)\nuser = identity.get_user(config[\"user\"]).data\nprint(f\"Authenticated as: {user.name} ({user.email})\")\nprint(f\"Tenancy: {config['tenancy']}\")\nprint(f\"Region: {config['region']}\")\n```\n\n### Step 7: Verify with the OCI CLI\n\n```bash\noci iam user get --user-id \"$(grep ^user ~/.oci/config | cut -d= -f2)\" \\\n  --query 'data.name' --raw-output\n```\n\n### Step 8: Config Validation Script\n\nSave this as `validate_oci_config.py` to catch common misconfigurations:\n\n```python\nimport oci\nimport os\n\ndef validate():\n    \"\"\"Validate OCI config file and key access.\"\"\"\n    config_path = os.path.expanduser(\"~/.oci/config\")\n    if not os.path.exists(config_path):\n        raise FileNotFoundError(f\"Config not found: {config_path}\")\n\n    config = oci.config.from_file(config_path)\n    oci.config.validate_config(config)\n\n    key_path = os.path.expanduser(config.get(\"key_file\", \"\"))\n    if not os.path.exists(key_path):\n        raise FileNotFoundError(f\"Private key not found: {key_path}\")\n\n    perms = oct(os.stat(key_path).st_mode)[-3:]\n    if perms != \"600\":\n        print(f\"WARNING: Key file permissions are {perms}, should be 600\")\n\n    identity = oci.identity.IdentityClient(config)\n    identity.get_user(config[\"user\"])\n    print(\"Config is valid. Authentication successful.\")\n\nvalidate()\n```\n\n## Output\n\nSuccessful completion produces:\n\n- An RSA key pair at `~/.oci/oci_api_key.pem` (private) and `~/.oci/oci_api_key_public.pem` (public)\n- A validated `~/.oci/config` with all five required fields\n- The public key uploaded to your OCI user profile with a matching fingerprint\n- Confirmed API connectivity via either the Python SDK or OCI CLI\n\n## Error Handling\n\n| Error | Code | Cause | Solution |\n|-------|------|-------|----------|\n| NotAuthenticated | 401 | Wrong fingerprint or key mismatch | Verify fingerprint matches: `openssl rsa -pubout -outform DER -in ~/.oci/oci_api_key.pem \\| openssl md5 -c` |\n| ConfigFileNotFound | \u2014 | Missing `~/.oci/config` | Run `oci setup config` or create manually per Step 5 |\n| InvalidKeyFilePath | \u2014 | `key_file` points to wrong path or public key | Ensure `key_file=~/.oci/oci_api_key.pem` (private key, no `_public`) |\n| InvalidPrivateKey | \u2014 | Key file is the public key, not private | The private key starts with `-----BEGIN RSA PRIVATE KEY-----` |\n| NotAuthorizedOrNotFound | 404 | User OCID is wrong or IAM policy missing | Double-check user OCID in Console > Profile > User Settings |\n| CERTIFICATE_VERIFY_FAILED | \u2014 | SSL cert issue behind corporate proxy | Set `OCI_PYTHON_SDK_NO_SERVICE_IMPORTS=1` or install `certifi` |\n\n## Examples\n\n**Quick auth test with curl (no SDK needed):**\n\n```bash\n# Verify the OCI CLI can reach the API\noci iam region list --output table\n```\n\n**Multiple profiles for dev/staging/prod:**\n\n```ini\n# ~/.oci/config\n[DEFAULT]\nuser=ocid1.user.oc1..aaaa_PROD_USER\ntenancy=ocid1.tenancy.oc1..aaaa_PROD\nregion=us-ashburn-1\nfingerprint=ab:cd:...\nkey_file=~/.oci/oci_api_key.pem\n\n[STAGING]\nuser=ocid1.user.oc1..aaaa_STAGING_USER\ntenancy=ocid1.tenancy.oc1..aaaa_STAGING\nregion=us-phoenix-1\nfingerprint=12:34:...\nkey_file=~/.oci/oci_api_key_staging.pem\n```\n\n```python\n# Load a specific profile\nconfig = oci.config.from_file(\"~/.oci/config\", profile_name=\"STAGING\")\n```\n\n## Resources\n\n- [OCI API Key Authentication](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/apisigningkey.htm) \u2014 key generation and config file format\n- [OCI Python SDK Reference](https://docs.oracle.com/en-us/iaas/tools/python/latest/) \u2014 full API documentation\n- [OCI CLI Reference](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/cliconcepts.htm) \u2014 command-line interface guide\n- [SDK Troubleshooting](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/sdk_troubleshooting.htm) \u2014 common auth and connectivity issues\n- [OCI Console](https://cloud.oracle.com) \u2014 web dashboard for key upload and OCID lookup\n- [Always Free Tier](https://www.oracle.com/cloud/free/) \u2014 free OCI resources for development\n\n## Next Steps\n\nAfter authentication is working, proceed to `oraclecloud-hello-world` to launch your first compute instance, or see `oraclecloud-common-errors` if you hit authentication issues.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "oraclecloud-install-auth",
-    "description": "Install and configure Oracle Cloud Infrastructure (OCI) SDK and CLI",
-    "allowed-tools": "Read, Write, Edit, Bash(pip:*), Bash(oci:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

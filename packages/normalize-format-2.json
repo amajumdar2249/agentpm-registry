@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000035189",
   "name": "normalize-format",
   "slug": "normalize-format-2",
   "description": "Normalizes a single inbox file of any supported format (plain markdown, Claude.ai JSON export, Claude Code JSONL session, Readwise markdown/CSV highlight, transcript with timestamps or speaker labels, link capture) into a clean markdown body plus partial frontmatter (id, title, source block, word_count). Handles format-specific failure modes \u2014 JSON content-block arrays, timestamp stripping, per-highlight chunking, URL-vs-commentary separation. Use when ingesting any inbox item for the substacker Librarian. Trigger keywords: normalize, convert, parse, transcript, export, JSON, JSONL, highlight, CSV.",
   "content": "\n# Normalize Format\n\n## Table of Contents\n\n- [Supported formats](#supported-formats)\n- [Workflow](#workflow)\n- [Detection heuristics](#detection-heuristics)\n- [Worked example](#worked-example)\n- [Guardrails](#guardrails)\n\n**Related skills:** Called by `ingest-inbox-item` as step 1. Upstream of `tag-by-topic`, `score-intuition-density`, `dedupe-against-corpus`.\n\n## Supported formats\n\n| Extension | Format | Notes |\n|---|---|---|\n| `.md`, `.txt` | plain markdown | Default; passes through |\n| `.json` | Claude.ai export | Conversation with messages array |\n| `.jsonl` | Claude Code session | Content-block array per response |\n| `.md` (Readwise-shaped) | Readwise export | Highlights + user notes |\n| `.csv` | Readwise CSV | Per-row highlight |\n| `.vtt`, `.srt`, `.md` (diarized) | Transcript | May include timestamps + speaker labels |\n| `.md` with URL + commentary | Link capture | User's framing is the signal |\n\n## Workflow\n\n```\nNormalize one file:\n- [ ] Step 1: Detect format by extension + first-line sniff\n- [ ] Step 2: Apply format-specific parse\n- [ ] Step 3: Split long transcripts at topic boundaries (>3000 words)\n- [ ] Step 4: Emit [{body, partial_frontmatter}, ...] list (usually one item)\n```\n\n### Step 1: Detection\n\n- `.jsonl` with `\"type\":\"assistant\"` \u2192 Claude Code session.\n- `.json` with `\"conversation\"` / `\"messages\"` top-level key \u2192 Claude.ai export.\n- `.md` starting with `# ` and Readwise boilerplate (`**Highlights first synced by Readwise...**`) \u2192 Readwise.\n- `.vtt` / `.srt`, or `.md` with `[HH:MM:SS]` timestamp pattern, or lines prefixed with speaker labels like `Me:` \u2192 transcript.\n- `.md` with \u226450 words and a prominent URL \u2192 link capture.\n- Else: plain markdown.\n\n### Step 2: Format-specific parse\n\n**Plain markdown**: pass body through unchanged. Title = first H1 or filename-derived.\n\n**Claude.ai JSON**: flatten content blocks to markdown. Preserve user/assistant turn labels (`**Me:**` / `**Claude:**`). Strip system-reminder blocks. `provenance.author: claude`, `confidence: paraphrased`.\n\n**Claude Code JSONL**: flatten content-block array. Drop `tool_use` blocks unless the adjacent user message references the tool output. Strip system reminders.\n\n**Readwise**: split per-book file into one seed per highlight. Body = highlight + user note. Boilerplate stripped. For bare highlights (no user note), set `provenance.confidence: quoted`, density capped at 3 downstream. For user-annotated highlights, `confidence: owned`.\n\n**Transcript**: strip timestamps. Preserve speaker labels as `**Speaker:**` prefixes. If >3000 words, split at topic shifts \u2014 emit multiple outputs sharing `parent_source`. Target ~1500 words per chunk.\n\n**Link capture**: separate URL from commentary. Body = user's commentary. Frontmatter adds `source.linked_url`. If <50 words of commentary, flag `low_commentary: true` so the scorer caps density.\n\n### Step 3: Split long transcripts\n\nSplit heuristic: paragraph break + topic-vocabulary shift (measured by tag overlap drop across adjacent paragraphs). Each chunk ~1500 words. Preserve `parent_source` across chunks.\n\n## Detection heuristics\n\n- A file that looks like a transcript but is actually an email thread (first-line sniff: `From: ...`, `Date: ...`, `Subject: ...`) \u2014 reclassify as plain markdown or link capture.\n- A Readwise file missing boilerplate \u2014 treat as plain markdown.\n- A `.json` file that isn't a Claude export \u2014 treat as plain markdown and wrap in code fences.\n\n## Worked example\n\n**Input** (`inbox/2026-04-21-claude-bnn.json`):\n```json\n{\"conversation\":{\"name\":\"BNN variational\",\"messages\":[\n  {\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"help me intuit why variational inference...\"}]},\n  {\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"Think of it as fitting a simple distribution...\"}]}\n]}}\n```\n\n**Output**:\n```markdown\n# BNN variational\n\n**Me:** help me intuit why variational inference...\n\n**Claude:** Think of it as fitting a simple distribution...\n```\n\nWith `partial_frontmatter = {id: 2026-04-21-bnn-variational, title: \"BNN variational\", source: {type: claude-conversation, ...}, provenance: {author: claude, confidence: paraphrased}}`.\n\n## Guardrails\n\n1. Readwise CSV with malformed rows: skip the row, log `WARN | malformed CSV row in <file> line N` to changelog.\n2. Claude.ai JSON schema drift: if `messages` key missing, fall back to recursive text extraction; mark `confidence: paraphrased` regardless.\n3. Transcript that is actually an email thread: reclassify rather than keep as transcript.\n4. Never OCR images. Image-only inbox items get a seed body of `[image: awaiting user annotation]` and `status: dead` with reason `image-only`.\n5. Files >50k words: refuse and log. User splits manually.\n6. Never lose the original. Even if parsing fails, the inbox file stays intact (caller moves to `.processed/` only on success).\n\n## Quick reference\n\n- Seven supported formats, each with a specific parser.\n- Returns `[{body, partial_frontmatter}, ...]` \u2014 always a list, usually of length 1.\n- Long transcripts split into multiple outputs sharing `parent_source`.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "normalize-format",
-    "description": "Normalizes a single inbox file of any supported format (plain markdown, Claude.ai JSON export, Claude Code JSONL session, Readwise markdown/CSV highlight, transcript with timestamps or speaker labels, link capture) into a clean markdown body plus partial frontmatter (id, title, source block, word_count). Handles format-specific failure modes \u2014 JSON content-block arrays, timestamp stripping, per-highlight chunking, URL-vs-commentary separation. Use when ingesting any inbox item for the substacker Librarian. Trigger keywords: normalize, convert, parse, transcript, export, JSON, JSONL, highlight, CSV."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000000231",
   "name": "defillama-api",
   "slug": "defillama-api",
   "description": "Free DeFi analytics across all chains \u2014 TVL, token prices, DEX volumes, fees/revenue, stablecoins, and bridges",
   "content": "\n# DeFiLlama API \u2014 DeFi Macro Analytics\n\nDeFiLlama is the largest DeFi TVL aggregator. Its API is **free with no authentication** for most endpoints \u2014 covering TVL, token prices, DEX volumes, fees/revenue, stablecoins, and bridges across all chains.\n\n## Quick Start\n\n```python\nimport httpx\n\n# No auth required for free endpoints\nBASE = \"https://api.llama.fi\"\nCOINS = \"https://coins.llama.fi\"\n\n# Current TVL for a protocol\ntvl = httpx.get(f\"{BASE}/tvl/raydium\").json()\nprint(f\"Raydium TVL: ${tvl:,.0f}\")\n\n# Token prices (multi-chain)\nresp = httpx.get(f\"{COINS}/prices/current/solana:So11111111111111111111111111111111111111112\")\nsol_price = resp.json()[\"coins\"][\"solana:So11111111111111111111111111111111111111112\"][\"price\"]\n```\n\n## Base URLs\n\n| Service | Base URL | Auth |\n|---------|----------|------|\n| TVL / Protocols | `https://api.llama.fi` | Free |\n| Coin Prices | `https://coins.llama.fi` | Free |\n| Stablecoins | `https://stablecoins.llama.fi` | Free |\n| Yields | `https://yields.llama.fi` | Pro ($300/mo) |\n| Bridges | `https://bridges.llama.fi` | Free (list) / Pro (detail) |\n| Pro API | `https://pro-api.llama.fi/{KEY}/api/...` | Pro key in URL path |\n\n**Rate limits**: ~500 requests per 5 minutes (free). Pro: 1,000 req/min, 1M calls/mo.\n\n## TVL & Protocol Data\n\n```python\n# List all protocols with TVL\nGET /protocols\n# Returns: [{name, slug, tvl, chainTvls, change_1h, change_1d, change_7d, category, chains, ...}]\n\n# Detailed protocol data with historical TVL\nGET /protocol/{slug}\n# Returns: Full object with tvl[], tokensInUsd{}, currentChainTvls{}, ...\n\n# Simple current TVL number\nGET /tvl/{slug}\n# Returns: plain number (e.g., 150977324562.40)\n\n# TVL for all chains\nGET /v2/chains\n# Returns: [{name, tvl, tokenSymbol, chainId, gecko_id}]\n\n# Historical chain TVL\nGET /v2/historicalChainTvl/{chain}\n# chain: \"Ethereum\", \"Solana\", \"Arbitrum\", etc.\n# Returns: [{date, tvl}] \u2014 date is unix timestamp (seconds)\n```\n\n## Token Prices\n\nCoin identifiers use `{chain}:{address}` format:\n- `solana:So11111111111111111111111111111111111111112` (SOL)\n- `ethereum:0xdac17f958d2ee523a2206206994597c13d831ec7` (USDT)\n- `coingecko:bitcoin` (non-chain lookups)\n\n```python\n# Current prices (batch)\nGET /prices/current/{coins}\n# coins: comma-separated identifiers\n# Optional: searchWidth (default 4h)\n# Returns: {coins: {id: {price, decimals, symbol, timestamp, confidence}}}\n\n# Historical price at timestamp\nGET /prices/historical/{timestamp}/{coins}\n# timestamp: unix seconds\n\n# Price chart\nGET /chart/{coins}?period=1d&span=30\n# period: 1d, 4h, 1h\n# Returns: {coins: {id: {prices: [{timestamp, price}]}}}\n\n# Price change percentage\nGET /percentage/{coins}\n\n# First recorded price\nGET /prices/first/{coins}\n\n# Block number at timestamp\nGET /block/{chain}/{timestamp}\n```\n\n### Batch Historical Prices\n\n```python\n# POST for multiple timestamps per coin\nPOST /batchHistorical\nBody: {\"coins\": {\"solana:So11...\": [1709251200, 1709337600]}}\n```\n\n## DEX Volumes\n\n```python\n# All DEXes aggregated\nGET /overview/dexs\n# Optional: excludeTotalDataChart=true, dataType=dailyVolume\n\n# Chain-specific\nGET /overview/dexs/{chain}\n# chain: \"Solana\", \"Ethereum\", etc.\n\n# Specific DEX\nGET /summary/dexs/{protocol}\n# Returns: {total24h, total7d, total30d, totalAllTime, totalDataChart, ...}\n```\n\n## Fees & Revenue\n\n```python\n# All protocols\nGET /overview/fees\n# Optional: dataType=dailyFees|dailyRevenue|dailyUserFees\n\n# Chain-specific\nGET /overview/fees/{chain}\n\n# Specific protocol\nGET /summary/fees/{protocol}\n# Returns: {total24h, total7d, methodology{}, totalDataChart[], ...}\n```\n\n## Stablecoins\n\n```python\n# All stablecoins with supply data\nGET https://stablecoins.llama.fi/stablecoins\n# Returns: [{name, symbol, pegType, circulating, chainCirculating, price}]\n\n# Historical market cap\nGET https://stablecoins.llama.fi/stablecoincharts/all\n\n# Chain-specific stablecoin data\nGET https://stablecoins.llama.fi/stablecoincharts/{chain}\n\n# Stablecoin prices (deviation tracking)\nGET https://stablecoins.llama.fi/stablecoinprices\n```\n\n## Bridges\n\n```python\n# List all bridges\nGET https://bridges.llama.fi/bridges\n# Optional: includeChains=true\n# Returns: {bridges: [{name, volume stats, chains, ...}]}\n```\n\n## Common Patterns\n\n### Protocol TVL Comparison\n\n```python\ndef compare_protocol_tvl(slugs: list[str]) -> list[dict]:\n    \"\"\"Compare TVL across protocols.\"\"\"\n    results = []\n    for slug in slugs:\n        resp = httpx.get(f\"https://api.llama.fi/tvl/{slug}\", timeout=15.0)\n        if resp.status_code == 200:\n            results.append({\"protocol\": slug, \"tvl\": resp.json()})\n    return sorted(results, key=lambda x: x[\"tvl\"], reverse=True)\n```\n\n### Multi-Token Price Lookup\n\n```python\ndef get_solana_prices(mints: list[str]) -> dict[str, float]:\n    \"\"\"Get USD prices for Solana tokens via DeFiLlama.\"\"\"\n    coins = \",\".join(f\"solana:{m}\" for m in mints)\n    resp = httpx.get(f\"https://coins.llama.fi/prices/current/{coins}\")\n    data = resp.json().get(\"coins\", {})\n    return {\n        mint: data[f\"solana:{mint}\"][\"price\"]\n        for mint in mints\n        if f\"solana:{mint}\" in data\n    }\n```\n\n### Solana DeFi Overview\n\n```python\ndef solana_defi_snapshot() -> dict:\n    \"\"\"Get a snapshot of Solana DeFi activity.\"\"\"\n    chain_tvl = httpx.get(\"https://api.llama.fi/v2/chains\").json()\n    sol_tvl = next((c[\"tvl\"] for c in chain_tvl if c[\"name\"] == \"Solana\"), 0)\n\n    dex_vol = httpx.get(\"https://api.llama.fi/overview/dexs/Solana\").json()\n    fees = httpx.get(\"https://api.llama.fi/overview/fees/Solana\").json()\n\n    return {\n        \"tvl\": sol_tvl,\n        \"dex_volume_24h\": dex_vol.get(\"total24h\", 0),\n        \"fees_24h\": fees.get(\"total24h\", 0),\n    }\n```\n\n### Historical Price Analysis\n\n```python\ndef price_at_date(coin: str, date_str: str) -> float:\n    \"\"\"Get token price at a specific date.\n\n    Args:\n        coin: DeFiLlama coin ID (e.g., 'solana:So11...')\n        date_str: Date string 'YYYY-MM-DD'\n    \"\"\"\n    from datetime import datetime, timezone\n    dt = datetime.strptime(date_str, \"%Y-%m-%d\").replace(tzinfo=timezone.utc)\n    ts = int(dt.timestamp())\n    resp = httpx.get(f\"https://coins.llama.fi/prices/historical/{ts}/{coin}\")\n    data = resp.json().get(\"coins\", {})\n    return data.get(coin, {}).get(\"price\", 0)\n```\n\n## Free vs Pro Endpoints\n\n| Category | Free | Pro ($300/mo) |\n|----------|------|---------------|\n| TVL / Protocols | Yes | Yes |\n| Coin Prices | Yes | Yes |\n| DEX Volumes (overview) | Yes | Yes |\n| Fees/Revenue (overview) | Yes | Yes |\n| Stablecoins | Yes | Yes |\n| Bridges (list) | Yes | Yes |\n| Yields / Pools | No | Yes |\n| Bridge detail | No | Yes |\n| Derivatives | No | Yes |\n| Emissions/Unlocks | No | Yes |\n| Treasuries | No | Yes |\n| Hacks database | No | Yes |\n\n## When to Use DeFiLlama vs Alternatives\n\n| Need | Use |\n|------|-----|\n| Protocol TVL comparison | **DeFiLlama** |\n| Multi-chain token prices | **DeFiLlama** (free batch) |\n| Historical prices at specific timestamps | **DeFiLlama** |\n| DeFi macro analysis | **DeFiLlama** |\n| Solana token OHLCV | Birdeye or SolanaTracker |\n| Real-time token data | DexScreener or Birdeye |\n| Wallet PnL | SolanaTracker |\n| On-chain transaction data | Helius |\n\n## Files\n\n### References\n- `references/endpoints.md` \u2014 Complete endpoint listing with parameters and response schemas\n- `references/coin_identifiers.md` \u2014 Chain prefixes, address formats, and batch lookup patterns\n- `references/error_handling.md` \u2014 Rate limits, error codes, retry strategies, large response handling\n\n### Scripts\n- `scripts/defi_snapshot.py` \u2014 Solana DeFi overview: TVL, volumes, fees, top protocols\n- `scripts/price_lookup.py` \u2014 Multi-token price lookup with historical comparison\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "defillama-api",
-    "description": "Free DeFi analytics across all chains \u2014 TVL, token prices, DEX volumes, fees/revenue, stablecoins, and bridges"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

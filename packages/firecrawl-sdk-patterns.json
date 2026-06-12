@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031977",
   "name": "firecrawl-sdk-patterns",
   "slug": "firecrawl-sdk-patterns",
   "description": "Apply production-ready Firecrawl SDK patterns for TypeScript and Python.",
   "content": "# Firecrawl SDK Patterns\n\n## Overview\n\nProduction-ready patterns for Firecrawl SDK (`@mendable/firecrawl-js` / `firecrawl-py`). Covers singleton client, typed wrappers, retry with backoff, response validation, and reusable scraping service patterns.\n\n## Prerequisites\n\n- `@mendable/firecrawl-js` installed\n- Understanding of async/await patterns\n- TypeScript strict mode recommended\n\n## Instructions\n\n### Step 1: Singleton Client with Configuration\n\n```typescript\n// src/firecrawl/client.ts\nimport FirecrawlApp from \"@mendable/firecrawl-js\";\n\nlet instance: FirecrawlApp | null = null;\n\nexport function getFirecrawl(): FirecrawlApp {\n  if (!instance) {\n    if (!process.env.FIRECRAWL_API_KEY) {\n      throw new Error(\"FIRECRAWL_API_KEY environment variable is required\");\n    }\n    instance = new FirecrawlApp({\n      apiKey: process.env.FIRECRAWL_API_KEY,\n      ...(process.env.FIRECRAWL_API_URL\n        ? { apiUrl: process.env.FIRECRAWL_API_URL }\n        : {}),\n    });\n  }\n  return instance;\n}\n```\n\n### Step 2: Typed Scrape Wrapper\n\n```typescript\n// src/firecrawl/scrape.ts\nimport { getFirecrawl } from \"./client\";\n\ninterface ScrapeResult {\n  url: string;\n  title: string;\n  markdown: string;\n  links: string[];\n  scrapedAt: string;\n}\n\nexport async function scrapePage(\n  url: string,\n  options?: { waitFor?: number; includeLinks?: boolean }\n): Promise<ScrapeResult> {\n  const firecrawl = getFirecrawl();\n  const formats: string[] = [\"markdown\"];\n  if (options?.includeLinks) formats.push(\"links\");\n\n  const result = await firecrawl.scrapeUrl(url, {\n    formats,\n    onlyMainContent: true,\n    ...(options?.waitFor ? { waitFor: options.waitFor } : {}),\n  });\n\n  if (!result.success) {\n    throw new Error(`Scrape failed for ${url}: ${result.error}`);\n  }\n\n  return {\n    url: result.metadata?.sourceURL || url,\n    title: result.metadata?.title || \"\",\n    markdown: result.markdown || \"\",\n    links: result.links || [],\n    scrapedAt: new Date().toISOString(),\n  };\n}\n```\n\n### Step 3: Retry with Exponential Backoff\n\n```typescript\n// src/firecrawl/retry.ts\nexport async function withRetry<T>(\n  operation: () => Promise<T>,\n  config = { maxRetries: 3, baseDelayMs: 1000, maxDelayMs: 30000 }\n): Promise<T> {\n  for (let attempt = 0; attempt <= config.maxRetries; attempt++) {\n    try {\n      return await operation();\n    } catch (error: any) {\n      if (attempt === config.maxRetries) throw error;\n\n      const status = error.statusCode || error.status;\n      // Only retry on rate limits (429) and server errors (5xx)\n      if (status && status !== 429 && status < 500) throw error;\n\n      const delay = Math.min(\n        config.baseDelayMs * Math.pow(2, attempt) + Math.random() * 500,\n        config.maxDelayMs\n      );\n      console.warn(`Firecrawl retry ${attempt + 1}/${config.maxRetries} in ${delay.toFixed(0)}ms`);\n      await new Promise(r => setTimeout(r, delay));\n    }\n  }\n  throw new Error(\"Unreachable\");\n}\n\n// Usage: await withRetry(() => scrapePage(\"https://example.com\"))\n```\n\n### Step 4: Scraping Service with Queue\n\n```typescript\n// src/firecrawl/service.ts\nimport PQueue from \"p-queue\";\nimport { scrapePage, type ScrapeResult } from \"./scrape\";\nimport { withRetry } from \"./retry\";\n\nexport class FirecrawlService {\n  private queue: PQueue;\n\n  constructor(concurrency = 3) {\n    this.queue = new PQueue({\n      concurrency,\n      interval: 1000,\n      intervalCap: 5,  // max 5 requests per second\n    });\n  }\n\n  async scrape(url: string): Promise<ScrapeResult> {\n    return this.queue.add(() => withRetry(() => scrapePage(url)));\n  }\n\n  async scrapeMany(urls: string[]): Promise<ScrapeResult[]> {\n    return Promise.all(urls.map(url => this.scrape(url)));\n  }\n\n  get pending(): number {\n    return this.queue.pending;\n  }\n}\n```\n\n### Step 5: Response Validation with Zod\n\n```typescript\nimport { z } from \"zod\";\n\nconst FirecrawlScrapeResponse = z.object({\n  success: z.literal(true),\n  markdown: z.string().min(1),\n  metadata: z.object({\n    title: z.string().optional(),\n    sourceURL: z.string().url(),\n    statusCode: z.number().optional(),\n  }),\n});\n\nexport function validateScrapeResponse(result: unknown) {\n  const parsed = FirecrawlScrapeResponse.safeParse(result);\n  if (!parsed.success) {\n    console.error(\"Invalid Firecrawl response:\", parsed.error.issues);\n    return null;\n  }\n  return parsed.data;\n}\n```\n\n### Step 6: Python Patterns\n\n```python\n# firecrawl_service.py\nimport os\nfrom firecrawl import FirecrawlApp\nfrom functools import lru_cache\nimport time\n\n@lru_cache(maxsize=1)\ndef get_firecrawl() -> FirecrawlApp:\n    \"\"\"Singleton Firecrawl client.\"\"\"\n    return FirecrawlApp(api_key=os.environ[\"FIRECRAWL_API_KEY\"])\n\ndef scrape_with_retry(url: str, max_retries: int = 3) -> dict:\n    \"\"\"Scrape with exponential backoff.\"\"\"\n    for attempt in range(max_retries):\n        try:\n            return get_firecrawl().scrape_url(url, params={\n                \"formats\": [\"markdown\"],\n                \"onlyMainContent\": True,\n            })\n        except Exception as e:\n            if attempt == max_retries - 1:\n                raise\n            delay = (2 ** attempt) + (time.time() % 1)\n            print(f\"Retry {attempt + 1}/{max_retries} in {delay:.1f}s: {e}\")\n            time.sleep(delay)\n```\n\n## Output\n\n- Singleton client with env-based configuration\n- Typed wrappers returning clean domain objects\n- Automatic retry with exponential backoff + jitter\n- Queue-based concurrency control\n- Zod validation for response safety\n\n## Error Handling\n\n| Pattern | Use Case | Benefit |\n|---------|----------|---------|\n| Singleton client | All SDK usage | One instance, consistent config |\n| Typed wrapper | Business logic | Compile-time safety |\n| Retry + backoff | 429 / 5xx errors | Automatic recovery |\n| Queue | Multiple URLs | Respect rate limits |\n| Zod validation | Any API response | Catch API changes early |\n\n## Examples\n\n### Factory Pattern (Multi-Tenant)\n\n```typescript\nconst clients = new Map<string, FirecrawlApp>();\n\nexport function getClientForTenant(tenantId: string): FirecrawlApp {\n  if (!clients.has(tenantId)) {\n    const apiKey = getTenantApiKey(tenantId);\n    clients.set(tenantId, new FirecrawlApp({ apiKey }));\n  }\n  return clients.get(tenantId)!;\n}\n```\n\n## Resources\n\n- [Node SDK](https://docs.firecrawl.dev/sdks/node)\n- [Python SDK](https://docs.firecrawl.dev/sdks/python)\n- [p-queue](https://github.com/sindresorhus/p-queue)\n- [Zod](https://zod.dev/)\n\n## Next Steps\n\nApply patterns in `firecrawl-core-workflow-a` for real-world usage.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "firecrawl-sdk-patterns",
-    "description": "Apply production-ready Firecrawl SDK patterns for TypeScript and Python.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

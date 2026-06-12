@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032796",
   "name": "openrouter-compliance-review",
   "slug": "openrouter-compliance-review",
   "description": "Review OpenRouter integration for regulatory compliance (SOC2, GDPR,",
   "content": "# OpenRouter Compliance Review\n\n## Overview\n\nOpenRouter is a proxy that routes requests to upstream providers (OpenAI, Anthropic, Google, etc.). Compliance depends on both OpenRouter's data handling and the selected provider's policies. Key considerations: data transit through OpenRouter infrastructure, provider-specific data retention, model selection for regulated data, and audit trail requirements.\n\n## Compliance Checklist\n\n```python\nCOMPLIANCE_CHECKLIST = {\n    \"data_handling\": [\n        \"Verify OpenRouter does NOT train on your data (confirmed in their privacy policy)\",\n        \"Confirm provider-level data policies (OpenAI, Anthropic, Google each differ)\",\n        \"Document data flow: your app -> OpenRouter -> provider -> OpenRouter -> your app\",\n        \"Identify if prompts contain PII, PHI, or regulated data\",\n        \"Implement PII redaction before sending to API\",\n    ],\n    \"access_control\": [\n        \"Use per-service API keys (not shared keys)\",\n        \"Set credit limits per key to isolate blast radius\",\n        \"Rotate keys on a 90-day schedule\",\n        \"Store keys in secrets manager (not .env files in repos)\",\n        \"Enable management keys for programmatic key provisioning\",\n    ],\n    \"audit_trail\": [\n        \"Log every API call with generation_id, model, user_id, cost\",\n        \"Hash prompts (SHA-256) instead of logging raw content\",\n        \"Retain audit logs per regulation (90d operational, 7yr financial)\",\n        \"Ship logs to append-only storage (S3, immutable DB)\",\n    ],\n    \"provider_selection\": [\n        \"Route regulated data only to compliant providers\",\n        \"Use provider routing to exclude non-compliant providers\",\n        \"Document which models are approved for which data classifications\",\n        \"Test that fallback routing doesn't route to unapproved providers\",\n    ],\n}\n```\n\n## Provider Routing for Compliance\n\n```python\nimport os\nfrom openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"https://openrouter.ai/api/v1\",\n    api_key=os.environ[\"OPENROUTER_API_KEY\"],\n    default_headers={\"HTTP-Referer\": \"https://my-app.com\", \"X-Title\": \"my-app\"},\n)\n\n# Route ONLY to specific providers (e.g., Anthropic for SOC2)\nresponse = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet\",\n    messages=[{\"role\": \"user\", \"content\": \"Analyze this contract...\"}],\n    max_tokens=2048,\n    extra_body={\n        \"provider\": {\n            \"order\": [\"Anthropic\"],        # Only Anthropic's infrastructure\n            \"allow_fallbacks\": False,       # Do NOT fall back to other providers\n        },\n    },\n)\n\n# Verify which provider actually served the request\nprint(f\"Served by: {response.model}\")  # Should match anthropic/claude-3.5-sonnet\n```\n\n## Data Classification Matrix\n\n| Classification | Allowed Providers | Controls |\n|---------------|-------------------|----------|\n| Public | Any (including `:free`) | Standard logging |\n| Internal | Tier 1 (OpenAI, Anthropic, Google) | Audit logging, key limits |\n| Confidential | Anthropic, OpenAI (API-only) | PII redaction, no free models |\n| Restricted/PHI | BYOK only or self-hosted | Full audit, encryption at rest |\n\n## BYOK for Data Sovereignty\n\n```python\n# Bring Your Own Key -- requests go directly to provider\n# OpenRouter acts as router only; data doesn't persist on OpenRouter\nresponse = client.chat.completions.create(\n    model=\"openai/gpt-4o\",\n    messages=[{\"role\": \"user\", \"content\": \"Process this...\"}],\n    max_tokens=1024,\n    extra_body={\n        \"provider\": {\n            \"order\": [\"OpenAI\"],\n            \"allow_fallbacks\": False,\n        },\n    },\n    # With BYOK, configure your provider key in OpenRouter dashboard\n    # Data flows: your app -> OpenRouter (routing only) -> OpenAI (your account)\n)\n```\n\n## Compliance Audit Script\n\n```bash\n#!/bin/bash\necho \"=== OpenRouter Compliance Audit ===\"\n\n# 1. Verify API key has credit limit set\necho \"1. Key configuration:\"\ncurl -s https://openrouter.ai/api/v1/auth/key \\\n  -H \"Authorization: Bearer $OPENROUTER_API_KEY\" | \\\n  jq '{label: .data.label, limit: .data.limit, is_free_tier: .data.is_free_tier}'\n\n# 2. Check if using free tier (not suitable for regulated data)\nIS_FREE=$(curl -s https://openrouter.ai/api/v1/auth/key \\\n  -H \"Authorization: Bearer $OPENROUTER_API_KEY\" | jq -r '.data.is_free_tier')\n[ \"$IS_FREE\" = \"true\" ] && echo \"WARNING: Free tier. Not suitable for regulated data.\"\n\n# 3. Scan for hardcoded keys in source\nFOUND=$(grep -r \"sk-or-v1-\" --include=\"*.py\" --include=\"*.ts\" --include=\"*.js\" . 2>/dev/null | grep -v node_modules | wc -l)\necho \"Hardcoded keys found: $FOUND\"\n```\n\n## Error Handling\n\n| Error | Cause | Fix |\n|-------|-------|-----|\n| Request routed to unapproved provider | `allow_fallbacks: true` (default) | Set `allow_fallbacks: false` with explicit `order` |\n| Key exposed in logs | Raw API key logged | Add PII redaction for `sk-or-v1-*` pattern |\n| No audit trail for request | Logging middleware bypassed | Make audit logging a required wrapper |\n| Free model used for regulated data | No model allowlist | Implement model allowlist in client wrapper |\n\n## Enterprise Considerations\n\n- OpenRouter does not train on API data, but upstream providers may have different terms for API vs consumer use\n- Use `provider.order` + `allow_fallbacks: false` to guarantee data only flows to approved providers\n- BYOK eliminates OpenRouter as a data processor for inference (routing metadata still transits)\n- Document the data flow diagram for auditors: client -> OpenRouter (routing) -> provider (inference)\n- Implement client-side PII redaction as defense-in-depth\n- Consider self-hosted or VPC deployments for restricted/PHI data\n\n## References\n\n- [Examples](${CLAUDE_SKILL_DIR}/references/examples.md) | [Errors](${CLAUDE_SKILL_DIR}/references/errors.md)\n- [Privacy Policy](https://openrouter.ai/privacy) | [Provider Routing](https://openrouter.ai/docs/features/provider-routing)\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "openrouter-compliance-review",
-    "description": "Review OpenRouter integration for regulatory compliance (SOC2, GDPR,",
-    "compliance posture. Triggers": "openrouter compliance'', ''openrouter gdpr'', ''openrouter",
-    "allowed-tools": "Read, Write, Edit, Bash, Grep",
-    "version": "2.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

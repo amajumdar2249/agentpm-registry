@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031151",
   "name": "adobe-incident-runbook",
   "slug": "adobe-incident-runbook",
   "description": "Execute Adobe incident response procedures with triage, mitigation,",
   "content": "# Adobe Incident Runbook\n\n## Overview\n\nRapid incident response procedures for Adobe API-related outages, covering IMS authentication failures, Firefly/Photoshop API downtime, PDF Services quota exhaustion, and I/O Events delivery failures.\n\n## Prerequisites\n\n- Access to Adobe Developer Console and Admin Console\n- Access to application monitoring (Grafana, Datadog, etc.)\n- kubectl access to production cluster (if applicable)\n- Communication channels (Slack, PagerDuty)\n\n## Severity Matrix\n\n| Level | Definition | Response Time | Example |\n|-------|------------|---------------|---------|\n| P1 | Complete Adobe integration failure | < 15 min | IMS auth broken, all APIs down |\n| P2 | Single API degraded | < 1 hour | Firefly 429s, Photoshop timeouts |\n| P3 | Minor impact | < 4 hours | Webhook delays, slow PDF extraction |\n| P4 | No user impact | Next business day | Monitoring gap, metric anomaly |\n\n## Quick Triage (Run These First)\n\n```bash\n# 1. Is Adobe itself down?\ncurl -s -o /dev/null -w \"Adobe Status: %{http_code}\\n\" https://status.adobe.com\n\n# 2. Can we generate an access token?\ncurl -s -o /dev/null -w \"IMS Auth: %{http_code}\\n\" -X POST \\\n  'https://ims-na1.adobelogin.com/ims/token/v3' \\\n  -d \"client_id=${ADOBE_CLIENT_ID}&client_secret=${ADOBE_CLIENT_SECRET}&grant_type=client_credentials&scope=${ADOBE_SCOPES}\"\n\n# 3. Can we reach each API endpoint?\nfor endpoint in firefly-api.adobe.io image.adobe.io pdf-services.adobe.io; do\n  CODE=$(curl -s -o /dev/null -w \"%{http_code}\" --connect-timeout 5 \"https://$endpoint\" 2>/dev/null || echo \"UNREACHABLE\")\n  echo \"$endpoint: $CODE\"\ndone\n\n# 4. Check our app health\ncurl -sf https://your-app.com/health | python3 -m json.tool\n\n# 5. Recent errors in our logs (last 5 min)\nkubectl logs -l app=adobe-service --since=5m 2>/dev/null | grep -i \"error\\|failed\\|429\\|401\\|500\" | tail -20\n```\n\n## Decision Tree\n\n```\nAdobe APIs returning errors?\n\u251c\u2500\u2500 YES: Is status.adobe.com reporting an incident?\n\u2502   \u251c\u2500\u2500 YES \u2192 Adobe-side outage. Enable fallback mode. Monitor status page.\n\u2502   \u2514\u2500\u2500 NO \u2192 Check our credentials and config.\n\u2502       \u251c\u2500\u2500 401 errors \u2192 Credentials expired/rotated. See \"Auth Recovery\" below.\n\u2502       \u251c\u2500\u2500 429 errors \u2192 Rate limited. See \"Rate Limit Recovery\" below.\n\u2502       \u2514\u2500\u2500 500/503 errors \u2192 Adobe server issue (unreported). Open support ticket.\n\u2514\u2500\u2500 NO: Is our application healthy?\n    \u251c\u2500\u2500 YES \u2192 Likely resolved or intermittent. Continue monitoring.\n    \u2514\u2500\u2500 NO \u2192 Our infrastructure issue. Check pods, memory, network.\n```\n\n## Recovery Procedures\n\n### Auth Recovery (401/403)\n\n```bash\n# 1. Verify credentials are still valid in Developer Console\n#    https://developer.adobe.com/console \u2192 Your Project \u2192 Credentials\n\n# 2. Test credential directly\ncurl -v -X POST 'https://ims-na1.adobelogin.com/ims/token/v3' \\\n  -d \"client_id=${ADOBE_CLIENT_ID}&client_secret=${ADOBE_CLIENT_SECRET}&grant_type=client_credentials&scope=${ADOBE_SCOPES}\" 2>&1 | grep -E \"HTTP|error\"\n\n# 3. If credentials were rotated, update in secret manager\ngcloud secrets versions add adobe-client-secret --data-file=- <<< \"new_p8_secret\"\n# OR\naws secretsmanager update-secret --secret-id adobe/production/credentials \\\n  --secret-string '{\"client_id\":\"...\",\"client_secret\":\"new_secret\"}'\n\n# 4. Restart application to clear cached token\nkubectl rollout restart deployment/adobe-service\n\n# 5. Verify recovery\ncurl -sf https://your-app.com/health | jq '.services.adobe'\n```\n\n### Rate Limit Recovery (429)\n\n```bash\n# 1. Check if rate limiting is transient or sustained\n# Look at 429 error rate over last 30 min\n\n# 2. Reduce throughput immediately\n# Option A: Scale down workers\nkubectl scale deployment/adobe-batch-worker --replicas=1\n\n# Option B: Enable rate limit queue mode\nkubectl set env deployment/adobe-service ADOBE_RATE_LIMIT_MODE=queue\n\n# 3. For sustained rate limiting, contact Adobe for limit increase\n# Include: client_id, typical request volume, business justification\n```\n\n### Fallback Mode\n\n```bash\n# Enable fallback mode (app continues working without Adobe)\nkubectl set env deployment/adobe-service ADOBE_FALLBACK_MODE=true\n\n# Verify fallback is working\ncurl -sf https://your-app.com/health | jq '.services.adobe'\n# Should return { \"status\": \"degraded\", \"mode\": \"fallback\" }\n```\n\n## Communication Templates\n\n### Internal (Slack)\n\n```\nP[1-4] INCIDENT: Adobe [API Name] Integration\nStatus: INVESTIGATING / IDENTIFIED / MONITORING / RESOLVED\nImpact: [User-facing description]\nRoot cause: [Adobe outage / credential issue / rate limit / our bug]\nCurrent action: [What you're doing right now]\nNext update: [Time]\nCommander: @[name]\n```\n\n### Postmortem Template\n\n```markdown\n## Incident: Adobe [API] [Error Type]\n**Date:** YYYY-MM-DD\n**Duration:** X hours Y minutes\n**Severity:** P[1-4]\n\n### Summary\n[1-2 sentence description of what happened]\n\n### Timeline\n- HH:MM UTC \u2014 Alert fired: adobe_api_errors_total spike\n- HH:MM UTC \u2014 On-call acknowledged, began triage\n- HH:MM UTC \u2014 Root cause identified: [description]\n- HH:MM UTC \u2014 Mitigation applied: [action taken]\n- HH:MM UTC \u2014 Full recovery confirmed\n\n### Root Cause\n[Technical explanation \u2014 was it Adobe-side, credential issue, our bug?]\n\n### Impact\n- Users affected: N\n- API calls failed: N\n- Revenue impact: $X (if applicable)\n\n### Action Items\n- [ ] [Preventive measure] \u2014 Owner \u2014 Due date\n- [ ] [Monitoring improvement] \u2014 Owner \u2014 Due date\n- [ ] [Documentation update] \u2014 Owner \u2014 Due date\n```\n\n## Output\n\n- Incident severity classified\n- Root cause identified via decision tree\n- Recovery procedure executed\n- Stakeholders notified with template\n- Evidence collected for postmortem\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Can't reach status.adobe.com | Network issue | Use mobile data or check @AdobeCare on Twitter |\n| kubectl auth expired | Token timeout | Re-authenticate with cloud provider |\n| Secret manager access denied | IAM policy | Use break-glass admin account |\n| Fallback mode not implemented | Missing code path | Return cached/default data |\n\n## Resources\n\n- [Adobe Status Page](https://status.adobe.com)\n- [Adobe Developer Support](https://developer.adobe.com/support)\n- [Adobe Developer Console](https://developer.adobe.com/console)\n\n## Next Steps\n\nFor data handling, see `adobe-data-handling`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "adobe-incident-runbook",
-    "description": "Execute Adobe incident response procedures with triage, mitigation,",
-    "allowed-tools": "Read, Grep, Bash(kubectl:*), Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

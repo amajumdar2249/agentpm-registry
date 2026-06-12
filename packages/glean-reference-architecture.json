@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032131",
   "name": "glean-reference-architecture",
   "slug": "glean-reference-architecture",
   "description": "Enterprise architecture: Source Systems to Connectors (Cloud Run/Lambda,",
   "content": "# Glean Reference Architecture\n\n## Overview\n\nEnterprise search integration architecture for connecting internal knowledge systems to Glean's indexing and search platform. Designed for organizations needing unified search across Confluence, Google Drive, Notion, Slack, Jira, and custom internal tools. Key design drivers: connector reliability for continuous indexing, permission synchronization to enforce source-system ACLs, incremental vs bulk indexing tradeoffs, and low-latency search aggregation across heterogeneous document types.\n\n## Architecture Diagram\n\n```\nSource Systems \u2500\u2500\u2192 Connector Framework \u2500\u2500\u2192 Queue (SQS) \u2500\u2500\u2192 Glean Indexing API\n(Confluence, Drive,    (Cloud Run)              \u2193            /indexing/documents\n Notion, Slack, Jira)       \u2193              Permission Sync  /indexing/permissions\n                      Schedule (cron) \u2500\u2500\u2192  Bulk Reindexer   /indexing/datasources\n                            \u2193\n                      Glean Search Index \u2500\u2500\u2192 Client API \u2500\u2500\u2192 Your Apps\n                                              /search       (Slack bot, portal)\n                                              /chat         (internal tools)\n```\n\n## Service Layer\n\n```typescript\nclass ConnectorService {\n  constructor(private glean: GleanIndexingClient, private cache: CacheLayer) {}\n\n  async indexDocument(doc: SourceDocument): Promise<void> {\n    const gleanDoc = this.transformToGleanFormat(doc);\n    await this.glean.indexDocument(doc.datasource, gleanDoc);\n    await this.syncPermissions(doc.id, doc.acl);\n  }\n\n  async bulkReindex(datasource: string, since?: string): Promise<IndexReport> {\n    const docs = await this.fetchAllDocuments(datasource, since);\n    const batches = this.chunk(docs, 100);  // Glean recommends batches of 100\n    let indexed = 0;\n    for (const batch of batches) {\n      await this.glean.bulkIndex(datasource, batch);\n      indexed += batch.length;\n    }\n    return { datasource, totalIndexed: indexed, timestamp: new Date().toISOString() };\n  }\n}\n```\n\n## Caching Strategy\n\n```typescript\nconst CACHE_CONFIG = {\n  searchResults:  { ttl: 30,   prefix: 'search' },   // 30s \u2014 freshness critical for search\n  permissions:    { ttl: 300,  prefix: 'perm' },      // 5 min \u2014 ACL changes are infrequent\n  datasources:    { ttl: 3600, prefix: 'ds' },        // 1 hr \u2014 datasource config rarely changes\n  connectorState: { ttl: 60,   prefix: 'conn' },      // 1 min \u2014 sync cursor freshness\n  documentMeta:   { ttl: 120,  prefix: 'docmeta' },   // 2 min \u2014 title/author for search previews\n};\n// Webhook-driven invalidation: source system change events flush document cache immediately\n```\n\n## Event Pipeline\n\n```typescript\nclass IndexingPipeline {\n  private queue = new Bull('glean-indexing', { redis: process.env.REDIS_URL });\n\n  async onSourceChange(event: SourceChangeEvent): Promise<void> {\n    await this.queue.add(event.type, event, { attempts: 5, backoff: { type: 'exponential', delay: 3000 } });\n  }\n\n  async processDocumentChange(event: DocumentChangeEvent): Promise<void> {\n    if (event.action === 'deleted') await this.glean.deleteDocument(event.datasource, event.docId);\n    else await this.connector.indexDocument(await this.fetchDoc(event.datasource, event.docId));\n  }\n\n  async processPermissionChange(event: PermissionChangeEvent): Promise<void> {\n    await this.glean.syncPermissions(event.datasource, event.docId, event.newAcl);\n  }\n}\n```\n\n## Data Model\n\n```typescript\ninterface SourceDocument  { id: string; datasource: string; title: string; body: string; url: string; author: string; updatedAt: string; acl: Permission[]; }\ninterface Permission      { type: 'user' | 'group' | 'domain'; value: string; access: 'read' | 'write'; }\ninterface ConnectorState  { datasource: string; lastSyncCursor: string; lastFullReindex: string; documentCount: number; status: 'healthy' | 'degraded' | 'failed'; }\ninterface IndexReport     { datasource: string; totalIndexed: number; failures: string[]; timestamp: string; }\n```\n\n## Scaling Considerations\n\n- Deploy one connector instance per datasource to isolate failures and rate limits\n- Schedule bulk reindexing during off-peak hours \u2014 Glean indexing API has per-datasource throughput limits\n- Use incremental sync (change cursors) for high-frequency sources (Slack, Jira) to minimize API calls\n- Permission sync is the bottleneck \u2014 batch ACL updates and run as a separate queue consumer\n- Monitor connector health per datasource; alert on sync lag > 15 minutes for critical sources\n\n## Error Handling\n\n| Component | Failure Mode | Recovery |\n|-----------|-------------|----------|\n| Connector sync | Source API rate limit | Per-datasource backoff, degrade to hourly bulk sync |\n| Document indexing | Glean 429 throughput limit | Queue retry with jitter, batch size reduction |\n| Permission sync | ACL mismatch between source and Glean | Reconciliation job flags discrepancies for admin review |\n| Bulk reindex | Timeout on large datasource | Checkpoint cursor, resume from last successful batch |\n| Search aggregation | Stale index for one datasource | Degrade gracefully \u2014 return results from healthy sources, flag staleness |\n\n## Resources\n\n- [Glean Developer Portal](https://developers.glean.com/)\n- [Indexing API](https://developers.glean.com/api-info/indexing/getting-started/overview)\n- [Search API](https://developers.glean.com/api/client-api/search/overview)\n\n## Next Steps\n\nSee `glean-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "glean-reference-architecture",
-    "description": "Enterprise architecture: Source Systems to Connectors (Cloud Run/Lambda,",
-    "Trigger": "glean reference architecture\", \"reference-architecture\".",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

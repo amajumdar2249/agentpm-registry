@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000029440",
   "name": "bio-methylation-methylkit",
   "slug": "bio-methylation-methylkit-2",
   "description": "DNA methylation analysis with methylKit in R. Import Bismark coverage files, filter by coverage, normalize samples, and perform statistical comparisons. Use when analyzing single-base methylation patterns, comparing samples, or preparing data for DMR detection.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: Bismark 0.24+, methylKit 1.28+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- R: `packageVersion('<pkg>')` then `?function_name` to verify parameters\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# methylKit Analysis\n\n**\"Analyze methylation patterns across my samples\"** \u2192 Import per-cytosine methylation data, filter by coverage, normalize across samples, and test for differential methylation at individual CpG sites.\n- R: `methylKit::methRead()` \u2192 `filterByCoverage()` \u2192 `normalizeCoverage()` \u2192 `calculateDiffMeth()`\n\n## Read Bismark Coverage Files\n\n```r\nlibrary(methylKit)\n\nfile_list <- list('sample1.bismark.cov.gz', 'sample2.bismark.cov.gz',\n                   'sample3.bismark.cov.gz', 'sample4.bismark.cov.gz')\nsample_ids <- c('ctrl_1', 'ctrl_2', 'treat_1', 'treat_2')\ntreatment <- c(0, 0, 1, 1)  # 0 = control, 1 = treatment\n\nmeth_obj <- methRead(\n    location = as.list(file_list),\n    sample.id = as.list(sample_ids),\n    treatment = treatment,\n    assembly = 'hg38',\n    context = 'CpG',\n    pipeline = 'bismarkCoverage'\n)\n```\n\n## Read Bismark cytosine Report\n\n```r\nmeth_obj <- methRead(\n    location = as.list(file_list),\n    sample.id = as.list(sample_ids),\n    treatment = treatment,\n    assembly = 'hg38',\n    context = 'CpG',\n    pipeline = 'bismarkCytosineReport'\n)\n```\n\n## Basic Statistics\n\n```r\n# Coverage statistics\ngetMethylationStats(meth_obj[[1]], plot = TRUE, both.strands = FALSE)\n\n# Coverage per sample\ngetCoverageStats(meth_obj[[1]], plot = TRUE, both.strands = FALSE)\n```\n\n## Filter by Coverage\n\n```r\n# Remove CpGs with very low or very high coverage\nmeth_filtered <- filterByCoverage(\n    meth_obj,\n    lo.count = 10,        # Minimum 10 reads\n    lo.perc = NULL,\n    hi.count = NULL,\n    hi.perc = 99.9        # Remove top 0.1% (likely PCR artifacts)\n)\n```\n\n## Normalize Coverage\n\n```r\n# Normalize coverage between samples (recommended)\nmeth_norm <- normalizeCoverage(meth_filtered, method = 'median')\n```\n\n## Merge Samples (Unite)\n\n```r\n# Find common CpGs across all samples\nmeth_united <- unite(meth_norm, destrand = TRUE)  # Combine strands\n\n# Allow some missing data\nmeth_united <- unite(meth_norm, destrand = TRUE, min.per.group = 2L)\n```\n\n## Visualize Samples\n\n```r\n# Correlation between samples\ngetCorrelation(meth_united, plot = TRUE)\n\n# PCA of samples\nPCASamples(meth_united, screeplot = TRUE)\nPCASamples(meth_united)\n\n# Clustering\nclusterSamples(meth_united, dist = 'correlation', method = 'ward.D', plot = TRUE)\n```\n\n## Differential Methylation (Single CpGs)\n\n```r\n# Calculate differential methylation\ndiff_meth <- calculateDiffMeth(\n    meth_united,\n    overdispersion = 'MN',     # Use shrinkage\n    test = 'Chisq',\n    mc.cores = 4\n)\n\n# Get significant differentially methylated CpGs\ndmcs <- getMethylDiff(diff_meth, difference = 25, qvalue = 0.01)\n\n# Hyper vs hypomethylated\ndmcs_hyper <- getMethylDiff(diff_meth, difference = 25, qvalue = 0.01, type = 'hyper')\ndmcs_hypo <- getMethylDiff(diff_meth, difference = 25, qvalue = 0.01, type = 'hypo')\n```\n\n## Tile-Based Analysis (Regions)\n\n**Goal:** Detect differentially methylated regions by aggregating single CpG data into fixed-size genomic windows.\n\n**Approach:** Tile individual CpG measurements into 1kb windows, unite common tiles across samples, and run differential methylation testing on the aggregated tiles.\n\n```r\n# Aggregate CpGs into tiles/windows\ntiles <- tileMethylCounts(meth_obj, win.size = 1000, step.size = 1000)\ntiles_united <- unite(tiles, destrand = TRUE)\n\n# Differential methylation on tiles\ndiff_tiles <- calculateDiffMeth(tiles_united, overdispersion = 'MN', mc.cores = 4)\ndmrs <- getMethylDiff(diff_tiles, difference = 25, qvalue = 0.01)\n```\n\n## Export Results\n\n```r\n# To data frame\ndiff_df <- getData(dmcs)\nwrite.csv(diff_df, 'dmcs_results.csv', row.names = FALSE)\n\n# To BED file\nlibrary(genomation)\ndmcs_gr <- as(dmcs, 'GRanges')\nexport(dmcs_gr, 'dmcs.bed', format = 'BED')\n```\n\n## Annotate with Genomic Features\n\n```r\nlibrary(genomation)\n\ngene_obj <- readTranscriptFeatures('genes.bed')\n\nannotated <- annotateWithGeneParts(as(dmcs, 'GRanges'), gene_obj)\n\n# Or with annotatr\nlibrary(annotatr)\nannotations <- build_annotations(genome = 'hg38', annotations = 'hg38_basicgenes')\ndmcs_annotated <- annotate_regions(regions = as(dmcs, 'GRanges'), annotations = annotations)\n```\n\n## Reorganize for Multi-Group Comparison\n\n```r\n# For more than 2 groups\nmeth_obj <- reorganize(\n    meth_united,\n    sample.ids = c('A1', 'A2', 'B1', 'B2', 'C1', 'C2'),\n    treatment = c(0, 0, 1, 1, 2, 2)\n)\n```\n\n## Pool Replicates\n\n```r\n# Combine biological replicates\nmeth_pooled <- pool(meth_united, sample.ids = c('control', 'treatment'))\n```\n\n## Key Functions\n\n| Function | Purpose |\n|----------|---------|\n| methRead | Read methylation files |\n| filterByCoverage | Remove low/high coverage |\n| normalizeCoverage | Normalize between samples |\n| unite | Find common CpGs |\n| calculateDiffMeth | Statistical test |\n| getMethylDiff | Filter significant results |\n| tileMethylCounts | Region-level analysis |\n| PCASamples | PCA visualization |\n| getCorrelation | Sample correlation |\n\n## Key Parameters for calculateDiffMeth\n\n| Parameter | Default | Description |\n|-----------|---------|-------------|\n| overdispersion | none | MN (shrinkage) or shrinkMN |\n| test | Chisq | Chisq, F, fast.fisher |\n| mc.cores | 1 | Parallel cores |\n| slim | TRUE | Remove unused columns |\n\n## Related Skills\n\n- bismark-alignment - Generate input BAM files\n- methylation-calling - Extract coverage files\n- differential-cpg-testing - Per-CpG testing with t-test, Mann-Whitney, limma\n- dmr-detection - Advanced DMR methods\n- pathway-analysis/go-enrichment - Functional annotation\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-methylation-methylkit",
-    "description": "DNA methylation analysis with methylKit in R. Import Bismark coverage files, filter by coverage, normalize samples, and perform statistical comparisons. Use when analyzing single-base methylation patterns, comparing samples, or preparing data for DMR detection.",
-    "tool_type": "r",
-    "primary_tool": "methylKit"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033525",
   "name": "webflow-incident-runbook",
   "slug": "webflow-incident-runbook",
   "description": "Execute Webflow incident response \\u2014 triage by HTTP status (401/403/429/500),\\n\\",
   "content": "# Webflow Incident Runbook\n\n## Overview\n\nRapid incident response procedures for Webflow Data API v2 integration failures.\nCovers triage, immediate remediation by error type, graceful degradation,\nstakeholder communication, and postmortem.\n\n## Prerequisites\n\n- Access to Webflow dashboard and status page\n- Application logs and metrics access\n- Communication channels (Slack, PagerDuty)\n- Cached fallback data available\n\n## Severity Levels\n\n| Level | Definition | Response Time | Example |\n|-------|------------|---------------|---------|\n| P1 | Integration fully down | < 15 min | All API calls returning 401/500 |\n| P2 | Degraded service | < 1 hour | High 429 rate, elevated latency |\n| P3 | Minor impact | < 4 hours | Webhook delays, form sync lag |\n| P4 | No user impact | Next business day | Monitoring gap, stale cache |\n\n## Quick Triage (Run First)\n\n```bash\n#!/bin/bash\necho \"=== Webflow Incident Triage ===\"\necho \"Time: $(date -u)\"\n\n# 1. Webflow platform status\necho \"\"\necho \"--- Platform Status ---\"\ncurl -s https://status.webflow.com/api/v2/status.json 2>/dev/null | \\\n  python3 -c \"\nimport sys,json\nd=json.load(sys.stdin)\nprint(f'Status: {d[\\\"status\\\"][\\\"description\\\"]}')\nfor c in d.get('components',[]):\n  if c['status'] != 'operational':\n    print(f'  DEGRADED: {c[\\\"name\\\"]} ({c[\\\"status\\\"]})')\n\" 2>/dev/null || echo \"Cannot reach status page\"\n\n# 2. API connectivity\necho \"\"\necho \"--- API Connectivity ---\"\nHTTP=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"Authorization: Bearer $WEBFLOW_API_TOKEN\" \\\n  https://api.webflow.com/v2/sites 2>/dev/null)\necho \"Sites endpoint: HTTP $HTTP\"\n\n# 3. Rate limit status\necho \"\"\necho \"--- Rate Limits ---\"\ncurl -sI -H \"Authorization: Bearer $WEBFLOW_API_TOKEN\" \\\n  https://api.webflow.com/v2/sites 2>/dev/null | \\\n  grep -i \"x-ratelimit\\|retry-after\" || echo \"No rate limit headers\"\n\n# 4. Our health endpoint\necho \"\"\necho \"--- App Health ---\"\nHEALTH=$(curl -s https://your-app.com/api/health 2>/dev/null)\necho \"$HEALTH\" | python3 -c \"\nimport sys,json\nd=json.load(sys.stdin)\nprint(f'Status: {d[\\\"status\\\"]}')\nfor k,v in d.get('services',{}).items():\n  print(f'  {k}: {v.get(\\\"status\\\",\\\"unknown\\\")} ({v.get(\\\"latencyMs\\\",\\\"?\\\")}ms)')\n\" 2>/dev/null || echo \"Health endpoint unreachable\"\n```\n\n## Decision Tree\n\n```\nIs Webflow API returning errors?\n\u251c\u2500\u2500 YES\n\u2502   \u251c\u2500\u2500 status.webflow.com shows incident?\n\u2502   \u2502   \u251c\u2500\u2500 YES \u2192 Activate fallback. Wait for Webflow resolution.\n\u2502   \u2502   \u2514\u2500\u2500 NO \u2192 Our issue. Check token, config, network.\n\u2502   \u251c\u2500\u2500 HTTP 401/403?\n\u2502   \u2502   \u2514\u2500\u2500 Token issue. See \"Auth Failure\" below.\n\u2502   \u251c\u2500\u2500 HTTP 429?\n\u2502   \u2502   \u2514\u2500\u2500 Rate limited. See \"Rate Limit\" below.\n\u2502   \u2514\u2500\u2500 HTTP 500/502/503?\n\u2502       \u2514\u2500\u2500 Webflow server issue. Activate circuit breaker.\n\u2514\u2500\u2500 NO\n    \u251c\u2500\u2500 Our service healthy?\n    \u2502   \u251c\u2500\u2500 YES \u2192 Likely resolved or intermittent. Monitor closely.\n    \u2502   \u2514\u2500\u2500 NO \u2192 Our infrastructure issue (pods, memory, network).\n    \u2514\u2500\u2500 Webhooks not firing?\n        \u2514\u2500\u2500 Check webhook registrations and endpoint accessibility.\n```\n\n## Immediate Actions by Error Type\n\n### 401/403 \u2014 Authentication Failure (P1)\n\n```bash\n# Verify token is set\necho \"Token present: ${WEBFLOW_API_TOKEN:+YES}${WEBFLOW_API_TOKEN:-NO}\"\n\n# Test token\ncurl -s -o /dev/null -w \"HTTP %{http_code}\" \\\n  -H \"Authorization: Bearer $WEBFLOW_API_TOKEN\" \\\n  https://api.webflow.com/v2/sites\n\n# If 401: Token was revoked or expired\n# Action: Generate new token at developers.webflow.com\n# Then update in deployment platform:\n# vercel env rm WEBFLOW_API_TOKEN production && vercel env add WEBFLOW_API_TOKEN production\n# fly secrets set WEBFLOW_API_TOKEN=new-token\n# kubectl create secret generic webflow-secrets --from-literal=api-token=NEW_TOKEN --dry-run=client -o yaml | kubectl apply -f -\n\n# Restart application to pick up new token\n```\n\n### 429 \u2014 Rate Limited (P2)\n\n```bash\n# Check Retry-After header\ncurl -sI -H \"Authorization: Bearer $WEBFLOW_API_TOKEN\" \\\n  https://api.webflow.com/v2/sites 2>&1 | grep -i \"retry-after\"\n\n# Immediate: Enable request queuing\n# If feature flag available:\n# curl -X POST https://your-app.com/admin/feature-flags \\\n#   -d '{\"webflow_queue_mode\": true}'\n\n# Long-term fixes:\n# 1. Switch reads to CDN-cached live endpoints (no rate limit)\n# 2. Use bulk endpoints (100 items = 1 API call)\n# 3. Reduce polling frequency\n# 4. Contact Webflow for limit increase (enterprise)\n```\n\n### 500/502/503 \u2014 Webflow Server Error (P2)\n\n```bash\n# Confirm Webflow is the source\ncurl -s https://status.webflow.com/api/v2/status.json | jq '.status.description'\n\n# Activate cached fallback\n# Your circuit breaker should handle this automatically.\n# If not, manually enable:\n# curl -X POST https://your-app.com/admin/feature-flags \\\n#   -d '{\"webflow_fallback_mode\": true}'\n\n# Monitor for recovery\nwatch -n 30 'curl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"Authorization: Bearer $WEBFLOW_API_TOKEN\" \\\n  https://api.webflow.com/v2/sites'\n```\n\n### Webhook Delivery Failure (P3)\n\n```bash\n# Check webhook registrations\ncurl -s \"https://api.webflow.com/v2/sites/$WEBFLOW_SITE_ID/webhooks\" \\\n  -H \"Authorization: Bearer $WEBFLOW_API_TOKEN\" | \\\n  jq '.webhooks[] | {id, triggerType, url, createdOn}'\n\n# Verify endpoint is accessible\ncurl -s -o /dev/null -w \"%{http_code}\" https://your-app.com/webhooks/webflow\n\n# Re-register if webhook was deleted\ncurl -X POST \"https://api.webflow.com/v2/sites/$WEBFLOW_SITE_ID/webhooks\" \\\n  -H \"Authorization: Bearer $WEBFLOW_API_TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"triggerType\": \"form_submission\", \"url\": \"https://your-app.com/webhooks/webflow\"}'\n```\n\n## Communication Templates\n\n### Internal (Slack)\n\n```\nP[1-4] INCIDENT: Webflow Integration\nStatus: INVESTIGATING | IDENTIFIED | MONITORING | RESOLVED\nImpact: [What users experience]\nRoot cause: [Webflow outage / Token expired / Rate limited / Our bug]\nCurrent action: [What we're doing]\nNext update in: [15 min / 1 hour]\nIncident commander: @[name]\n```\n\n### External (Status Page)\n\n```\nWebflow Integration \u2014 Degraded Performance\n\nWe're experiencing issues with content updates powered by our Webflow integration.\n[Specific impact: delayed content / forms not processing / orders not syncing].\n\nOur team is actively working on resolution. Existing content remains accessible.\n\nLast updated: [timestamp UTC]\n```\n\n## Post-Incident\n\n### Evidence Collection\n\n```bash\n# Export recent logs\ngrep -i \"webflow\\|429\\|401\\|500\" /var/log/app/*.log | tail -200 > incident-logs.txt\n\n# Export metrics snapshot\ncurl \"http://prometheus:9090/api/v1/query_range?\\\nquery=rate(webflow_api_errors_total[5m])&\\\nstart=$(date -d '2 hours ago' +%s)&\\\nend=$(date +%s)&step=60\" > incident-metrics.json\n\n# Generate debug bundle\n./webflow-debug-bundle.sh\n```\n\n### Postmortem Template\n\n```markdown\n## Incident: Webflow [Error Description]\n**Date:** YYYY-MM-DD HH:MM \u2014 HH:MM UTC\n**Duration:** X hours Y minutes\n**Severity:** P[1-4]\n**Impact:** [Users affected, revenue impact]\n\n### Timeline\n- HH:MM \u2014 Alert fired: [description]\n- HH:MM \u2014 Triage started\n- HH:MM \u2014 Root cause identified: [cause]\n- HH:MM \u2014 Mitigation applied: [action]\n- HH:MM \u2014 Service restored\n\n### Root Cause\n[Technical explanation]\n\n### What Went Well\n- [What worked]\n\n### What Went Wrong\n- [What failed]\n\n### Action Items\n- [ ] [Preventive measure] \u2014 Owner \u2014 Due date\n- [ ] [Monitoring improvement] \u2014 Owner \u2014 Due date\n```\n\n## Output\n\n- Triage script identifying the error source\n- Decision tree for rapid root cause identification\n- Remediation steps for every HTTP error type\n- Communication templates for internal and external stakeholders\n- Evidence collection for postmortem\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Status page unreachable | Network issue or DNS | Use mobile data or VPN |\n| Can't rotate token | Lost dashboard access | Contact Webflow support |\n| Circuit breaker stuck open | Reset time too long | Manually reset or adjust threshold |\n| Stale cache served | Fallback active too long | Set TTL on cached content |\n\n## Resources\n\n- [Webflow Status Page](https://status.webflow.com)\n- [Webflow Support](https://support.webflow.com)\n- [API Reference](https://developers.webflow.com/data/reference/rest-introduction)\n\n## Next Steps\n\nFor data handling and compliance, see `webflow-data-handling`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "webflow-incident-runbook",
-    "description": "Execute Webflow incident response \\u2014 triage by HTTP status (401/403/429/500),\\n\\",
-    "allowed-tools": "Read, Grep, Bash(curl:*), Bash(npm:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

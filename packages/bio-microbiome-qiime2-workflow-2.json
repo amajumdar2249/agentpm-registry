@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000029445",
   "name": "bio-microbiome-qiime2-workflow",
   "slug": "bio-microbiome-qiime2-workflow-2",
   "description": "QIIME2 command-line workflow for 16S/ITS amplicon analysis. Alternative to DADA2/phyloseq R workflow with built-in provenance tracking. Use when preferring CLI over R, needing reproducible provenance, or working within QIIME2 ecosystem.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: DADA2 1.30+, MAFFT 7.520+, QIIME2 2024.2+, phyloseq 1.46+, scanpy 1.10+, scikit-learn 1.4+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# QIIME2 Amplicon Workflow\n\n**\"Run my amplicon analysis through QIIME2\"** \u2192 Process 16S/ITS amplicon data end-to-end using the QIIME2 CLI with built-in provenance tracking, from import through denoising, taxonomy, and diversity analysis.\n- CLI: `qiime dada2 denoise-paired`, `qiime diversity core-metrics-phylogenetic`\n\n## Import Data\n\n```bash\n# Import paired-end FASTQ with manifest\nqiime tools import \\\n    --type 'SampleData[PairedEndSequencesWithQuality]' \\\n    --input-path manifest.tsv \\\n    --output-path demux.qza \\\n    --input-format PairedEndFastqManifestPhred33V2\n\n# View demultiplexed summary\nqiime demux summarize \\\n    --i-data demux.qza \\\n    --o-visualization demux.qzv\n```\n\n## Denoise with DADA2\n\n```bash\n# DADA2 denoising (creates ASV table + representative sequences)\nqiime dada2 denoise-paired \\\n    --i-demultiplexed-seqs demux.qza \\\n    --p-trunc-len-f 240 \\\n    --p-trunc-len-r 160 \\\n    --p-trim-left-f 0 \\\n    --p-trim-left-r 0 \\\n    --p-max-ee-f 2 \\\n    --p-max-ee-r 2 \\\n    --p-n-threads 0 \\\n    --o-table table.qza \\\n    --o-representative-sequences rep-seqs.qza \\\n    --o-denoising-stats denoising-stats.qza\n\n# View denoising stats\nqiime metadata tabulate \\\n    --m-input-file denoising-stats.qza \\\n    --o-visualization denoising-stats.qzv\n```\n\n## Alternative: Deblur Denoising\n\n```bash\n# Quality filter first\nqiime quality-filter q-score \\\n    --i-demux demux.qza \\\n    --o-filtered-sequences demux-filtered.qza \\\n    --o-filter-stats filter-stats.qza\n\n# Deblur denoise\nqiime deblur denoise-16S \\\n    --i-demultiplexed-seqs demux-filtered.qza \\\n    --p-trim-length 250 \\\n    --p-sample-stats \\\n    --o-representative-sequences rep-seqs-deblur.qza \\\n    --o-table table-deblur.qza \\\n    --o-stats deblur-stats.qza\n```\n\n## Taxonomy Assignment\n\n```bash\n# Download pre-trained classifier (SILVA 138)\n# wget https://data.qiime2.org/2024.5/common/silva-138-99-nb-classifier.qza\n\n# Classify with sklearn naive Bayes\nqiime feature-classifier classify-sklearn \\\n    --i-classifier silva-138-99-nb-classifier.qza \\\n    --i-reads rep-seqs.qza \\\n    --o-classification taxonomy.qza\n\n# Visualize taxonomy\nqiime metadata tabulate \\\n    --m-input-file taxonomy.qza \\\n    --o-visualization taxonomy.qzv\n\n# Taxonomic barplot\nqiime taxa barplot \\\n    --i-table table.qza \\\n    --i-taxonomy taxonomy.qza \\\n    --m-metadata-file metadata.tsv \\\n    --o-visualization taxa-barplot.qzv\n```\n\n## Phylogenetic Tree\n\n```bash\n# Build phylogeny with MAFFT + FastTree\nqiime phylogeny align-to-tree-mafft-fasttree \\\n    --i-sequences rep-seqs.qza \\\n    --o-alignment aligned-rep-seqs.qza \\\n    --o-masked-alignment masked-aligned-rep-seqs.qza \\\n    --o-tree unrooted-tree.qza \\\n    --o-rooted-tree rooted-tree.qza\n```\n\n## Diversity Analysis\n\n```bash\n# Core metrics (alpha + beta diversity)\nqiime diversity core-metrics-phylogenetic \\\n    --i-phylogeny rooted-tree.qza \\\n    --i-table table.qza \\\n    --p-sampling-depth 10000 \\\n    --m-metadata-file metadata.tsv \\\n    --output-dir core-metrics-results\n\n# Alpha diversity significance\nqiime diversity alpha-group-significance \\\n    --i-alpha-diversity core-metrics-results/shannon_vector.qza \\\n    --m-metadata-file metadata.tsv \\\n    --o-visualization shannon-significance.qzv\n\n# Beta diversity significance (PERMANOVA)\nqiime diversity beta-group-significance \\\n    --i-distance-matrix core-metrics-results/weighted_unifrac_distance_matrix.qza \\\n    --m-metadata-file metadata.tsv \\\n    --m-metadata-column Group \\\n    --p-method permanova \\\n    --o-visualization weighted-unifrac-permanova.qzv\n```\n\n## Differential Abundance (ANCOM)\n\n**Goal:** Identify taxa with significantly different abundances between groups using QIIME2's ANCOM implementation.\n\n**Approach:** Collapse the feature table to genus level, add pseudocounts for log-ratio computation, and run ANCOM to test for differential abundance per taxon.\n\n```bash\n# Collapse to genus level\nqiime taxa collapse \\\n    --i-table table.qza \\\n    --i-taxonomy taxonomy.qza \\\n    --p-level 6 \\\n    --o-collapsed-table table-l6.qza\n\n# Add pseudocount and run ANCOM\nqiime composition add-pseudocount \\\n    --i-table table-l6.qza \\\n    --o-composition-table comp-table-l6.qza\n\nqiime composition ancom \\\n    --i-table comp-table-l6.qza \\\n    --m-metadata-file metadata.tsv \\\n    --m-metadata-column Group \\\n    --o-visualization ancom-l6.qzv\n```\n\n## Export to R/Python\n\n```bash\n# Export feature table to BIOM\nqiime tools export \\\n    --input-path table.qza \\\n    --output-path exported\n\n# Convert BIOM to TSV\nbiom convert \\\n    -i exported/feature-table.biom \\\n    -o feature-table.tsv \\\n    --to-tsv\n\n# Export taxonomy\nqiime tools export \\\n    --input-path taxonomy.qza \\\n    --output-path exported\n\n# Export tree\nqiime tools export \\\n    --input-path rooted-tree.qza \\\n    --output-path exported\n```\n\n## Manifest File Format\n\n```\n# manifest.tsv (tab-separated)\nsample-id\tforward-absolute-filepath\treverse-absolute-filepath\nsample1\t/path/to/sample1_R1.fastq.gz\t/path/to/sample1_R2.fastq.gz\nsample2\t/path/to/sample2_R1.fastq.gz\t/path/to/sample2_R2.fastq.gz\n```\n\n## Metadata File Format\n\n```\n# metadata.tsv (tab-separated)\nsample-id\tGroup\tTimepoint\nsample1\tTreatment\tDay0\nsample2\tControl\tDay0\nsample3\tTreatment\tDay7\n```\n\n## Related Skills\n\n- amplicon-processing - DADA2 R workflow alternative\n- taxonomy-assignment - More database options\n- diversity-analysis - phyloseq R alternative\n- differential-abundance - ALDEx2/ANCOM-BC in R\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-microbiome-qiime2-workflow",
-    "description": "QIIME2 command-line workflow for 16S/ITS amplicon analysis. Alternative to DADA2/phyloseq R workflow with built-in provenance tracking. Use when preferring CLI over R, needing reproducible provenance, or working within QIIME2 ecosystem.",
-    "tool_type": "cli",
-    "primary_tool": "qiime2"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

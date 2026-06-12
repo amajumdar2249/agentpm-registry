@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032874",
   "name": "perplexity-architecture-variants",
   "slug": "perplexity-architecture-variants",
   "description": "Choose and implement Perplexity architecture blueprints for different",
   "content": "# Perplexity Architecture Variants\n\n## Overview\n\nThree validated architectures for Perplexity Sonar API at different scales. Each builds on the previous, adding caching and orchestration as volume grows.\n\n## Decision Matrix\n\n| Factor | Direct Widget | Cached Layer | Research Pipeline |\n|--------|--------------|--------------|-------------------|\n| Volume | <500/day | 500-5K/day | 5K+/day |\n| Latency (p50) | 2-5s | 50ms (cached) / 2-5s (miss) | 10-30s |\n| Model | `sonar` | `sonar` + cache | `sonar` + `sonar-pro` |\n| Monthly Cost | <$150 | $50-$300 | $300+ |\n| Complexity | Minimal | Moderate | High |\n\n## Instructions\n\n### Variant 1: Direct Search Widget (<500 queries/day)\n\nBest for: Adding AI search to an existing app. No cache needed at this scale.\n\n```typescript\n// Simple endpoint \u2014 add to any Express/Next.js app\nimport OpenAI from \"openai\";\n\nconst perplexity = new OpenAI({\n  apiKey: process.env.PERPLEXITY_API_KEY!,\n  baseURL: \"https://api.perplexity.ai\",\n});\n\napp.post(\"/api/search\", async (req, res) => {\n  try {\n    const response = await perplexity.chat.completions.create({\n      model: \"sonar\",\n      messages: [{ role: \"user\", content: req.body.query }],\n      max_tokens: 1024,\n    });\n\n    res.json({\n      answer: response.choices[0].message.content,\n      citations: (response as any).citations || [],\n    });\n  } catch (err: any) {\n    if (err.status === 429) {\n      res.status(429).json({ error: \"Rate limited. Try again shortly.\" });\n    } else {\n      res.status(500).json({ error: \"Search unavailable\" });\n    }\n  }\n});\n```\n\n### Variant 2: Cached Research Layer (500-5K queries/day)\n\nBest for: Repeated queries, knowledge base search, FAQ bots. Cache eliminates duplicate API calls.\n\n```typescript\nimport { createHash } from \"crypto\";\nimport { LRUCache } from \"lru-cache\";\n\nconst cache = new LRUCache<string, any>({\n  max: 5000,\n  ttl: 4 * 3600_000,  // 4-hour TTL\n});\n\nclass CachedSearchService {\n  constructor(private client: OpenAI) {}\n\n  async search(query: string, model = \"sonar\") {\n    const key = this.cacheKey(query, model);\n    const cached = cache.get(key);\n    if (cached) return { ...cached, cached: true };\n\n    const response = await this.client.chat.completions.create({\n      model,\n      messages: [{ role: \"user\", content: query }],\n      max_tokens: 1024,\n    });\n\n    const result = {\n      answer: response.choices[0].message.content || \"\",\n      citations: (response as any).citations || [],\n      model: response.model,\n    };\n\n    cache.set(key, result);\n    return { ...result, cached: false };\n  }\n\n  private cacheKey(query: string, model: string): string {\n    return createHash(\"sha256\")\n      .update(`${model}:${query.toLowerCase().trim()}`)\n      .digest(\"hex\");\n  }\n\n  get stats() {\n    return { size: cache.size, max: 5000 };\n  }\n}\n```\n\n### Variant 3: Multi-Query Research Pipeline (5K+ queries/day)\n\nBest for: Automated research, report generation, competitive intelligence. Uses job queue for rate limiting and sonar-pro for deep analysis.\n\n```typescript\nimport PQueue from \"p-queue\";\n\nclass ResearchPipeline {\n  private queue: PQueue;\n  private cache: CachedSearchService;\n\n  constructor(private client: OpenAI) {\n    this.queue = new PQueue({\n      concurrency: 3,\n      interval: 60_000,\n      intervalCap: 40,  // 40 RPM (safety margin)\n    });\n    this.cache = new CachedSearchService(client);\n  }\n\n  async researchTopic(topic: string): Promise<{\n    overview: string;\n    sections: Array<{ question: string; answer: string; citations: string[] }>;\n    bibliography: string[];\n  }> {\n    // Phase 1: Decompose (sonar, fast)\n    const decomposition = await this.cache.search(\n      `Break \"${topic}\" into 4 focused research questions. One per line.`,\n      \"sonar\"\n    );\n    const questions = decomposition.answer.split(\"\\n\").filter((q) => q.trim().length > 10);\n\n    // Phase 2: Deep research each question (sonar-pro, queued)\n    const sections = await Promise.all(\n      questions.slice(0, 5).map((q) =>\n        this.queue.add(async () => {\n          const result = await this.cache.search(q.trim(), \"sonar-pro\");\n          return { question: q.trim(), ...result };\n        })\n      )\n    );\n\n    // Phase 3: Compile\n    const allCitations = new Set<string>();\n    for (const s of sections) {\n      if (s) s.citations.forEach((url: string) => allCitations.add(url));\n    }\n\n    return {\n      overview: decomposition.answer,\n      sections: sections.filter(Boolean).map((s) => ({\n        question: s!.question,\n        answer: s!.answer,\n        citations: s!.citations,\n      })),\n      bibliography: [...allCitations],\n    };\n  }\n}\n```\n\n### Python Variant (Direct Widget)\n\n```python\nfrom flask import Flask, request, jsonify\nfrom openai import OpenAI\nimport os\n\napp = Flask(__name__)\nclient = OpenAI(api_key=os.environ[\"PERPLEXITY_API_KEY\"], base_url=\"https://api.perplexity.ai\")\n\n@app.route(\"/api/search\", methods=[\"POST\"])\ndef search():\n    query = request.json[\"query\"]\n    response = client.chat.completions.create(\n        model=\"sonar\",\n        messages=[{\"role\": \"user\", \"content\": query}],\n        max_tokens=1024,\n    )\n    raw = response.model_dump()\n    return jsonify({\n        \"answer\": response.choices[0].message.content,\n        \"citations\": raw.get(\"citations\", []),\n    })\n```\n\n## Choosing the Right Variant\n\n```\nHow many queries per day?\n\u251c\u2500 <500 \u2192 Variant 1 (Direct Widget)\n\u2502   \u2514\u2500 Add retry with backoff\n\u251c\u2500 500-5K \u2192 Variant 2 (Cached Layer)\n\u2502   \u2514\u2500 Add LRU cache with 4-hour TTL\n\u2514\u2500 5K+ \u2192 Variant 3 (Research Pipeline)\n    \u2514\u2500 Add job queue + sonar-pro for deep queries\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Slow in UI | No caching | Add Variant 2 cache layer |\n| High cost | sonar-pro for all queries | Route simple queries to sonar |\n| Rate limited | Burst traffic | Add PQueue rate limiter |\n| Stale answers | Long cache TTL | Reduce TTL for time-sensitive queries |\n\n## Output\n\n- Selected architecture variant matching your scale\n- Implementation code for chosen variant\n- Cache strategy if applicable\n- Queue configuration if applicable\n\n## Resources\n\n- [Perplexity API Documentation](https://docs.perplexity.ai)\n- [Perplexity Model Pricing](https://docs.perplexity.ai/docs/getting-started/pricing)\n\n## Next Steps\n\nFor common pitfalls, see `perplexity-known-pitfalls`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "perplexity-architecture-variants",
-    "description": "Choose and implement Perplexity architecture blueprints for different",
-    "scales": "",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

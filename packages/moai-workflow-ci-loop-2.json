@@ -1,30 +1,49 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000015964",
   "name": "moai-workflow-ci-loop",
   "slug": "moai-workflow-ci-loop-2",
   "description": ">",
   "content": "\n# CI Loop (`moai-workflow-ci-loop`)\n\nUnified CI watch + auto-fix loop. The orchestrator invokes this skill after `/moai sync`\nPhase 4 (`gh pr create`) returns a PR number. The skill polls required checks, classifies\nfailures into mechanical vs semantic, attempts safe patches up to 3 iterations, and\nescalates semantic failures via AskUserQuestion.\n\n## Quick Reference\n\n**Trigger**: `/moai sync` Phase 4 PR-create returns a PR number, or an existing PR needs\nCI monitoring.\n\n**Two phases, one skill**:\n1. **Watch** \u2014 Poll `gh pr checks` every 30s, classify required vs auxiliary via\n   `.github/required-checks.yml` SSoT; exit on green/fail/timeout.\n2. **Auto-fix** \u2014 On required-fail (exit 2), receive JSON handoff, run up to 3 patch\n   iterations, escalate semantic failures immediately.\n\n**One-liner**:\n```bash\nMOAI_CIWATCH_GH=gh sh scripts/ci-watch/run.sh <PR_NUMBER> <BRANCH>\n```\n\n**Exit codes**:\n- `0` \u2014 all required passed \u2192 ready-to-merge AskUserQuestion\n- `1` \u2014 fatal error \u2192 surface remediation\n- `2` \u2014 required failure \u2192 JSON handoff \u2192 auto-fix phase\n- `3` \u2014 30-min hard timeout \u2192 blocker message, return control\n\n**HARD invariants**:\n- AskUserQuestion is orchestrator-only \u2014 CLI, shell scripts, and `manager-quality` MUST NOT call it.\n- Force-push is absolutely prohibited (`--force`, `-f`, `--force-with-lease` all banned).\n- Max 3 auto-fix iterations; iteration 4+ triggers mandatory blocking AskUserQuestion.\n- Semantic failures (race, deadlock, panic, assertion) are never auto-patched.\n- Protected files: `.env*`, credentials, `.claude/settings*.json`, `.github/required-checks.yml`,\n  `scripts/ci-watch/run.sh`.\n\n## Implementation Guide\n\n### Phase 1 \u2014 Watch Loop\n\n**Polling cadence**: 30 seconds minimum (GitHub API rate-limit). Override via\n`CIWATCH_POLL_INTERVAL` env, never below 30 in production. Test mode uses\n`MOAI_CIWATCH_NO_SLEEP=1` (single-tick exit).\n\n**30-minute hard timeout**: `CIWATCH_TIMEOUT_SECONDS=1800` default. On timeout, exit 3.\nDo not auto-restart.\n\n**Required vs auxiliary**: Required checks live in `.github/required-checks.yml`\n`branches.<pattern>.contexts`. Auxiliary checks listed under `auxiliary:` MUST NOT block\nready-to-merge. Hardcoding check names in scripts is prohibited.\n\n**State file**: `.moai/state/ci-watch-active.flag` (YAML). Tracks `pr_number`, `started_at`,\n`heartbeat_at`, `required_checks`, `abort_requested`. Heartbeat staleness > 90s allows\ntakeover. Abort: `moai pr watch --abort`.\n\n**Background watch standardization**: For long-running PRs (5+ min), use\n`gh pr checks <PR> --watch` invoked via `run_in_background: true`. Sleep + poll loops are\nprohibited \u2014 they block the orchestrator's main session.\n\n**Status report format** (stderr, state-change ticks only, no ANSI):\n```\n[ci-watch] PR #785: required 4/6 pass, 2 pending; advisory 0 fail\n```\n\n**Handoff schema on exit 2** \u2014 JSON with stable fields: `prNumber`, `branch`,\n`failedChecks[]` (each entry `{name, runId, logUrl}`), `auxiliaryFailCount`,\n`totalRequired`. Field stability: `name`, `runId`, `logUrl` are Wave 3 contract \u2014 do not\nrename. Schema source: `internal/ciwatch/handoff.go::Handoff`.\n\n### Phase 2 \u2014 Auto-Fix Loop\n\n**Entry condition**: `ci-watch` exit 2 + valid JSON handoff. State file:\n`.moai/state/ci-autofix-<PR>.json` (PR-scoped, 24-hour staleness threshold).\n\n**OQ2 cadence matrix** (single source of truth for iteration behavior):\n\n- iter 1, any mechanical sub_class \u2192 confirm + apply via AskUserQuestion (1st option =\n  \"\ud328\uce58 \uc801\uc6a9 (\uad8c\uc7a5)\").\n- iter 1, semantic/unknown \u2192 escalate (no patch attempt) via AskUserQuestion with\n  diagnosis report.\n- iter 2-3, mechanical + sub_class=trivial \u2192 silent apply + log (no AskUserQuestion).\n- iter 2-3, mechanical + sub_class=non-trivial \u2192 confirm + apply via AskUserQuestion.\n- iter 2-3, semantic/unknown \u2192 escalate (no patch) via AskUserQuestion.\n- iter 4+ \u2192 mandatory blocking AskUserQuestion (no timer, options: manual fix / revise\n  SPEC / abandon PR).\n\n\"trivial\" = whitespace, gofmt/goimports, import-order (matches `classify.sh` `RX_TRIVIAL_*`).\n\n**Patch commit rule**: Every patch = new commit. Format:\n`fix(ci): auto-fix <classification> failure (iter <N>)`. After push, re-invoke\n`scripts/ci-watch/run.sh` to restart the watch loop.\n\n**Iteration 4+ escalation** (mandatory blocking, no silent timeout):\n1. (\uad8c\uc7a5) \uc9c1\uc811 \uc218\ub3d9 \uc218\uc815 \u2014 investigate and fix manually\n2. SPEC \uc218\uc815 \u2014 revise the SPEC and restart implementation\n3. PR \ud3ec\uae30 \u2014 close the PR and abandon this approach\n\n**manager-quality spawn prompt** injects: handoff JSON, classification + sub_class,\nfailed CI log + PR diff, mode directive (mechanical \u2192 propose unified-diff patch;\nsemantic/unknown \u2192 return diagnosis only, no patch). HARD: no AskUserQuestion call from\nthe subagent \u2014 return Markdown only.\n\n**Audit log**: `.moai/reports/ci-autofix/<PR-NNN>-<YYYY-MM-DD>.md`. Append-only. Each\niteration records classification, sub_class, action, patch_sha, escalation_reason.\n\n### Protected Files (never auto-modified)\n\n- `**/.env`, `**/.env.*`\n- `**/credentials*`, `**/*_key.json`, `**/*secret*`\n- `.claude/settings.json`, `.claude/settings.local.json`\n- `.github/required-checks.yml` (Wave 1 SSoT, read-only for Wave 2/3)\n- `scripts/ci-watch/run.sh` (Wave 2 invariant)\n\nIf `manager-quality` proposes a patch touching any of these, reject and escalate.\n\n### Go Helpers and Shell Scripts\n\nGo: `internal/ciwatch/{classifier,handoff,state}.go` (classify required-vs-auxiliary,\nhandoff JSON schema, watch state file); `internal/cli/pr/watch.go`\n(`EmitReadyToMergeReport`, `EmitFailureHandoff`). Shell: `scripts/ci-watch/run.sh` (main\nloop, mock via `MOAI_CIWATCH_GH`); `scripts/ci-watch/lib/classify.sh` (yq + grep\nfallback); `scripts/ci-autofix/log-fetch.sh` (failure log + PR diff);\n`scripts/ci-autofix/classify.sh` (mechanical vs semantic).\n\n**gh CLI compat**: requires `gh >= 2.50` for the `workflow` JSON field. On older `gh`,\n`classify.sh` falls back to name-based heuristics from the `required:` list.\n\n## Works Well With\n\n- `manager-quality` \u2014 failure diagnosis + patch proposal subagent\n- `manager-git` \u2014 commit/push of auto-fix patches\n- `.claude/rules/moai/workflow/ci-watch-protocol.md` \u2014 HARD watch invocation contract\n- `.claude/rules/moai/workflow/ci-autofix-protocol.md` \u2014 HARD autofix invocation contract\n- `.github/required-checks.yml` \u2014 Wave 1 SSoT\n- `scripts/ci-mirror/run.sh` \u2014 Wave 1 local CI mirror\n\n## Common Rationalizations\n\n- \"Skip watch loop for small PRs\" \u2014 small PRs fail CI too. Loop costs nothing, saves manual polling.\n- \"Auxiliary failures should block merge\" \u2014 advisory by SSoT definition. Edit `required-checks.yml` to change classification.\n- \"semantic \uc2e4\ud328\ub3c4 auto-patch \uc2dc\ub3c4\ud574\ubcf4\uc790\" \u2014 semantic failures (race, assertion) cannot be auto-patched without context; wrong patch is worse.\n- \"force-push\ub85c \ud788\uc2a4\ud1a0\ub9ac \uc815\ub9ac\ud558\uba74 \uae54\ub054\ud558\ub2e4\" \u2014 force-push destroys reviewer diff visibility. Always a new commit.\n- \"iter 3 \uc774\ud6c4 timeout\" \u2014 silent timeout prohibited; user must decide explicitly.\n- \"trivial fix\ub294 confirm \uc5c6\uc774 \ubc14\ub85c \uc801\uc6a9\ud558\uc790\" \u2014 iter 1 always confirms; iter 2+ trivial may silent apply.\n\n## Red Flags\n\n- `manager-quality` subagent calls AskUserQuestion (HARD: orchestrator-only)\n- Iteration 4 auto-continues without blocking AskUser\n- `git push --force` / `-f` / `--force-with-lease` anywhere in scripts\n- Semantic classification produces a patch attempt\n- State file missing \u2192 iteration counter lost \u2192 infinite loop risk\n- Watch polling interval < 30s (rate-limit risk)\n- `required-checks.yml` modified without `moai github init` re-run\n\n## Verification\n\n- [ ] `bash scripts/ci-watch/test/run_test.sh` passes all shell tests\n- [ ] `go test ./internal/ciwatch/... ./internal/cli/pr/... -race` passes\n- [ ] `internal/ciwatch/` coverage >= 85%\n- [ ] No ANSI codes in `FormatStatusUpdate()` output\n- [ ] `EmitReadyToMergeReport` first option carries `(\uad8c\uc7a5)`\n- [ ] CLI does NOT call AskUserQuestion\n- [ ] `grep -r 'push -f\\|push --force' scripts/ci-autofix/ scripts/ci-watch/` returns no matches\n- [ ] Audit log `.moai/reports/ci-autofix/<PR>-<DATE>.md` contains every iteration\n\n<!-- absorbed from moai-workflow-ci-watch + moai-workflow-ci-autofix (SPEC-V3R6-SKILL-CONSOLIDATE-001, 2026-05-22) -->\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "moai-workflow-ci-loop",
-    "description": ">",
-    "license": "Apache-2.0",
-    "compatibility": "Designed for Claude Code",
-    "allowed-tools": "Bash, Read",
-    "user-invocable": "false",
-    "metadata": "",
-    "version": "0.1.0",
-    "category": "workflow",
-    "status": "active",
-    "updated": "2026-05-22",
-    "tags": "ci, watch, autofix, polling, github-actions, required-checks, force-push-prohibited",
-    "progressive_disclosure": "",
-    "enabled": "true",
-    "level1_tokens": "120",
-    "level2_tokens": "5000",
-    "triggers": "",
-    "keywords": "[\"/moai sync.*PR\", \"moai pr watch\", \"ci watch\", \"check.*status.*PR\", \"ci.*fail.*auto.*fix\", \"T3.*loop\", \"ci.*autofix\"]",
-    "agents": "[\"manager-quality\", \"manager-git\"]",
-    "phases": "[\"sync\"]",
-    "paths": ".claude/rules/moai/workflow/ci-watch-protocol.md,.claude/rules/moai/workflow/ci-autofix-protocol.md"
+  "author": "agentpm",
+  "version": "0.1.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "Apache-2.0",
+  "category": "workflow",
+  "tags": [
+    "ci",
+    "watch",
+    "autofix",
+    "polling",
+    "github-actions",
+    "required-checks",
+    "force-push-prohibited"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

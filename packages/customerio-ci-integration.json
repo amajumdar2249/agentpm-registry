@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031718",
   "name": "customerio-ci-integration",
   "slug": "customerio-ci-integration",
   "description": "Configure Customer.io CI/CD integration with automated testing.",
   "content": "# Customer.io CI Integration\n\n## Overview\n\nSet up CI/CD pipelines for Customer.io integrations: GitHub Actions workflow with unit + integration tests, test fixtures with automatic cleanup, pre-commit hooks, and environment-specific credential management.\n\n## Prerequisites\n\n- GitHub repository with Node.js project\n- Separate Customer.io workspace for CI testing (do NOT use production)\n- GitHub Actions secrets configured\n\n## Instructions\n\n### Step 1: GitHub Actions Workflow\n\n```yaml\n# .github/workflows/customerio-tests.yml\nname: Customer.io Integration Tests\non:\n  push:\n    paths:\n      - \"lib/customerio-*.ts\"\n      - \"services/customerio-*.ts\"\n      - \"tests/customerio*\"\n  pull_request:\n    paths:\n      - \"lib/customerio-*.ts\"\n      - \"services/customerio-*.ts\"\n\nenv:\n  CUSTOMERIO_SITE_ID: ${{ secrets.CIO_TEST_SITE_ID }}\n  CUSTOMERIO_TRACK_API_KEY: ${{ secrets.CIO_TEST_TRACK_API_KEY }}\n  CUSTOMERIO_APP_API_KEY: ${{ secrets.CIO_TEST_APP_API_KEY }}\n  CUSTOMERIO_REGION: us\n\njobs:\n  unit-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 20\n          cache: npm\n      - run: npm ci\n      - run: npx vitest run tests/customerio --reporter=verbose\n        env:\n          CUSTOMERIO_DRY_RUN: \"true\"  # Unit tests use mocks\n\n  integration-tests:\n    runs-on: ubuntu-latest\n    needs: unit-tests  # Only run if unit tests pass\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: 20\n          cache: npm\n      - run: npm ci\n      - name: Validate credentials\n        run: |\n          if [ -z \"$CUSTOMERIO_SITE_ID\" ]; then\n            echo \"::warning::CIO credentials not configured \u2014 skipping integration tests\"\n            exit 0\n          fi\n      - name: Run integration tests\n        run: npx vitest run tests/customerio.integration --reporter=verbose\n      - name: Cleanup test users\n        if: always()\n        run: npx tsx scripts/cio-cleanup-test-users.ts\n```\n\n### Step 2: Test Fixtures and Helpers\n\n```typescript\n// tests/helpers/cio-test-utils.ts\nimport { TrackClient, RegionUS } from \"customerio-node\";\n\nconst TEST_RUN_ID = `ci-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;\nconst createdUsers: string[] = [];\n\nexport function getCioTestClient(): TrackClient {\n  return new TrackClient(\n    process.env.CUSTOMERIO_SITE_ID!,\n    process.env.CUSTOMERIO_TRACK_API_KEY!,\n    { region: RegionUS }\n  );\n}\n\nexport function testUserId(label: string): string {\n  const id = `${TEST_RUN_ID}-${label}`;\n  createdUsers.push(id);\n  return id;\n}\n\nexport async function cleanupTestUsers(client: TrackClient): Promise<void> {\n  console.log(`Cleaning up ${createdUsers.length} test users...`);\n  for (const userId of createdUsers) {\n    try {\n      await client.suppress(userId);\n      await client.destroy(userId);\n    } catch {\n      // Ignore cleanup errors\n    }\n  }\n  createdUsers.length = 0;\n}\n```\n\n### Step 3: Integration Test Suite\n\n```typescript\n// tests/customerio.integration.test.ts\nimport { describe, it, expect, afterAll } from \"vitest\";\nimport { getCioTestClient, testUserId, cleanupTestUsers } from \"./helpers/cio-test-utils\";\n\nconst cio = getCioTestClient();\n\ndescribe(\"Customer.io Integration\", () => {\n  afterAll(async () => {\n    await cleanupTestUsers(cio);\n  });\n\n  it(\"should identify a new user\", async () => {\n    const userId = testUserId(\"identify-new\");\n    await expect(\n      cio.identify(userId, {\n        email: `${userId}@test.example.com`,\n        created_at: Math.floor(Date.now() / 1000),\n      })\n    ).resolves.not.toThrow();\n  });\n\n  it(\"should update an existing user\", async () => {\n    const userId = testUserId(\"identify-update\");\n    await cio.identify(userId, { email: `${userId}@test.example.com` });\n    await expect(\n      cio.identify(userId, { plan: \"pro\", updated: true })\n    ).resolves.not.toThrow();\n  });\n\n  it(\"should track an event on a user\", async () => {\n    const userId = testUserId(\"track-event\");\n    await cio.identify(userId, { email: `${userId}@test.example.com` });\n    await expect(\n      cio.track(userId, {\n        name: \"ci_test_event\",\n        data: { test_run: true, timestamp: Date.now() },\n      })\n    ).resolves.not.toThrow();\n  });\n\n  it(\"should track an anonymous event\", async () => {\n    await expect(\n      cio.trackAnonymous({\n        anonymous_id: testUserId(\"anon\"),\n        name: \"ci_anonymous_test\",\n        data: { page: \"/test\" },\n      })\n    ).resolves.not.toThrow();\n  });\n\n  it(\"should suppress a user\", async () => {\n    const userId = testUserId(\"suppress\");\n    await cio.identify(userId, { email: `${userId}@test.example.com` });\n    await expect(cio.suppress(userId)).resolves.not.toThrow();\n  });\n\n  it(\"should reject invalid credentials\", async () => {\n    const badClient = new (await import(\"customerio-node\")).TrackClient(\n      \"invalid\", \"invalid\", { region: (await import(\"customerio-node\")).RegionUS }\n    );\n    await expect(\n      badClient.identify(\"x\", { email: \"x@test.com\" })\n    ).rejects.toThrow();\n  });\n});\n```\n\n### Step 4: Test User Cleanup Script\n\n```typescript\n// scripts/cio-cleanup-test-users.ts\nimport { TrackClient, RegionUS } from \"customerio-node\";\n\nconst cio = new TrackClient(\n  process.env.CUSTOMERIO_SITE_ID!,\n  process.env.CUSTOMERIO_TRACK_API_KEY!,\n  { region: RegionUS }\n);\n\n// Clean up any test users from failed CI runs\n// This uses the ci- prefix convention from testUserId()\nasync function cleanup() {\n  console.log(\"Cleaning up CI test users...\");\n  console.log(\"Note: Customer.io doesn't have a list/search API via Track API.\");\n  console.log(\"Cleanup relies on suppress+destroy for known test user IDs.\");\n  console.log(\"For bulk cleanup, use the Customer.io dashboard People filter.\");\n}\n\ncleanup();\n```\n\n### Step 5: GitHub Secrets Setup\n\n```bash\n# Set up CI secrets (use a dedicated test workspace \u2014 NEVER production)\ngh secret set CIO_TEST_SITE_ID --body \"your-test-site-id\"\ngh secret set CIO_TEST_TRACK_API_KEY --body \"your-test-track-key\"\ngh secret set CIO_TEST_APP_API_KEY --body \"your-test-app-key\"\n```\n\n### Step 6: Pre-commit Hook\n\n```bash\n# .husky/pre-commit (or lint-staged config)\nnpx lint-staged\n```\n\n```json\n// package.json\n{\n  \"lint-staged\": {\n    \"lib/customerio-*.ts\": [\"eslint --fix\", \"vitest related --run\"],\n    \"services/customerio-*.ts\": [\"eslint --fix\", \"vitest related --run\"]\n  }\n}\n```\n\n## CI Best Practices\n\n| Practice | Rationale |\n|----------|-----------|\n| Dedicated test workspace | Prevents CI from polluting dev/staging data |\n| Unique test user IDs | Prevents collisions between parallel CI runs |\n| Always cleanup in `afterAll` | Prevents accumulating stale test profiles |\n| Rate limit awareness | Add small delays between batched API calls in CI |\n| Skip integration tests if no creds | PRs from forks won't have secrets |\n\n## Error Handling\n\n| Issue | Solution |\n|-------|----------|\n| Secrets not available in PR | Fork PRs don't get secrets \u2014 skip integration tests gracefully |\n| Test user pollution | Use `${TEST_RUN_ID}` prefix, cleanup in `afterAll` |\n| Rate limiting in CI | Keep integration test count under 50 API calls |\n| Flaky network failures | Add retry logic to integration tests |\n\n## Resources\n\n- [GitHub Actions Encrypted Secrets](https://docs.github.com/en/actions/security-guides/encrypted-secrets)\n- [vitest Documentation](https://vitest.dev/)\n\n## Next Steps\n\nAfter CI setup, proceed to `customerio-deploy-pipeline` for production deployment.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "customerio-ci-integration",
-    "description": "Configure Customer.io CI/CD integration with automated testing.",
-    "Trigger": "customer.io ci\", \"customer.io github actions\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(gh:*), Glob, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

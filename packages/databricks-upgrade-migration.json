@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031763",
   "name": "databricks-upgrade-migration",
   "slug": "databricks-upgrade-migration",
   "description": "Upgrade Databricks runtime versions and migrate between features.",
   "content": "# Databricks Upgrade & Migration\n\n## Overview\n\nUpgrade Databricks Runtime versions and migrate from Hive Metastore to Unity Catalog. Covers version compatibility, deprecated config removal, table migration via SYNC/CTAS, API endpoint updates, and Delta protocol upgrades.\n\n## Prerequisites\n\n- Admin access to workspace\n- Test environment (dev/staging) for validation before prod\n- Inventory of current workloads and dependencies\n\n## Instructions\n\n### Step 1: Runtime Version Upgrade\n\n#### Version Compatibility Matrix\n\n| Current DBR | Target DBR | Key Changes | Effort |\n|-------------|------------|-------------|--------|\n| 12.x LTS | 13.3 LTS | Spark 3.4, Python 3.10 default | Low |\n| 13.3 LTS | 14.3 LTS | Spark 3.5, improved AQE, Liquid Clustering GA | Medium |\n| 14.x | 15.x LTS | Unity Catalog mandatory, legacy DBFS deprecated | High |\n\n#### Automated Upgrade Script\n\n```python\nfrom databricks.sdk import WorkspaceClient\n\nw = WorkspaceClient()\n\ndef plan_cluster_upgrade(\n    cluster_id: str,\n    target_version: str = \"14.3.x-scala2.12\",\n    dry_run: bool = True,\n) -> dict:\n    \"\"\"Plan and optionally execute a DBR version upgrade.\"\"\"\n    cluster = w.clusters.get(cluster_id)\n    plan = {\n        \"cluster_id\": cluster_id,\n        \"cluster_name\": cluster.cluster_name,\n        \"current_version\": cluster.spark_version,\n        \"target_version\": target_version,\n        \"removals\": [],\n        \"warnings\": [],\n    }\n\n    # Check for deprecated Spark configs\n    deprecated = {\n        \"spark.databricks.delta.preview.enabled\": \"GA in 13.x+\",\n        \"spark.sql.legacy.createHiveTableByDefault\": \"Removed in 14.x+\",\n        \"spark.databricks.passthrough.enabled\": \"Removed in 15.x+\",\n        \"spark.sql.legacy.allowNonEmptyLocationInCTAS\": \"Removed in 14.x+\",\n    }\n\n    for key, reason in deprecated.items():\n        if cluster.spark_conf and key in cluster.spark_conf:\n            plan[\"removals\"].append({\"config\": key, \"reason\": reason})\n\n    # Check Python version compatibility\n    if \"13.\" in target_version or \"14.\" in target_version:\n        plan[\"warnings\"].append(\"Python default changes to 3.10 \u2014 verify library compatibility\")\n\n    if not dry_run:\n        clean_conf = {\n            k: v for k, v in (cluster.spark_conf or {}).items()\n            if k not in deprecated\n        }\n        w.clusters.edit(\n            cluster_id=cluster_id,\n            spark_version=target_version,\n            cluster_name=cluster.cluster_name,\n            spark_conf=clean_conf,\n            node_type_id=cluster.node_type_id,\n            num_workers=cluster.num_workers,\n        )\n        plan[\"status\"] = \"APPLIED\"\n    else:\n        plan[\"status\"] = \"DRY_RUN\"\n\n    return plan\n\n# Dry run first\nfor cluster in w.clusters.list():\n    plan = plan_cluster_upgrade(cluster.cluster_id, dry_run=True)\n    if plan[\"removals\"] or plan[\"warnings\"]:\n        print(f\"\\n{plan['cluster_name']}:\")\n        for r in plan[\"removals\"]:\n            print(f\"  REMOVE: {r['config']} ({r['reason']})\")\n        for w_ in plan[\"warnings\"]:\n            print(f\"  WARN: {w_}\")\n```\n\n### Step 2: Unity Catalog Migration (Hive Metastore)\n\n#### Inventory Current Tables\n\n```sql\n-- List all Hive Metastore tables to migrate\nSHOW DATABASES IN hive_metastore;\nSHOW TABLES IN hive_metastore.my_database;\n\n-- Get table sizes for migration planning\nSELECT table_name, table_type,\n       data_length / 1024 / 1024 AS size_mb\nFROM hive_metastore.information_schema.tables\nWHERE table_schema = 'my_database'\nORDER BY data_length DESC;\n```\n\n#### Migrate Tables\n\n```sql\n-- Create Unity Catalog destination\nCREATE CATALOG IF NOT EXISTS analytics;\nCREATE SCHEMA IF NOT EXISTS analytics.migrated;\n\n-- Option A: SYNC (in-place \u2014 keeps data where it is, adds UC metadata)\n-- Best for external tables already on cloud storage\nSYNC SCHEMA analytics.migrated FROM hive_metastore.my_database;\n\n-- Option B: CTAS (copies data \u2014 creates managed Delta tables)\n-- Best for small-medium tables or format conversion\nCREATE TABLE analytics.migrated.customers AS\nSELECT * FROM hive_metastore.my_database.customers;\n\n-- Option C: DEEP CLONE (best for Delta-to-Delta, preserves history)\nCREATE TABLE analytics.migrated.orders\nDEEP CLONE hive_metastore.my_database.orders;\n\n-- Migrate views\nCREATE VIEW analytics.migrated.customer_summary AS\nSELECT * FROM analytics.migrated.customers\nWHERE active = true;\n\n-- Verify migration\nSELECT 'source' AS system, COUNT(*) AS rows\nFROM hive_metastore.my_database.customers\nUNION ALL\nSELECT 'target', COUNT(*)\nFROM analytics.migrated.customers;\n\n-- Grant access\nGRANT USAGE ON CATALOG analytics TO `data-team`;\nGRANT SELECT ON SCHEMA analytics.migrated TO `data-team`;\n```\n\n### Step 3: API Endpoint Migration\n\n```python\n# Jobs API 2.0 \u2192 2.1 changes\n# Old: POST /api/2.0/jobs/create with flat task definition\n# New: POST /api/2.1/jobs/create with tasks[] array (multi-task)\n\n# Old (single task):\nold_config = {\n    \"name\": \"my-job\",\n    \"existing_cluster_id\": \"abc-123\",\n    \"notebook_task\": {\"notebook_path\": \"/path\"}\n}\n\n# New (multi-task):\nnew_config = {\n    \"name\": \"my-job\",\n    \"tasks\": [{\n        \"task_key\": \"main\",\n        \"existing_cluster_id\": \"abc-123\",\n        \"notebook_task\": {\"notebook_path\": \"/path\"}\n    }]\n}\n\n# The Python SDK uses the latest API version automatically\nfrom databricks.sdk.service.jobs import Task, NotebookTask\njob = w.jobs.create(\n    name=\"my-job\",\n    tasks=[Task(\n        task_key=\"main\",\n        existing_cluster_id=\"abc-123\",\n        notebook_task=NotebookTask(notebook_path=\"/path\"),\n    )],\n)\n```\n\n### Step 4: Delta Protocol Upgrade\n\n```sql\n-- Check current protocol version\nDESCRIBE DETAIL analytics.silver.orders;\n-- Look at: minReaderVersion, minWriterVersion\n\n-- Upgrade to support Deletion Vectors (reader v3, writer v7)\nALTER TABLE analytics.silver.orders\nSET TBLPROPERTIES (\n    'delta.minReaderVersion' = '3',\n    'delta.minWriterVersion' = '7',\n    'delta.enableDeletionVectors' = 'true'\n);\n\n-- Enable Liquid Clustering (replaces partitioning + Z-order)\nALTER TABLE analytics.silver.orders CLUSTER BY (order_date, region);\n\n-- WARNING: Protocol upgrades are irreversible.\n-- If you need to downgrade, DEEP CLONE to a new table instead.\n```\n\n## Output\n\n- DBR version upgraded with deprecated configs removed\n- Hive Metastore tables migrated to Unity Catalog (SYNC/CTAS/DEEP CLONE)\n- API calls updated to latest SDK patterns\n- Delta protocol upgraded for Deletion Vectors and Liquid Clustering\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Library incompatible with new DBR | Python/Java version change | Pin library versions in `requirements.txt`, test in staging |\n| `PERMISSION_DENIED` after migration | Missing Unity Catalog grants | Run `GRANT USAGE ON CATALOG`, `GRANT SELECT ON SCHEMA` |\n| `SYNC` fails | Storage location inaccessible | Check cloud storage permissions and network config |\n| Protocol downgrade error | Cannot lower protocol version | `DEEP CLONE` to a new table with lower protocol |\n| `Table not found` after migration | Notebooks still reference `hive_metastore` | Update all references to `catalog.schema.table` format |\n\n## Examples\n\n### Quick Upgrade Check\n\n```bash\n# Current state\necho \"CLI: $(databricks --version)\"\necho \"SDK: $(pip show databricks-sdk | grep Version)\"\necho \"Cluster DBR: $(databricks clusters get --cluster-id $CID | jq -r .spark_version)\"\n\n# Upgrade SDK\npip install --upgrade databricks-sdk\n```\n\n### Bulk Table Migration Script\n\n```python\n# Migrate all tables in a Hive Metastore database\nsource_db = \"hive_metastore.legacy_data\"\ntarget_schema = \"analytics.migrated\"\n\ntables = spark.sql(f\"SHOW TABLES IN {source_db}\").collect()\nfor t in tables:\n    table_name = t.tableName\n    print(f\"Migrating {table_name}...\")\n    spark.sql(f\"\"\"\n        CREATE TABLE IF NOT EXISTS {target_schema}.{table_name}\n        AS SELECT * FROM {source_db}.{table_name}\n    \"\"\")\n    # Verify\n    src_count = spark.table(f\"{source_db}.{table_name}\").count()\n    tgt_count = spark.table(f\"{target_schema}.{table_name}\").count()\n    status = \"OK\" if src_count == tgt_count else \"MISMATCH\"\n    print(f\"  {table_name}: {src_count} -> {tgt_count} [{status}]\")\n```\n\n## Resources\n\n- [Runtime Release Notes](https://docs.databricks.com/aws/en/release-notes/runtime/)\n- [Unity Catalog Migration](https://docs.databricks.com/aws/en/data-governance/unity-catalog/get-started)\n- [Delta Protocol Versions](https://docs.databricks.com/aws/en/delta/versioning)\n- [Jobs API 2.1 Updates](https://docs.databricks.com/aws/en/reference/jobs-api-2-1-updates)\n\n## Next Steps\n\nFor CI/CD integration, see `databricks-ci-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "databricks-upgrade-migration",
-    "description": "Upgrade Databricks runtime versions and migrate between features.",
-    "allowed-tools": "Read, Write, Edit, Bash(databricks:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

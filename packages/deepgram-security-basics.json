@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031786",
   "name": "deepgram-security-basics",
   "slug": "deepgram-security-basics",
   "description": "Apply Deepgram security best practices for API key management and data",
   "content": "# Deepgram Security Basics\n\n## Overview\n\nSecurity best practices for Deepgram integration: scoped API keys, key rotation, Deepgram's built-in PII redaction feature, client-side temporary keys, SSRF prevention for audio URLs, and audit logging.\n\n## Security Checklist\n\n- [ ] API keys in environment variables or secret manager (never in code)\n- [ ] Separate keys per environment (dev/staging/prod)\n- [ ] Keys scoped to minimum required permissions\n- [ ] Key rotation schedule (90 days recommended)\n- [ ] Deepgram `redact` option enabled for PII-sensitive audio\n- [ ] Audio URLs validated (HTTPS only, no private IPs)\n- [ ] Audit logging on all transcription operations\n\n## Instructions\n\n### Step 1: Scoped API Keys\n\nCreate keys with minimal permissions in Console > Settings > API Keys:\n\n```typescript\n// Production transcription service \u2014 only needs listen scope\nconst sttKey = process.env.DEEPGRAM_STT_KEY;  // Scope: listen\n\n// TTS service \u2014 only needs speak scope\nconst ttsKey = process.env.DEEPGRAM_TTS_KEY;  // Scope: speak\n\n// Monitoring dashboard \u2014 only needs usage read\nconst monitorKey = process.env.DEEPGRAM_MONITOR_KEY;  // Scope: usage:read\n\n// Admin operations \u2014 separate key, restricted access\nconst adminKey = process.env.DEEPGRAM_ADMIN_KEY;  // Scope: manage, keys\n```\n\n### Step 2: Deepgram Built-in PII Redaction\n\n```typescript\nimport { createClient } from '@deepgram/sdk';\n\nconst deepgram = createClient(process.env.DEEPGRAM_API_KEY!);\n\n// Deepgram redacts PII directly in the transcript\nconst { result } = await deepgram.listen.prerecorded.transcribeUrl(\n  { url: audioUrl },\n  {\n    model: 'nova-3',\n    smart_format: true,\n    // Built-in redaction \u2014 replaces sensitive data in transcript\n    redact: ['pci', 'ssn', 'numbers'],\n    // pci     \u2014 Credit card numbers \u2192 [REDACTED]\n    // ssn     \u2014 Social Security numbers \u2192 [REDACTED]\n    // numbers \u2014 All numeric sequences \u2192 [REDACTED]\n  }\n);\n\n// Transcript will contain [REDACTED] in place of sensitive numbers\nconsole.log(result.results.channels[0].alternatives[0].transcript);\n// \"My card number is [REDACTED] and my SSN is [REDACTED]\"\n```\n\n### Step 3: Temporary Keys for Client-Side\n\n```typescript\n// Generate short-lived keys for browser/mobile clients\n// This prevents exposing your main API key\n\nimport { createClient } from '@deepgram/sdk';\nimport express from 'express';\n\nconst app = express();\nconst deepgram = createClient(process.env.DEEPGRAM_API_KEY!);\n\napp.post('/api/deepgram/token', async (req, res) => {\n  // Create a temporary key that expires in 10 seconds\n  // Use for browser WebSocket connections\n  const { result, error } = await deepgram.manage.createProjectKey(\n    process.env.DEEPGRAM_PROJECT_ID!,\n    {\n      comment: `temp-key-${Date.now()}`,\n      scopes: ['listen'],          // Minimal scope\n      time_to_live_in_seconds: 10, // Short-lived\n    }\n  );\n\n  if (error) return res.status(500).json({ error: error.message });\n  res.json({ key: result.key, expires_in: 10 });\n});\n\n// Browser client uses temporary key:\n// const { key } = await fetch('/api/deepgram/token').then(r => r.json());\n// const ws = new WebSocket('wss://api.deepgram.com/v1/listen', ['token', key]);\n```\n\n### Step 4: Key Rotation\n\n```typescript\nimport { createClient } from '@deepgram/sdk';\n\nasync function rotateApiKey(projectId: string) {\n  const admin = createClient(process.env.DEEPGRAM_ADMIN_KEY!);\n\n  // 1. Create new key with same scopes\n  const { result: newKey } = await admin.manage.createProjectKey(projectId, {\n    comment: `rotated-${new Date().toISOString().split('T')[0]}`,\n    scopes: ['listen', 'speak'],\n    expiration_date: new Date(Date.now() + 90 * 86400000).toISOString(), // 90 days\n  });\n  console.log('New key created:', newKey.key_id);\n\n  // 2. Update secret manager (example: GCP Secret Manager)\n  // await updateSecret('DEEPGRAM_API_KEY', newKey.key);\n\n  // 3. Validate new key works\n  const testClient = createClient(newKey.key);\n  const { error } = await testClient.manage.getProjects();\n  if (error) throw new Error('New key validation failed \u2014 aborting rotation');\n\n  // 4. Delete old key (after services have picked up new key)\n  // await admin.manage.deleteProjectKey(projectId, oldKeyId);\n\n  return newKey;\n}\n```\n\n### Step 5: Audio URL Validation (SSRF Prevention)\n\n```typescript\nimport { URL } from 'url';\nimport { lookup } from 'dns/promises';\n\nasync function validateAudioUrl(url: string): Promise<void> {\n  const parsed = new URL(url);\n\n  // Require HTTPS\n  if (parsed.protocol !== 'https:') {\n    throw new Error('Only HTTPS audio URLs allowed');\n  }\n\n  // Block private/internal IPs\n  const { address } = await lookup(parsed.hostname);\n  const privateRanges = [\n    /^127\\./, /^10\\./, /^172\\.(1[6-9]|2\\d|3[01])\\./, /^192\\.168\\./,\n    /^0\\./, /^169\\.254\\./, /^::1$/, /^fc00:/, /^fe80:/,\n  ];\n  if (privateRanges.some(r => r.test(address))) {\n    throw new Error(`Blocked: ${parsed.hostname} resolves to private IP`);\n  }\n\n  // Block known internal hostnames\n  const blockedHosts = ['localhost', 'metadata.google.internal', '169.254.169.254'];\n  if (blockedHosts.includes(parsed.hostname)) {\n    throw new Error(`Blocked hostname: ${parsed.hostname}`);\n  }\n}\n\n// Use before transcription:\nawait validateAudioUrl(userProvidedUrl);\nconst { result } = await deepgram.listen.prerecorded.transcribeUrl(\n  { url: userProvidedUrl }, { model: 'nova-3' }\n);\n```\n\n### Step 6: Audit Logging\n\n```typescript\ninterface AuditEntry {\n  timestamp: string;\n  action: 'transcribe' | 'tts' | 'key_create' | 'key_delete';\n  userId: string;\n  requestId?: string;\n  model: string;\n  audioDuration?: number;\n  success: boolean;\n  error?: string;\n  ip?: string;\n}\n\nfunction logAudit(entry: AuditEntry) {\n  // Structured JSON for log aggregation (Datadog, CloudWatch, etc.)\n  const log = {\n    ...entry,\n    service: 'deepgram-integration',\n    level: entry.success ? 'info' : 'error',\n  };\n  console.log(JSON.stringify(log));\n}\n\n// Usage in transcription middleware\nasync function transcribeWithAudit(userId: string, url: string, ip: string) {\n  const start = Date.now();\n  try {\n    const { result, error } = await deepgram.listen.prerecorded.transcribeUrl(\n      { url }, { model: 'nova-3', smart_format: true }\n    );\n    logAudit({\n      timestamp: new Date().toISOString(),\n      action: 'transcribe',\n      userId, model: 'nova-3', ip,\n      requestId: result?.metadata?.request_id,\n      audioDuration: result?.metadata?.duration,\n      success: !error,\n      error: error?.message,\n    });\n    if (error) throw error;\n    return result;\n  } catch (err: any) {\n    logAudit({\n      timestamp: new Date().toISOString(),\n      action: 'transcribe',\n      userId, model: 'nova-3', ip,\n      success: false, error: err.message,\n    });\n    throw err;\n  }\n}\n```\n\n## Output\n\n- Scoped API keys per service/environment\n- Built-in PII redaction via `redact` parameter\n- Temporary keys for client-side (browser/mobile)\n- Key rotation with validation and cleanup\n- SSRF-safe audio URL validation\n- Structured audit logging\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| 403 after scoping | Key missing required scope | Add scope in Console (e.g., `listen`) |\n| Temp key expired | TTL too short | Increase `time_to_live_in_seconds` |\n| Rotation broke service | New key not propagated | Use overlap period \u2014 both keys active |\n| Redaction missed PII | Wrong redact option | Use `redact: ['pci', 'ssn', 'numbers']` |\n\n## Resources\n\n- [API Key Management](https://developers.deepgram.com/docs/api-key-management)\n- [PII Redaction](https://developers.deepgram.com/docs/redaction)\n- [Deepgram Security](https://deepgram.com/security)\n- [SOC 2 / HIPAA](https://deepgram.com/hipaa)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "deepgram-security-basics",
-    "description": "Apply Deepgram security best practices for API key management and data",
-    "Trigger": "deepgram security\", \"deepgram API key security\", \"secure deepgram\",",
-    "allowed-tools": "Read, Write, Edit, Grep, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

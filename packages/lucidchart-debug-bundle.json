@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032566",
   "name": "lucidchart-debug-bundle",
   "slug": "lucidchart-debug-bundle",
   "description": "Debug Bundle for Lucidchart.",
   "content": "# Lucidchart Debug Bundle\n\n## Overview\n\nThis debug bundle collects diagnostic evidence from Lucidchart diagramming API integrations\nfor troubleshooting document access, shape rendering, data linking pipelines, and export\nfailures. It captures OAuth token validation, document listing, page metadata, data-linked\nshape status, and export endpoint availability. The resulting tarball provides support\nengineers the evidence to diagnose permission errors, stale data links, broken embeds,\nand export timeouts without requiring direct Lucid account access.\n\n## Prerequisites\n\n- `curl`, `jq`, `tar` installed\n- `LUCID_API_KEY` set (OAuth2 bearer token from Lucid developer portal)\n- `LUCID_ACCOUNT_ID` optionally set for account-scoped queries\n\n## Debug Collection Script\n\n```bash\n#!/bin/bash\nset -euo pipefail\nBUNDLE=\"debug-lucidchart-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE\"\n\n# Environment check\necho \"=== Environment ===\" > \"$BUNDLE/environment.txt\"\necho \"API Key: ${LUCID_API_KEY:+SET (redacted)}\" >> \"$BUNDLE/environment.txt\"\necho \"Account ID: ${LUCID_ACCOUNT_ID:-NOT SET}\" >> \"$BUNDLE/environment.txt\"\necho \"Node: $(node -v 2>/dev/null || echo 'not installed')\" >> \"$BUNDLE/environment.txt\"\necho \"Timestamp: $(date -u)\" >> \"$BUNDLE/environment.txt\"\n\n# API connectivity \u2014 user info\necho \"=== API Health ===\" > \"$BUNDLE/api-health.txt\"\ncurl -sf -o \"$BUNDLE/api-health.txt\" -w \"HTTP %{http_code} in %{time_total}s\\n\" \\\n  -H \"Authorization: Bearer ${LUCID_API_KEY}\" \\\n  -H \"Lucid-Api-Version: 1\" \\\n  \"https://api.lucid.co/users/me\" 2>&1 || echo \"UNREACHABLE\" > \"$BUNDLE/api-health.txt\"\n\n# Document listing (first 10)\necho \"=== Documents ===\" > \"$BUNDLE/documents.json\"\ncurl -sf -H \"Authorization: Bearer ${LUCID_API_KEY}\" \\\n  -H \"Lucid-Api-Version: 1\" \\\n  \"https://api.lucid.co/documents?limit=10\" \\\n  >> \"$BUNDLE/documents.json\" 2>&1 || echo '{\"error\":\"FAILED\"}' > \"$BUNDLE/documents.json\"\n\n# Page metadata for first document\necho \"=== Pages ===\" > \"$BUNDLE/pages.json\"\nDOC_ID=$(jq -r '.documents[0].documentId // empty' \"$BUNDLE/documents.json\" 2>/dev/null)\nif [ -n \"${DOC_ID:-}\" ]; then\n  curl -sf -H \"Authorization: Bearer ${LUCID_API_KEY}\" \\\n    -H \"Lucid-Api-Version: 1\" \\\n    \"https://api.lucid.co/documents/${DOC_ID}/pages\" \\\n    >> \"$BUNDLE/pages.json\" 2>&1\nelse\n  echo '{\"error\":\"No documents found\"}' > \"$BUNDLE/pages.json\"\nfi\n\n# Data linking status\necho \"=== Data Links ===\" > \"$BUNDLE/data-links.json\"\nif [ -n \"${DOC_ID:-}\" ]; then\n  curl -sf -H \"Authorization: Bearer ${LUCID_API_KEY}\" \\\n    -H \"Lucid-Api-Version: 1\" \\\n    \"https://api.lucid.co/documents/${DOC_ID}/dataSources\" \\\n    >> \"$BUNDLE/data-links.json\" 2>&1 || echo '{\"error\":\"DATA_LINKS_FAILED\"}' > \"$BUNDLE/data-links.json\"\nelse\n  echo '{\"error\":\"Skipped \u2014 no document\"}' > \"$BUNDLE/data-links.json\"\nfi\n\n# Recent logs\necho \"=== Recent Logs ===\" > \"$BUNDLE/app-logs.txt\"\ntail -100 /var/log/lucid-integration/*.log >> \"$BUNDLE/app-logs.txt\" 2>/dev/null || echo \"No integration logs found\" >> \"$BUNDLE/app-logs.txt\"\n\n# Rate limit status\necho \"=== Rate Limits ===\" > \"$BUNDLE/rate-limits.txt\"\ncurl -sI -H \"Authorization: Bearer ${LUCID_API_KEY}\" \\\n  -H \"Lucid-Api-Version: 1\" \\\n  \"https://api.lucid.co/users/me\" 2>/dev/null | grep -i \"x-rate\\|retry-after\\|x-ratelimit\" >> \"$BUNDLE/rate-limits.txt\" || echo \"No rate limit headers\" >> \"$BUNDLE/rate-limits.txt\"\n\n# Package versions\necho \"=== Dependencies ===\" > \"$BUNDLE/deps.txt\"\nnpm ls 2>/dev/null | grep -i lucid >> \"$BUNDLE/deps.txt\" || echo \"No Lucid npm packages found\" >> \"$BUNDLE/deps.txt\"\n\ntar -czf \"$BUNDLE.tar.gz\" \"$BUNDLE\" && rm -rf \"$BUNDLE\"\necho \"Bundle: $BUNDLE.tar.gz\"\n```\n\n## Analyzing the Bundle\n\n```bash\ntar -xzf debug-lucidchart-*.tar.gz\ncat debug-lucidchart-*/environment.txt          # Verify API key is set\ncat debug-lucidchart-*/api-health.txt           # Check HTTP status and latency\njq '.documents | length' debug-lucidchart-*/documents.json  # Count accessible docs\njq '.dataSources' debug-lucidchart-*/data-links.json        # Check linked data sources\n```\n\n## Common Issues\n\n| Symptom | Check in Bundle | Fix |\n|---------|----------------|-----|\n| 401 on all endpoints | `environment.txt` shows key NOT SET | Generate OAuth2 token in Lucid Developer Portal > API Tokens |\n| 403 on document access | `documents.json` shows permission error | Token scope missing `lucidchart.document.content`; regenerate with correct scopes |\n| Data links show stale values | `data-links.json` shows old `lastSynced` timestamp | Trigger manual data refresh via Lucidchart UI or PATCH datasource endpoint |\n| Export returns 413 | App logs show payload too large | Document exceeds export size limit; split into multiple pages before exporting |\n| Empty document list | `documents.json` returns empty array | Check `LUCID_ACCOUNT_ID` scope; token may be scoped to a different team folder |\n| Shape IDs not resolving | `pages.json` missing expected shapes | Shapes on locked layers are excluded from API; unlock layers or use admin token |\n\n## Automated Health Check\n\n```typescript\nasync function checkLucidchartHealth(): Promise<{\n  status: string;\n  latencyMs: number;\n  userOk: boolean;\n  documentCount: number;\n  dataLinkingAvailable: boolean;\n}> {\n  const apiKey = process.env.LUCID_API_KEY;\n  const headers = {\n    Authorization: `Bearer ${apiKey}`,\n    \"Lucid-Api-Version\": \"1\",\n  };\n  const start = Date.now();\n\n  const userRes = await fetch(\"https://api.lucid.co/users/me\", { headers });\n  const docsRes = await fetch(\"https://api.lucid.co/documents?limit=1\", { headers });\n\n  let documentCount = 0;\n  let dataLinkingAvailable = false;\n  if (docsRes.ok) {\n    const data = await docsRes.json();\n    documentCount = data.documents?.length ?? 0;\n    if (documentCount > 0) {\n      const docId = data.documents[0].documentId;\n      const dlRes = await fetch(\n        `https://api.lucid.co/documents/${docId}/dataSources`, { headers }\n      );\n      dataLinkingAvailable = dlRes.ok;\n    }\n  }\n\n  return {\n    status: userRes.ok ? \"healthy\" : \"degraded\",\n    latencyMs: Date.now() - start,\n    userOk: userRes.ok,\n    documentCount,\n    dataLinkingAvailable,\n  };\n}\n```\n\n## Resources\n\n- [Lucid Developer Portal](https://developer.lucid.co/reference/overview)\n- [Lucid Status Page](https://status.lucid.co)\n- [Lucid API Changelog](https://developer.lucid.co/changelog)\n\n## Next Steps\n\nSee `lucidchart-rate-limits`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "lucidchart-debug-bundle",
-    "description": "Debug Bundle for Lucidchart.",
-    "Trigger": "lucidchart debug bundle\".",
-    "allowed-tools": "Read, Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

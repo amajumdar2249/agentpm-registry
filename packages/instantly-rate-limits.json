@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032306",
   "name": "instantly-rate-limits",
   "slug": "instantly-rate-limits",
   "description": "Implement Instantly.ai rate limiting, backoff, and request throttling",
   "content": "# Instantly Rate Limits\n\n## Overview\n\nHandle Instantly API v2 rate limits. The API returns `429 Too Many Requests` when limits are exceeded. Most endpoints follow standard limits. The email listing endpoint has a stricter constraint of **20 requests per minute**. Failed webhook deliveries are retried up to **3 times within 30 seconds**.\n\n## Prerequisites\n\n- Completed `instantly-install-auth` setup\n- Understanding of exponential backoff patterns\n\n## Known Rate Limits\n\n| Endpoint | Limit | Notes |\n|----------|-------|-------|\n| Most API endpoints | Standard REST limits | Varies by plan |\n| `GET /emails` | 20 req/min | Stricter \u2014 email listing |\n| Webhook deliveries | 3 retries in 30s | Instantly retries to your endpoint |\n| Background jobs | N/A | Async \u2014 poll via `GET /background-jobs/{id}` |\n\n## Instructions\n\n### Step 1: Exponential Backoff with Jitter\n\n```typescript\nimport { InstantlyApiError } from \"./src/instantly/client\";\n\ninterface RetryOptions {\n  maxRetries: number;\n  baseDelayMs: number;\n  maxDelayMs: number;\n}\n\nconst DEFAULT_RETRY: RetryOptions = {\n  maxRetries: 5,\n  baseDelayMs: 1000,\n  maxDelayMs: 30000,\n};\n\nasync function withBackoff<T>(\n  operation: () => Promise<T>,\n  opts: Partial<RetryOptions> = {}\n): Promise<T> {\n  const { maxRetries, baseDelayMs, maxDelayMs } = { ...DEFAULT_RETRY, ...opts };\n\n  for (let attempt = 0; attempt <= maxRetries; attempt++) {\n    try {\n      return await operation();\n    } catch (err) {\n      const isRetryable =\n        err instanceof InstantlyApiError &&\n        (err.status === 429 || err.status >= 500);\n\n      if (!isRetryable || attempt === maxRetries) throw err;\n\n      // Parse Retry-After header if available\n      let delay = baseDelayMs * Math.pow(2, attempt);\n      delay = Math.min(delay, maxDelayMs);\n\n      // Add jitter (10-30% of delay)\n      const jitter = delay * (0.1 + Math.random() * 0.2);\n      const totalDelay = delay + jitter;\n\n      console.warn(\n        `Rate limited (attempt ${attempt + 1}/${maxRetries}). Waiting ${Math.round(totalDelay)}ms...`\n      );\n      await new Promise((r) => setTimeout(r, totalDelay));\n    }\n  }\n  throw new Error(\"Unreachable\");\n}\n```\n\n### Step 2: Request Queue with Concurrency Control\n\n```typescript\nclass RequestQueue {\n  private queue: Array<() => Promise<void>> = [];\n  private running = 0;\n  private readonly maxConcurrent: number;\n  private readonly delayBetweenMs: number;\n\n  constructor(maxConcurrent = 5, delayBetweenMs = 200) {\n    this.maxConcurrent = maxConcurrent;\n    this.delayBetweenMs = delayBetweenMs;\n  }\n\n  async add<T>(operation: () => Promise<T>): Promise<T> {\n    return new Promise((resolve, reject) => {\n      this.queue.push(async () => {\n        try {\n          const result = await withBackoff(operation);\n          resolve(result);\n        } catch (err) {\n          reject(err);\n        } finally {\n          this.running--;\n          this.processQueue();\n        }\n      });\n      this.processQueue();\n    });\n  }\n\n  private async processQueue() {\n    while (this.running < this.maxConcurrent && this.queue.length > 0) {\n      const task = this.queue.shift()!;\n      this.running++;\n      if (this.delayBetweenMs > 0) {\n        await new Promise((r) => setTimeout(r, this.delayBetweenMs));\n      }\n      task();\n    }\n  }\n}\n\n// Usage \u2014 add 500 leads with controlled concurrency\nconst queue = new RequestQueue(3, 300); // 3 concurrent, 300ms gap\n\nfor (const lead of leads) {\n  queue.add(() =>\n    instantly(\"/leads\", {\n      method: \"POST\",\n      body: JSON.stringify({ campaign: campaignId, email: lead.email, ...lead }),\n    })\n  );\n}\n```\n\n### Step 3: Rate-Limited Email Listing\n\n```typescript\n// The /emails endpoint has a 20 req/min limit\n// Use a dedicated throttled fetcher\nclass ThrottledEmailFetcher {\n  private requestTimestamps: number[] = [];\n  private readonly maxPerMinute = 18; // leave 2 req margin\n\n  private async waitForSlot() {\n    const now = Date.now();\n    this.requestTimestamps = this.requestTimestamps.filter(\n      (t) => now - t < 60000\n    );\n\n    if (this.requestTimestamps.length >= this.maxPerMinute) {\n      const oldest = this.requestTimestamps[0];\n      const waitMs = 60000 - (now - oldest) + 1000; // +1s buffer\n      console.log(`Email API throttle: waiting ${waitMs}ms`);\n      await new Promise((r) => setTimeout(r, waitMs));\n    }\n\n    this.requestTimestamps.push(Date.now());\n  }\n\n  async listEmails(params: {\n    campaign_id?: string;\n    is_unread?: boolean;\n    limit?: number;\n    starting_after?: string;\n  }) {\n    await this.waitForSlot();\n\n    const qs = new URLSearchParams();\n    if (params.campaign_id) qs.set(\"campaign_id\", params.campaign_id);\n    if (params.is_unread !== undefined) qs.set(\"is_unread\", String(params.is_unread));\n    if (params.limit) qs.set(\"limit\", String(params.limit));\n    if (params.starting_after) qs.set(\"starting_after\", params.starting_after);\n\n    return instantly(`/emails?${qs}`);\n  }\n}\n```\n\n### Step 4: Batch Operations Pattern\n\n```typescript\n// Instead of creating leads one-by-one, batch where possible\nasync function addLeadsBatched(\n  campaignId: string,\n  leads: Array<{ email: string; first_name?: string }>,\n  batchSize = 10,\n  delayBetweenBatchesMs = 1000\n) {\n  let added = 0;\n  let failed = 0;\n\n  for (let i = 0; i < leads.length; i += batchSize) {\n    const batch = leads.slice(i, i + batchSize);\n\n    const results = await Promise.allSettled(\n      batch.map((lead) =>\n        withBackoff(() =>\n          instantly(\"/leads\", {\n            method: \"POST\",\n            body: JSON.stringify({\n              campaign: campaignId,\n              email: lead.email,\n              first_name: lead.first_name,\n              skip_if_in_workspace: true,\n            }),\n          })\n        )\n      )\n    );\n\n    added += results.filter((r) => r.status === \"fulfilled\").length;\n    failed += results.filter((r) => r.status === \"rejected\").length;\n\n    console.log(`Batch ${Math.floor(i / batchSize) + 1}: ${added} added, ${failed} failed`);\n\n    if (i + batchSize < leads.length) {\n      await new Promise((r) => setTimeout(r, delayBetweenBatchesMs));\n    }\n  }\n\n  console.log(`\\nTotal: ${added} added, ${failed} failed out of ${leads.length}`);\n}\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `429` on lead import | Too many sequential POSTs | Use batch pattern with delays |\n| `429` on email listing | >20 req/min | Use `ThrottledEmailFetcher` |\n| `5xx` intermittent | Instantly server overload | Backoff + retry; check status.instantly.ai |\n| Webhook delivery retries exhausted | Your endpoint too slow | Return 200 immediately, process async |\n| Queue memory growing | Too many queued operations | Set max queue size, reject overflow |\n\n## Resources\n\n- [Instantly API v2 Docs](https://developer.instantly.ai/)\n- [Instantly Blog: API Rate Limits](https://instantly.ai/blog/api-webhooks-custom-integrations-for-outreach/)\n\n## Next Steps\n\nFor security patterns, see `instantly-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "instantly-rate-limits",
-    "description": "Implement Instantly.ai rate limiting, backoff, and request throttling",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

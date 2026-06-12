@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031895",
   "name": "fathom-performance-tuning",
   "slug": "fathom-performance-tuning",
   "description": "Optimize Fathom API performance with caching and batch processing.",
   "content": "# Fathom Performance Tuning\n\n## Overview\n\nFathom's meeting intelligence API serves transcript downloads, bulk meeting sync, and action item aggregation. Transcript payloads are large (50-500KB each), making bulk sync of historical meetings a major latency bottleneck. The 60 req/min rate limit requires careful batching. Caching immutable transcripts aggressively while keeping action item data fresh reduces download latency by 70% and prevents rate limit errors during bulk operations.\n\n## Caching Strategy\n\n```typescript\nconst cache = new Map<string, { data: any; expiry: number }>();\nconst TTL = { transcript: 3_600_000, actionItems: 120_000, meetings: 300_000 };\n\nasync function cached(key: string, ttlKey: keyof typeof TTL, fn: () => Promise<any>) {\n  const entry = cache.get(key);\n  if (entry && entry.expiry > Date.now()) return entry.data;\n  const data = await fn();\n  cache.set(key, { data, expiry: Date.now() + TTL[ttlKey] });\n  return data;\n}\n// Transcripts are immutable \u2014 cache 1hr. Action items change \u2014 cache 2min.\n```\n\n## Batch Operations\n\n```typescript\nasync function syncMeetingsBatch(client: any, ids: string[], batchSize = 50) {\n  const results = [];\n  for (let i = 0; i < ids.length; i += batchSize) {\n    const batch = ids.slice(i, i + batchSize);\n    const res = await Promise.all(batch.map(id => client.getTranscript(id)));\n    results.push(...res);\n    if (i + batchSize < ids.length) await new Promise(r => setTimeout(r, 61_000)); // 60 req/min\n  }\n  return results;\n}\n```\n\n## Connection Pooling\n\n```typescript\nimport { Agent } from 'https';\nconst agent = new Agent({ keepAlive: true, maxSockets: 6, maxFreeSockets: 3, timeout: 45_000 });\n// Transcript downloads are large \u2014 longer timeout, fewer concurrent sockets\n```\n\n## Rate Limit Management\n\n```typescript\nasync function withFathomRateLimit(fn: () => Promise<any>): Promise<any> {\n  try { return await fn(); }\n  catch (err: any) {\n    if (err.status === 429) {\n      const retryAfter = parseInt(err.headers?.['retry-after'] || '60') * 1000;\n      await new Promise(r => setTimeout(r, retryAfter));\n      return fn();\n    }\n    throw err;\n  }\n}\n```\n\n## Monitoring\n\n```typescript\nconst metrics = { downloads: 0, cacheHits: 0, rateLimits: 0, avgLatencyMs: 0 };\nfunction trackDownload(startMs: number, cached: boolean, rateLimited: boolean) {\n  metrics.downloads++;\n  metrics.avgLatencyMs = (metrics.avgLatencyMs * (metrics.downloads - 1) + (Date.now() - startMs)) / metrics.downloads;\n  if (cached) metrics.cacheHits++; if (rateLimited) metrics.rateLimits++;\n}\n```\n\n## Performance Checklist\n\n- [ ] Cache transcripts with 1-hour TTL (immutable after generation)\n- [ ] Use webhooks instead of polling for new meeting notifications\n- [ ] Batch transcript downloads in groups of 50 with 60s pauses\n- [ ] Set action item cache TTL to 2 min for freshness\n- [ ] Enable HTTP keep-alive with 45s timeout for large payloads\n- [ ] Track rate limit hits and back off with Retry-After header\n- [ ] Parallelize independent meeting metadata and transcript fetches\n- [ ] Aggregate action items client-side to reduce API round-trips\n\n## Error Handling\n\n| Issue | Cause | Fix |\n|-------|-------|-----|\n| 429 Rate Limited | Exceeded 60 req/min | Parse Retry-After, batch with 61s delay between groups |\n| Transcript timeout | Large payload on slow connection | Increase timeout to 45s, enable keep-alive |\n| Stale action items | Cache TTL too aggressive | Reduce action item TTL to 2 min |\n| Missing transcript | Meeting still processing | Check meeting status before download, retry after 30s |\n| Partial sync failure | Network interruption mid-batch | Track progress, resume from last successful ID |\n\n## Resources\n\n- [Fathom API Docs](https://fathom.video/developers)\n\n## Next Steps\n\nSee `fathom-reference-architecture`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "fathom-performance-tuning",
-    "description": "Optimize Fathom API performance with caching and batch processing.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

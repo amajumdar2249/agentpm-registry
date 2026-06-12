@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032644",
   "name": "miro-webhooks-events",
   "slug": "miro-webhooks-events",
   "description": "Implement Miro REST API v2 webhooks with board subscriptions, event",
   "content": "# Miro Webhooks & Events\n\n## Overview\n\nReceive real-time notifications when items on a Miro board change. Miro uses **board subscriptions** via the `/v2-experimental/webhooks/board_subscriptions` endpoint. All board item types are supported except tags, connectors, and comments.\n\n## Prerequisites\n\n- Access token with `boards:read` scope\n- HTTPS endpoint accessible from the internet\n- Webhook signing secret (generated when creating subscription)\n\n## Create a Board Subscription\n\n```typescript\n// POST https://api.miro.com/v2-experimental/webhooks/board_subscriptions\nasync function createBoardSubscription(boardId: string, callbackUrl: string) {\n  const response = await fetch(\n    'https://api.miro.com/v2-experimental/webhooks/board_subscriptions',\n    {\n      method: 'POST',\n      headers: {\n        'Authorization': `Bearer ${process.env.MIRO_ACCESS_TOKEN}`,\n        'Content-Type': 'application/json',\n      },\n      body: JSON.stringify({\n        boardId,\n        callbackUrl,       // Must be HTTPS\n        status: 'enabled', // 'enabled' | 'disabled'\n      }),\n    }\n  );\n\n  const subscription = await response.json();\n  console.log(`Subscription created: ${subscription.id}`);\n  console.log(`Type: ${subscription.type}`);  // 'board_subscription'\n  return subscription;\n}\n```\n\n## Manage Subscriptions\n\n```typescript\n// List subscriptions\n// GET https://api.miro.com/v2-experimental/webhooks/board_subscriptions\nconst list = await miroFetch('/v2-experimental/webhooks/board_subscriptions');\n\n// Get a specific subscription\n// GET https://api.miro.com/v2-experimental/webhooks/board_subscriptions/{subscription_id}\nconst sub = await miroFetch(`/v2-experimental/webhooks/board_subscriptions/${subId}`);\n\n// Update subscription (enable/disable)\n// PATCH https://api.miro.com/v2-experimental/webhooks/board_subscriptions/{subscription_id}\nawait miroFetch(`/v2-experimental/webhooks/board_subscriptions/${subId}`, 'PATCH', {\n  status: 'disabled',\n});\n\n// Delete subscription\n// DELETE https://api.miro.com/v2-experimental/webhooks/board_subscriptions/{subscription_id}\nawait miroFetch(`/v2-experimental/webhooks/board_subscriptions/${subId}`, 'DELETE');\n```\n\n## Event Payload Structure\n\nWhen a board item is created, updated, or deleted, Miro sends a POST request to your callback URL:\n\n```json\n{\n  \"event\": \"board_subscription_changed\",\n  \"type\": \"update\",\n  \"boardId\": \"uXjVN1234567890\",\n  \"item\": {\n    \"id\": \"3458764500000001\",\n    \"type\": \"sticky_note\"\n  },\n  \"changes\": [\n    {\n      \"property\": \"data.content\",\n      \"previousValue\": \"Old text\",\n      \"newValue\": \"Updated text\"\n    }\n  ],\n  \"createdAt\": \"2025-01-15T10:30:00Z\",\n  \"createdBy\": {\n    \"id\": \"user-123\",\n    \"type\": \"user\"\n  }\n}\n```\n\n### Event Types\n\n| `type` Value | Description | Item Types |\n|-------------|-------------|------------|\n| `create` | New item added to board | All except tags, connectors, comments |\n| `update` | Item content/position/style changed | All except tags, connectors, comments |\n| `delete` | Item removed from board | All except tags, connectors, comments |\n\n## Webhook Handler (Express.js)\n\n```typescript\nimport express from 'express';\nimport crypto from 'crypto';\n\nconst app = express();\n\n// CRITICAL: Use raw body parser for signature verification\napp.post('/webhooks/miro',\n  express.raw({ type: 'application/json' }),\n  async (req, res) => {\n    // Step 1: Verify signature\n    const signature = req.headers['x-miro-signature'] as string;\n    if (!verifySignature(req.body, signature)) {\n      console.error('Invalid webhook signature \u2014 possible forgery');\n      return res.status(401).json({ error: 'Invalid signature' });\n    }\n\n    // Step 2: Parse event\n    const event = JSON.parse(req.body.toString());\n\n    // Step 3: Respond quickly (within 10 seconds)\n    res.status(200).json({ received: true });\n\n    // Step 4: Process asynchronously\n    processEvent(event).catch(err =>\n      console.error(`Failed to process event: ${err.message}`)\n    );\n  }\n);\n\nfunction verifySignature(rawBody: Buffer, signature: string): boolean {\n  if (!signature) return false;\n\n  const secret = process.env.MIRO_WEBHOOK_SECRET!;\n  const expected = crypto\n    .createHmac('sha256', secret)\n    .update(rawBody)\n    .digest('hex');\n\n  try {\n    return crypto.timingSafeEqual(\n      Buffer.from(signature, 'hex'),\n      Buffer.from(expected, 'hex'),\n    );\n  } catch {\n    return false;\n  }\n}\n```\n\n## Event Processing\n\n```typescript\ninterface MiroBoardEvent {\n  event: 'board_subscription_changed';\n  type: 'create' | 'update' | 'delete';\n  boardId: string;\n  item: { id: string; type: string };\n  changes?: Array<{ property: string; previousValue: unknown; newValue: unknown }>;\n  createdAt: string;\n  createdBy: { id: string; type: string };\n}\n\nasync function processEvent(event: MiroBoardEvent): Promise<void> {\n  const { type, boardId, item } = event;\n\n  switch (type) {\n    case 'create':\n      console.log(`New ${item.type} created on board ${boardId}: ${item.id}`);\n      // Fetch full item details if needed\n      const fullItem = await miroFetch(`/v2/boards/${boardId}/items/${item.id}`);\n      await syncToDatabase(fullItem);\n      break;\n\n    case 'update':\n      console.log(`${item.type} updated on board ${boardId}: ${item.id}`);\n      if (event.changes) {\n        for (const change of event.changes) {\n          console.log(`  ${change.property}: ${change.previousValue} \u2192 ${change.newValue}`);\n        }\n      }\n      await updateInDatabase(item.id, event.changes);\n      break;\n\n    case 'delete':\n      console.log(`${item.type} deleted from board ${boardId}: ${item.id}`);\n      await deleteFromDatabase(item.id);\n      break;\n  }\n}\n```\n\n## Idempotency Guard\n\nMiro may deliver the same event multiple times. Prevent duplicate processing:\n\n```typescript\nimport { Redis } from 'ioredis';\n\nconst redis = new Redis(process.env.REDIS_URL);\n\nasync function processOnce(eventId: string, handler: () => Promise<void>): Promise<void> {\n  const key = `miro:webhook:${eventId}`;\n\n  // SET NX with TTL \u2014 returns 'OK' only if key was newly set\n  const result = await redis.set(key, '1', 'EX', 86400 * 7, 'NX');  // 7 days TTL\n  if (result !== 'OK') {\n    console.log(`Duplicate event ${eventId} \u2014 skipping`);\n    return;\n  }\n\n  await handler();\n}\n```\n\n## Webhook Testing\n\n```bash\n# Test with ngrok for local development\nngrok http 3000\n# Register https://your-ngrok.ngrok-free.app/webhooks/miro as callback URL\n\n# Manually test your endpoint\ncurl -X POST http://localhost:3000/webhooks/miro \\\n  -H \"Content-Type: application/json\" \\\n  -H \"X-Miro-Signature: $(echo -n '{\"event\":\"board_subscription_changed\",\"type\":\"create\",\"boardId\":\"test\",\"item\":{\"id\":\"123\",\"type\":\"sticky_note\"}}' | openssl dgst -sha256 -hmac \"$MIRO_WEBHOOK_SECRET\" | awk '{print $2}')\" \\\n  -d '{\"event\":\"board_subscription_changed\",\"type\":\"create\",\"boardId\":\"test\",\"item\":{\"id\":\"123\",\"type\":\"sticky_note\"}}'\n\n# Use Pipedream for webhook debugging\n# See: https://developers.miro.com/docs/set-up-a-test-endpoint-for-webhooks\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| No events received | Subscription disabled | Check subscription status |\n| Invalid signature | Wrong secret | Verify MIRO_WEBHOOK_SECRET matches app settings |\n| Event processing timeout | Slow handler | Return 200 immediately, process async |\n| Duplicate events | Miro retry delivery | Implement idempotency with event ID |\n| Missing item types | Tags/connectors/comments excluded | Use polling for those types |\n\n## Resources\n\n- [Getting Started with Webhooks](https://developers.miro.com/docs/getting-started-with-webhooks)\n- [Create Board Subscription](https://developers.miro.com/reference/create-board-subscription)\n- [Set Up Test Endpoint](https://developers.miro.com/docs/set-up-a-test-endpoint-for-webhooks)\n- [Webhooks with Python](https://developers.miro.com/docs/getting-started-with-webhooks-python)\n\n## Next Steps\n\nFor performance optimization, see `miro-performance-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "miro-webhooks-events",
-    "description": "Implement Miro REST API v2 webhooks with board subscriptions, event",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

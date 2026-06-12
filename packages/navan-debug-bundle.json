@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032676",
   "name": "navan-debug-bundle",
   "slug": "navan-debug-bundle",
   "description": "Use when collecting diagnostic data from a Navan API integration \\u2014\\",
   "content": "# Navan Debug Bundle\n\n## Overview\n\nCollect diagnostic data from Navan REST API integrations into a structured, shareable debug bundle. Navan has no SDK \u2014 all debugging uses raw HTTP requests against their OAuth 2.0 REST endpoints.\n\n## Prerequisites\n\n- Navan API credentials: `client_id` and `client_secret` from Admin > Travel admin > Settings > Integrations\n- `curl` and `jq` installed locally\n- Credentials are viewable **only once** at creation \u2014 store them in a secret manager immediately\n- No sandbox environment exists; all API calls hit production\n\n## Instructions\n\n### Step 1 \u2014 Create Bundle Directory\n\n```bash\nBUNDLE_DIR=\"navan-debug-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE_DIR\"/{auth,api,connectivity,env}\necho \"Bundle initialized: $BUNDLE_DIR\"\n```\n\n### Step 2 \u2014 Capture Environment State\n\n```bash\ncat > \"$BUNDLE_DIR/env/config.txt\" <<ENVEOF\nTimestamp: $(date -u +\"%Y-%m-%dT%H:%M:%SZ\")\nNAVAN_CLIENT_ID: ${NAVAN_CLIENT_ID:+SET (not empty)}${NAVAN_CLIENT_ID:-UNSET}\nNAVAN_CLIENT_SECRET: ${NAVAN_CLIENT_SECRET:+SET (not empty)}${NAVAN_CLIENT_SECRET:-UNSET}\nNAVAN_TOKEN_URL: ${NAVAN_TOKEN_URL:-https://api.navan.com/ta-auth/oauth/token}\ncurl version: $(curl --version | head -1)\njq version: $(jq --version 2>/dev/null || echo \"not installed\")\nENVEOF\n```\n\n### Step 3 \u2014 Test OAuth Token Acquisition\n\n```bash\ncurl -s -w \"\\n---HTTP_CODE:%{http_code}---\\n\" \\\n  -X POST \"https://api.navan.com/ta-auth/oauth/token\" \\\n  -H \"Content-Type: application/x-www-form-urlencoded\" \\\n  -d \"grant_type=client_credentials&client_id=$NAVAN_CLIENT_ID&client_secret=$NAVAN_CLIENT_SECRET\" \\\n  | tee \"$BUNDLE_DIR/auth/token-response.json\" \\\n  | jq '{has_token: (.access_token != null), error: .error}'\n```\n\nIf the token response returns HTTP 401, the credentials are invalid or expired. If HTTP 403, the API integration may not be enabled for your organization.\n\n### Step 4 \u2014 Probe API Endpoints\n\nTest each core endpoint and capture full response headers:\n\n```bash\nTOKEN=$(jq -r '.access_token' \"$BUNDLE_DIR/auth/token-response.json\")\n\n# Test the primary bookings endpoint\nENDPOINT=\"v1/bookings\"\ncurl -s -D \"$BUNDLE_DIR/api/bookings-headers.txt\" \\\n  -w \"\\n---HTTP_CODE:%{http_code}---\\n\" \\\n  -H \"Authorization: Bearer $TOKEN\" \\\n  \"https://api.navan.com/${ENDPOINT}?page=0&size=1\" \\\n  > \"$BUNDLE_DIR/api/bookings-body.json\" 2>&1\necho \"bookings: $(grep 'HTTP_CODE' \"$BUNDLE_DIR/api/bookings-body.json\")\"\n```\n\n### Step 5 \u2014 Connectivity and DNS Tests\n\n```bash\ncurl -s -o /dev/null -w \"connect_time: %{time_connect}\\nttfb: %{time_starttransfer}\\ntotal: %{time_total}\\nhttp_code: %{http_code}\\n\" \\\n  \"https://api.navan.com/ta-auth/oauth/token\" \\\n  > \"$BUNDLE_DIR/connectivity/timing.txt\"\n\nnslookup api.navan.com > \"$BUNDLE_DIR/connectivity/dns.txt\" 2>&1\n```\n\n### Step 6 \u2014 Sanitize and Package\n\nStrip any raw credentials before sharing:\n\n```bash\n# Remove raw secrets from bundle files\nfind \"$BUNDLE_DIR\" -type f -exec sed -i \\\n  -e \"s/$NAVAN_CLIENT_SECRET/[REDACTED]/g\" \\\n  -e \"s/$NAVAN_CLIENT_ID/[CLIENT_ID_REDACTED]/g\" {} +\n\ntar -czf \"${BUNDLE_DIR}.tar.gz\" \"$BUNDLE_DIR\"\necho \"Debug bundle ready: ${BUNDLE_DIR}.tar.gz ($(du -h \"${BUNDLE_DIR}.tar.gz\" | cut -f1))\"\n```\n\n## Output\n\nA compressed tarball containing:\n\n| File | Contents |\n|------|----------|\n| `auth/token-response.json` | OAuth response (token redacted) |\n| `api/*-headers.txt` | HTTP response headers per endpoint |\n| `api/*-body.json` | API response bodies |\n| `connectivity/timing.txt` | Connection timing metrics |\n| `connectivity/dns.txt` | DNS resolution results |\n| `env/config.txt` | Environment variable state |\n\n## Error Handling\n\n| HTTP Code | Meaning | Action |\n|-----------|---------|--------|\n| 401 | Invalid or expired credentials | Regenerate credentials in Admin > Integrations |\n| 403 | API not enabled for organization | Contact Navan admin to enable API access |\n| 429 | Rate limit exceeded | Wait and retry; check `Retry-After` header |\n| 500 | Navan server error | Retry after 60s; check Navan status |\n| `ECONNREFUSED` | Cannot reach Navan | Check DNS, firewall, and proxy settings |\n\n## Examples\n\nParse a specific error from the bundle:\n\n```bash\n# Extract error details from a failed endpoint\njq '.error, .message, .status' \"$BUNDLE_DIR/api/bookings-body.json\"\n\n# Check if token is expired\njq '.expires_at' \"$BUNDLE_DIR/auth/token-response.json\"\n\n# Review response times\ncat \"$BUNDLE_DIR/connectivity/timing.txt\"\n```\n\n## Resources\n\n- [Navan Help Center](https://app.navan.com/app/helpcenter) \u2014 Support documentation and troubleshooting\n- [Navan Security](https://navan.com/security) \u2014 SOC 2 Type II, ISO 27001 compliance details\n- [Navan Integrations](https://navan.com/integrations) \u2014 Available third-party connectors\n\n## Next Steps\n\n- Use `navan-incident-runbook` if the debug bundle reveals a production incident\n- Use `navan-rate-limits` if 429 errors appear in the bundle\n- Use `navan-common-errors` for guidance on specific HTTP error codes\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "navan-debug-bundle",
-    "description": "Use when collecting diagnostic data from a Navan API integration \\u2014\\",
-    "allowed-tools": "Read, Bash(curl:*), Bash(jq:*), Bash(tar:*), Bash(mkdir:*), Bash(date:*),",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

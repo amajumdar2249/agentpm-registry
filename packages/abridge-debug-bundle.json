@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031126",
   "name": "abridge-debug-bundle",
   "slug": "abridge-debug-bundle",
   "description": "Collect Abridge debug evidence for support tickets and troubleshooting.",
   "content": "# Abridge Debug Bundle\n\n## Overview\n\nCollect HIPAA-safe diagnostic data for Abridge support tickets. All PHI is automatically redacted before bundle creation.\n\n## Prerequisites\n\n- Abridge credentials configured\n- Access to application logs\n- Node.js or bash for running diagnostic scripts\n\n## Instructions\n\n### Step 1: Generate Debug Bundle\n\n```typescript\n// src/debug/abridge-debug-bundle.ts\nimport fs from 'fs';\nimport { execSync } from 'child_process';\n\ninterface DebugBundle {\n  timestamp: string;\n  environment: Record<string, string>;\n  connectivity: Record<string, any>;\n  recentErrors: any[];\n  sessionDiagnostics: any[];\n  fhirStatus: any;\n}\n\nasync function generateDebugBundle(): Promise<DebugBundle> {\n  const bundle: DebugBundle = {\n    timestamp: new Date().toISOString(),\n    environment: collectEnvironment(),\n    connectivity: await testConnectivity(),\n    recentErrors: await collectRecentErrors(),\n    sessionDiagnostics: await collectSessionDiagnostics(),\n    fhirStatus: await checkFhirStatus(),\n  };\n\n  // Redact PHI before saving\n  const sanitized = redactPhi(JSON.stringify(bundle, null, 2));\n  const filename = `abridge-debug-${Date.now()}.json`;\n  fs.writeFileSync(filename, sanitized);\n  console.log(`Debug bundle saved: ${filename}`);\n\n  return bundle;\n}\n\nfunction collectEnvironment(): Record<string, string> {\n  return {\n    nodeVersion: process.version,\n    platform: process.platform,\n    abridgeBaseUrl: process.env.ABRIDGE_BASE_URL || 'NOT SET',\n    orgId: process.env.ABRIDGE_ORG_ID ? 'SET (redacted)' : 'NOT SET',\n    clientSecret: process.env.ABRIDGE_CLIENT_SECRET ? 'SET (redacted)' : 'NOT SET',\n    fhirBaseUrl: process.env.EPIC_FHIR_BASE_URL || 'NOT SET',\n    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,\n  };\n}\n\nasync function testConnectivity(): Promise<Record<string, any>> {\n  const results: Record<string, any> = {};\n  const endpoints = [\n    { name: 'abridge_api', url: `${process.env.ABRIDGE_BASE_URL}/health` },\n    { name: 'fhir_server', url: `${process.env.EPIC_FHIR_BASE_URL}/metadata` },\n  ];\n\n  for (const ep of endpoints) {\n    try {\n      const start = Date.now();\n      const res = await fetch(ep.url, { signal: AbortSignal.timeout(5000) });\n      results[ep.name] = { status: res.status, latency_ms: Date.now() - start };\n    } catch (err) {\n      results[ep.name] = { status: 'UNREACHABLE', error: (err as Error).message };\n    }\n  }\n  return results;\n}\n\nfunction redactPhi(text: string): string {\n  return text\n    .replace(/\\b\\d{3}-\\d{2}-\\d{4}\\b/g, '[SSN-REDACTED]')\n    .replace(/\\b\\d{10}\\b/g, '[MRN-REDACTED]')\n    .replace(/\"(name|patient_name|given|family)\":\\s*\"[^\"]+\"/g, '\"$1\": \"[REDACTED]\"')\n    .replace(/\\b\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}\\b/g, '[DOB-REDACTED]');\n}\n```\n\n### Step 2: Session-Level Diagnostics\n\n```typescript\nasync function collectSessionDiagnostics(): Promise<any[]> {\n  const api = AbridgeApiClient.getInstance().http;\n  try {\n    const { data } = await api.get('/encounters/sessions', {\n      params: { status: 'error', limit: 10, order: 'desc' },\n    });\n    return data.sessions.map((s: any) => ({\n      session_id: s.session_id,\n      status: s.status,\n      error_code: s.error_code,\n      specialty: s.specialty,\n      created_at: s.created_at,\n      segment_count: s.segment_count,\n      // No PHI fields included\n    }));\n  } catch {\n    return [{ error: 'Could not fetch session diagnostics' }];\n  }\n}\n```\n\n### Step 3: Bash Quick Diagnostic\n\n```bash\n#!/bin/bash\n# scripts/abridge-quick-diag.sh\n\necho \"=== Abridge Quick Diagnostics $(date -Iseconds) ===\"\n\necho -e \"\\n--- Environment ---\"\necho \"ABRIDGE_BASE_URL: ${ABRIDGE_BASE_URL:-NOT SET}\"\necho \"ABRIDGE_ORG_ID: ${ABRIDGE_ORG_ID:+SET (redacted)}\"\necho \"ABRIDGE_CLIENT_SECRET: ${ABRIDGE_CLIENT_SECRET:+SET (redacted)}\"\n\necho -e \"\\n--- Connectivity ---\"\necho -n \"API Health: \"\ncurl -s -o /dev/null -w \"%{http_code} (%{time_total}s)\" \\\n  -H \"Authorization: Bearer $ABRIDGE_CLIENT_SECRET\" \\\n  -H \"X-Org-Id: $ABRIDGE_ORG_ID\" \\\n  \"$ABRIDGE_BASE_URL/health\"\n\necho -e \"\\n\\n--- TLS Info ---\"\necho | openssl s_client -connect \"$(echo $ABRIDGE_BASE_URL | sed 's|https://||'):443\" 2>/dev/null \\\n  | openssl x509 -noout -subject -dates 2>/dev/null\n\necho -e \"\\n--- DNS Resolution ---\"\ndig +short \"$(echo $ABRIDGE_BASE_URL | sed 's|https://||')\" 2>/dev/null || echo \"dig not available\"\n\necho -e \"\\n=== Diagnostics Complete ===\"\n```\n\n## Output\n\n- `abridge-debug-{timestamp}.json` file with all PHI redacted\n- Environment configuration status\n- Connectivity test results with latency\n- Recent error sessions (metadata only, no PHI)\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Bundle contains PHI | Redaction regex missed a pattern | Add pattern to `redactPhi()` function |\n| Cannot reach API | Network/firewall issue | Check DNS, TLS cert, firewall rules |\n| Empty error list | No recent errors | Good sign \u2014 check if issue is client-side |\n\n## Resources\n\n- [Abridge Support](https://support.abridge.com)\n- [HIPAA Minimum Necessary Rule](https://www.hhs.gov/hipaa/for-professionals/privacy/guidance/minimum-necessary-requirement/)\n\n## Next Steps\n\nFor rate limiting patterns, see `abridge-rate-limits`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "abridge-debug-bundle",
-    "description": "Collect Abridge debug evidence for support tickets and troubleshooting.",
-    "Trigger": "abridge debug bundle\", \"abridge support ticket\",",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Bash(node:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

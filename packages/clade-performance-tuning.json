@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031503",
   "name": "clade-performance-tuning",
   "slug": "clade-performance-tuning",
   "description": "Optimize Anthropic API latency \\u2014 streaming, prompt caching, model\\",
   "content": "# Anthropic Performance Tuning\n\n## Overview\n\nClaude latency has two components: **time to first token (TTFT)** and **tokens per second (TPS)**. Different strategies target each.\n\n## Latency Benchmarks (approximate)\n\n| Model | TTFT (p50) | TTFT (p95) | Output TPS |\n|-------|-----------|-----------|------------|\n| Claude Haiku 4.5 | 200ms | 600ms | ~150 |\n| Claude Sonnet 4 | 400ms | 1.2s | ~90 |\n| Claude Opus 4 | 800ms | 2.5s | ~40 |\n\n## Optimization Strategies\n\n## Instructions\n\n### Step 1: Always Stream\n\n```typescript\n// Streaming delivers the first token ASAP \u2014 user sees response instantly\n// instead of waiting for the full response to generate\n\nconst stream = client.messages.stream({\n  model: 'claude-sonnet-4-20250514',\n  max_tokens: 1024,\n  messages,\n});\n\n// First token arrives in ~400ms (Sonnet)\n// Full response may take 5-10s, but user sees progress immediately\nfor await (const event of stream) {\n  if (event.type === 'content_block_delta') {\n    yield event.delta.text;\n  }\n}\n```\n\n### Step 2: Prompt Caching \u2014 Faster TTFT\n\n```typescript\n// Cached prompts skip re-processing \u2014 dramatically lower TTFT for large system prompts\nconst message = await client.messages.create({\n  model: 'claude-sonnet-4-20250514',\n  max_tokens: 1024,\n  system: [{\n    type: 'text',\n    text: largeSystemPrompt, // 10K+ tokens\n    cache_control: { type: 'ephemeral' },\n  }],\n  messages,\n}, {\n  headers: { 'claude-beta': 'prompt-caching-2024-07-31' },\n});\n// TTFT drops from ~2s to ~500ms on cache hit with large prompts\n```\n\n### Step 3: Use Haiku for Speed-Critical Paths\n\n```typescript\n// Haiku is 2-4x faster than Sonnet with 80% quality for many tasks\n// Use for: classification, extraction, simple Q&A, routing decisions\n\nconst route = await client.messages.create({\n  model: 'claude-haiku-4-5-20251001', // 200ms TTFT\n  max_tokens: 10,\n  system: 'Classify the intent. Reply with exactly one word: search, create, update, delete.',\n  messages: [{ role: 'user', content: userInput }],\n});\n\n// Then use Sonnet/Opus for the actual task\n```\n\n### Step 4: Reuse Client Instance\n\n```typescript\n// BAD \u2014 creates new connection pool per request\napp.get('/api/chat', async (req, res) => {\n  const client = new Anthropic(); // DON'T\n  // ...\n});\n\n// GOOD \u2014 single client shared across requests\nconst client = new Anthropic(); // Module-level singleton\n\napp.get('/api/chat', async (req, res) => {\n  const message = await client.messages.create({ ... });\n  // ...\n});\n```\n\n### Step 5: Parallel Requests\n\n```typescript\n// When you need multiple independent Claude calls, fire them in parallel\nconst [summary, sentiment, entities] = await Promise.all([\n  client.messages.create({ model: 'claude-haiku-4-5-20251001', max_tokens: 200,\n    messages: [{ role: 'user', content: `Summarize: ${text}` }] }),\n  client.messages.create({ model: 'claude-haiku-4-5-20251001', max_tokens: 20,\n    messages: [{ role: 'user', content: `Sentiment (positive/negative/neutral): ${text}` }] }),\n  client.messages.create({ model: 'claude-haiku-4-5-20251001', max_tokens: 200,\n    messages: [{ role: 'user', content: `Extract named entities from: ${text}` }] }),\n]);\n```\n\n### Step 6: Minimize Output Tokens\n\n```typescript\n// Fewer output tokens = faster response\nsystem: 'Be extremely concise. Use bullet points, not paragraphs.',\n\n// Set tight max_tokens\nmax_tokens: 256, // Don't use 4096 for short answers\n```\n\n## Output\n\n- Streaming enabled for all user-facing responses (first token in ~400ms with Sonnet)\n- Prompt caching reducing TTFT for large system prompts\n- Model routing to Haiku for speed-critical classification/routing tasks\n- Client instance reused across requests (no per-request connection overhead)\n- Parallel requests firing independent Claude calls concurrently\n\n## Error Handling\n\n| Issue | Cause | Fix |\n|-------|-------|-----|\n| TTFT > 3s | Large uncached prompt | Enable prompt caching |\n| Slow output | Using Opus for simple tasks | Downgrade to Haiku/Sonnet |\n| Timeouts | Long generation + default timeout | `new Anthropic({ timeout: 120_000 })` |\n| 529 overloaded | API capacity | SDK auto-retries; add fallback model |\n\n## Examples\n\nSee Latency Benchmarks table and six numbered strategy sections above, each with complete TypeScript code examples.\n\n## Resources\n\n- [Streaming Docs](https://docs.anthropic.com/en/api/messages-streaming)\n- [Prompt Caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching)\n- [Models Comparison](https://docs.anthropic.com/en/docs/about-claude/models)\n\n## Next Steps\n\nSee `clade-deploy-integration` for production deployment patterns.\n\n## Prerequisites\n\n- Completed `clade-install-auth`\n- User-facing application where latency matters\n- Understanding of streaming and async patterns\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clade-performance-tuning",
-    "description": "Optimize Anthropic API latency \\u2014 streaming, prompt caching, model\\",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

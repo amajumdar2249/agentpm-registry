@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031375",
   "name": "attio-sdk-patterns",
   "slug": "attio-sdk-patterns",
   "description": "Production-ready patterns for the Attio REST API: typed client,",
   "content": "# Attio SDK Patterns\n\n## Overview\n\nThere is no official Attio Node.js SDK. The API is a clean REST/JSON interface at `https://api.attio.com/v2`. These patterns wrap `fetch` into a production-grade typed client with retry, pagination, and error normalization.\n\n## Prerequisites\n\n- Node.js 18+ (native `fetch`)\n- TypeScript 5+\n- Completed `attio-install-auth`\n\n## Instructions\n\n### Pattern 1: Typed Client with Error Normalization\n\n```typescript\n// src/attio/client.ts\nconst ATTIO_BASE = \"https://api.attio.com/v2\";\n\nexport class AttioApiError extends Error {\n  constructor(\n    public statusCode: number,\n    public type: string,\n    public code: string,\n    message: string\n  ) {\n    super(message);\n    this.name = \"AttioApiError\";\n  }\n\n  get retryable(): boolean {\n    return this.statusCode === 429 || this.statusCode >= 500;\n  }\n}\n\nexport class AttioClient {\n  constructor(private apiKey: string) {}\n\n  async request<T>(\n    method: string,\n    path: string,\n    body?: Record<string, unknown>\n  ): Promise<T> {\n    const res = await fetch(`${ATTIO_BASE}${path}`, {\n      method,\n      headers: {\n        Authorization: `Bearer ${this.apiKey}`,\n        \"Content-Type\": \"application/json\",\n      },\n      body: body ? JSON.stringify(body) : undefined,\n    });\n\n    if (!res.ok) {\n      const err = await res.json().catch(() => ({}));\n      throw new AttioApiError(\n        res.status,\n        err.type || \"unknown\",\n        err.code || \"unknown\",\n        err.message || `HTTP ${res.status}`\n      );\n    }\n\n    return res.json() as Promise<T>;\n  }\n\n  // Convenience methods for common HTTP verbs\n  get<T>(path: string) { return this.request<T>(\"GET\", path); }\n  post<T>(path: string, body: Record<string, unknown>) { return this.request<T>(\"POST\", path, body); }\n  patch<T>(path: string, body: Record<string, unknown>) { return this.request<T>(\"PATCH\", path, body); }\n  put<T>(path: string, body: Record<string, unknown>) { return this.request<T>(\"PUT\", path, body); }\n  delete<T>(path: string) { return this.request<T>(\"DELETE\", path); }\n}\n```\n\n### Pattern 2: Retry with Exponential Backoff\n\n```typescript\n// src/attio/retry.ts\nexport async function withRetry<T>(\n  operation: () => Promise<T>,\n  config = { maxRetries: 4, baseMs: 1000, maxMs: 30000 }\n): Promise<T> {\n  for (let attempt = 0; attempt <= config.maxRetries; attempt++) {\n    try {\n      return await operation();\n    } catch (err) {\n      if (attempt === config.maxRetries) throw err;\n\n      // Only retry on rate limits (429) and server errors (5xx)\n      if (err instanceof AttioApiError && !err.retryable) throw err;\n\n      const delay = Math.min(\n        config.baseMs * Math.pow(2, attempt) + Math.random() * 500,\n        config.maxMs\n      );\n      await new Promise((r) => setTimeout(r, delay));\n    }\n  }\n  throw new Error(\"Unreachable\");\n}\n\n// Usage\nconst people = await withRetry(() =>\n  client.post(\"/objects/people/records/query\", { limit: 50 })\n);\n```\n\n### Pattern 3: Cursor-Based Pagination Iterator\n\nAttio uses cursor-based pagination. The initial request omits `offset`; responses include `pagination.next_cursor`.\n\n```typescript\n// src/attio/paginate.ts\nexport async function* paginate<T>(\n  client: AttioClient,\n  path: string,\n  body: Record<string, unknown> = {},\n  pageSize = 100\n): AsyncGenerator<T> {\n  let offset = 0;\n  let hasMore = true;\n\n  while (hasMore) {\n    const res = await withRetry(() =>\n      client.post<{ data: T[] }>(path, {\n        ...body,\n        limit: pageSize,\n        offset,\n      })\n    );\n\n    for (const item of res.data) {\n      yield item;\n    }\n\n    hasMore = res.data.length === pageSize;\n    offset += pageSize;\n  }\n}\n\n// Usage: iterate all companies\nfor await (const company of paginate(client, \"/objects/companies/records/query\")) {\n  console.log(company);\n}\n```\n\n### Pattern 4: Singleton with Lazy Init\n\n```typescript\n// src/attio/singleton.ts\nlet _client: AttioClient | null = null;\n\nexport function getClient(): AttioClient {\n  if (!_client) {\n    const key = process.env.ATTIO_API_KEY;\n    if (!key) throw new Error(\"ATTIO_API_KEY not set\");\n    _client = new AttioClient(key);\n  }\n  return _client;\n}\n```\n\n### Pattern 5: Multi-Tenant Factory\n\n```typescript\n// src/attio/factory.ts\nconst tenantClients = new Map<string, AttioClient>();\n\nexport function getClientForTenant(tenantId: string): AttioClient {\n  if (!tenantClients.has(tenantId)) {\n    const key = getTenantApiKey(tenantId); // from DB or secrets manager\n    tenantClients.set(tenantId, new AttioClient(key));\n  }\n  return tenantClients.get(tenantId)!;\n}\n```\n\n### Pattern 6: Response Validation with Zod\n\n```typescript\nimport { z } from \"zod\";\n\nconst AttioPersonSchema = z.object({\n  id: z.object({\n    object_id: z.string(),\n    record_id: z.string(),\n  }),\n  created_at: z.string(),\n  values: z.object({\n    name: z.array(z.object({\n      first_name: z.string().nullable(),\n      last_name: z.string().nullable(),\n      full_name: z.string().nullable(),\n    })),\n    email_addresses: z.array(z.object({\n      email_address: z.string(),\n    })),\n  }).passthrough(),\n});\n\n// Validated fetch\nconst raw = await client.post(\"/objects/people/records/query\", { limit: 1 });\nconst person = AttioPersonSchema.parse(raw.data[0]);\n```\n\n## Error Handling\n\n| Pattern | When to Use | Benefit |\n|---------|------------|---------|\n| `AttioApiError` class | All API calls | Typed error with `retryable` flag |\n| `withRetry` wrapper | Any mutating or critical read | Auto-retry on 429/5xx |\n| Zod validation | Parsing API responses | Catches schema drift at runtime |\n| Multi-tenant factory | SaaS with per-customer tokens | Isolates credentials |\n\n## Resources\n\n- [Attio REST API Overview](https://docs.attio.com/rest-api/overview)\n- [Attio Pagination Guide](https://docs.attio.com/rest-api/guides/pagination)\n- [Attio Slugs and IDs](https://docs.attio.com/docs/slugs-and-ids)\n- [Zod Documentation](https://zod.dev/)\n\n## Next Steps\n\nApply these patterns in `attio-core-workflow-a` (records CRUD) and `attio-core-workflow-b` (lists and entries).\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "attio-sdk-patterns",
-    "description": "Production-ready patterns for the Attio REST API: typed client,",
-    "Trigger": "attio SDK patterns\", \"attio best practices\",",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

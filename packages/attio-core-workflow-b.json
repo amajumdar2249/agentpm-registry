@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031364",
   "name": "attio-core-workflow-b",
   "slug": "attio-core-workflow-b",
   "description": "Manage Attio lists, entries, notes, and tasks via the REST API.",
   "content": "# Attio Lists, Notes & Tasks (Core Workflow B)\n\n## Overview\n\nLists are Attio's pipeline/board primitive -- they contain entries (records added to the list with list-specific attributes like stage or owner). This skill also covers notes and tasks, which attach to records for activity tracking.\n\n## Prerequisites\n\n- `attio-install-auth` completed\n- Scopes: `object_configuration:read`, `record_permission:read`, `list_entry:read`, `list_entry:read-write`, `note:read-write`, `task:read-write`, `user_management:read`\n\n## Instructions\n\n### Step 1: List All Lists\n\n```typescript\n// GET /v2/lists\nconst lists = await client.get<{\n  data: Array<{\n    id: { list_id: string };\n    api_slug: string;\n    name: string;\n    parent_object: string[];  // Which object types can be added\n  }>;\n}>(\"/lists\");\n\nconsole.log(lists.data.map((l) => `${l.api_slug}: ${l.name}`));\n// Output: [\"sales_pipeline: Sales Pipeline\", \"hiring: Hiring Pipeline\"]\n```\n\n### Step 2: Query List Entries\n\n```typescript\n// POST /v2/lists/{list_slug}/entries/query\nconst entries = await client.post<{\n  data: Array<{\n    entry_id: string;\n    record_id: string;\n    created_at: string;\n    values: Record<string, any[]>;\n  }>;\n}>(\"/lists/sales_pipeline/entries/query\", {\n  filter: {\n    stage: { status: { $eq: \"In Progress\" } },\n  },\n  sorts: [\n    { attribute: \"created_at\", field: \"created_at\", direction: \"desc\" },\n  ],\n  limit: 50,\n});\n```\n\n### Step 3: Add a Record to a List (Create Entry)\n\n```typescript\n// POST /v2/lists/{list_slug}/entries\nconst entry = await client.post<{ data: { entry_id: string } }>(\n  \"/lists/sales_pipeline/entries\",\n  {\n    data: {\n      // The record to add to the list\n      parent_record_id: companyRecordId,\n      parent_object: \"companies\",\n      // List-specific attribute values\n      values: {\n        stage: [{ status: \"Qualified\" }],\n        deal_value: [{ currency_code: \"USD\", currency_value: 50000 }],\n        owner: [{ referenced_actor_id: workspaceMemberId, referenced_actor_type: \"workspace-member\" }],\n      },\n    },\n  }\n);\n```\n\n### Step 4: Update an Entry\n\n```typescript\n// PATCH /v2/lists/{list_slug}/entries/{entry_id} -- append multiselect\nawait client.patch(\n  `/lists/sales_pipeline/entries/${entryId}`,\n  {\n    data: {\n      values: {\n        stage: [{ status: \"Won\" }],\n      },\n    },\n  }\n);\n\n// PUT /v2/lists/{list_slug}/entries/{entry_id} -- overwrite multiselect\nawait client.put(\n  `/lists/sales_pipeline/entries/${entryId}`,\n  {\n    data: {\n      values: {\n        stage: [{ status: \"Lost\" }],\n      },\n    },\n  }\n);\n```\n\n### Step 5: Delete an Entry (Remove from List)\n\n```typescript\n// DELETE /v2/lists/{list_slug}/entries/{entry_id}\nawait client.delete(`/lists/sales_pipeline/entries/${entryId}`);\n// Note: This removes from the list only. The underlying record is not deleted.\n```\n\n### Step 6: Create a Note on a Record\n\n```typescript\n// POST /v2/notes\nconst note = await client.post<{\n  data: { id: { note_id: string } };\n}>(\"/notes\", {\n  data: {\n    // Link to a parent record\n    parent_object: \"companies\",\n    parent_record_id: companyRecordId,\n    // Note content\n    title: \"Q1 Review Meeting\",\n    format: \"plaintext\",                     // or \"markdown\"\n    content: \"Discussed renewal timeline. Budget approved for next quarter.\",\n  },\n});\n```\n\n### Step 7: List Notes on a Record\n\n```typescript\n// GET /v2/notes?parent_object=companies&parent_record_id={id}\nconst notes = await client.get<{\n  data: Array<{\n    id: { note_id: string };\n    title: string;\n    content: string;\n    created_at: string;\n    created_by_actor: { type: string; id: string };\n  }>;\n}>(`/notes?parent_object=companies&parent_record_id=${companyRecordId}`);\n```\n\n### Step 8: Create and Manage Tasks\n\n```typescript\n// POST /v2/tasks\nconst task = await client.post<{\n  data: { id: { task_id: string } };\n}>(\"/tasks\", {\n  data: {\n    content: \"Send renewal proposal to Acme Corp\",\n    deadline: \"2025-07-15T17:00:00.000Z\",\n    is_completed: false,\n    // Link to records\n    linked_records: [\n      { target_object: \"companies\", target_record_id: companyRecordId },\n    ],\n    // Assign to workspace members\n    assignees: [\n      { referenced_actor_id: memberId, referenced_actor_type: \"workspace-member\" },\n    ],\n  },\n});\n\n// Complete a task\nawait client.patch(`/tasks/${taskId}`, {\n  data: { is_completed: true },\n});\n\n// List tasks (sorted oldest to newest by default)\nconst tasks = await client.get<{\n  data: Array<{\n    id: { task_id: string };\n    content: string;\n    deadline: string | null;\n    is_completed: boolean;\n  }>;\n}>(\"/tasks\");\n```\n\n## Attio Lists vs Records Mental Model\n\n```\nObjects (people, companies, deals)\n \u2514\u2500\u2500 Records  \u2190 individual CRM entries (Step 1-7 of core-workflow-a)\n      \u2514\u2500\u2500 Notes, Tasks  \u2190 activity attached to records\n\nLists (pipelines, boards)\n \u2514\u2500\u2500 Entries  \u2190 a record placed in a list context\n      \u2514\u2500\u2500 List-specific values (stage, owner, custom columns)\n```\n\n## Error Handling\n\n| Error | Status | Cause | Solution |\n|-------|--------|-------|----------|\n| `not_found` | 404 | Invalid list slug or entry ID | Verify with `GET /v2/lists` |\n| `insufficient_scopes` | 403 | Missing `list_entry:read-write` | Update token scopes |\n| `validation_error` | 422 | Wrong parent_object for list | Check list's `parent_object` array |\n| `insufficient_scopes` | 403 | Missing `note:read-write` for notes | Add note scope to token |\n| `insufficient_scopes` | 403 | Missing `task:read-write` + `user_management:read` | Tasks need both scopes |\n\n## Resources\n\n- [Attio List Entries](https://docs.attio.com/rest-api/endpoint-reference/entries/list-entries)\n- [Attio Create Note](https://docs.attio.com/rest-api/endpoint-reference/notes/create-a-note)\n- [Attio Create Task](https://docs.attio.com/rest-api/endpoint-reference/tasks/create-a-task)\n- [Attio Objects and Lists](https://docs.attio.com/docs/objects-and-lists)\n\n## Next Steps\n\nFor error diagnosis, see `attio-common-errors`. For webhooks on list/record changes, see `attio-webhooks-events`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "attio-core-workflow-b",
-    "description": "Manage Attio lists, entries, notes, and tasks via the REST API.",
-    "Trigger": "attio lists\", \"attio entries\", \"attio pipeline\",",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

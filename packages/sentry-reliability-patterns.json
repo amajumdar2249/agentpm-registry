@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033185",
   "name": "sentry-reliability-patterns",
   "slug": "sentry-reliability-patterns",
   "description": "Build reliable Sentry integrations with graceful degradation, circuit",
   "content": "# Sentry Reliability Patterns\n\n## Overview\n\nBuild Sentry integrations that never take your application down via three pillars: safe initialization with graceful degradation, a circuit breaker that stops hammering Sentry when unreachable, and an offline event queue that buffers errors during outages. Every pattern prioritizes application uptime over telemetry completeness.\n\n## Prerequisites\n\n- `@sentry/node` v8+ (TypeScript) or `sentry-sdk` v2+ (Python)\n- A valid Sentry DSN from project settings at `sentry.io`\n- A fallback logging destination decided (console, file, or external logger)\n- Understanding of your application shutdown lifecycle (signal handlers, container orchestration)\n\n## Instructions\n\n### Step 1 \u2014 Safe Initialization with Graceful Degradation\n\nWrap `Sentry.init()` in try/catch so an invalid DSN, network error, or SDK bug never crashes the app. Track initialization state with a boolean flag. Protect `beforeSend` callbacks with their own error boundary.\n\nCreate `lib/sentry-safe.ts` with `initSentrySafe()` and `captureError()`. See [graceful-degradation.md](references/graceful-degradation.md) for full implementation.\n\nKey rules:\n\n- Never let `Sentry.init()` crash the process \u2014 wrap in try/catch, set `sentryAvailable = false` on failure\n- Verify client creation with `Sentry.getClient()` \u2014 invalid DSNs silently produce no client\n- Always log errors locally as baseline before attempting Sentry capture\n- Wrap user-supplied `beforeSend` hooks in nested try/catch \u2014 return raw event on hook failure\n\n### Step 2 \u2014 Circuit Breaker for Sentry Outages\n\nWhen Sentry is unreachable, continued attempts waste resources and add latency. Track consecutive failures and trip open after a threshold. After cooldown, enter half-open state and send a single probe.\n\nImplement `SentryCircuitBreaker` class with closed/open/half-open states. See [circuit-breaker-pattern.md](references/circuit-breaker-pattern.md) for full implementation. Expose state via [health-checks.md](references/health-checks.md) endpoint.\n\nKey rules:\n\n- Default: 5 failures to trip open, 60-second cooldown before half-open probe\n- In open state, skip Sentry calls entirely and log to fallback\n- On half-open success, reset to closed with zero failure count\n- Expose `getStatus()` for health check endpoints and monitoring dashboards\n\n### Step 3 \u2014 Offline Queue, Custom Transport, and Graceful Shutdown\n\nBuffer events when network is unavailable and replay on reconnect. Use bounded file-based queue to survive restarts. Pair with signal handlers that flush via `Sentry.close()` before process exit.\n\nImplement three modules:\n\n- `lib/sentry-offline-queue.ts` \u2014 `enqueueEvent()` and `drainQueue()`. See [network-failure-handling.md](references/network-failure-handling.md)\n- `lib/sentry-transport.ts` \u2014 Custom transport with exponential backoff retry. See [timeout-handling.md](references/timeout-handling.md)\n- `lib/sentry-shutdown.ts` \u2014 `SIGTERM`/`SIGINT` handlers calling `Sentry.close(2000)`. See [timeout-handling.md](references/timeout-handling.md)\n\nKey rules:\n\n- Cap offline queue at 1000 events, evict oldest when full\n- Drain queue on startup and when connectivity restores\n- Call `Sentry.close(timeout)` before `process.exit()` \u2014 without it, in-flight events are silently dropped\n- For critical errors, use [dual-write-pattern.md](references/dual-write-pattern.md) to send to multiple destinations via `Promise.allSettled`\n\n## Output\n\n- Safe init wrapper catching SDK failures, starting app in degraded mode\n- `captureError()` with automatic fallback to local logging\n- Circuit breaker stopping sends after repeated failures, self-healing after cooldown\n- Health check endpoint exposing SDK status and circuit breaker state\n- File-based offline queue buffering events during outages, draining on reconnect\n- Signal handlers flushing in-flight events before process exit\n- Custom transport with exponential-backoff retry logic\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| App crashes on `Sentry.init()` | Invalid DSN or SDK bug | Wrap in try/catch via `initSentrySafe()` |\n| Events lost on `SIGTERM` | No `Sentry.close()` before exit | Register signal handlers with `Sentry.close(2000)` |\n| Sentry outage cascades latency | Every error path hits Sentry HTTP | Circuit breaker trips after 5 failures |\n| Events lost during network blip | SDK drops events silently | Retry transport + offline queue |\n| Silent event loss | SDK fails without throwing | Health check probes with `captureMessage` + `flush` |\n| Queue grows unbounded | Never drained, Sentry permanently down | Cap at 1000 events, drain on startup |\n| `beforeSend` crashes pipeline | User hook throws | Nested try/catch, return raw event |\n\nSee [errors.md](references/errors.md) for extended troubleshooting.\n\n## Examples\n\nSee [examples.md](references/examples.md) for complete TypeScript and Python integration examples including full-stack wiring of all three patterns.\n\n## Resources\n\n- [Sentry JS Configuration](https://docs.sentry.io/platforms/javascript/configuration/) \u2014 `beforeSend`, `sampleRate`, init options\n- [Custom Transports](https://docs.sentry.io/platforms/javascript/configuration/transports/) \u2014 retry and offline transports\n- [Shutdown & Draining](https://docs.sentry.io/platforms/javascript/configuration/draining/) \u2014 `Sentry.close()` and `Sentry.flush()`\n- [Sentry Python SDK](https://docs.sentry.io/platforms/python/) \u2014 `sentry_sdk.init()`, `flush()`, scope management\n- [Sentry Status Page](https://status.sentry.io/) \u2014 monitor platform outages\n\n## Next Steps\n\n- Emit circuit breaker state changes to observability platform (Datadog, Prometheus) for outage alerting\n- Set up periodic `drainQueue()` via `setInterval` (Node) or cron (Python) instead of startup-only\n- Apply retry transport pattern to Python via `sentry_sdk.init(transport=...)` parameter\n- Test failure modes in staging \u2014 simulate Sentry failures with `beforeSend` to verify circuit breaker behavior\n- Add [dual-write](references/dual-write-pattern.md) for P0/fatal errors to secondary destinations (CloudWatch, PagerDuty)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "sentry-reliability-patterns",
-    "description": "Build reliable Sentry integrations with graceful degradation, circuit",
-    "allowed-tools": "Read, Write, Edit, Grep, Bash(node:*), Bash(pip:*), Bash(python*:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

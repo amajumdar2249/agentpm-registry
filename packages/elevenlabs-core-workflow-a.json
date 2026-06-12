@@ -1,19 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031815",
   "name": "elevenlabs-core-workflow-a",
   "slug": "elevenlabs-core-workflow-a",
   "description": "Implement ElevenLabs text-to-speech and voice cloning workflows.",
   "content": "# ElevenLabs Core Workflow A \u2014 TTS & Voice Cloning\n\n## Overview\n\nThe primary ElevenLabs workflows: (1) Text-to-Speech with voice settings, (2) Instant Voice Cloning from audio samples, and (3) streaming TTS via WebSocket for real-time applications.\n\n## Prerequisites\n\n- Completed `elevenlabs-install-auth` setup\n- Valid API key with sufficient character quota\n- For voice cloning: audio recording(s) of the target voice (min 30 seconds, clean audio)\n\n## Instructions\n\n### Step 1: Advanced Text-to-Speech\n\n```typescript\nimport { ElevenLabsClient } from \"@elevenlabs/elevenlabs-js\";\nimport { createWriteStream } from \"fs\";\nimport { Readable } from \"stream\";\nimport { pipeline } from \"stream/promises\";\n\nconst client = new ElevenLabsClient();\n\nasync function generateSpeech(\n  text: string,\n  voiceId: string,\n  outputPath: string\n) {\n  const audio = await client.textToSpeech.convert(voiceId, {\n    text,\n    model_id: \"eleven_multilingual_v2\",\n    voice_settings: {\n      stability: 0.5,          // Lower = more expressive, higher = more consistent\n      similarity_boost: 0.75,  // How closely to match the original voice\n      style: 0.3,              // Amplify the speaker's style (adds latency if > 0)\n      speed: 1.0,              // 0.7 to 1.2 range\n    },\n    // Optional: enforce language for multilingual model\n    // language_code: \"en\",    // ISO 639-1\n  });\n\n  await pipeline(Readable.fromWeb(audio as any), createWriteStream(outputPath));\n  console.log(`Generated: ${outputPath}`);\n}\n\n// Generate with different voice settings for comparison\nawait generateSpeech(\"Welcome to our platform.\", \"21m00Tcm4TlvDq8ikWAM\", \"stable.mp3\");\n```\n\n### Step 2: Instant Voice Cloning (IVC)\n\nClone a voice from audio samples using `POST /v1/voices/add`:\n\n```typescript\nimport { createReadStream } from \"fs\";\n\nasync function cloneVoice(\n  name: string,\n  description: string,\n  audioFiles: string[]  // Paths to audio samples\n) {\n  const voice = await client.voices.add({\n    name,\n    description,\n    files: audioFiles.map(f => createReadStream(f)),\n    // Optional: label the voice for organization\n    labels: JSON.stringify({ accent: \"american\", age: \"young\" }),\n  });\n\n  console.log(`Cloned voice created: ${voice.voice_id}`);\n  console.log(`Name: ${name}`);\n\n  // Use the cloned voice immediately\n  const audio = await client.textToSpeech.convert(voice.voice_id, {\n    text: \"This is my cloned voice speaking!\",\n    model_id: \"eleven_multilingual_v2\",\n    voice_settings: {\n      stability: 0.5,\n      similarity_boost: 0.85,  // Higher for cloned voices to stay close to original\n    },\n  });\n\n  return { voiceId: voice.voice_id, audio };\n}\n\n// Clone from 1-25 audio samples (more = better quality)\nawait cloneVoice(\n  \"My Custom Voice\",\n  \"Professional narrator voice\",\n  [\"sample1.mp3\", \"sample2.mp3\"]\n);\n```\n\n### Step 3: WebSocket Streaming TTS\n\nFor real-time applications (chatbots, live narration), use the WebSocket endpoint:\n\n```typescript\nimport WebSocket from \"ws\";\n\nasync function streamTTSWebSocket(\n  voiceId: string,\n  textChunks: string[]\n) {\n  const modelId = \"eleven_flash_v2_5\"; // Best for real-time streaming\n  const wsUrl = `wss://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream-input?model_id=${modelId}`;\n\n  const ws = new WebSocket(wsUrl);\n  const audioChunks: Buffer[] = [];\n\n  return new Promise<Buffer>((resolve, reject) => {\n    ws.on(\"open\", () => {\n      // Send initial config (BOS - Beginning of Stream)\n      ws.send(JSON.stringify({\n        text: \" \",  // Space signals BOS\n        voice_settings: {\n          stability: 0.5,\n          similarity_boost: 0.75,\n        },\n        xi_api_key: process.env.ELEVENLABS_API_KEY,\n        // How many chars to buffer before generating audio\n        chunk_length_schedule: [120, 160, 250, 290],\n      }));\n\n      // Stream text chunks\n      for (const chunk of textChunks) {\n        ws.send(JSON.stringify({ text: chunk }));\n      }\n\n      // Send EOS (End of Stream)\n      ws.send(JSON.stringify({ text: \"\" }));\n    });\n\n    ws.on(\"message\", (data: Buffer) => {\n      const msg = JSON.parse(data.toString());\n      if (msg.audio) {\n        // Base64-encoded audio chunk\n        audioChunks.push(Buffer.from(msg.audio, \"base64\"));\n      }\n      if (msg.isFinal) {\n        ws.close();\n      }\n    });\n\n    ws.on(\"close\", () => resolve(Buffer.concat(audioChunks)));\n    ws.on(\"error\", reject);\n  });\n}\n\n// Stream from an LLM response in chunks\nconst chunks = [\"Hello, \", \"this is \", \"streamed \", \"speech!\"];\nconst audio = await streamTTSWebSocket(\"21m00Tcm4TlvDq8ikWAM\", chunks);\n```\n\n### Step 4: Voice Management\n\n```typescript\n// List all available voices\nasync function listVoices() {\n  const { voices } = await client.voices.getAll();\n  for (const v of voices) {\n    console.log(`${v.name} (${v.voice_id}) \u2014 ${v.category}`);\n    // category: \"premade\" | \"cloned\" | \"generated\"\n  }\n}\n\n// Get voice settings defaults\nasync function getVoiceSettings(voiceId: string) {\n  const settings = await client.voices.getSettings(voiceId);\n  console.log(`Stability: ${settings.stability}`);\n  console.log(`Similarity: ${settings.similarity_boost}`);\n}\n\n// Update default voice settings\nasync function updateVoiceSettings(voiceId: string) {\n  await client.voices.editSettings(voiceId, {\n    stability: 0.6,\n    similarity_boost: 0.8,\n  });\n}\n\n// Delete a cloned voice\nasync function deleteVoice(voiceId: string) {\n  await client.voices.delete(voiceId);\n  console.log(`Voice ${voiceId} deleted.`);\n}\n```\n\n## Voice Cloning Requirements\n\n| Aspect | Requirement |\n|--------|-------------|\n| Audio length | Minimum 30 seconds total (1+ minute recommended) |\n| Audio quality | Clean, no background noise, no music |\n| Format | MP3, WAV, M4A, FLAC, OGG |\n| Samples | 1-25 files per voice |\n| Languages | Works across all supported languages |\n| Plan | Available on all paid plans |\n\n## Voice Settings Guide\n\n| Setting | Range | Low Value Effect | High Value Effect |\n|---------|-------|-----------------|-------------------|\n| `stability` | 0-1 | More expressive, varied | Consistent, monotone |\n| `similarity_boost` | 0-1 | More creative deviation | Strictly matches voice |\n| `style` | 0-1 | Neutral delivery | Exaggerated emotion |\n| `speed` | 0.7-1.2 | Slower speech | Faster speech |\n\n**Recommended starting points:**\n\n- Narration: stability=0.5, similarity=0.75, style=0.0\n- Conversational: stability=0.4, similarity=0.6, style=0.3\n- Cloned voice: stability=0.5, similarity=0.85, style=0.0\n\n## Error Handling\n\n| Error | HTTP | Cause | Solution |\n|-------|------|-------|----------|\n| `voice_not_found` | 404 | Invalid voice_id | List voices first: `GET /v1/voices` |\n| `text_too_long` | 400 | Over 5,000 chars per request | Split text and use `previous_text`/`next_text` for prosody |\n| `quota_exceeded` | 401 | Character limit reached | Check usage, upgrade plan |\n| `too_many_concurrent_requests` | 429 | Exceeds plan concurrency | Queue requests; see concurrency limits |\n| `invalid_voice_sample` | 400 | Bad audio file for cloning | Use clean audio, supported format, 30s+ |\n| WebSocket `model_not_supported` | N/A | eleven_v3 not available for WS | Use `eleven_flash_v2_5` or `eleven_multilingual_v2` |\n\n## Resources\n\n- [TTS API Reference](https://elevenlabs.io/docs/api-reference/text-to-speech/convert)\n- [Voice Cloning Guide](https://elevenlabs.io/docs/eleven-api/guides/cookbooks/voices/instant-voice-cloning)\n- [WebSocket Streaming](https://elevenlabs.io/docs/api-reference/text-to-speech/v-1-text-to-speech-voice-id-stream-input)\n- [Voice Settings](https://elevenlabs.io/docs/api-reference/voices/settings/get)\n\n## Next Steps\n\nFor speech-to-speech, sound effects, and audio isolation, see `elevenlabs-core-workflow-b`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "elevenlabs-core-workflow-a",
-    "description": "Implement ElevenLabs text-to-speech and voice cloning workflows.",
-    "or implementing the primary ElevenLabs money-path": "voice generation.",
-    "Trigger": "elevenlabs TTS\", \"text to speech\", \"voice cloning elevenlabs\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

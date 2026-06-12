@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032633",
   "name": "miro-local-dev-loop",
   "slug": "miro-local-dev-loop",
   "description": "Configure Miro local development with hot reload, testing, and ngrok",
   "content": "# Miro Local Dev Loop\n\n## Overview\n\nSet up a fast local development workflow for building Miro integrations, including hot reload, test mocking against the REST API v2, and ngrok tunneling for webhooks.\n\n## Prerequisites\n\n- Completed `miro-install-auth` setup\n- Node.js 18+ with npm or pnpm\n- Access token with `boards:read` and `boards:write` scopes\n- ngrok (for webhook development)\n\n## Instructions\n\n### Step 1: Project Structure\n\n```\nmy-miro-app/\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 miro/\n\u2502   \u2502   \u251c\u2500\u2500 client.ts       # MiroApi wrapper singleton\n\u2502   \u2502   \u251c\u2500\u2500 boards.ts       # Board CRUD operations\n\u2502   \u2502   \u251c\u2500\u2500 items.ts        # Item operations (sticky notes, shapes, etc.)\n\u2502   \u2502   \u2514\u2500\u2500 types.ts        # Response type definitions\n\u2502   \u251c\u2500\u2500 webhooks/\n\u2502   \u2502   \u2514\u2500\u2500 handler.ts      # Webhook event processing\n\u2502   \u2514\u2500\u2500 index.ts\n\u251c\u2500\u2500 tests/\n\u2502   \u251c\u2500\u2500 miro-client.test.ts\n\u2502   \u2514\u2500\u2500 fixtures/\n\u2502       \u251c\u2500\u2500 board.json       # Sample board response\n\u2502       \u2514\u2500\u2500 sticky-note.json # Sample item response\n\u251c\u2500\u2500 .env.local               # Local secrets (git-ignored)\n\u251c\u2500\u2500 .env.example             # Template for team\n\u251c\u2500\u2500 package.json\n\u2514\u2500\u2500 tsconfig.json\n```\n\n### Step 2: Package Configuration\n\n```json\n{\n  \"scripts\": {\n    \"dev\": \"tsx watch src/index.ts\",\n    \"test\": \"vitest\",\n    \"test:watch\": \"vitest --watch\",\n    \"test:integration\": \"MIRO_TEST_MODE=live vitest run tests/integration/\",\n    \"tunnel\": \"ngrok http 3000\",\n    \"typecheck\": \"tsc --noEmit\"\n  },\n  \"dependencies\": {\n    \"@mirohq/miro-api\": \"^2.0.0\",\n    \"express\": \"^4.18.0\",\n    \"dotenv\": \"^16.0.0\"\n  },\n  \"devDependencies\": {\n    \"tsx\": \"^4.0.0\",\n    \"vitest\": \"^1.0.0\",\n    \"typescript\": \"^5.0.0\"\n  }\n}\n```\n\n### Step 3: Miro Client Singleton\n\n```typescript\n// src/miro/client.ts\nimport { MiroApi } from '@mirohq/miro-api';\n\nlet instance: MiroApi | null = null;\n\nexport function getMiroApi(): MiroApi {\n  if (!instance) {\n    const token = process.env.MIRO_ACCESS_TOKEN;\n    if (!token) throw new Error('MIRO_ACCESS_TOKEN not set');\n    instance = new MiroApi(token);\n  }\n  return instance;\n}\n\n// For testing \u2014 allow injecting a mock\nexport function resetMiroApi(): void {\n  instance = null;\n}\n```\n\n### Step 4: Test Fixtures from Real API Responses\n\n```json\n// tests/fixtures/board.json\n{\n  \"id\": \"uXjVN1234567890\",\n  \"type\": \"board\",\n  \"name\": \"Test Board\",\n  \"description\": \"Fixture for unit tests\",\n  \"createdAt\": \"2025-01-15T10:00:00Z\",\n  \"modifiedAt\": \"2025-01-15T10:30:00Z\",\n  \"owner\": { \"id\": \"123456\", \"type\": \"user\", \"name\": \"Dev User\" },\n  \"policy\": {\n    \"sharingPolicy\": { \"access\": \"private\" },\n    \"permissionsPolicy\": { \"collaborationToolsStartAccess\": \"all_editors\" }\n  }\n}\n```\n\n```json\n// tests/fixtures/sticky-note.json\n{\n  \"id\": \"3458764500000001\",\n  \"type\": \"sticky_note\",\n  \"data\": { \"content\": \"Test note\", \"shape\": \"square\" },\n  \"style\": { \"fillColor\": \"light_yellow\", \"textAlign\": \"center\" },\n  \"position\": { \"x\": 100, \"y\": 200, \"origin\": \"center\" },\n  \"geometry\": { \"width\": 199 },\n  \"createdAt\": \"2025-01-15T10:05:00Z\",\n  \"modifiedAt\": \"2025-01-15T10:05:00Z\",\n  \"createdBy\": { \"id\": \"123456\", \"type\": \"user\" }\n}\n```\n\n### Step 5: Unit Tests with Vitest Mocks\n\n```typescript\n// tests/miro-client.test.ts\nimport { describe, it, expect, vi, beforeEach } from 'vitest';\nimport boardFixture from './fixtures/board.json';\nimport stickyNoteFixture from './fixtures/sticky-note.json';\n\n// Mock fetch for Miro API calls\nconst mockFetch = vi.fn();\nvi.stubGlobal('fetch', mockFetch);\n\ndescribe('Miro Board Operations', () => {\n  beforeEach(() => {\n    mockFetch.mockReset();\n  });\n\n  it('should create a sticky note on a board', async () => {\n    mockFetch.mockResolvedValueOnce({\n      ok: true,\n      status: 201,\n      json: async () => stickyNoteFixture,\n    });\n\n    const response = await fetch(\n      'https://api.miro.com/v2/boards/uXjVN123/sticky_notes',\n      {\n        method: 'POST',\n        headers: {\n          'Authorization': 'Bearer test-token',\n          'Content-Type': 'application/json',\n        },\n        body: JSON.stringify({\n          data: { content: 'Test note', shape: 'square' },\n          position: { x: 100, y: 200 },\n        }),\n      }\n    );\n\n    const note = await response.json();\n    expect(note.type).toBe('sticky_note');\n    expect(note.data.content).toBe('Test note');\n    expect(mockFetch).toHaveBeenCalledWith(\n      expect.stringContaining('/v2/boards/'),\n      expect.objectContaining({ method: 'POST' })\n    );\n  });\n\n  it('should handle 429 rate limit responses', async () => {\n    mockFetch.mockResolvedValueOnce({\n      ok: false,\n      status: 429,\n      headers: new Headers({\n        'X-RateLimit-Remaining': '0',\n        'Retry-After': '5',\n      }),\n      json: async () => ({ status: 429, message: 'Rate limit exceeded' }),\n    });\n\n    const response = await fetch('https://api.miro.com/v2/boards', {\n      headers: { 'Authorization': 'Bearer test-token' },\n    });\n\n    expect(response.status).toBe(429);\n  });\n});\n```\n\n### Step 6: Ngrok Tunneling for Webhooks\n\n```bash\n# Start your dev server\nnpm run dev\n\n# In another terminal, start ngrok\nngrok http 3000\n\n# Copy the HTTPS URL (e.g., https://abc123.ngrok.app)\n# Register it as a webhook callback in your Miro app settings\n# or via the API (see miro-webhooks-events skill)\n```\n\n### Step 7: Debug Logging\n\n```typescript\n// Enable verbose HTTP logging during development\nimport { MiroApi } from '@mirohq/miro-api';\n\n// Log all API requests and responses\nconst api = new MiroApi(process.env.MIRO_ACCESS_TOKEN!, {\n  logger: {\n    info: (...args) => console.log('[MIRO]', ...args),\n    warn: (...args) => console.warn('[MIRO]', ...args),\n    error: (...args) => console.error('[MIRO]', ...args),\n  },\n});\n```\n\n## Environment Variables\n\n| Variable | Required | Description |\n|----------|----------|-------------|\n| `MIRO_ACCESS_TOKEN` | Yes | OAuth 2.0 access token |\n| `MIRO_CLIENT_ID` | For OAuth flow | App client ID |\n| `MIRO_CLIENT_SECRET` | For OAuth flow | App client secret |\n| `MIRO_REDIRECT_URI` | For OAuth flow | OAuth callback URL |\n| `MIRO_TEST_BOARD_ID` | For integration tests | Board ID for live tests |\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `MIRO_ACCESS_TOKEN not set` | Missing env variable | Copy `.env.example` to `.env.local` |\n| `ECONNREFUSED` on webhook test | Dev server not running | Start with `npm run dev` first |\n| `invalid_token` | Expired access token | Refresh token (see `miro-install-auth`) |\n| Mock not matching | Fixture out of date | Re-capture fixture from live API |\n\n## Resources\n\n- [Miro Node.js Quickstart](https://developers.miro.com/docs/miro-nodejs-quickstart)\n- [Vitest Documentation](https://vitest.dev/)\n- [ngrok Documentation](https://ngrok.com/docs)\n\n## Next Steps\n\nSee `miro-sdk-patterns` for production-ready code patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "miro-local-dev-loop",
-    "description": "Configure Miro local development with hot reload, testing, and ngrok",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(npx:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

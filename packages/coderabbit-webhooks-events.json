@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031638",
   "name": "coderabbit-webhooks-events",
   "slug": "coderabbit-webhooks-events",
   "description": "Implement CodeRabbit webhook signature validation and event handling.",
   "content": "# CodeRabbit Webhooks & Events\n\n## Overview\n\nHandle CodeRabbit events triggered through GitHub and GitLab integrations. CodeRabbit posts AI-powered code review comments on pull requests.\n\n## Prerequisites\n\n- CodeRabbit installed on your GitHub or GitLab repository\n- GitHub webhook endpoint configured for PR events\n- GitHub App or personal access token for API access\n- `.coderabbit.yaml` configuration in repository root\n\n## Event Types\n\n| Event | Source | Payload |\n|-------|--------|---------|\n| `pull_request_review` | GitHub webhook | Review body, state (approved/changes_requested) |\n| `pull_request_review_comment` | GitHub webhook | Line comment, diff position, file path |\n| `check_run.completed` | GitHub Checks API | CodeRabbit analysis results, conclusion |\n| `issue_comment.created` | GitHub webhook | Summary comment, walkthrough |\n| `pull_request.labeled` | GitHub webhook | Labels applied by CodeRabbit |\n\n## Instructions\n\n### Step 1: Configure GitHub Webhook Receiver\n\n```typescript\nimport express from \"express\";\nimport crypto from \"crypto\";\n\nconst app = express();\n\napp.post(\"/webhooks/github\",\n  express.raw({ type: \"application/json\" }),\n  async (req, res) => {\n    const signature = req.headers[\"x-hub-signature-256\"] as string;  # 256 bytes\n    const secret = process.env.GITHUB_WEBHOOK_SECRET!;\n\n    const expected = \"sha256=\" + crypto\n      .createHmac(\"sha256\", secret)\n      .update(req.body)\n      .digest(\"hex\");\n\n    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {\n      return res.status(401).json({ error: \"Invalid signature\" });  # HTTP 401 Unauthorized\n    }\n\n    const event = req.headers[\"x-github-event\"] as string;\n    const payload = JSON.parse(req.body.toString());\n    res.status(200).json({ received: true });  # HTTP 200 OK\n    await routeCodeRabbitEvent(event, payload);\n  }\n);\n```\n\n### Step 2: Filter and Route CodeRabbit Events\n\n```typescript\nasync function routeCodeRabbitEvent(event: string, payload: any) {\n  const isCodeRabbit = payload?.sender?.login === \"coderabbitai[bot]\";\n\n  if (!isCodeRabbit && event !== \"check_run\") return;\n\n  switch (event) {\n    case \"pull_request_review\":\n      await handleCodeRabbitReview(payload);\n      break;\n    case \"pull_request_review_comment\":\n      await handleReviewComment(payload);\n      break;\n    case \"check_run\":\n      if (payload.check_run?.app?.slug === \"coderabbitai\") {\n        await handleCheckRunComplete(payload);\n      }\n      break;\n    case \"issue_comment\":\n      await handleSummaryComment(payload);\n      break;\n  }\n}\n```\n\n### Step 3: Process Review Results\n\n```typescript\nasync function handleCodeRabbitReview(payload: any) {\n  const { review, pull_request } = payload;\n  const prNumber = pull_request.number;\n  const state = review.state;\n\n  if (state === \"changes_requested\") {\n    const issues = parseReviewIssues(review.body);\n    await notifyTeam({\n      channel: \"#code-reviews\",\n      message: `CodeRabbit found ${issues.length} issues in PR #${prNumber}`,\n      prUrl: pull_request.html_url,\n    });\n  }\n\n  if (state === \"approved\") {\n    await checkAutoMergeEligibility(prNumber);\n  }\n}\n\nfunction parseReviewIssues(body: string): string[] {\n  return body.split(\"\\n\").filter(line =>\n    line.match(/^[-*]\\s+(Bug|Issue|Suggestion|Security)/i)\n  );\n}\n```\n\n### Step 4: Configure CodeRabbit Behavior\n\n```yaml\n# .coderabbit.yaml\nreviews:\n  auto_review:\n    enabled: true\n    drafts: false\n  path_filters:\n    - \"!**/*.test.ts\"\n    - \"!**/generated/**\"\n  review_instructions:\n    - path: \"src/api/**\"\n      instructions: \"Focus on security and input validation\"\nchat:\n  auto_reply: true\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| No review posted | PR too large | Split PR or adjust `max_files` in config |\n| Invalid signature | Wrong GitHub secret | Verify webhook secret in App settings |\n| Bot not responding | App not installed | Check CodeRabbit GitHub App installation |\n| Duplicate comments | Re-triggered workflow | CodeRabbit deduplicates automatically |\n\n## Examples\n\n### Track Review Metrics\n\n```typescript\nasync function handleCheckRunComplete(payload: any) {\n  const { check_run } = payload;\n  await metricsDb.insert({\n    prNumber: check_run.pull_requests?.[0]?.number,\n    conclusion: check_run.conclusion,\n    issuesFound: check_run.output?.annotations_count || 0,\n    completedAt: check_run.completed_at,\n  });\n}\n```\n\n## Resources\n\n- [CodeRabbit Documentation](https://docs.coderabbit.ai)\n- [GitHub Webhooks Guide](https://docs.github.com/en/webhooks)\n- [CodeRabbit Configuration](https://docs.coderabbit.ai/configuration)\n\n## Output\n\n- GitHub webhook receiver with signature validation\n- CodeRabbit event routing for reviews, comments, and check runs\n- Review result processing with team notifications\n- Auto-merge eligibility check on CodeRabbit approval\n- Review metrics tracking via check run events\n\n## Next Steps\n\nFor deployment setup, see `coderabbit-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "coderabbit-webhooks-events",
-    "description": "Implement CodeRabbit webhook signature validation and event handling.",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033202",
   "name": "serpapi-reference-architecture",
   "slug": "serpapi-reference-architecture",
   "description": "Production architecture for SerpApi search services with caching, monitoring,",
   "content": "# SerpApi Reference Architecture\n\n## Overview\n\nProduction architecture for search-powered applications using SerpApi. Core components: cached search service, multi-engine abstraction, SERP monitoring pipeline, and credit budget management.\n\n## Architecture Diagram\n\n```\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2502          API Layer               \u2502\n\u2502  /search  /track  /health        \u2502\n\u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524\n\u2502        Search Service            \u2502\n\u2502  Multi-engine  Caching  Parsing  \u2502\n\u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524\n\u2502       SerpApi Client             \u2502\n\u2502  Rate Limiting  Retry  Archive   \u2502\n\u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524\n\u2502       Infrastructure             \u2502\n\u2502  Redis Cache  PostgreSQL  Cron   \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n         \u2502\n         \u25bc\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2502        SerpApi REST API          \u2502\n\u2502  google  youtube  bing  news     \u2502\n\u2502  1 credit/search, 100-50K/mo     \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n```\n\n## Project Structure\n\n```\nsearch-service/\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 serpapi/\n\u2502   \u2502   \u251c\u2500\u2500 client.ts          # Cached search with rate limiting\n\u2502   \u2502   \u251c\u2500\u2500 engines.ts         # Engine-specific param mapping\n\u2502   \u2502   \u2514\u2500\u2500 types.ts           # Typed result interfaces\n\u2502   \u251c\u2500\u2500 services/\n\u2502   \u2502   \u251c\u2500\u2500 search.ts          # Multi-engine search facade\n\u2502   \u2502   \u251c\u2500\u2500 tracking.ts        # Keyword rank tracking\n\u2502   \u2502   \u2514\u2500\u2500 credits.ts         # Usage monitoring\n\u2502   \u251c\u2500\u2500 api/\n\u2502   \u2502   \u251c\u2500\u2500 search.ts          # /search proxy endpoint\n\u2502   \u2502   \u2514\u2500\u2500 health.ts          # /health with credit check\n\u2502   \u2514\u2500\u2500 jobs/\n\u2502       \u2514\u2500\u2500 rank-tracker.ts    # Daily keyword monitoring\n\u251c\u2500\u2500 tests/\n\u2502   \u251c\u2500\u2500 fixtures/              # Recorded SerpApi responses\n\u2502   \u2514\u2500\u2500 search.test.ts         # Fixture-based tests\n\u2514\u2500\u2500 config/\n```\n\n## Key Components\n\n### Search Service Facade\n\n```typescript\nclass SearchService {\n  constructor(private client: CachedSerpApiClient, private db: Database) {}\n\n  async search(query: string, options?: { engine?: string; num?: number }) {\n    const engine = options?.engine || 'google';\n    const result = await this.client.cachedSearch({\n      engine, q: query, num: options?.num || 5,\n    });\n\n    // Normalize across engines\n    return {\n      results: result.organic_results || result.video_results || [],\n      answer_box: result.answer_box || null,\n      knowledge_graph: result.knowledge_graph || null,\n      search_id: result.search_metadata.id,\n      cached: result._cached || false,\n    };\n  }\n\n  async trackKeyword(keyword: string, domain: string) {\n    const result = await this.client.cachedSearch({\n      engine: 'google', q: keyword, num: 100,\n    });\n    const position = result.organic_results?.findIndex(\n      (r: any) => r.link?.includes(domain)\n    );\n    await this.db.saveRanking(keyword, domain, position >= 0 ? position + 1 : null);\n  }\n}\n```\n\n### Credit Budget Manager\n\n```typescript\nclass CreditBudget {\n  async check(): Promise<{ ok: boolean; remaining: number }> {\n    const account = await fetch(\n      `https://serpapi.com/account.json?api_key=${process.env.SERPAPI_API_KEY}`\n    ).then(r => r.json());\n\n    return {\n      ok: account.plan_searches_left > 100,\n      remaining: account.plan_searches_left,\n    };\n  }\n}\n```\n\n## Error Handling\n\n| Component | Failure | Recovery |\n|-----------|---------|----------|\n| Search API | Credits exhausted | Return cached results, alert ops |\n| Cache | Redis down | Fall through to API (graceful degradation) |\n| Rank tracker | Query fails | Skip and retry next cycle |\n| Health check | API unreachable | Report degraded status |\n\n## Resources\n\n- [SerpApi Documentation](https://serpapi.com/)\n- [Searches Archive](https://serpapi.com/search-archive-api)\n\n## Next Steps\n\nSee individual skill docs for deep-dives on each component.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "serpapi-reference-architecture",
-    "description": "Production architecture for SerpApi search services with caching, monitoring,",
-    "Trigger": "serpapi architecture\", \"serpapi project structure\", \"serpapi design\".",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

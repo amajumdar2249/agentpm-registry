@@ -1,15 +1,48 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000034238",
   "name": "sync-system-bus",
   "slug": "sync-system-bus-2",
   "description": "Deploy the system-bus-worker to the joelclaw Kubernetes cluster from local machine. Use when syncing changes in packages/system-bus to k8s, especially because the GitHub Actions deploy job targets a non-existent self-hosted runner and cannot complete deploys automatically.",
   "content": "\n# Sync System Bus Worker\n\nDeploy `system-bus-worker` to the local joelclaw k8s cluster (Talos v1.12.4 / k8s v1.35.0).\n\n**Important:** `.github/workflows/system-bus-worker-deploy.yml` has a deploy job on `self-hosted`. That runner does not exist, so deploys must be completed locally.\n\n## Quick Deploy\n\nThe publish script handles everything \u2014 build, auth, push, k8s apply, rollout, verification:\n\n```bash\ncd ~/Code/joelhooks/joelclaw\nk8s/publish-system-bus-worker.sh\n```\n\nOptional: pass a tag (defaults to timestamp):\n```bash\nk8s/publish-system-bus-worker.sh a6de1e0\n```\n\n### GHCR Auth Order\n\n`publish-system-bus-worker.sh` now authenticates in this order:\n1. `GHCR_TOKEN` env var (if provided)\n2. `secrets lease ghcr_pat` (agent-secrets)\n3. `gh auth token` fallback\n\nIf your `gh auth token` lacks `read:packages/write:packages`, push will 403. Use `ghcr_pat`.\n\n## What the Script Does\n\n1. Builds ARM64 Docker image (required \u2014 Talos/Colima node is aarch64)\n2. Authenticates to GHCR (prefers `agent-secrets` lease `ghcr_pat`; falls back to `gh auth token`) with temp Docker config\n3. Pushes `ghcr.io/joelhooks/system-bus-worker:${TAG}` and `:latest`\n4. Updates the image ref in `k8s/system-bus-worker.yaml`\n5. `kubectl apply` the manifest\n6. Waits for rollout (`--timeout=180s`)\n7. Probes the new pod's health endpoint\n\n## Post-Deploy Verification\n\n```bash\njoelclaw refresh                           # Re-register functions with Inngest\njoelclaw functions | grep \"<new-function>\" # Verify new function appears\njoelclaw status                            # Full health check\njoelclaw runs --count 3                    # Confirm runs are flowing\n```\n\n## Restart Safety (ADR-0156)\n\nThe worker is stateless between Inngest steps. Each step is a separate HTTP call; Inngest stores step output server-side. This means k8s rolling restarts are safe \u2014 Inngest retries the in-flight step against the new pod.\n\n**Critical rule: NEVER set `retries: 0` on Inngest functions.** With retries: 0, a worker restart during step execution kills the run permanently. With retries \u2265 1, Inngest retries and hits the new pod.\n\nCurrent story-pipeline has `retries: 2` specifically to survive the ~1s restart window during deploys.\n\n### What happens during deploy\n\n```\nStep executing on old pod \u2192 old pod terminates \u2192 step fails (SDK unreachable)\n\u2192 Inngest retries after backoff \u2192 new pod handles retry \u2192 step completes\n```\n\nAll previously completed steps are memoized. Only the in-flight step reruns.\n\n### Long-running steps (codex implement: 5-10 min)\n\nIf a deploy kills a codex step mid-execution, the step reruns from scratch on the new pod (5-10 min wasted but not fatal). For time-critical deploys during active loops, check `joelclaw loop status` first and deploy between stories.\n\n## Manual Steps (if script fails)\n\n### Build\n\n```bash\ncd ~/Code/joelhooks/joelclaw\nTAG=$(git rev-parse --short HEAD)\nIMAGE=\"ghcr.io/joelhooks/system-bus-worker:${TAG}\"\ndocker build --platform linux/arm64 -t \"$IMAGE\" -t ghcr.io/joelhooks/system-bus-worker:latest -f packages/system-bus/Dockerfile .\n```\n\n### Push\n\n```bash\ngh auth token | docker login ghcr.io -u $(gh api user -q .login) --password-stdin\ndocker push \"$IMAGE\"\ndocker push ghcr.io/joelhooks/system-bus-worker:latest\n```\n\n### Deploy\n\n```bash\nkubectl -n joelclaw set image deployment/system-bus-worker system-bus-worker=\"$IMAGE\"\nkubectl -n joelclaw rollout status deployment/system-bus-worker --timeout=180s\n```\n\n### Verify\n\n```bash\njoelclaw refresh\njoelclaw status\n```\n\n### Log\n\n```bash\nslog write --action deploy --tool system-bus-worker --detail \"deployed ${IMAGE}\" --reason \"sync worker changes\"\n```\n\n## Talon Rebuild (Adding Secrets / Changing Worker Supervision)\n\nTalon is a Rust binary that supervises the worker process. It leases secrets from `agent-secrets` and injects them as env vars. When adding new webhook secrets or changing supervision behavior:\n\n```bash\n# 1. Add secret to agent-secrets\nsecrets add my_new_secret --value \"the-secret-value\"\n\n# 2. Update Talon source \u2014 add mapping to SECRET_MAPPINGS array\n#    File: ~/Code/joelhooks/joelclaw/infra/talon/src/worker.rs\n#    (\"my_new_secret\", \"MY_NEW_SECRET_ENV_VAR\"),\n\n# 3. Recompile (fast \u2014 ~3s incremental)\nexport PATH=\"$HOME/.cargo/bin:$PATH\"\ncd ~/Code/joelhooks/joelclaw/infra/talon\ncargo build --release\n\n# 4. Install + re-sign (macOS kills unsigned binaries)\ncp target/release/talon ~/.local/bin/talon\ncodesign -fs - ~/.local/bin/talon\n\n# 5. Restart via launchd\nlaunchctl bootout gui/$(id -u)/com.joel.talon\nsleep 1\nlaunchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.joel.talon.plist\nsleep 12\n\n# 6. Verify\ncurl -s http://localhost:3111/ | jq '.status'\ncurl -X PUT http://localhost:3111/api/inngest  # Force function sync\n```\n\n### Current SECRET_MAPPINGS (worker.rs)\n\n| Secret Name | Env Var |\n|------------|---------|\n| `claude_oauth_token` | `CLAUDE_CODE_OAUTH_TOKEN` |\n| `todoist_client_secret` | `TODOIST_CLIENT_SECRET` |\n| `todoist_api_token` | `TODOIST_API_TOKEN` |\n| `front_rules_webhook_secret` | `FRONT_WEBHOOK_SECRET` |\n| `front_api_token` | `FRONT_API_TOKEN` |\n| `vercel_webhook_secret` | `VERCEL_WEBHOOK_SECRET` |\n| `joelclaw_webhook_secret` | `JOELCLAW_WEBHOOK_SECRET` |\n| `revalidation_secret` | `REVALIDATION_SECRET` |\n\n### Talon Key Paths\n\n| What | Path |\n|------|------|\n| Binary | `~/.local/bin/talon` |\n| Source | `~/Code/joelhooks/joelclaw/infra/talon/src/` |\n| LaunchAgent plist | `~/Library/LaunchAgents/com.joel.talon.plist` |\n| Logs | `~/.local/log/talon.log` / `talon.err` |\n| ADR | `~/Vault/docs/decisions/0159-talon-worker-manager.md` |\n\n### Gotcha: `codesign -fs -` is required\n\nAfter `cargo build`, the binary has adhoc linker-signed signature. macOS launchd may SIGKILL:9 it. Re-signing with `codesign -fs -` fixes this.\n\n## Common Gotchas\n\n| Problem | Cause | Fix |\n|---------|-------|-----|\n| `exec format error` in pod | Built for amd64, not arm64 | Rebuild with `--platform linux/arm64` |\n| GHCR push fails with `403 Forbidden` on blob HEAD | `gh auth token` missing package scopes | Use `ghcr_pat` via `agent-secrets` or export `GHCR_TOKEN` with package scope |\n| `docker-credential-desktop` error | Docker config has credsStore | Script uses temp config dir \u2014 if manual, remove `\"credsStore\": \"desktop\"` |\n| Function missing after deploy | Not in index file | Add to both `index.host.ts` AND `index.cluster.ts` |\n| Function still missing | Stale Inngest registration | `joelclaw refresh` then check again |\n| \"Unable to reach SDK URL\" | Worker pod not ready | Wait for rollout, then `joelclaw refresh` |\n| Runs stuck after deploy | `retries: 0` on the function | Set `retries: 2` minimum (ADR-0156) |\n| Stale app registrations | Multiple apps registered | Delete old registrations in Inngest dashboard (`:8289`) |\n\n## Key Paths\n\n| What | Path |\n|------|------|\n| Publish script | `k8s/publish-system-bus-worker.sh` |\n| Dockerfile | `packages/system-bus/Dockerfile` |\n| k8s manifest | `k8s/system-bus-worker.yaml` |\n| Host function index | `packages/system-bus/src/inngest/functions/index.host.ts` |\n| Cluster function index | `packages/system-bus/src/inngest/functions/index.cluster.ts` |\n| Worker entry | `packages/system-bus/src/serve.ts` |\n| GH Actions workflow | `.github/workflows/system-bus-worker-deploy.yml` |\n| ADR-0156 | `~/Vault/docs/decisions/0156-graceful-worker-restart.md` |\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "sync-system-bus",
-    "displayName": "Sync System Bus",
-    "description": "Deploy the system-bus-worker to the joelclaw Kubernetes cluster from local machine. Use when syncing changes in packages/system-bus to k8s, especially because the GitHub Actions deploy job targets a non-existent self-hosted runner and cannot complete deploys automatically.",
-    "version": "2.1.0",
-    "author": "Joel Hooks",
-    "tags": "[joelclaw, system-bus, kubernetes, deploy, ghcr, inngest]"
+  "author": "Joel Hooks",
+  "version": "2.1.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "[joelclaw",
+    "system-bus",
+    "kubernetes",
+    "deploy",
+    "ghcr",
+    "inngest]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

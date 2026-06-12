@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032582",
   "name": "maintainx-core-workflow-b",
   "slug": "maintainx-core-workflow-b",
   "description": "Execute MaintainX secondary workflow: Asset and Location management.",
   "content": "# MaintainX Core Workflow B: Asset & Location Management\n\n## Overview\n\nManage equipment assets and facility locations in MaintainX. Assets represent equipment that requires maintenance; locations organize your facilities into a manageable hierarchy.\n\n## Prerequisites\n\n- Completed `maintainx-install-auth` setup\n- `MAINTAINX_API_KEY` environment variable configured\n- MaintainX account with asset management permissions\n\n## Instructions\n\n### Step 1: Create a Location Hierarchy\n\n```typescript\nimport { MaintainXClient } from './maintainx/client';\n\nconst client = new MaintainXClient();\n\n// Create top-level facility\nconst { data: plant } = await client.request('POST', '/locations', {\n  name: 'Manufacturing Plant - Austin',\n  description: 'Main production facility',\n  address: '1234 Industrial Blvd, Austin, TX 78701',\n});\n\n// Create sub-locations\nconst { data: floor } = await client.request('POST', '/locations', {\n  name: 'Production Floor - Building A',\n  parentId: plant.id,\n  description: 'Primary manufacturing area with 12 production lines',\n});\n\nconst { data: mechRoom } = await client.request('POST', '/locations', {\n  name: 'Mechanical Room - B2',\n  parentId: plant.id,\n  description: 'Pumps, compressors, and HVAC equipment',\n});\n\nconsole.log(`Location hierarchy created: ${plant.id} \u2192 ${floor.id}, ${mechRoom.id}`);\n```\n\n### Step 2: Register Assets\n\n```typescript\n// Create an asset linked to a location\nconst { data: pump } = await client.request('POST', '/assets', {\n  name: 'Centrifugal Pump #3',\n  description: 'Grundfos CR 45-2, 15HP, installed 2023',\n  locationId: mechRoom.id,\n  serialNumber: 'GF-CR45-2-00891',\n  model: 'CR 45-2',\n  manufacturer: 'Grundfos',\n});\n\nconst { data: conveyor } = await client.request('POST', '/assets', {\n  name: 'Conveyor Belt - Line 7',\n  description: 'Main assembly line conveyor, 120ft span',\n  locationId: floor.id,\n  serialNumber: 'DRV-CONV-7-2024',\n  model: 'Heavy Duty BD-120',\n  manufacturer: 'Dorner',\n});\n\nconsole.log(`Assets registered: Pump #${pump.id}, Conveyor #${conveyor.id}`);\n```\n\n### Step 3: List and Filter Assets\n\n```typescript\n// Get all assets at a location\nconst { data: locationAssets } = await client.getAssets({\n  locationId: mechRoom.id,\n  limit: 50,\n});\n\nfor (const asset of locationAssets.assets) {\n  console.log(`  ${asset.name} (SN: ${asset.serialNumber || 'N/A'})`);\n}\n\n// Paginate through all assets\nasync function getAllAssets() {\n  const all = [];\n  let cursor: string | undefined;\n  do {\n    const { data } = await client.getAssets({ limit: 100, cursor });\n    all.push(...data.assets);\n    cursor = data.cursor;\n  } while (cursor);\n  return all;\n}\n\nconst allAssets = await getAllAssets();\nconsole.log(`Total assets: ${allAssets.length}`);\n```\n\n### Step 4: Query Locations\n\n```typescript\n// Get all locations (flat list)\nconst { data: locations } = await client.getLocations({ limit: 100 });\n\n// Build a tree structure from flat list\nfunction buildTree(locations: any[]) {\n  const map = new Map();\n  const roots: any[] = [];\n\n  for (const loc of locations) {\n    map.set(loc.id, { ...loc, children: [] });\n  }\n  for (const loc of locations) {\n    const node = map.get(loc.id);\n    if (loc.parentId && map.has(loc.parentId)) {\n      map.get(loc.parentId).children.push(node);\n    } else {\n      roots.push(node);\n    }\n  }\n  return roots;\n}\n\nconst tree = buildTree(locations.locations);\nconsole.log(JSON.stringify(tree, null, 2));\n```\n\n### Step 5: Create Work Orders Linked to Assets\n\n```typescript\n// Corrective maintenance on a specific asset\nconst { data: wo } = await client.createWorkOrder({\n  title: 'Centrifugal Pump #3 - Bearing Noise',\n  description: 'Unusual grinding noise detected during morning inspection.',\n  priority: 'HIGH',\n  assetId: pump.id,\n  locationId: mechRoom.id,\n  categories: ['CORRECTIVE'],\n});\n\nconsole.log(`Work order #${wo.id} linked to asset ${pump.id}`);\n```\n\n## Output\n\n- Location hierarchy created with parent-child relationships\n- Assets registered with serial numbers, models, and location links\n- Paginated asset and location queries\n- Work orders linked to specific assets and locations\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| 404 Not Found | Invalid asset or location ID | Verify ID exists with a GET request first |\n| 400 Bad Request | Missing `name` field | Assets and locations require at least `name` |\n| 409 Conflict | Duplicate serial number | Use unique serial numbers per asset |\n| Empty results | Wrong filter or no data | Check query parameters, try without filters |\n\n## Resources\n\n- [MaintainX API Reference](https://developer.maintainx.com/reference)\n- [Assets Help](https://help.getmaintainx.com/about-assets)\n- [Locations Help](https://help.getmaintainx.com/about-locations)\n\n## Next Steps\n\nFor troubleshooting common issues, see `maintainx-common-errors`.\n\n## Examples\n\n**Bulk import assets from CSV**:\n\n```typescript\nimport { parse } from 'csv-parse/sync';\nimport { readFileSync } from 'fs';\n\nconst csv = readFileSync('assets.csv', 'utf-8');\nconst rows = parse(csv, { columns: true });\n\nfor (const row of rows) {\n  await client.request('POST', '/assets', {\n    name: row.name,\n    serialNumber: row.serial_number,\n    locationId: parseInt(row.location_id),\n    model: row.model,\n    manufacturer: row.manufacturer,\n  });\n  console.log(`Imported: ${row.name}`);\n}\n```\n\n**Get maintenance history for an asset**:\n\n```bash\n# Fetch all work orders linked to a specific asset\ncurl -s \"https://api.getmaintainx.com/v1/workorders?assetId=98765&limit=50\" \\\n  -H \"Authorization: Bearer $MAINTAINX_API_KEY\" \\\n  | jq '.workOrders[] | {id, title, status, completedAt}'\n```\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "maintainx-core-workflow-b",
-    "description": "Execute MaintainX secondary workflow: Asset and Location management.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

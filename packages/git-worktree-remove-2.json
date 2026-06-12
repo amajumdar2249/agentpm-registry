@@ -1,14 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000028498",
   "name": "git-worktree-remove",
   "slug": "git-worktree-remove-2",
   "description": "Safely remove a git worktree with branch cleanup and safety checks",
   "content": "\n# Git Worktree Remove\n\nSafely remove a single git worktree with branch cleanup, merge verification, and database branch teardown.\n\n**Core principle:** Safety checks first, then clean removal of worktree + branch + DB resources.\n\n**Part of:** [Worktree Lifecycle Suite](./git-worktree.md) | [`/git-worktree`](./git-worktree.md) | [`/git-worktree-status`](./git-worktree-status.md) | [`/git-worktree-clean`](./git-worktree-clean.md)\n\n## Process\n\n1. **Validate Target**: Identify worktree to remove\n2. **Safety Check**: Protect main/develop branches\n3. **Check Merge Status**: Warn if branch has unmerged changes\n4. **Check Uncommitted Changes**: Warn if worktree has dirty state\n5. **Remove Worktree**: `git worktree remove`\n6. **Delete Local Branch**: `git branch -d` (or `-D` with confirmation)\n7. **Delete Remote Branch**: `git push origin --delete` (with confirmation)\n8. **Database Cleanup Reminder**: Suggest DB branch deletion if applicable\n9. **Prune References**: `git worktree prune`\n\n## Safety Checks\n\n### Protected Branches\n\n```bash\n# Never remove worktrees for these branches (configurable)\nPROTECTED_BRANCHES=\"main master develop staging production\"\n\nif echo \"$PROTECTED_BRANCHES\" | grep -qw \"$BRANCH\"; then\n  echo \"BLOCKED: Cannot remove worktree for protected branch '$BRANCH'\"\n  echo \"Protected branches: $PROTECTED_BRANCHES\"\n  exit 1\nfi\n```\n\n### Uncommitted Changes\n\n```bash\ncd \"$WORKTREE_PATH\"\nif [ -n \"$(git status --porcelain)\" ]; then\n  echo \"WARNING: Worktree has uncommitted changes:\"\n  git status --short\n  echo \"\"\n  echo \"Options:\"\n  echo \"  1. Commit changes first\"\n  echo \"  2. Force remove (--force)\"\n  echo \"  3. Cancel\"\n  # Wait for user decision\nfi\n```\n\n### Merge Status\n\n```bash\n# Check if branch is merged into main\nMAIN_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@')\n\nif git merge-base --is-ancestor \"$BRANCH\" \"$MAIN_BRANCH\" 2>/dev/null; then\n  echo \"Branch '$BRANCH' is merged into $MAIN_BRANCH. Safe to delete.\"\n  MERGED=true\nelse\n  echo \"WARNING: Branch '$BRANCH' is NOT merged into $MAIN_BRANCH.\"\n  echo \"You may lose work if you delete this branch.\"\n  MERGED=false\nfi\n```\n\n## Removal Steps\n\n```bash\n# 1. Remove the worktree\ngit worktree remove \"$WORKTREE_PATH\"\n# If dirty state and user confirmed force:\n# git worktree remove --force \"$WORKTREE_PATH\"\n\n# 2. Delete local branch\nif [ \"$MERGED\" = true ]; then\n  git branch -d \"$BRANCH\"\nelse\n  echo \"Delete unmerged branch '$BRANCH'? (requires confirmation)\"\n  # On confirmation:\n  git branch -D \"$BRANCH\"\nfi\n\n# 3. Delete remote branch (with confirmation)\nif git ls-remote --heads origin \"$BRANCH\" | grep -q \"$BRANCH\"; then\n  echo \"Delete remote branch 'origin/$BRANCH'?\"\n  # On confirmation:\n  git push origin --delete \"$BRANCH\"\nfi\n\n# 4. Prune stale references\ngit worktree prune\n```\n\n## Database Branch Cleanup\n\n**After worktree removal, remind about associated database branches:**\n\n```bash\n# Detect database provider (same logic as /git-worktree)\nif [ -f \".env\" ] && grep -q \"neon\" \".env\"; then\n  echo \"\"\n  echo \"DB Cleanup: neonctl branches delete $BRANCH_SLUG\"\nelif [ -f \".pscale.yml\" ]; then\n  echo \"\"\n  DB_NAME=$(grep 'database:' .pscale.yml | awk '{print $2}')\n  echo \"DB Cleanup: pscale branch delete $DB_NAME $BRANCH_SLUG\"\nelif [ -f \".env\" ] && grep -q \"postgresql\" \".env\"; then\n  echo \"\"\n  echo \"DB Cleanup: psql \\$DATABASE_URL -c \\\"DROP SCHEMA ${BRANCH_SLUG} CASCADE;\\\"\"\nfi\n```\n\n## Report Format\n\n**Successful removal (merged branch):**\n\n```\nRemoved worktree: .worktrees/feat/auth\n  Worktree directory: deleted\n  Local branch feat/auth: deleted (was merged)\n  Remote branch origin/feat/auth: deleted\n  References: pruned\n\nDB reminder: neonctl branches delete feat-auth\n```\n\n**Removal with warnings (unmerged branch):**\n\n```\nRemoved worktree: .worktrees/feat/experimental\n  Worktree directory: deleted\n  Local branch feat/experimental: deleted (was NOT merged - forced)\n  Remote branch: no remote branch found\n  References: pruned\n\nWARNING: Branch was not merged. Changes may be lost.\nLast commit: a1b2c3d \"WIP: experimental auth flow\"\n```\n\n## Flags\n\n| Flag | Effect |\n|------|--------|\n| `--force` | Skip uncommitted changes warning |\n| `--keep-branch` | Remove worktree but keep the branch |\n| `--keep-remote` | Don't delete remote branch |\n\n## Quick Reference\n\n| Situation | Action |\n|-----------|--------|\n| Branch is merged | Safe delete (branch -d) |\n| Branch is unmerged | Warn + require confirmation (branch -D) |\n| Uncommitted changes | Warn + offer force/cancel |\n| Protected branch (main/develop) | Block removal |\n| Remote branch exists | Ask to delete remote |\n| DB branch detected | Remind with exact command |\n| Stale references | Auto-prune |\n\n## Common Mistakes\n\n**Removing worktree for main/develop**\n- Always blocked by safety check. Reconfigure protected branches if needed.\n\n**Deleting unmerged branch without checking**\n- Always verify merge status. Unmerged branches require explicit `--force` or `-D`.\n\n**Forgetting database branch cleanup**\n- Leaves orphaned DB branches consuming resources. Command reminds automatically.\n\n**Using `rm -rf` instead of `git worktree remove`**\n- Leaves stale worktree references in `.git/worktrees/`. Always use git commands.\n\n## Usage\n\n```\n/git-worktree-remove feat/auth\n/git-worktree-remove fix/login-bug --force\n/git-worktree-remove refactor/db --keep-branch\n```\n\nBranch or worktree path: $ARGUMENTS",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "git-worktree-remove",
-    "description": "Safely remove a git worktree with branch cleanup and safety checks",
-    "argument-hint": "<worktree_name>",
-    "effort": "low",
-    "disable-model-invocation": "true"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

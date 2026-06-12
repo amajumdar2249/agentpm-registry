@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032809",
   "name": "openrouter-model-routing",
   "slug": "openrouter-model-routing",
   "description": "Implement intelligent model routing to optimize cost, quality, and latency",
   "content": "# OpenRouter Model Routing\n\n## Overview\n\nOpenRouter gives you access to 100+ models through one API. The key to cost efficiency is routing each request to the right model based on task complexity, required capabilities, cost budget, and latency requirements. This skill covers task-based routing, complexity classification, cost-aware selection, and OpenRouter's native routing features.\n\n## Task-Based Router\n\n```python\nimport os, re\nfrom openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"https://openrouter.ai/api/v1\",\n    api_key=os.environ[\"OPENROUTER_API_KEY\"],\n    default_headers={\"HTTP-Referer\": \"https://my-app.com\", \"X-Title\": \"my-app\"},\n)\n\n# Model tiers by cost and capability\nMODELS = {\n    \"free\":    \"google/gemma-2-9b-it:free\",          # $0/0 \u2014 testing only\n    \"budget\":  \"meta-llama/llama-3.1-8b-instruct\",   # $0.06/$0.06 per 1M\n    \"mid\":     \"openai/gpt-4o-mini\",                  # $0.15/$0.60 per 1M\n    \"standard\":\"anthropic/claude-3.5-sonnet\",         # $3/$15 per 1M\n    \"premium\": \"openai/o1\",                           # $15/$60 per 1M\n}\n\nTASK_ROUTING = {\n    \"classification\":  \"budget\",   # Simple label assignment\n    \"translation\":     \"mid\",      # Moderate quality needed\n    \"summarization\":   \"mid\",      # Good quality, cost-effective\n    \"code_generation\": \"standard\", # Needs high accuracy\n    \"code_review\":     \"standard\", # Needs reasoning\n    \"analysis\":        \"standard\", # Complex reasoning\n    \"creative_writing\":\"standard\", # Quality matters\n    \"deep_reasoning\":  \"premium\",  # Multi-step logic\n    \"simple_qa\":       \"budget\",   # Basic questions\n    \"chat\":            \"mid\",      # General conversation\n}\n\ndef route_request(task_type: str, messages: list[dict], **kwargs) -> dict:\n    \"\"\"Route to appropriate model based on task type.\"\"\"\n    tier = TASK_ROUTING.get(task_type, \"mid\")\n    model = MODELS[tier]\n\n    response = client.chat.completions.create(\n        model=model, messages=messages, **kwargs\n    )\n    return {\n        \"content\": response.choices[0].message.content,\n        \"model\": response.model,\n        \"tier\": tier,\n        \"tokens\": response.usage.prompt_tokens + response.usage.completion_tokens,\n    }\n```\n\n## Complexity-Based Auto-Router\n\n```python\ndef classify_complexity(prompt: str) -> str:\n    \"\"\"Classify prompt complexity to select model tier.\n\n    Simple heuristics -- replace with a trained classifier for production.\n    \"\"\"\n    word_count = len(prompt.split())\n    has_code = bool(re.search(r'```|def |function |class |import ', prompt))\n    has_reasoning = bool(re.search(r'explain|analyze|compare|why|how does|trade.?off', prompt, re.I))\n    has_math = bool(re.search(r'calculate|equation|formula|derive|proof', prompt, re.I))\n\n    if has_math or (has_reasoning and has_code):\n        return \"premium\"\n    if has_code or has_reasoning or word_count > 500:\n        return \"standard\"\n    if word_count > 100:\n        return \"mid\"\n    return \"budget\"\n\ndef auto_route(messages: list[dict], **kwargs):\n    \"\"\"Automatically select model based on prompt complexity.\"\"\"\n    user_msg = next((m[\"content\"] for m in reversed(messages) if m[\"role\"] == \"user\"), \"\")\n    tier = classify_complexity(user_msg)\n    model = MODELS[tier]\n\n    response = client.chat.completions.create(model=model, messages=messages, **kwargs)\n    return response\n```\n\n## OpenRouter Native Routing\n\n```python\n# Route: \"fallback\" \u2014 try models in order until one succeeds\nresponse = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet\",\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n    max_tokens=200,\n    extra_body={\n        \"models\": [\n            \"anthropic/claude-3.5-sonnet\",\n            \"openai/gpt-4o\",\n            \"openai/gpt-4o-mini\",\n        ],\n        \"route\": \"fallback\",\n    },\n)\n\n# Provider routing \u2014 control which provider serves a model\nresponse = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet\",\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n    max_tokens=200,\n    extra_body={\n        \"provider\": {\n            \"order\": [\"Anthropic\", \"AWS Bedrock\"],\n            \"allow_fallbacks\": True,\n        },\n    },\n)\n\n# Model variant: \":floor\" picks cheapest provider\nresponse = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet:floor\",\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n    max_tokens=200,\n)\n```\n\n## Cost-Aware Router\n\n```python\nimport requests\n\ndef get_model_pricing() -> dict:\n    \"\"\"Fetch current pricing for cost-aware routing.\"\"\"\n    models = requests.get(\"https://openrouter.ai/api/v1/models\").json()[\"data\"]\n    return {\n        m[\"id\"]: {\n            \"prompt\": float(m[\"pricing\"][\"prompt\"]) * 1_000_000,\n            \"completion\": float(m[\"pricing\"][\"completion\"]) * 1_000_000,\n            \"context\": m[\"context_length\"],\n        }\n        for m in models\n    }\n\ndef cheapest_model_for_task(pricing: dict, min_context: int = 4096,\n                             needs_tools: bool = False) -> str:\n    \"\"\"Find the cheapest model that meets requirements.\"\"\"\n    candidates = [\n        (mid, p) for mid, p in pricing.items()\n        if p[\"context\"] >= min_context and p[\"prompt\"] > 0  # Exclude free (unreliable)\n    ]\n    candidates.sort(key=lambda x: x[1][\"prompt\"] + x[1][\"completion\"])\n    return candidates[0][0] if candidates else \"openai/gpt-4o-mini\"\n```\n\n## Error Handling\n\n| Error | Cause | Fix |\n|-------|-------|-----|\n| Wrong model selected | Classification too coarse | Add more task categories; test with diverse prompts |\n| Model unavailable | Selected model temporarily down | Add fallback chain per tier |\n| Cost overrun | Complex tasks routed to premium models | Set `max_tokens` and daily budget caps |\n| Quality regression | Budget model can't handle task | Monitor output quality; escalate tier on poor results |\n\n## Enterprise Considerations\n\n- Start with manual task-type routing (explicit labels), then graduate to auto-classification\n- Log every routing decision (task type, tier, model, cost) to tune the router over time\n- Use OpenRouter's `:floor` variant to automatically get the cheapest provider for any model\n- Set `max_tokens` on every request to cap per-request cost regardless of model tier\n- A/B test routing rules: send 10% of traffic to a different tier and compare quality metrics\n- Combine with fallback chains so each tier has backup models\n\n## References\n\n- [Examples](${CLAUDE_SKILL_DIR}/references/examples.md) | [Errors](${CLAUDE_SKILL_DIR}/references/errors.md)\n- [Model Routing](https://openrouter.ai/docs/features/model-routing) | [Provider Routing](https://openrouter.ai/docs/features/provider-routing)\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "openrouter-model-routing",
-    "description": "Implement intelligent model routing to optimize cost, quality, and latency",
-    "task types. Triggers": "openrouter routing'', ''model routing'', ''route to model'',",
-    "allowed-tools": "Read, Write, Edit, Bash, Grep",
-    "version": "2.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031863",
   "name": "exa-debug-bundle",
   "slug": "exa-debug-bundle",
   "description": "Collect Exa debug evidence for support tickets and troubleshooting.",
   "content": "# Exa Debug Bundle\n\n## Current State\n\n!`node --version 2>/dev/null || echo 'N/A'`\n!`npm list exa-js 2>/dev/null | grep exa-js || echo 'exa-js not installed'`\n!`echo \"EXA_API_KEY: ${EXA_API_KEY:+SET (${#EXA_API_KEY} chars)}\"`\n\n## Overview\n\nCollect all necessary diagnostic information for Exa support tickets. Exa error responses include a `requestId` field \u2014 always include it when contacting support at hello@exa.ai.\n\n## Instructions\n\n### Step 1: Quick Connectivity Test\n\n```bash\nset -euo pipefail\n\necho \"=== Exa Connectivity Test ===\"\necho \"API Key: ${EXA_API_KEY:+SET (${#EXA_API_KEY} chars)}\"\necho \"\"\n\n# Test basic search endpoint\nHTTP_CODE=$(curl -s -o /tmp/exa-debug.json -w \"%{http_code}\" \\\n  -X POST https://api.exa.ai/search \\\n  -H \"x-api-key: $EXA_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"query\":\"debug connectivity test\",\"numResults\":1}')\n\necho \"HTTP Status: $HTTP_CODE\"\nif [ \"$HTTP_CODE\" = \"200\" ]; then\n  echo \"Status: HEALTHY\"\n  python3 -c \"import json; d=json.load(open('/tmp/exa-debug.json')); print(f'Results: {len(d.get(\\\"results\\\",[]))}')\" 2>/dev/null\nelse\n  echo \"Status: UNHEALTHY\"\n  echo \"Response:\"\n  cat /tmp/exa-debug.json | python3 -m json.tool 2>/dev/null || cat /tmp/exa-debug.json\nfi\n```\n\n### Step 2: Capture Request/Response Details\n\n```typescript\nimport Exa from \"exa-js\";\n\nconst exa = new Exa(process.env.EXA_API_KEY);\n\nasync function debugSearch(query: string) {\n  const startTime = performance.now();\n  try {\n    const result = await exa.searchAndContents(query, {\n      numResults: 3,\n      text: { maxCharacters: 500 },\n    });\n\n    const duration = performance.now() - startTime;\n    console.log(\"=== Debug Info ===\");\n    console.log(`Query: \"${query}\"`);\n    console.log(`Duration: ${duration.toFixed(0)}ms`);\n    console.log(`Results: ${result.results.length}`);\n    console.log(`Has autoprompt: ${!!result.autopromptString}`);\n    for (const r of result.results) {\n      console.log(`  [${r.score.toFixed(3)}] ${r.title} (${r.url})`);\n      console.log(`    Text: ${r.text ? `${r.text.length} chars` : \"none\"}`);\n    }\n  } catch (err: any) {\n    const duration = performance.now() - startTime;\n    console.error(\"=== Error Debug ===\");\n    console.error(`Query: \"${query}\"`);\n    console.error(`Duration: ${duration.toFixed(0)}ms`);\n    console.error(`Status: ${err.status || \"unknown\"}`);\n    console.error(`Message: ${err.message}`);\n    console.error(`RequestId: ${err.requestId || err.request_id || \"none\"}`);\n    console.error(`Error tag: ${err.error_tag || err.tag || \"none\"}`);\n  }\n}\n```\n\n### Step 3: Create Debug Bundle Script\n\n```bash\n#!/bin/bash\nset -euo pipefail\n# exa-debug-bundle.sh\n\nBUNDLE_DIR=\"exa-debug-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE_DIR\"\n\necho \"=== Exa Debug Bundle ===\" > \"$BUNDLE_DIR/summary.txt\"\necho \"Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# Environment info\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"--- Environment ---\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"Node: $(node --version 2>/dev/null || echo 'N/A')\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"npm: $(npm --version 2>/dev/null || echo 'N/A')\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"OS: $(uname -a)\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"EXA_API_KEY: ${EXA_API_KEY:+SET}\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# SDK version\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"--- SDK ---\" >> \"$BUNDLE_DIR/summary.txt\"\nnpm list exa-js 2>/dev/null >> \"$BUNDLE_DIR/summary.txt\" || echo \"exa-js not found\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# API connectivity test\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"--- API Test ---\" >> \"$BUNDLE_DIR/summary.txt\"\nHTTP_CODE=$(curl -s -o \"$BUNDLE_DIR/api-response.json\" -w \"%{http_code}\" \\\n  -X POST https://api.exa.ai/search \\\n  -H \"x-api-key: ${EXA_API_KEY:-missing}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"query\":\"debug test\",\"numResults\":1}' 2>/dev/null)\necho \"HTTP Status: $HTTP_CODE\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# Package bundle\ntar -czf \"$BUNDLE_DIR.tar.gz\" \"$BUNDLE_DIR\"\necho \"Bundle created: $BUNDLE_DIR.tar.gz\"\necho \"\"\necho \"IMPORTANT: Review $BUNDLE_DIR/summary.txt before sharing.\"\necho \"Include the requestId from any error responses when contacting hello@exa.ai\"\n```\n\n## Output\n\n- `exa-debug-YYYYMMDD-HHMMSS.tar.gz` archive containing:\n  - `summary.txt` \u2014 environment, SDK version, API connectivity\n  - `api-response.json` \u2014 raw API response from test query\n\n## Sensitive Data Handling\n\n**Always redact before sharing:**\n\n- API keys and tokens\n- Query content containing PII\n- Internal URLs or domain names\n\n**Safe to include:**\n\n- HTTP status codes and error tags\n- `requestId` from error responses\n- SDK and runtime versions\n- Latency measurements\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `curl: command not found` | curl not installed | Install curl or use node script |\n| Empty API response | Network firewall | Check outbound HTTPS to api.exa.ai |\n| 401 in connectivity test | Bad API key | Regenerate at dashboard.exa.ai |\n| Bundle script fails | Missing permissions | Run with `bash` not `sh` |\n\n## Resources\n\n- [Exa Error Codes](https://docs.exa.ai/reference/error-codes)\n- [Exa Support](mailto:hello@exa.ai)\n\n## Next Steps\n\nFor rate limit issues, see `exa-rate-limits`. For common error solutions, see `exa-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "exa-debug-bundle",
-    "description": "Collect Exa debug evidence for support tickets and troubleshooting.",
-    "allowed-tools": "Read, Bash(grep:*), Bash(curl:*), Bash(tar:*), Bash(node:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

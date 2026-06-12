@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031587",
   "name": "clickhouse-sdk-patterns",
   "slug": "clickhouse-sdk-patterns",
   "description": "Production-ready patterns for @clickhouse/client \\u2014 streaming inserts,\\",
   "content": "# ClickHouse SDK Patterns\n\n## Overview\n\nProduction patterns for `@clickhouse/client` \u2014 typed queries, streaming inserts,\nerror handling, and connection lifecycle management.\n\n## Prerequisites\n\n- `@clickhouse/client` installed (see `clickhouse-install-auth`)\n- Familiarity with async/await and Node.js streams\n\n## Instructions\n\n### Pattern 1: Typed Query Helper\n\n```typescript\nimport { createClient } from '@clickhouse/client';\n\nconst client = createClient({\n  url: process.env.CLICKHOUSE_HOST!,\n  username: process.env.CLICKHOUSE_USER ?? 'default',\n  password: process.env.CLICKHOUSE_PASSWORD ?? '',\n});\n\n// Generic typed query \u2014 returns parsed JSON rows\nasync function query<T>(sql: string, params?: Record<string, unknown>): Promise<T[]> {\n  const rs = await client.query({\n    query: sql,\n    query_params: params,\n    format: 'JSONEachRow',\n  });\n  return rs.json<T>();\n}\n\n// Usage\ninterface EventCount {\n  event_type: string;\n  cnt: string;  // ClickHouse JSON returns numbers as strings\n}\n\nconst rows = await query<EventCount>(\n  'SELECT event_type, count() AS cnt FROM events WHERE user_id = {user_id:UInt64} GROUP BY event_type',\n  { user_id: 42 }\n);\n```\n\n**Note on parameterized queries:** ClickHouse uses `{name:Type}` syntax for parameters,\nnot `$1` or `?`. Always use typed parameters to prevent SQL injection.\n\n### Pattern 2: Streaming Insert (Backpressure-Safe)\n\n```typescript\nimport { createClient } from '@clickhouse/client';\nimport { Readable } from 'stream';\n\n// For large inserts, stream data instead of buffering in memory\nasync function streamInsert(rows: AsyncIterable<Record<string, unknown>>) {\n  const stream = new Readable({\n    objectMode: true,\n    read() {},  // push-based\n  });\n\n  const insertPromise = client.insert({\n    table: 'events',\n    values: stream,\n    format: 'JSONEachRow',\n  });\n\n  for await (const row of rows) {\n    // Backpressure: if push returns false, wait for drain\n    if (!stream.push(row)) {\n      await new Promise<void>((resolve) => stream.once('drain', resolve));\n    }\n  }\n  stream.push(null);  // Signal end of stream\n\n  await insertPromise;\n}\n```\n\n### Pattern 3: Batch Insert with Retry\n\n```typescript\nasync function batchInsert<T extends Record<string, unknown>>(\n  table: string,\n  rows: T[],\n  batchSize = 10_000,\n  maxRetries = 3,\n): Promise<{ inserted: number; errors: Error[] }> {\n  let inserted = 0;\n  const errors: Error[] = [];\n\n  for (let i = 0; i < rows.length; i += batchSize) {\n    const batch = rows.slice(i, i + batchSize);\n    let attempt = 0;\n\n    while (attempt < maxRetries) {\n      try {\n        await client.insert({\n          table,\n          values: batch,\n          format: 'JSONEachRow',\n        });\n        inserted += batch.length;\n        break;\n      } catch (err) {\n        attempt++;\n        if (attempt === maxRetries) {\n          errors.push(err as Error);\n        } else {\n          await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt)));\n        }\n      }\n    }\n  }\n\n  return { inserted, errors };\n}\n```\n\n### Pattern 4: Streaming SELECT (Low Memory)\n\n```typescript\n// For large result sets, stream rows instead of loading all into memory\nasync function* streamQuery<T>(sql: string): AsyncGenerator<T> {\n  const rs = await client.query({ query: sql, format: 'JSONEachRow' });\n  const stream = rs.stream();\n\n  for await (const rows of stream) {\n    // Each chunk is an array of rows (typically ~8KB worth)\n    for (const row of rows) {\n      yield (row as { json: () => T }).json();\n    }\n  }\n}\n\n// Usage\nfor await (const event of streamQuery<{ event_type: string }>('SELECT * FROM events')) {\n  process.stdout.write(`${event.event_type}\\n`);\n}\n```\n\n### Pattern 5: Error Handling\n\n```typescript\nimport { ClickHouseError } from '@clickhouse/client';\n\nasync function safeQuery<T>(sql: string): Promise<{ data: T[] | null; error: string | null }> {\n  try {\n    const rs = await client.query({ query: sql, format: 'JSONEachRow' });\n    return { data: await rs.json<T>(), error: null };\n  } catch (err) {\n    if (err instanceof ClickHouseError) {\n      // ClickHouse server-side error (syntax, permissions, etc.)\n      console.error(`ClickHouse error ${err.code}: ${err.message}`);\n      return { data: null, error: `CH-${err.code}: ${err.message}` };\n    }\n    // Network or client-side error\n    console.error('Client error:', (err as Error).message);\n    return { data: null, error: (err as Error).message };\n  }\n}\n```\n\n### Pattern 6: Connection Lifecycle\n\n```typescript\n// Graceful shutdown \u2014 important for flush of pending inserts\nprocess.on('SIGTERM', async () => {\n  console.log('Closing ClickHouse connection...');\n  await client.close();\n  process.exit(0);\n});\n\n// Health check\nasync function isHealthy(): Promise<boolean> {\n  try {\n    const { success } = await client.ping();\n    return success;\n  } catch {\n    return false;\n  }\n}\n```\n\n### Pattern 7: ClickHouse Settings Per Query\n\n```typescript\n// Override server settings for specific queries\nconst rs = await client.query({\n  query: 'SELECT * FROM huge_table',\n  format: 'JSONEachRow',\n  clickhouse_settings: {\n    max_threads: 4,                    // Limit parallelism\n    max_memory_usage: 1_000_000_000,   // 1GB memory limit\n    max_execution_time: 30,            // 30s timeout\n    max_result_rows: 100_000,          // Cap result size\n  },\n});\n```\n\n## Format Reference\n\n| Format | Use Case | Streaming |\n|--------|----------|-----------|\n| `JSONEachRow` | Standard JSON rows (NDJSON) | Yes |\n| `JSONCompactEachRow` | Arrays instead of objects (smaller) | Yes |\n| `CSV` | Export/import | Yes |\n| `TabSeparated` | CLI-compatible output | Yes |\n| `Parquet` | Analytics interchange | Yes |\n| `Native` | Fastest binary format | Yes |\n\n## Error Handling\n\n| Error Code | Meaning | Action |\n|------------|---------|--------|\n| `SYNTAX_ERROR (62)` | Bad SQL | Fix query syntax |\n| `UNKNOWN_TABLE (60)` | Table doesn't exist | Check table name, database |\n| `TOO_MANY_SIMULTANEOUS_QUERIES (202)` | Connection overload | Reduce concurrency or pool |\n| `MEMORY_LIMIT_EXCEEDED (241)` | Query uses too much RAM | Add filters, use streaming |\n| `TIMEOUT_EXCEEDED (159)` | Query too slow | Optimize ORDER BY, add indexes |\n\n## Resources\n\n- [Node.js Client Docs](https://clickhouse.com/docs/integrations/javascript)\n- [Client Examples (GitHub)](https://github.com/ClickHouse/clickhouse-js/tree/main/examples)\n- [Query Settings Reference](https://clickhouse.com/docs/operations/settings/settings)\n\n## Next Steps\n\nApply these patterns in `clickhouse-core-workflow-a` for real data modeling.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clickhouse-sdk-patterns",
-    "description": "Production-ready patterns for @clickhouse/client \\u2014 streaming inserts,\\",
-    "\\ coding standards.\\nTrigger": "\\\"clickhouse SDK patterns\\\", \\\"clickhouse client patterns\\\"\\",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000042799",
   "name": "trigger-realtime",
   "slug": "trigger-realtime-2",
   "description": "Subscribe to Trigger.dev task runs in real-time from frontend and backend. Use when building progress indicators, live dashboards, streaming AI/LLM responses, or React components that display task status.",
   "content": "\n# Trigger.dev Realtime\n\nSubscribe to task runs and stream data in real-time from frontend and backend.\n\n## When to Use\n\n- Building progress indicators for long-running tasks\n- Creating live dashboards showing task status\n- Streaming AI/LLM responses to the UI\n- React components that trigger and monitor tasks\n- Waiting for user approval in tasks\n\n## Authentication\n\n### Create Public Access Token (Backend)\n\n```ts\nimport { auth } from \"@trigger.dev/sdk\";\n\n// Read-only token for specific runs\nconst publicToken = await auth.createPublicToken({\n  scopes: {\n    read: {\n      runs: [\"run_123\"],\n      tasks: [\"my-task\"],\n    },\n  },\n  expirationTime: \"1h\",\n});\n\n// Pass this token to your frontend\n```\n\n### Create Trigger Token (for frontend triggering)\n\n```ts\nconst triggerToken = await auth.createTriggerPublicToken(\"my-task\", {\n  expirationTime: \"30m\",\n});\n```\n\n## Backend Subscriptions\n\n```ts\nimport { runs, tasks } from \"@trigger.dev/sdk\";\n\n// Trigger and subscribe\nconst handle = await tasks.trigger(\"my-task\", { data: \"value\" });\n\nfor await (const run of runs.subscribeToRun(handle.id)) {\n  console.log(`Status: ${run.status}`);\n  console.log(`Progress: ${run.metadata?.progress}`);\n  \n  if (run.status === \"COMPLETED\") {\n    console.log(\"Output:\", run.output);\n    break;\n  }\n}\n\n// Subscribe to tagged runs\nfor await (const run of runs.subscribeToRunsWithTag(\"user-123\")) {\n  console.log(`Run ${run.id}: ${run.status}`);\n}\n\n// Subscribe to batch\nfor await (const run of runs.subscribeToBatch(batchId)) {\n  console.log(`Batch run ${run.id}: ${run.status}`);\n}\n```\n\n## React Hooks\n\n### Installation\n\n```bash\nnpm add @trigger.dev/react-hooks\n```\n\n### Trigger Task from React\n\n```tsx\n\"use client\";\nimport { useRealtimeTaskTrigger } from \"@trigger.dev/react-hooks\";\nimport type { myTask } from \"../trigger/tasks\";\n\nfunction TaskTrigger({ accessToken }: { accessToken: string }) {\n  const { submit, run, isLoading } = useRealtimeTaskTrigger<typeof myTask>(\n    \"my-task\",\n    { accessToken }\n  );\n\n  return (\n    <div>\n      <button \n        onClick={() => submit({ data: \"value\" })} \n        disabled={isLoading}\n      >\n        Start Task\n      </button>\n      \n      {run && (\n        <div>\n          <p>Status: {run.status}</p>\n          <p>Progress: {run.metadata?.progress}%</p>\n          {run.output && <p>Result: {JSON.stringify(run.output)}</p>}\n        </div>\n      )}\n    </div>\n  );\n}\n```\n\n### Subscribe to Existing Run\n\n```tsx\n\"use client\";\nimport { useRealtimeRun } from \"@trigger.dev/react-hooks\";\nimport type { myTask } from \"../trigger/tasks\";\n\nfunction RunStatus({ runId, accessToken }: { runId: string; accessToken: string }) {\n  const { run, error } = useRealtimeRun<typeof myTask>(runId, {\n    accessToken,\n    onComplete: (run) => {\n      console.log(\"Completed:\", run.output);\n    },\n  });\n\n  if (error) return <div>Error: {error.message}</div>;\n  if (!run) return <div>Loading...</div>;\n\n  return (\n    <div>\n      <p>Status: {run.status}</p>\n      <p>Progress: {run.metadata?.progress || 0}%</p>\n    </div>\n  );\n}\n```\n\n### Subscribe to Tagged Runs\n\n```tsx\n\"use client\";\nimport { useRealtimeRunsWithTag } from \"@trigger.dev/react-hooks\";\n\nfunction UserTasks({ userId, accessToken }: { userId: string; accessToken: string }) {\n  const { runs } = useRealtimeRunsWithTag(`user-${userId}`, { accessToken });\n\n  return (\n    <ul>\n      {runs.map((run) => (\n        <li key={run.id}>{run.id}: {run.status}</li>\n      ))}\n    </ul>\n  );\n}\n```\n\n## Realtime Streams (AI/LLM)\n\n### Define Stream (shared location)\n\n```ts\n// trigger/streams.ts\nimport { streams } from \"@trigger.dev/sdk\";\n\nexport const aiStream = streams.define<string>({\n  id: \"ai-output\",\n});\n```\n\n### Pipe Stream in Task\n\n```ts\nimport { task } from \"@trigger.dev/sdk\";\nimport { aiStream } from \"./streams\";\n\nexport const streamingTask = task({\n  id: \"streaming-task\",\n  run: async (payload: { prompt: string }) => {\n    const completion = await openai.chat.completions.create({\n      model: \"gpt-4\",\n      messages: [{ role: \"user\", content: payload.prompt }],\n      stream: true,\n    });\n\n    const { waitUntilComplete } = aiStream.pipe(completion);\n    await waitUntilComplete();\n  },\n});\n```\n\n### Read Stream in React\n\n```tsx\n\"use client\";\nimport { useRealtimeStream } from \"@trigger.dev/react-hooks\";\nimport { aiStream } from \"../trigger/streams\";\n\nfunction AIResponse({ runId, accessToken }: { runId: string; accessToken: string }) {\n  const { parts, error } = useRealtimeStream(aiStream, runId, {\n    accessToken,\n    throttleInMs: 50,\n  });\n\n  if (error) return <div>Error: {error.message}</div>;\n  if (!parts) return <div>Waiting for response...</div>;\n\n  return <div>{parts.join(\"\")}</div>;\n}\n```\n\n## Wait Tokens (Human-in-the-loop)\n\n### In Task\n\n```ts\nimport { task, wait } from \"@trigger.dev/sdk\";\n\nexport const approvalTask = task({\n  id: \"approval-task\",\n  run: async (payload) => {\n    // Process initial data\n    const processed = await processData(payload);\n\n    // Wait for human approval\n    const approval = await wait.forToken<{ approved: boolean }>({\n      token: `approval-${payload.id}`,\n      timeoutInSeconds: 86400, // 24 hours\n    });\n\n    if (approval.approved) {\n      return await finalizeData(processed);\n    }\n    \n    throw new Error(\"Not approved\");\n  },\n});\n```\n\n### Complete Token from React\n\n```tsx\n\"use client\";\nimport { useWaitToken } from \"@trigger.dev/react-hooks\";\n\nfunction ApprovalButton({ tokenId, accessToken }: { tokenId: string; accessToken: string }) {\n  const { complete } = useWaitToken(tokenId, { accessToken });\n\n  return (\n    <div>\n      <button onClick={() => complete({ approved: true })}>\n        Approve\n      </button>\n      <button onClick={() => complete({ approved: false })}>\n        Reject\n      </button>\n    </div>\n  );\n}\n```\n\n## Run Object Properties\n\n| Property | Description |\n|----------|-------------|\n| `id` | Unique run identifier |\n| `status` | `QUEUED`, `EXECUTING`, `COMPLETED`, `FAILED`, `CANCELED` |\n| `payload` | Task input (typed) |\n| `output` | Task result (typed, when completed) |\n| `metadata` | Real-time updatable data |\n| `createdAt` | Start timestamp |\n| `costInCents` | Execution cost |\n\n## Best Practices\n\n1. **Scope tokens narrowly** \u2014 only grant necessary permissions\n2. **Set expiration times** \u2014 don't use long-lived tokens\n3. **Use typed hooks** \u2014 pass task types for proper inference\n4. **Handle errors** \u2014 always check for errors in hooks\n5. **Throttle streams** \u2014 use `throttleInMs` to control re-renders\n\nSee `references/realtime.md` for complete documentation.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "trigger-realtime",
-    "description": "Subscribe to Trigger.dev task runs in real-time from frontend and backend. Use when building progress indicators, live dashboards, streaming AI/LLM responses, or React components that display task status."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

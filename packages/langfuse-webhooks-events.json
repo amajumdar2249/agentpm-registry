@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032470",
   "name": "langfuse-webhooks-events",
   "slug": "langfuse-webhooks-events",
   "description": "Configure Langfuse webhooks for prompt change notifications and event-driven",
   "content": "# Langfuse Webhooks & Events\n\n## Overview\n\nConfigure Langfuse webhooks to receive notifications on prompt version changes. Langfuse supports webhook events for prompt lifecycle: **Created**, **Updated** (labels/tags changed), and **Deleted**. Use webhooks to trigger CI/CD pipelines, sync prompts to external systems, or notify teams via Slack.\n\n## Prerequisites\n\n- Langfuse Cloud or self-hosted instance\n- HTTPS endpoint to receive webhook POST requests\n- Webhook secret for HMAC signature verification\n\n## Instructions\n\n### Step 1: Create Webhook Endpoint\n\n```typescript\n// app/api/webhooks/langfuse/route.ts (Next.js App Router)\nimport { NextRequest, NextResponse } from \"next/server\";\nimport crypto from \"crypto\";\n\nconst WEBHOOK_SECRET = process.env.LANGFUSE_WEBHOOK_SECRET!;\n\ninterface LangfuseWebhookEvent {\n  event: \"prompt.created\" | \"prompt.updated\" | \"prompt.deleted\";\n  timestamp: string;\n  data: {\n    promptName: string;\n    promptVersion: number;\n    labels?: string[];\n    projectId: string;\n    [key: string]: any;\n  };\n}\n\n// Verify HMAC SHA-256 signature\nfunction verifySignature(payload: string, signature: string): boolean {\n  const expected = crypto\n    .createHmac(\"sha256\", WEBHOOK_SECRET)\n    .update(payload)\n    .digest(\"hex\");\n\n  return crypto.timingSafeEqual(\n    Buffer.from(signature),\n    Buffer.from(expected)\n  );\n}\n\nexport async function POST(request: NextRequest) {\n  const payload = await request.text();\n  const signature = request.headers.get(\"x-langfuse-signature\");\n\n  // Verify webhook authenticity\n  if (!signature || !verifySignature(payload, signature)) {\n    return NextResponse.json({ error: \"Invalid signature\" }, { status: 401 });\n  }\n\n  const event: LangfuseWebhookEvent = JSON.parse(payload);\n  console.log(`Langfuse webhook: ${event.event} - ${event.data.promptName}`);\n\n  switch (event.event) {\n    case \"prompt.created\":\n      await handlePromptCreated(event.data);\n      break;\n    case \"prompt.updated\":\n      await handlePromptUpdated(event.data);\n      break;\n    case \"prompt.deleted\":\n      await handlePromptDeleted(event.data);\n      break;\n  }\n\n  return NextResponse.json({ received: true });\n}\n\nasync function handlePromptCreated(data: LangfuseWebhookEvent[\"data\"]) {\n  // Trigger CI/CD pipeline for new prompt version\n  if (data.labels?.includes(\"production\")) {\n    await triggerPromptDeployPipeline(data.promptName, data.promptVersion);\n  }\n\n  await notifySlack({\n    text: `New prompt version: *${data.promptName}* v${data.promptVersion}`,\n    labels: data.labels,\n  });\n}\n\nasync function handlePromptUpdated(data: LangfuseWebhookEvent[\"data\"]) {\n  // Label change -- check if promoted to production\n  if (data.labels?.includes(\"production\")) {\n    await notifySlack({\n      text: `Prompt *${data.promptName}* v${data.promptVersion} promoted to production`,\n    });\n  }\n}\n\nasync function handlePromptDeleted(data: LangfuseWebhookEvent[\"data\"]) {\n  await notifySlack({\n    text: `Prompt *${data.promptName}* v${data.promptVersion} deleted`,\n    level: \"warning\",\n  });\n}\n```\n\n### Step 2: Configure Webhook in Langfuse\n\n1. Navigate to **Prompts > Create Automation > Webhook**\n2. Enter your endpoint URL: `https://your-domain.com/api/webhooks/langfuse`\n3. Select events to watch: Created, Updated, Deleted\n4. Optionally filter to specific prompts\n5. Generate and save the webhook secret\n6. Click **Test** to verify connectivity\n\n### Step 3: Slack Integration\n\n```typescript\n// lib/slack-notify.ts\n\nasync function notifySlack(params: {\n  text: string;\n  labels?: string[];\n  level?: \"info\" | \"warning\";\n}) {\n  const color = params.level === \"warning\" ? \"#ff9800\" : \"#36a64f\";\n\n  await fetch(process.env.SLACK_WEBHOOK_URL!, {\n    method: \"POST\",\n    headers: { \"Content-Type\": \"application/json\" },\n    body: JSON.stringify({\n      attachments: [\n        {\n          color,\n          blocks: [\n            {\n              type: \"section\",\n              text: { type: \"mrkdwn\", text: params.text },\n            },\n            ...(params.labels\n              ? [\n                  {\n                    type: \"context\",\n                    elements: [\n                      {\n                        type: \"mrkdwn\",\n                        text: `Labels: ${params.labels.join(\", \")}`,\n                      },\n                    ],\n                  },\n                ]\n              : []),\n          ],\n        },\n      ],\n    }),\n  });\n}\n```\n\n### Step 4: Trigger CI/CD Pipeline on Prompt Changes\n\n```typescript\n// Trigger GitHub Actions workflow when production prompt changes\nasync function triggerPromptDeployPipeline(promptName: string, version: number) {\n  await fetch(\n    `https://api.github.com/repos/${process.env.GITHUB_REPO}/dispatches`,\n    {\n      method: \"POST\",\n      headers: {\n        Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,\n        \"Content-Type\": \"application/json\",\n      },\n      body: JSON.stringify({\n        event_type: \"prompt-updated\",\n        client_payload: { promptName, version },\n      }),\n    }\n  );\n}\n```\n\n```yaml\n# .github/workflows/prompt-deploy.yml\nname: Deploy Updated Prompt\non:\n  repository_dispatch:\n    types: [prompt-updated]\n\njobs:\n  test-and-deploy:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with: { node-version: \"20\", cache: \"npm\" }\n      - run: npm ci\n\n      - name: Test updated prompt\n        env:\n          LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}\n          LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}\n          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}\n        run: |\n          echo \"Testing prompt: ${{ github.event.client_payload.promptName }}\"\n          npx vitest run tests/ai/prompt-quality.test.ts\n```\n\n### Step 5: Webhook Reliability with Retry Queue\n\n```typescript\n// For production: queue webhook processing to return 200 fast\nimport { Queue, Worker } from \"bullmq\";\n\nconst webhookQueue = new Queue(\"langfuse-webhooks\", {\n  connection: { host: process.env.REDIS_HOST },\n});\n\n// In webhook handler -- enqueue and respond immediately\nexport async function POST(request: NextRequest) {\n  const payload = await request.text();\n  // ... verify signature ...\n\n  await webhookQueue.add(\"process\", JSON.parse(payload), {\n    attempts: 3,\n    backoff: { type: \"exponential\", delay: 1000 },\n  });\n\n  return NextResponse.json({ received: true }); // Return fast\n}\n\n// Worker processes asynchronously\nconst worker = new Worker(\n  \"langfuse-webhooks\",\n  async (job) => {\n    const event = job.data as LangfuseWebhookEvent;\n    // Process event...\n  },\n  { connection: { host: process.env.REDIS_HOST } }\n);\n```\n\n## Webhook Event Reference\n\n| Event | Trigger | Use Case |\n|-------|---------|----------|\n| `prompt.created` | New prompt version added | Run regression tests, notify team |\n| `prompt.updated` | Labels or tags changed | Detect production promotions |\n| `prompt.deleted` | Prompt version removed | Alert on accidental deletion |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Invalid signature (401) | Wrong webhook secret | Re-copy secret from Langfuse settings |\n| Missed events | Handler threw error | Queue events, return 200 immediately |\n| Duplicate processing | Retry without idempotency | Dedupe by `event + timestamp + promptName` |\n| Webhook timeout | Slow handler | Enqueue and process async |\n\n## Resources\n\n- [Langfuse Webhooks](https://langfuse.com/docs/prompt-management/features/webhooks-slack-integrations)\n- [Prompt Version Webhooks Changelog](https://langfuse.com/changelog/2025-07-11-prompt-version-webhooks)\n- [GitHub Integration](https://langfuse.com/docs/prompt-management/features/github-integration)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "langfuse-webhooks-events",
-    "description": "Configure Langfuse webhooks for prompt change notifications and event-driven",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

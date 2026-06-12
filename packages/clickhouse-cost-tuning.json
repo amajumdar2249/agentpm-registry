@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031571",
   "name": "clickhouse-cost-tuning",
   "slug": "clickhouse-cost-tuning",
   "description": "Optimize ClickHouse Cloud costs \\u2014 compute scaling, storage tiering,\\",
   "content": "# ClickHouse Cost Tuning\n\n## Overview\n\nReduce ClickHouse Cloud costs through storage optimization, compression tuning,\nTTL policies, compute scaling, and query efficiency improvements.\n\n## Prerequisites\n\n- ClickHouse Cloud account with billing access\n- Understanding of current data volumes and query patterns\n\n## Instructions\n\n### Step 1: Understand ClickHouse Cloud Pricing\n\n| Component | Pricing Model | Key Driver |\n|-----------|---------------|------------|\n| Compute | Per-hour per replica | vCPU + memory tier |\n| Storage | Per GB-month | Compressed data on disk |\n| Network | Per GB egress | Query result sizes |\n| Backups | Per GB stored | Backup retention |\n\n**Key insight:** ClickHouse bills on **compressed** storage, and ClickHouse\ncompresses extremely well (often 10-20x). Your cost driver is usually compute,\nnot storage.\n\n### Step 2: Analyze Storage Usage\n\n```sql\n-- Storage cost breakdown by table\nSELECT\n    database,\n    table,\n    formatReadableSize(sum(bytes_on_disk)) AS compressed_size,\n    formatReadableSize(sum(data_uncompressed_bytes)) AS raw_size,\n    round(sum(data_uncompressed_bytes) / sum(bytes_on_disk), 1) AS compression_ratio,\n    sum(rows) AS total_rows,\n    count() AS parts\nFROM system.parts\nWHERE active\nGROUP BY database, table\nORDER BY sum(bytes_on_disk) DESC;\n\n-- Storage by column (find bloated columns)\nSELECT\n    table,\n    column,\n    type,\n    formatReadableSize(sum(column_data_compressed_bytes)) AS compressed,\n    formatReadableSize(sum(column_data_uncompressed_bytes)) AS raw,\n    round(sum(column_data_uncompressed_bytes) / sum(column_data_compressed_bytes), 1) AS ratio\nFROM system.parts_columns\nWHERE active AND database = 'analytics'\nGROUP BY table, column, type\nORDER BY sum(column_data_compressed_bytes) DESC\nLIMIT 30;\n```\n\n### Step 3: Improve Compression\n\n```sql\n-- Check current codec per column\nSELECT name, type, compression_codec\nFROM system.columns\nWHERE database = 'analytics' AND table = 'events';\n\n-- Apply better codecs to large columns\nALTER TABLE analytics.events\n    MODIFY COLUMN properties String CODEC(ZSTD(3));  -- JSON blobs\n\nALTER TABLE analytics.events\n    MODIFY COLUMN created_at DateTime CODEC(DoubleDelta, ZSTD);  -- Timestamps\n\nALTER TABLE analytics.events\n    MODIFY COLUMN user_id UInt64 CODEC(Delta, ZSTD);  -- Sequential IDs\n\n-- Verify improvement after next merge\nOPTIMIZE TABLE analytics.events FINAL;\n\n-- Check new compression ratio\nSELECT\n    column,\n    formatReadableSize(sum(column_data_compressed_bytes)) AS compressed,\n    round(sum(column_data_uncompressed_bytes) / sum(column_data_compressed_bytes), 1) AS ratio\nFROM system.parts_columns\nWHERE active AND database = 'analytics' AND table = 'events'\nGROUP BY column ORDER BY sum(column_data_compressed_bytes) DESC;\n```\n\n### Step 4: TTL for Data Lifecycle\n\n```sql\n-- Expire old data automatically (reduces storage)\nALTER TABLE analytics.events\n    MODIFY TTL created_at + INTERVAL 90 DAY;\n\n-- Move old data to cheaper storage tier (ClickHouse Cloud)\nALTER TABLE analytics.events\n    MODIFY TTL\n        created_at + INTERVAL 30 DAY TO VOLUME 'hot',\n        created_at + INTERVAL 90 DAY TO VOLUME 'cold',\n        created_at + INTERVAL 365 DAY DELETE;\n\n-- Drop entire partitions manually (fastest way to delete bulk data)\nALTER TABLE analytics.events\n    DROP PARTITION '202401';   -- Drops January 2024\n\n-- Check TTL status\nSELECT database, table, result_ttl_expression\nFROM system.tables\nWHERE database = 'analytics';\n```\n\n### Step 5: Compute Cost Reduction\n\n```sql\n-- ClickHouse Cloud: Scale compute dynamically\n-- Configure in Cloud Console:\n-- - Auto-scaling: min 2 / max 8 replicas\n-- - Idle timeout: 5 minutes (auto-suspend when no queries)\n-- - Use \"Development\" tier for staging environments\n\n-- Reduce per-query compute consumption\nSET max_threads = 4;                  -- Use fewer cores per query\nSET max_memory_usage = 5000000000;    -- 5GB cap per query\n\n-- Server-side async inserts (reduces insert compute)\nSET async_insert = 1;\nSET async_insert_max_data_size = 10000000;  -- Flush at 10MB\nSET async_insert_busy_timeout_ms = 5000;    -- or every 5 seconds\n```\n\n### Step 6: Query Efficiency = Lower Costs\n\n```sql\n-- Find the most expensive queries (by data scanned)\nSELECT\n    normalized_query_hash,\n    count() AS executions,\n    formatReadableSize(sum(read_bytes)) AS total_read,\n    round(avg(query_duration_ms)) AS avg_ms,\n    any(substring(query, 1, 200)) AS sample\nFROM system.query_log\nWHERE type = 'QueryFinish'\n  AND event_time >= now() - INTERVAL 7 DAY\nGROUP BY normalized_query_hash\nORDER BY sum(read_bytes) DESC\nLIMIT 20;\n\n-- Use materialized views to avoid repeated full scans\n-- Instead of: SELECT count() FROM events WHERE date = today()\n-- Pre-compute:\n-- CREATE MATERIALIZED VIEW daily_counts_mv TO daily_counts AS\n--   SELECT toDate(created_at) AS date, count() AS cnt FROM events GROUP BY date;\n-- Then: SELECT cnt FROM daily_counts WHERE date = today()\n\n-- Use PREWHERE to read less data\nSELECT user_id, properties FROM analytics.events\nPREWHERE event_type = 'purchase'    -- Filter first, read fewer columns\nWHERE created_at >= today() - 7;\n```\n\n### Step 7: Monitor Costs\n\n```typescript\n// Track query costs in your application\nasync function queryWithCostTracking<T>(\n  client: ReturnType<typeof import('@clickhouse/client').createClient>,\n  sql: string,\n): Promise<{ rows: T[]; cost: { readRows: number; readBytes: number; durationMs: number } }> {\n  const start = Date.now();\n  const rs = await client.query({ query: sql, format: 'JSONEachRow' });\n  const rows = await rs.json<T>();\n  const durationMs = Date.now() - start;\n\n  // Log for cost analysis\n  console.log({\n    query: sql.slice(0, 100),\n    readRows: rs.response_headers['x-clickhouse-summary']\n      ? JSON.parse(rs.response_headers['x-clickhouse-summary']).read_rows\n      : 'unknown',\n    durationMs,\n  });\n\n  return { rows, cost: { readRows: 0, readBytes: 0, durationMs } };\n}\n```\n\n## Cost Optimization Checklist\n\n- [ ] Compression codecs applied to large columns (ZSTD, Delta, DoubleDelta)\n- [ ] TTL configured for data expiration\n- [ ] Auto-scaling and idle suspension enabled (Cloud)\n- [ ] Development/staging on smaller tiers\n- [ ] Materialized views for dashboard queries\n- [ ] `max_threads` limited for non-critical queries\n- [ ] `async_insert` enabled for high-frequency small inserts\n- [ ] Monthly cost review with `system.query_log` analysis\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Storage growing fast | No TTL, no drops | Add TTL or schedule partition drops |\n| High compute bill | Full-scan queries | Add materialized views, fix ORDER BY |\n| Egress charges | Large result sets | Add LIMIT, use aggregations |\n| Idle compute cost | No auto-suspend | Enable idle timeout in Cloud console |\n\n## Resources\n\n- [ClickHouse Cloud Pricing](https://clickhouse.com/pricing)\n- [Data Compression](https://clickhouse.com/docs/sql-reference/statements/create/table#column_compression_codec)\n- [TTL for Data Management](https://clickhouse.com/docs/engines/table-engines/mergetree-family/mergetree#table_engine-mergetree-ttl)\n\n## Next Steps\n\nFor architecture patterns, see `clickhouse-reference-architecture`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clickhouse-cost-tuning",
-    "description": "Optimize ClickHouse Cloud costs \\u2014 compute scaling, storage tiering,\\",
-    "\\ Cloud bills, reducing storage costs,\\nor optimizing compute utilization.\\nTrigger": "\\",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

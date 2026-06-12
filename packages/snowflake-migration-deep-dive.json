@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033292",
   "name": "snowflake-migration-deep-dive",
   "slug": "snowflake-migration-deep-dive",
   "description": "Execute migration to Snowflake from Redshift, BigQuery, or on-prem databases",
   "content": "# Snowflake Migration Deep Dive\n\n## Overview\n\nComprehensive guide for migrating to Snowflake from Redshift, BigQuery, on-prem databases, or other data warehouses.\n\n## Migration Types\n\n| Source | Complexity | Duration | Key Challenge |\n|--------|-----------|----------|---------------|\n| Amazon Redshift | Medium | 2-6 weeks | SQL dialect differences |\n| Google BigQuery | Medium | 2-6 weeks | Nested/repeated fields |\n| On-prem (Oracle/SQL Server) | High | 1-3 months | Data transfer bandwidth |\n| Another Snowflake account | Low | Days | Replication or data sharing |\n\n## Instructions\n\n### Step 1: Schema Conversion\n\n```sql\n-- Common SQL differences from Redshift/BigQuery\n\n-- Redshift DISTKEY/SORTKEY \u2192 Snowflake clustering (optional, for large tables)\n-- Redshift: CREATE TABLE orders (id INT) DISTSTYLE KEY DISTKEY(customer_id) SORTKEY(order_date);\n-- Snowflake:\nCREATE TABLE orders (\n  id INTEGER AUTOINCREMENT,\n  customer_id INTEGER,\n  order_date TIMESTAMP_NTZ\n);\nALTER TABLE orders CLUSTER BY (order_date);  -- Only for tables > 1TB\n\n-- Redshift IDENTITY \u2192 Snowflake AUTOINCREMENT\n-- Redshift: id INT IDENTITY(1,1)\n-- Snowflake: id INTEGER AUTOINCREMENT START 1 INCREMENT 1\n\n-- BigQuery STRUCT/ARRAY \u2192 Snowflake VARIANT/ARRAY\n-- BigQuery: address STRUCT<street STRING, city STRING>\n-- Snowflake:\nCREATE TABLE customers (\n  id INTEGER,\n  address VARIANT  -- Store as JSON: {\"street\": \"...\", \"city\": \"...\"}\n);\n-- Access: SELECT address:street::VARCHAR FROM customers\n\n-- BigQuery REPEATED fields \u2192 Snowflake ARRAY\n-- BigQuery: tags ARRAY<STRING>\n-- Snowflake: tags ARRAY\n\n-- Data types mapping\n-- Redshift VARCHAR(MAX) \u2192 Snowflake VARCHAR (16MB max)\n-- Redshift TIMESTAMPTZ \u2192 Snowflake TIMESTAMP_TZ\n-- BigQuery INT64 \u2192 Snowflake NUMBER(38,0)\n-- BigQuery FLOAT64 \u2192 Snowflake FLOAT\n-- BigQuery BYTES \u2192 Snowflake BINARY\n-- Oracle CLOB \u2192 Snowflake VARCHAR\n-- SQL Server DATETIME2 \u2192 Snowflake TIMESTAMP_NTZ\n```\n\n### Step 2: Data Transfer Methods\n\n```bash\n# Method 1: Through cloud storage (recommended for large datasets)\n\n# From Redshift \u2192 S3 \u2192 Snowflake\n# Step A: Unload from Redshift to S3\npsql -h redshift-cluster.xxx.region.redshift.amazonaws.com -d mydb -c \"\n  UNLOAD ('SELECT * FROM orders')\n  TO 's3://migration-bucket/redshift/orders/'\n  IAM_ROLE 'arn:aws:iam::123456789:role/RedshiftUnload'\n  FORMAT PARQUET;\n\"\n\n# Step B: Load from S3 to Snowflake\nsnowsql -c prod -q \"\n  CREATE STAGE migration_stage\n    STORAGE_INTEGRATION = s3_integration\n    URL = 's3://migration-bucket/redshift/';\n\n  COPY INTO orders\n    FROM @migration_stage/orders/\n    FILE_FORMAT = (TYPE = 'PARQUET')\n    MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE;\n\"\n```\n\n```python\n# Method 2: Direct transfer via Python (for smaller tables)\nimport snowflake.connector\nimport pandas as pd\nfrom snowflake.connector.pandas_tools import write_pandas\n\n# Read from source (Redshift example)\nimport psycopg2\nsource_conn = psycopg2.connect(\n    host='redshift-cluster.xxx.redshift.amazonaws.com',\n    dbname='source_db', user='admin', password='***', port=5439\n)\ndf = pd.read_sql('SELECT * FROM orders', source_conn)\nprint(f\"Read {len(df)} rows from Redshift\")\n\n# Write to Snowflake\nsf_conn = snowflake.connector.connect(\n    account=os.environ['SNOWFLAKE_ACCOUNT'],\n    user=os.environ['SNOWFLAKE_USER'],\n    password=os.environ['SNOWFLAKE_PASSWORD'],\n    warehouse='ETL_WH',\n    database='PROD_DW',\n    schema='SILVER',\n)\nsuccess, nchunks, nrows, _ = write_pandas(sf_conn, df, 'ORDERS')\nprint(f\"Loaded {nrows} rows to Snowflake in {nchunks} chunks\")\n```\n\n### Step 3: Data Validation\n\n```sql\n-- Row count comparison\nSELECT 'orders' AS table_name,\n       (SELECT COUNT(*) FROM prod_dw.silver.orders) AS snowflake_count,\n       12345678 AS source_count,  -- Replace with actual source count\n       (SELECT COUNT(*) FROM prod_dw.silver.orders) - 12345678 AS diff;\n\n-- Checksum validation (aggregate comparison)\nSELECT\n  COUNT(*) AS row_count,\n  SUM(amount) AS total_amount,\n  MIN(order_date) AS min_date,\n  MAX(order_date) AS max_date,\n  COUNT(DISTINCT customer_id) AS unique_customers\nFROM prod_dw.silver.orders;\n-- Compare these values with source system\n\n-- Sample-based validation\nSELECT *\nFROM prod_dw.silver.orders\nWHERE order_id IN (1001, 5000, 10000, 50000, 100000)\nORDER BY order_id;\n-- Compare row-by-row with source\n\n-- Data type validation\nSELECT column_name, data_type, is_nullable,\n       character_maximum_length, numeric_precision, numeric_scale\nFROM INFORMATION_SCHEMA.COLUMNS\nWHERE table_name = 'ORDERS'\nORDER BY ordinal_position;\n```\n\n### Step 4: Query Migration\n\n```sql\n-- Common SQL translation patterns\n\n-- Redshift: GETDATE() \u2192 Snowflake: CURRENT_TIMESTAMP()\n-- Redshift: DATEDIFF(day, a, b) \u2192 Snowflake: DATEDIFF('day', a, b)  (string date part)\n-- Redshift: NVL(a, b) \u2192 Snowflake: COALESCE(a, b) or NVL(a, b)  (both work)\n-- Redshift: LISTAGG(col, ',') \u2192 Snowflake: LISTAGG(col, ',')  (same)\n-- Redshift: DECODE(a, 1, 'x', 2, 'y') \u2192 Snowflake: DECODE(a, 1, 'x', 2, 'y')  (same)\n\n-- BigQuery: SAFE_DIVIDE(a, b) \u2192 Snowflake: DIV0(a, b)  or a / NULLIF(b, 0)\n-- BigQuery: FORMAT_DATE('%Y-%m', date) \u2192 Snowflake: TO_CHAR(date, 'YYYY-MM')\n-- BigQuery: UNNEST(array) \u2192 Snowflake: LATERAL FLATTEN(input => array)\n-- BigQuery: STRUCT access a.b.c \u2192 Snowflake: a:b:c (colon path notation)\n\n-- Example: BigQuery UNNEST \u2192 Snowflake FLATTEN\n-- BigQuery:\n--   SELECT id, tag FROM orders, UNNEST(tags) AS tag\n-- Snowflake:\nSELECT o.id, f.value::VARCHAR AS tag\nFROM orders o, LATERAL FLATTEN(input => o.tags) f;\n```\n\n### Step 5: Cutover Plan\n\n```\nWeek 1-2: Setup\n\u251c\u2500 Create Snowflake account and configure\n\u251c\u2500 Design schema (converted from source)\n\u251c\u2500 Set up storage integration for data transfer\n\u2514\u2500 Create roles, warehouses, resource monitors\n\nWeek 3-4: Data Migration\n\u251c\u2500 Full historical load via cloud storage\n\u251c\u2500 Validate row counts and checksums\n\u251c\u2500 Convert and test critical queries\n\u2514\u2500 Set up ongoing CDC (if parallel run needed)\n\nWeek 5-6: Parallel Run\n\u251c\u2500 Run both systems simultaneously\n\u251c\u2500 Compare query results between source and Snowflake\n\u251c\u2500 Migrate BI tools to point at Snowflake\n\u2514\u2500 Train users on Snowflake SQL differences\n\nWeek 7: Cutover\n\u251c\u2500 Final delta sync from source\n\u251c\u2500 Switch all connections to Snowflake\n\u251c\u2500 Decommission source system (after validation period)\n\u2514\u2500 Document and postmortem\n```\n\n## Rollback Plan\n\n```sql\n-- Keep source system running for rollback period (2-4 weeks)\n-- If rollback needed:\n\n-- 1. Redirect connections back to source\n-- 2. Sync any new data from Snowflake back to source (if needed)\n-- 3. Document what went wrong\n\n-- Snowflake Time Travel as safety net during migration\nALTER DATABASE PROD_DW SET DATA_RETENTION_TIME_IN_DAYS = 30;\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Data type mismatch | Schema conversion error | Use TRY_CAST for safe conversion |\n| Row count mismatch | Duplicate handling differs | Check dedup logic in source vs target |\n| Query results differ | SQL dialect difference | Test each function translation |\n| Transfer too slow | Large dataset, small warehouse | Use LARGE warehouse for COPY INTO |\n| Parquet schema evolution | Column added mid-migration | Use `MATCH_BY_COLUMN_NAME` |\n\n## Resources\n\n- [Migration Guides](https://docs.snowflake.com/en/user-guide/data-load-overview)\n- [SQL Translation (from Redshift)](https://docs.snowflake.com/en/guides/migration/redshift)\n- [FLATTEN Function](https://docs.snowflake.com/en/sql-reference/functions/flatten)\n- [write_pandas](https://docs.snowflake.com/en/developer-guide/python-connector/python-connector-pandas)\n\n## Next Steps\n\nFor advanced troubleshooting, see `snowflake-advanced-troubleshooting`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "snowflake-migration-deep-dive",
-    "description": "Execute migration to Snowflake from Redshift, BigQuery, or on-prem databases",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(python3:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

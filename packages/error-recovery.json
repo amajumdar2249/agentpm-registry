@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000001720",
   "name": "error-recovery",
   "slug": "error-recovery",
   "description": "Strategies for handling subagent failures with retry logic and escalation patterns.",
   "content": "\n# Error Recovery Skill\n\nPattern for handling subagent failures gracefully with appropriate retry strategies.\n\n## When to Load This Skill\n\n- You are spawning subagents that may fail\n- A subagent returned an error or unexpected output\n- You need to decide whether to retry, escalate, or abort\n\n## Failure Categories\n\n| Category | Symptoms | Strategy |\n|----------|----------|----------|\n| **Transient** | Timeout, malformed output, parsing error | Simple Retry |\n| **Context Gap** | \"I don't have enough information\", unclear task | Context Enhancement |\n| **Complexity** | Partial completion, scope creep, tangents | Scope Reduction |\n| **Boundary/Contract** | `status: blocked`, boundary_violation, contract_change | Escalation |\n| **Fatal** | Repeated failures (3+), fundamental misunderstanding | Abort with Report |\n\n## Retry Strategies\n\n### Strategy 1: Simple Retry\n\nFor transient failures. Same prompt, up to 3 attempts.\n\n```\n# Track attempts\nattempts: 0\nmax_attempts: 3\n\n# On failure\nIF attempts < max_attempts:\n  attempts += 1\n  Task(same_subagent_type, same_model, same_prompt)\nELSE:\n  Mark as FAILED, move on\n```\n\n**Use when:**\n- Output was malformed or truncated\n- Timeout occurred\n- Agent returned empty/null response\n\n### Strategy 2: Context Enhancement\n\nAdd more information to help the agent succeed.\n\n```\nTask(\n  subagent_type: \"implementer\",\n  model: \"sonnet\",\n  prompt: |\n    ## PREVIOUS ATTEMPT FAILED\n\n    Error: {error_message}\n    Output received: {partial_output}\n\n    ## ADDITIONAL CONTEXT\n\n    Here is more information that may help:\n    - Related file: @{additional_file_path}\n    - Pattern to follow: {example_pattern}\n    - Specific guidance: {clarification}\n\n    ## ORIGINAL TASK\n\n    {original_task_description}\n\n    Output to: {output_path}\n)\n```\n\n**Use when:**\n- Agent said \"I don't understand\" or \"unclear requirements\"\n- Agent made incorrect assumptions\n- Agent asked questions in output\n\n**Context to add:**\n- Related code files the agent might need\n- Similar implementations as examples\n- Explicit clarification of ambiguous points\n- Error message from previous attempt\n\n### Strategy 3: Scope Reduction\n\nBreak the failing task into smaller, more manageable pieces.\n\n```\n# Original task failed\nTask: \"Implement full authentication system\"\n\n# Split into subtasks\nTask(implementer, \"Implement password hashing utility\")\nTask(implementer, \"Implement session token generation\")\nTask(implementer, \"Implement login endpoint\")\nTask(implementer, \"Implement logout endpoint\")\n```\n\n**Use when:**\n- Agent completed partial work then failed\n- Task description was too broad\n- Agent went off on tangents\n- Output shows confusion about scope\n\n**Splitting guidelines:**\n- Each subtask should be independently completable\n- Each subtask should have clear boundaries\n- Subtasks can run in parallel if no dependencies\n- Recombine outputs after all subtasks complete\n\n### Strategy 4: Escalation\n\nRoute to specialized agent for resolution.\n\n```\n# For boundary violations\nTask(\n  subagent_type: \"contract-resolver\",\n  model: \"sonnet\",\n  prompt: |\n    A task is blocked due to boundary/contract issues.\n\n    Blocked task output: memory/tasks/{task_id}/output.json\n    Blocked reason: {blocked_reason}\n    Current contracts: {contract_paths}\n\n    Analyze impact and provide resolution.\n    Output to: memory/contracts/resolution_{task_id}.json\n)\n```\n\n**Escalation paths:**\n\n| Failure Type | Escalate To | Action |\n|--------------|-------------|--------|\n| `blocked_reason: boundary_violation` | contract-resolver | Expand boundaries or redesign |\n| `blocked_reason: contract_change` | contract-resolver | Modify contract, re-verify dependents |\n| `blocked_reason: dependency_issue` | executor (self) | Re-check dependency status |\n| Repeated implementation failures | architect | Reconsider design approach |\n\n### Strategy 5: Abort with Report\n\nWhen recovery is not possible, fail gracefully.\n\n```json\n{\"tasks\":[{\"id\":\"{task_id}\",\"status\":\"failed\",\"failure_reason\":\"{specific reason}\",\"attempts_made\":3,\"recovery_attempted\":[{\"strategy\":\"simple_retry\",\"result\":\"same_error\"},{\"strategy\":\"context_enhancement\",\"result\":\"different_error\"},{\"strategy\":\"scope_reduction\",\"result\":\"subtasks_also_failed\"}],\"recommendation\":\"Task may need architectural redesign\"}]}\n```\n\n**Use when:**\n- 3+ retry attempts failed\n- Different strategies all failed\n- Fundamental misunderstanding of requirements\n- Task is actually impossible given constraints\n\n## Decision Tree\n\n```\nOn Subagent Failure:\n\u2502\n\u251c\u2500 Is output malformed/empty/timeout?\n\u2502  \u2514\u2500 YES \u2192 Strategy 1: Simple Retry (up to 3x)\n\u2502\n\u251c\u2500 Did agent say \"unclear\" or ask questions?\n\u2502  \u2514\u2500 YES \u2192 Strategy 2: Context Enhancement\n\u2502\n\u251c\u2500 Did agent complete partial work?\n\u2502  \u2514\u2500 YES \u2192 Strategy 3: Scope Reduction\n\u2502\n\u251c\u2500 Is status \"blocked\" with boundary/contract reason?\n\u2502  \u2514\u2500 YES \u2192 Strategy 4: Escalation to contract-resolver\n\u2502\n\u251c\u2500 Have we tried 3+ strategies already?\n\u2502  \u2514\u2500 YES \u2192 Strategy 5: Abort with Report\n\u2502\n\u2514\u2500 Unknown error\n   \u2514\u2500 Try Strategy 2 first, then escalate\n```\n\n## Retry State Tracking\n\nTrack retry attempts in the execution state file:\n\n```json\n{\"tasks\":[{\"id\":\"task-001\",\"status\":\"running\",\"attempts\":2,\"last_error\":\"Timeout after 120s\",\"retry_strategy\":\"simple_retry\"},{\"id\":\"task-002\",\"status\":\"running\",\"attempts\":1,\"last_error\":\"Needs access to src/config/db.ts\",\"retry_strategy\":\"context_enhancement\",\"context_added\":[\"src/config/db.ts\",\"src/types/config.ts\"]}]}\n```\n\n## Integration with Executor Loop\n\n```\n# Enhanced execution loop\nWHILE tasks remain incomplete:\n  1. Read state file\n  2. Find ready tasks\n  3. Spawn ready tasks\n  4. Check completed tasks:\n     FOR each completed task:\n       IF status == pre_complete:\n         spawn verifier\n       ELIF status == blocked:\n         apply Strategy 4 (Escalation)\n       ELIF status == failed:\n         determine_failure_category()\n         apply_appropriate_strategy()\n         update_retry_state()\n  5. Update state file\n  6. IF all verified: EXIT\n  7. IF all failed with no recovery: EXIT with failure report\n```\n\n## Principles\n\n1. **Fail fast, recover smart** - Don't retry blindly; analyze the failure first\n2. **Preserve partial work** - If agent completed 50%, don't discard it\n3. **Escalate early** - Boundary/contract issues need resolver, not retries\n4. **Track everything** - Log all attempts for reflection phase\n5. **Know when to quit** - 3 failed strategies = abort, don't loop forever\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "error-recovery",
-    "description": "Strategies for handling subagent failures with retry logic and escalation patterns.",
-    "allowed-tools": "Read, Task"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

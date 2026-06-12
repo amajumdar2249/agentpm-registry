@@ -1,14 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000040017",
   "name": "orchestrating-skills",
   "slug": "orchestrating-skills-2",
   "description": ">-",
   "content": "\n# Skill-Aware Orchestration\n\nOrchestrate complex multi-step tasks through a four-phase pipeline that eliminates\nredundant context processing and reflexive subagent spawning.\n\n## When to Use\n\n- Task requires **multiple analytical perspectives** (e.g., compare + critique + synthesize)\n- Context is large and **subtasks only need portions** of it\n- Simple lookups should be **self-answered** without spawning subagents\n\n## When NOT to Use\n\n- Single-skill tasks (just use the skill directly)\n- Tasks requiring tool use or code execution (this is text-analysis orchestration)\n- Real-time streaming requirements (this is batch-oriented)\n\n## Quick Start\n\n```python\nimport sys\nsys.path.insert(0, \"/mnt/skills/user/orchestrating-skills/scripts\")\nfrom orchestrate import orchestrate\n\nresult = orchestrate(\n    context=open(\"report.md\").read(),\n    task=\"Compare the two proposed architectures, extract cost figures, and recommend one\",\n    verbose=True,\n)\nprint(result[\"result\"])\n```\n\n## Dependencies\n\n- **httpx** (usually pre-installed; `pip install httpx` if not)\n- **No Anthropic SDK required**\n- API key: reads `ANTHROPIC_API_KEY` env var or `/mnt/project/claude.env`\n\n## Four-Phase Pipeline\n\n### Phase 1: Planning (LLM)\n\nThe orchestrator reads the full context **once** and produces a JSON plan:\n\n```json\n{\n  \"subtasks\": [\n    {\n      \"task\": \"Compare architecture A vs B on scalability, cost, and complexity\",\n      \"skill\": \"analytical_comparison\",\n      \"context_pointers\": {\"sections\": [\"Architecture A\", \"Architecture B\"]}\n    },\n    {\n      \"task\": \"What is the project budget?\",\n      \"skill\": \"self\",\n      \"answer\": \"$2.4M\"\n    }\n  ]\n}\n```\n\nKey behaviors:\n- Assigns one skill per subtask from the built-in library\n- Uses `\"self\"` for direct lookups (numbers, names, dates) \u2014 no subagent spawned\n- Self-answering is an LLM judgment call, not a sentence-count heuristic\n- Context pointers use **section headers** (structural, edit-resilient)\n\n### Phase 2: Assembly (Deterministic Code)\n\nNo LLM calls. Extracts context subsets using section headers or line ranges,\npairs each with the assigned skill's system prompt, builds prompt dicts.\n\n### Phase 3: Execution (Parallel LLM)\n\nDelegated subtasks run in parallel via `concurrent.futures.ThreadPoolExecutor`.\nEach subagent receives **only its context slice** and **skill-specific instructions**.\n\n### Phase 4: Synthesis (LLM)\n\nCollects all results (self-answered + subagent), synthesizes into a coherent\nresponse that reads as if a single expert wrote it.\n\n## Built-in Skill Library\n\nEight analytical skills plus one pipeline skill:\n\n| Skill | Purpose |\n|-------|---------|\n| `analytical_comparison` | Compare items along dimensions with trade-offs |\n| `fact_extraction` | Extract facts with source attribution |\n| `structured_synthesis` | Combine multiple sources into narrative |\n| `causal_reasoning` | Identify cause-effect chains |\n| `critique` | Evaluate arguments for soundness |\n| `classification` | Categorize items with rationale |\n| `summarization` | Produce concise summaries |\n| `gap_analysis` | Identify missing information |\n| `remember` | Persist key findings to long-term memory via `remembering` skill (pipeline-only, runs post-synthesis) |\n\n## API Reference\n\n### `orchestrate(context, task, **kwargs) -> dict`\n\nReturns:\n\n```python\n{\n    \"result\": \"Final synthesized response\",\n    \"plan\": {...},\n    \"subtask_count\": 4,\n    \"self_answered\": 1,\n    \"delegated\": 3,\n    \"memory_ids\": [\"abc123\"],  # populated when remember subtasks ran\n}\n```\n\nParameters:\n- `context` (str): Full context to process\n- `task` (str): What to accomplish\n- `model` (str): Claude model, default `claude-sonnet-4-6`\n- `max_tokens` (int): Per-subagent token limit, default 2048\n- `synthesis_max_tokens` (int): Synthesis token limit, default 4096\n- `max_workers` (int): Parallel subagent limit, default 5\n- `skills` (dict): Custom skill library (merged with built-in)\n- `persist` (bool): Auto-append a `remember` subtask to store findings, default False\n- `verbose` (bool): Print progress to stderr\n\n### CLI\n\n```bash\npython orchestrate.py \\\n    --context-file report.md \\\n    --task \"Analyze this report\" \\\n    --verbose --json\n```\n\n## Extending the Skill Library\n\n```python\nfrom skill_library import SKILLS\n\ncustom_skills = {\n    **SKILLS,\n    \"code_review\": {\n        \"description\": \"Review code for bugs, style, and security\",\n        \"system_prompt\": \"You are a code review specialist...\",\n        \"output_hint\": \"issues_list with severity and fix suggestions\",\n    }\n}\n\nresult = orchestrate(context=code, task=\"Review this PR\", skills=custom_skills)\n```\n\n## Persisting Findings with `remember`\n\n`remember` is a **pipeline skill** \u2014 it executes in Phase 4 after synthesis, not as a\nparallel subagent. It uses LLM distillation to extract the key insight from the synthesized\nresult, then writes it to long-term memory via the `remembering` skill.\n\n### Two ways to activate persistence\n\n**1. `persist=True` (automatic)**\n\n```python\nresult = orchestrate(\n    context=open(\"report.md\").read(),\n    task=\"Compare approaches A and B\",\n    persist=True,  # auto-injects a remember subtask\n    verbose=True,\n)\nprint(result[\"memory_ids\"])  # ['abc123']\n```\n\n**2. Planner-emitted (explicit)**\n\nThe orchestrator planner can emit `remember` as a subtask when the task description\nimplies storage:\n\n```json\n{\n  \"task\": \"Store the key findings from this analysis\",\n  \"skill\": \"remember\",\n  \"context_pointers\": {}\n}\n```\n\n### Requirements\n\n- `remembering` skill must be installed (`/mnt/skills/user/remembering` or\n  `/home/user/claude-skills/remembering`)\n- Turso credentials must be available (auto-detected by the remembering skill)\n- If unavailable, persistence is skipped silently and `memory_ids` returns `[]`\n\n## Architecture Details\n\nSee [references/architecture.md](references/architecture.md) for design decisions,\ntoken efficiency analysis, and comparison with SkillOrchestra (arXiv 2602.19672).\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "orchestrating-skills",
-    "description": ">-",
-    "metadata": "",
-    "version": "0.3.0",
-    "depends_on": "[]"
+  "author": "agentpm",
+  "version": "0.3.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

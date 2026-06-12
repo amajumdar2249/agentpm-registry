@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033116",
   "name": "salesforce-core-workflow-b",
   "slug": "salesforce-core-workflow-b",
   "description": "Execute Salesforce Bulk API 2.0 and Composite API operations for high-volume",
   "content": "# Salesforce Core Workflow B \u2014 Bulk & Composite API\n\n## Overview\n\nHigh-volume data operations using Bulk API 2.0 (millions of records) and Composite API (multi-step transactions in a single call).\n\n## Prerequisites\n\n- Completed `salesforce-install-auth` setup\n- Understanding of `salesforce-core-workflow-a` (standard CRUD)\n- jsforce installed with connection configured\n\n## Instructions\n\n### Step 1: Bulk API 2.0 \u2014 Ingest (Insert/Update/Upsert/Delete)\n\n```typescript\nimport { getConnection } from './salesforce/connection';\nimport fs from 'fs';\n\nconst conn = await getConnection();\n\n// Create a bulk ingest job\nconst job = conn.bulk2.createJob({\n  operation: 'insert',     // insert | update | upsert | delete\n  object: 'Contact',\n  // For upsert, specify: externalIdFieldName: 'External_ID__c'\n});\n\n// Upload CSV data\nconst csvData = `FirstName,LastName,Email,AccountId\nAlice,Johnson,alice@example.com,001xxxxxxxxxxxx\nBob,Williams,bob@example.com,001xxxxxxxxxxxx\nCarol,Davis,carol@example.com,001xxxxxxxxxxxx`;\n\n// jsforce handles chunking automatically\nconst results = await conn.bulk2.loadAndWaitForResults({\n  object: 'Contact',\n  operation: 'insert',\n  input: csvData,\n});\n\nconsole.log('Successful:', results.successfulResults.length);\nconsole.log('Failed:', results.failedResults.length);\n\nfor (const failure of results.failedResults) {\n  console.error(`Row ${failure.sf__Id}: ${failure.sf__Error}`);\n}\n```\n\n### Step 2: Bulk API 2.0 \u2014 Query (Export)\n\n```typescript\n// Bulk query for large datasets (100K+ records)\nconst queryResults = await conn.bulk2.query(\n  `SELECT Id, Name, Email, Account.Name\n   FROM Contact\n   WHERE CreatedDate >= LAST_N_DAYS:90`\n);\n\n// Stream results for memory efficiency\nlet recordCount = 0;\nfor await (const record of queryResults) {\n  recordCount++;\n  // Process each record\n  console.log(`${record.Name} \u2014 ${record.Email}`);\n}\nconsole.log(`Total exported: ${recordCount}`);\n```\n\n### Step 3: Bulk API 2.0 \u2014 File-Based Upload\n\n```typescript\n// Upload from a CSV file (for very large datasets)\nconst csvStream = fs.createReadStream('contacts-import.csv');\n\nconst bulkResults = await conn.bulk2.loadAndWaitForResults({\n  object: 'Contact',\n  operation: 'upsert',\n  externalIdFieldName: 'External_ID__c',\n  input: csvStream,\n  pollTimeout: 600000,   // 10 min timeout for large jobs\n  pollInterval: 5000,    // Check every 5 seconds\n});\n\nconsole.log(`Processed: ${bulkResults.successfulResults.length} success, ${bulkResults.failedResults.length} failed`);\n```\n\n### Step 4: Composite API \u2014 Multiple Operations in One Call\n\n```typescript\n// Execute up to 25 subrequests in a single API call\n// Each subrequest counts as a separate API call for limits\nconst compositeResult = await conn.request({\n  method: 'POST',\n  url: '/services/data/v59.0/composite',\n  body: JSON.stringify({\n    allOrNone: true,  // Rollback all if any fail\n    compositeRequest: [\n      {\n        method: 'POST',\n        url: '/services/data/v59.0/sobjects/Account/',\n        referenceId: 'newAccount',\n        body: { Name: 'Composite Corp', Industry: 'Technology' },\n      },\n      {\n        method: 'POST',\n        url: '/services/data/v59.0/sobjects/Contact/',\n        referenceId: 'newContact',\n        body: {\n          FirstName: 'Jane',\n          LastName: 'Doe',\n          AccountId: '@{newAccount.id}',  // Reference previous result\n          Email: 'jane@composite.example.com',\n        },\n      },\n      {\n        method: 'POST',\n        url: '/services/data/v59.0/sobjects/Opportunity/',\n        referenceId: 'newOpp',\n        body: {\n          Name: 'Composite Deal',\n          AccountId: '@{newAccount.id}',\n          StageName: 'Prospecting',\n          CloseDate: '2026-12-31',\n          Amount: 100000,\n        },\n      },\n    ],\n  }),\n  headers: { 'Content-Type': 'application/json' },\n});\n```\n\n### Step 5: Composite Batch \u2014 Independent Operations\n\n```typescript\n// Batch executes up to 25 independent subrequests\n// Unlike composite, subrequests can't reference each other\nconst batchResult = await conn.request({\n  method: 'POST',\n  url: '/services/data/v59.0/composite/batch',\n  body: JSON.stringify({\n    batchRequests: [\n      {\n        method: 'GET',\n        url: 'v59.0/sobjects/Account/001xxxxxxxxxxxx',\n      },\n      {\n        method: 'GET',\n        url: 'v59.0/query/?q=SELECT+Id,Name+FROM+Contact+LIMIT+5',\n      },\n      {\n        method: 'PATCH',\n        url: 'v59.0/sobjects/Account/001xxxxxxxxxxxx',\n        richInput: { Industry: 'Software' },\n      },\n    ],\n  }),\n  headers: { 'Content-Type': 'application/json' },\n});\n\n// Check results\nfor (const result of batchResult.results) {\n  console.log(`Status: ${result.statusCode}`, result.result);\n}\n```\n\n### Step 6: Composite Graph \u2014 Complex Transaction Trees\n\n```typescript\n// Composite Graph: multiple independent composite operations\n// Each graph is an all-or-none transaction\nconst graphResult = await conn.request({\n  method: 'POST',\n  url: '/services/data/v59.0/composite/graph',\n  body: JSON.stringify({\n    graphs: [\n      {\n        graphId: 'graph1',\n        compositeRequest: [\n          {\n            method: 'POST',\n            url: '/services/data/v59.0/sobjects/Account/',\n            referenceId: 'acct1',\n            body: { Name: 'Graph Corp' },\n          },\n          {\n            method: 'POST',\n            url: '/services/data/v59.0/sobjects/Contact/',\n            referenceId: 'contact1',\n            body: {\n              LastName: 'Graph',\n              AccountId: '@{acct1.id}',\n            },\n          },\n        ],\n      },\n    ],\n  }),\n  headers: { 'Content-Type': 'application/json' },\n});\n```\n\n## Bulk vs Composite Decision Guide\n\n| Scenario | API | Why |\n|----------|-----|-----|\n| Import 10K+ records | Bulk API 2.0 | Handles millions, async processing |\n| Export large datasets | Bulk API 2.0 Query | Streaming, no memory issues |\n| Create Account + Contact + Opportunity | Composite | Single call, references between objects |\n| Fetch 5 unrelated records | Composite Batch | Parallel fetches, 1 API call |\n| Multi-object transaction | Composite Graph | All-or-none across object types |\n| < 200 records CRUD | sObject Collections | Simpler, synchronous, from workflow-a |\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `PROCESSING_HALTED` | Bulk job aborted | Check `failedResults` for row-level errors |\n| `InvalidBatch` | CSV format error | Verify column headers match field API names |\n| `ALL_OR_NONE_OPERATION_ROLLED_BACK` | Composite `allOrNone` failure | Check individual subrequest errors |\n| `MAX_BATCH_SIZE_EXCEEDED` | Too many subrequests | Composite: max 25, Batch: max 25 |\n| `EXCEEDED_ID_LIMIT` | Too many records in single bulk job | Split into multiple jobs (max 150M records/job) |\n\n## Resources\n\n- [Bulk API 2.0 Developer Guide](https://developer.salesforce.com/docs/atlas.en-us.api_asynch.meta/api_asynch/bulk_api_2_0.htm)\n- [Composite Resources](https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/resources_composite.htm)\n- [Composite Graph](https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/resources_composite_graph_introduction.htm)\n- [sObject Collections](https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/resources_composite_sobjects_collections.htm)\n\n## Next Steps\n\nFor common errors and debugging, see `salesforce-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "salesforce-core-workflow-b",
-    "description": "Execute Salesforce Bulk API 2.0 and Composite API operations for high-volume",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

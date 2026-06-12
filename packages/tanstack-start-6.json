@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000042711",
   "name": "tanstack-start",
   "slug": "tanstack-start-6",
   "description": "Full-stack React framework powered by TanStack Router with SSR, streaming, server functions, and deployment to any hosting provider.",
   "content": "\n# TanStack Start Skills\n\n## Overview\n\nTanStack Start is a full-stack React framework built on TanStack Router, powered by Vite and Nitro (via Vinxi). It provides server-side rendering, streaming, server functions (RPC), middleware, API routes, and deploys to any platform via Nitro presets.\n\n**Package:** `@tanstack/react-start`\n**Router Plugin:** `@tanstack/router-plugin`\n**Build Tool:** Vinxi (Vite + Nitro)\n**Status:** RC (Release Candidate)\n**RSC Support:** React Server Components support is in active development and will land as a non-breaking v1.x addition\n\n## Installation & Project Setup\n\n```bash\nnpx @tanstack/cli create my-app\n# Or manually:\nnpm install @tanstack/react-start @tanstack/react-router react react-dom\nnpm install -D @tanstack/router-plugin typescript vite vite-tsconfig-paths\n```\n\n### Project Structure\n\n```\nmy-app/\n  app/\n    routes/\n      __root.tsx          # Root layout\n      index.tsx           # / route\n      posts.$postId.tsx   # /posts/:postId\n      api/\n        users.ts          # /api/users API route\n    client.tsx            # Client entry\n    router.tsx            # Router creation\n    ssr.tsx               # SSR entry\n    routeTree.gen.ts      # Auto-generated route tree\n  app.config.ts           # TanStack Start config\n  tsconfig.json\n  package.json\n```\n\n### Configuration (`app.config.ts`)\n\n```typescript\nimport { defineConfig } from '@tanstack/react-start/config'\nimport viteTsConfigPaths from 'vite-tsconfig-paths'\n\nexport default defineConfig({\n  vite: {\n    plugins: [\n      viteTsConfigPaths({ projects: ['./tsconfig.json'] }),\n    ],\n  },\n  server: {\n    preset: 'node-server', // 'vercel' | 'netlify' | 'cloudflare-pages' | etc.\n  },\n  tsr: {\n    appDirectory: './app',\n    routesDirectory: './app/routes',\n    generatedRouteTree: './app/routeTree.gen.ts',\n  },\n})\n```\n\n## Server Functions (`createServerFn`)\n\nServer functions provide type-safe RPC calls between client and server.\n\n### Basic Server Functions\n\n```typescript\nimport { createServerFn } from '@tanstack/react-start'\n\n// GET (data fetching, cacheable)\nconst getUsers = createServerFn()\n  .handler(async () => {\n    const users = await db.query.users.findMany()\n    return users\n  })\n\n// POST (mutations, side effects)\nconst createUser = createServerFn({ method: 'POST' })\n  .validator((data: { name: string; email: string }) => data)\n  .handler(async ({ data }) => {\n    const user = await db.insert(users).values(data).returning()\n    return user\n  })\n```\n\n### With Zod Validation\n\n```typescript\nimport { z } from 'zod'\n\nconst updateUser = createServerFn({ method: 'POST' })\n  .validator(\n    z.object({\n      id: z.string(),\n      name: z.string().min(1),\n      email: z.string().email(),\n    })\n  )\n  .handler(async ({ data }) => {\n    // data is fully typed: { id: string; name: string; email: string }\n    return await db.update(users).set(data).where(eq(users.id, data.id))\n  })\n```\n\n## Middleware\n\n### Creating Middleware\n\n```typescript\nimport { createMiddleware } from '@tanstack/react-start'\n\nconst loggingMiddleware = createMiddleware().handler(async ({ next }) => {\n  console.log('Request started')\n  const result = await next()\n  console.log('Request completed')\n  return result\n})\n```\n\n### Auth Middleware with Context\n\n```typescript\nconst authMiddleware = createMiddleware().handler(async ({ next }) => {\n  const request = getWebRequest()\n  const session = await getSession(request)\n\n  if (!session?.user) {\n    throw redirect({ to: '/login' })\n  }\n\n  // Pass typed context to handler\n  return next({ context: { user: session.user } })\n})\n```\n\n### Chaining Middleware\n\n```typescript\nconst adminMiddleware = createMiddleware()\n  .middleware([authMiddleware])\n  .handler(async ({ next, context }) => {\n    // context.user is typed from authMiddleware\n    if (context.user.role !== 'admin') {\n      throw redirect({ to: '/unauthorized' })\n    }\n    return next({ context: { isAdmin: true } })\n  })\n\n// Usage\nconst adminAction = createServerFn({ method: 'POST' })\n  .middleware([adminMiddleware])\n  .handler(async ({ context }) => {\n    // context: { user: User; isAdmin: boolean }\n    return { success: true }\n  })\n```\n\n## API Routes (Server Routes)\n\n```typescript\n// app/routes/api/users.ts\nimport { createAPIFileRoute } from '@tanstack/react-start/api'\n\nexport const APIRoute = createAPIFileRoute('/api/users')({\n  GET: async ({ request }) => {\n    const users = await db.query.users.findMany()\n    return Response.json(users)\n  },\n  POST: async ({ request }) => {\n    const body = await request.json()\n    const user = await db.insert(users).values(body).returning()\n    return new Response(JSON.stringify(user), { status: 201 })\n  },\n})\n```\n\n## SSR Strategies\n\n### Streaming SSR (Default)\n\n```typescript\nexport const Route = createFileRoute('/dashboard')({\n  loader: async () => ({\n    criticalData: await fetchCriticalData(),\n    deferredData: defer(fetchSlowData()),\n  }),\n  component: Dashboard,\n})\n\nfunction Dashboard() {\n  const { criticalData, deferredData } = Route.useLoaderData()\n  return (\n    <div>\n      <CriticalSection data={criticalData} />\n      <Suspense fallback={<Loading />}>\n        <Await promise={deferredData}>\n          {(data) => <SlowSection data={data} />}\n        </Await>\n      </Suspense>\n    </div>\n  )\n}\n```\n\n## Deployment\n\n### Supported Platforms (Nitro Presets)\n\n```typescript\n// app.config.ts\nexport default defineConfig({\n  server: {\n    preset: 'node-server',        // Self-hosted Node.js\n    // preset: 'vercel',          // Vercel\n    // preset: 'netlify',         // Netlify\n    // preset: 'cloudflare-pages', // Cloudflare Pages\n    // preset: 'aws-lambda',      // AWS Lambda\n    // preset: 'deno-server',     // Deno Deploy\n    // preset: 'bun',             // Bun\n  },\n})\n```\n\n## Best Practices\n\n1. **Use validators for all server function inputs** - runtime safety and TypeScript inference\n2. **Compose middleware** for cross-cutting concerns (auth, logging, rate limiting)\n3. **Use `createServerFn` GET** for data fetching (cacheable, preloadable)\n4. **Use `createServerFn` POST** for mutations and side effects\n5. **Use `beforeLoad`** for route-level auth guards\n6. **Use `defer()`** for non-critical data to improve TTFB\n7. **Set `defaultPreload: 'intent'`** on the router for instant navigation\n8. **Co-locate server functions** with the routes that use them\n\n## Common Pitfalls\n\n- Server functions cannot close over client-side variables (they're extracted to separate bundles)\n- Data returned from server functions must be serializable\n- Forgetting `await` in loaders leads to streaming issues\n- Importing server-only code in client bundles causes build errors\n- Missing `declare module '@tanstack/react-router'` loses all type safety\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "tanstack-start",
-    "description": "Full-stack React framework powered by TanStack Router with SSR, streaming, server functions, and deployment to any hosting provider."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

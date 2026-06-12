@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009641",
   "name": "options-payoff",
   "slug": "options-payoff",
   "description": ">",
   "content": "\n# Options Payoff Curve Skill\n\nGenerates a fully interactive HTML widget (via `visualize:show_widget`) showing:\n- **Expiry payoff curve** (dashed gray line) \u2014 intrinsic value at expiration\n- **Theoretical value curve** (solid colored line) \u2014 Black-Scholes price at current DTE/IV\n- Dynamic sliders for all key parameters\n- Real-time stats: max profit, max loss, breakevens, current P&L at spot\n\n---\n\n## Step 1: Extract Strategy From User Input\n\nWhen the user provides a screenshot or text, extract:\n\n| Field | Where to find it | Default if missing |\n|---|---|---|\n| Strategy type | Title bar / leg description | \"custom\" |\n| Underlying | Ticker symbol | SPX |\n| Strike(s) | K1, K2, K3... in title or leg table | nearest round number |\n| Premium paid/received | Filled price or avg price | 5.00 |\n| Quantity | Position size | 1 |\n| Multiplier | 100 for equity options, 100 for SPX | 100 |\n| Expiry | Date in title | 30 DTE |\n| Spot price | Current underlying price (NOT strike) | middle strike |\n| IV | Shown in greeks panel, or estimate from vega | 20% |\n| Risk-free rate | \u2014 | 4.3% |\n\n**Critical for screenshots**: The spot price is the CURRENT price of the underlying index/stock, NOT the strikes. Never default spot to a strike price value.\n\n**Current SPX reference price:**\n```\n!`python3 -c \"import yfinance as yf; print(f'SPX \u2248 {yf.Ticker(\\\"^GSPC\\\").fast_info[\\\"lastPrice\\\"]:.0f}')\" 2>/dev/null || echo \"SPX price unavailable \u2014 check market data\"`\n```\n\n---\n\n## Step 2: Identify Strategy Type\n\nMatch to one of the supported strategies below, then read the corresponding section in `references/strategies.md`.\n\n| Strategy | Legs | Key Identifiers |\n|---|---|---|\n| **butterfly** | Buy K1, Sell 2\u00d7K2, Buy K3 | 3 strikes, \"Butterfly\" in title |\n| **vertical_spread** | Buy K1, Sell K2 (same expiry) | 2 strikes, debit or credit |\n| **calendar_spread** | Buy far-expiry K, Sell near-expiry K | Same strike, 2 expiries |\n| **iron_condor** | Sell K2/K3, Buy K1/K4 wings | 4 strikes, 2 spreads |\n| **straddle** | Buy Call K + Buy Put K | Same strike, both types |\n| **strangle** | Buy OTM Call + Buy OTM Put | 2 strikes, both OTM |\n| **covered_call** | Long 100 shares + Sell Call K | Stock + short call |\n| **naked_put** | Sell Put K | Single leg |\n| **ratio_spread** | Buy 1\u00d7K1, Sell N\u00d7K2 | Unequal quantities |\n\nFor strategies not listed, use `custom` mode: decompose into individual legs and sum their P&Ls.\n\n---\n\n## Step 3: Compute Payoffs\n\n### Black-Scholes Put Price\n```\nd1 = (ln(S/K) + (r + \u03c3\u00b2/2)\u00b7T) / (\u03c3\u00b7\u221aT)\nd2 = d1 - \u03c3\u00b7\u221aT\nput = K\u00b7e^(-rT)\u00b7N(-d2) - S\u00b7N(-d1)\n```\n\n### Black-Scholes Call Price (via put-call parity)\n```\ncall = put + S - K\u00b7e^(-rT)\n```\n\n### Butterfly Put Payoff (expiry)\n```\nif S >= K3: 0\nif S >= K2: K3 - S\nif S >= K1: S - K1\nelse: 0\n```\nNet P&L per share = payoff \u2212 premium_paid\n\n### Vertical Spread (call debit) Payoff (expiry)\n```\nlong_call = max(S - K1, 0)\nshort_call = max(S - K2, 0)\npayoff = long_call - short_call - net_debit\n```\n\n### Calendar Spread Theoretical Value\nCalendar cannot be expressed as a simple expiry function \u2014 always use BS pricing for both legs:\n```\nvalue = BS(S, K, T_far, r, IV_far) - BS(S, K, T_near, r, IV_near)\n```\nFor expiry curve of calendar: near leg expires worthless, far leg = BS with remaining T.\n\n### Iron Condor Payoff (expiry)\n```\nput_spread = max(K2-S, 0) - max(K1-S, 0)   // short put spread\ncall_spread = max(S-K3, 0) - max(S-K4, 0)  // short call spread\npayoff = credit_received - put_spread - call_spread\n```\n\n---\n\n## Step 4: Render the Widget\n\nUse `visualize:read_me` with modules `[\"chart\", \"interactive\"]` before building.\n\n### Required Controls (sliders)\n\n**Structure section:**\n- All strike prices (K1, K2, K3... as needed by strategy)\n- Premium paid/received\n- Quantity\n- Multiplier (100 default, show for clarity)\n\n**Pricing variables section:**\n- IV % (5\u201380%, step 0.5)\n- DTE \u2014 days to expiry (0\u201390)\n- Risk-free rate % (0\u20138%)\n\n**Spot price:**\n- Full-width slider, range = [min_strike - 20%, max_strike + 20%], defaulting to ACTUAL current spot\n\n### Required Stats Cards (live-updating)\n- Max profit (expiry)\n- Max loss (expiry)\n- Breakeven(s) \u2014 show both for two-sided strategies\n- Current theoretical P&L at spot\n\n### Chart Specs\n- X-axis: SPX/underlying price\n- Y-axis: Total USD P&L (not per-share)\n- Blue solid line = theoretical value at current DTE/IV\n- Gray dashed line = expiry payoff\n- Green dashed vertical = strike prices (K2 center strike brighter)\n- Amber dashed vertical = current spot price\n- Fill above zero = green 10% opacity; below zero = red 10% opacity\n- Tooltip: show both curves on hover\n\n### Code template\n\nUse this JS structure inside the widget, adapting `pnlExpiry()` and `bfTheory()` per strategy:\n\n```js\n// Black-Scholes helpers (always include)\nfunction normCDF(x) { /* Horner approximation */ }\nfunction bsCall(S,K,T,r,sig) { /* standard BS call */ }\nfunction bsPut(S,K,T,r,sig) { /* standard BS put */ }\n\n// Strategy-specific expiry payoff (returns per-share value BEFORE premium)\nfunction expiryValue(S, ...strikes) { ... }\n\n// Strategy-specific theoretical value using BS\nfunction theoreticalValue(S, ...strikes, T, r, iv) { ... }\n\n// Main update() reads all sliders, computes arrays, destroys+recreates Chart.js instance\nfunction update() { ... }\n\n// Attach listeners\n['k1','k2',...,'iv','dte','rate','spot'].forEach(id => {\n  document.getElementById(id).addEventListener('input', update);\n});\nupdate();\n```\n\n---\n\n## Step 5: Respond to User\n\nAfter rendering the widget, briefly explain:\n1. What strategy was detected and how legs were mapped\n2. Max profit / max loss at current settings\n3. One key insight (e.g., \"spot is currently 950 pts below the profit zone, expiring tomorrow\")\n\nKeep it concise \u2014 the chart speaks for itself.\n\n---\n\n## Reference Files\n\n- `references/strategies.md` \u2014 Detailed payoff formulas and edge cases for each strategy type\n- `references/bs_code.md` \u2014 Copy-paste ready Black-Scholes JS implementation with normCDF\n\nRead the relevant reference file if you're unsure about payoff formula edge cases for a given strategy.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "options-payoff",
-    "description": ">",
-    "or asks to visualize how an options trade makes or loses money. Triggers include": "any mention of"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

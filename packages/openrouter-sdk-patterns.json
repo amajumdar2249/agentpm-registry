@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032818",
   "name": "openrouter-sdk-patterns",
   "slug": "openrouter-sdk-patterns",
   "description": "Build reusable OpenRouter client wrappers with retries, typing, and",
   "content": "# OpenRouter SDK Patterns\n\n## Overview\n\nBuild production-grade OpenRouter client wrappers using the OpenAI SDK. The OpenAI Python/TypeScript SDKs work natively with OpenRouter by changing `base_url` to `https://openrouter.ai/api/v1`. This skill covers typed wrappers, retry strategies, middleware, and reusable patterns.\n\n## Python: Production Client Wrapper\n\n```python\nimport os, time, hashlib, json, logging\nfrom dataclasses import dataclass\nfrom typing import Optional\nfrom openai import OpenAI, APIError, RateLimitError, APITimeoutError\n\nlog = logging.getLogger(\"openrouter\")\n\n@dataclass\nclass CompletionResult:\n    content: str\n    model: str\n    prompt_tokens: int\n    completion_tokens: int\n    generation_id: str\n    latency_ms: float\n\nclass OpenRouterClient:\n    def __init__(\n        self,\n        api_key: Optional[str] = None,\n        app_name: str = \"my-app\",\n        app_url: str = \"https://my-app.com\",\n        max_retries: int = 3,\n        timeout: float = 60.0,\n    ):\n        self.client = OpenAI(\n            base_url=\"https://openrouter.ai/api/v1\",\n            api_key=api_key or os.environ[\"OPENROUTER_API_KEY\"],\n            max_retries=max_retries,  # Built-in SDK retry with backoff\n            timeout=timeout,\n            default_headers={\n                \"HTTP-Referer\": app_url,\n                \"X-Title\": app_name,\n            },\n        )\n        self._cache: dict[str, CompletionResult] = {}\n\n    def complete(\n        self,\n        prompt: str,\n        model: str = \"anthropic/claude-3.5-sonnet\",\n        system: str = \"\",\n        max_tokens: int = 1024,\n        temperature: float = 0.7,\n        cache: bool = False,\n        **extra_params,\n    ) -> CompletionResult:\n        messages = []\n        if system:\n            messages.append({\"role\": \"system\", \"content\": system})\n        messages.append({\"role\": \"user\", \"content\": prompt})\n\n        # Optional caching (deterministic requests only)\n        cache_key = None\n        if cache and temperature == 0:\n            cache_key = hashlib.sha256(\n                json.dumps({\"model\": model, \"messages\": messages, \"max_tokens\": max_tokens}).encode()\n            ).hexdigest()\n            if cache_key in self._cache:\n                log.debug(f\"Cache hit: {cache_key[:12]}\")\n                return self._cache[cache_key]\n\n        start = time.monotonic()\n        response = self.client.chat.completions.create(\n            model=model,\n            messages=messages,\n            max_tokens=max_tokens,\n            temperature=temperature,\n            **extra_params,\n        )\n        latency = (time.monotonic() - start) * 1000\n\n        result = CompletionResult(\n            content=response.choices[0].message.content or \"\",\n            model=response.model,\n            prompt_tokens=response.usage.prompt_tokens,\n            completion_tokens=response.usage.completion_tokens,\n            generation_id=response.id,\n            latency_ms=round(latency, 1),\n        )\n\n        log.info(f\"[{result.model}] {result.prompt_tokens}+{result.completion_tokens} tokens, {result.latency_ms}ms\")\n\n        if cache_key:\n            self._cache[cache_key] = result\n        return result\n\n    def check_credits(self) -> dict:\n        \"\"\"Check remaining credits and rate limits.\"\"\"\n        import requests\n        resp = requests.get(\n            \"https://openrouter.ai/api/v1/auth/key\",\n            headers={\"Authorization\": f\"Bearer {self.client.api_key}\"},\n        )\n        return resp.json()[\"data\"]\n\n# Usage\nor_client = OpenRouterClient(app_name=\"my-saas\")\nresult = or_client.complete(\"Explain recursion\", model=\"openai/gpt-4o-mini\", max_tokens=200)\nprint(f\"{result.content}\\n---\\n{result.model} | {result.latency_ms}ms | {result.prompt_tokens}+{result.completion_tokens} tokens\")\n```\n\n## TypeScript: Production Client Wrapper\n\n```typescript\nimport OpenAI from \"openai\";\n\ninterface CompletionResult {\n  content: string;\n  model: string;\n  promptTokens: number;\n  completionTokens: number;\n  generationId: string;\n  latencyMs: number;\n}\n\nclass OpenRouterClient {\n  private client: OpenAI;\n\n  constructor(opts: { apiKey?: string; appName?: string; appUrl?: string } = {}) {\n    this.client = new OpenAI({\n      baseURL: \"https://openrouter.ai/api/v1\",\n      apiKey: opts.apiKey ?? process.env.OPENROUTER_API_KEY,\n      maxRetries: 3,\n      timeout: 60_000,\n      defaultHeaders: {\n        \"HTTP-Referer\": opts.appUrl ?? \"https://my-app.com\",\n        \"X-Title\": opts.appName ?? \"My App\",\n      },\n    });\n  }\n\n  async complete(\n    prompt: string,\n    opts: { model?: string; system?: string; maxTokens?: number; temperature?: number } = {}\n  ): Promise<CompletionResult> {\n    const messages: OpenAI.ChatCompletionMessageParam[] = [];\n    if (opts.system) messages.push({ role: \"system\", content: opts.system });\n    messages.push({ role: \"user\", content: prompt });\n\n    const start = performance.now();\n    const res = await this.client.chat.completions.create({\n      model: opts.model ?? \"anthropic/claude-3.5-sonnet\",\n      messages,\n      max_tokens: opts.maxTokens ?? 1024,\n      temperature: opts.temperature ?? 0.7,\n    });\n    const latency = Math.round(performance.now() - start);\n\n    return {\n      content: res.choices[0].message.content ?? \"\",\n      model: res.model,\n      promptTokens: res.usage?.prompt_tokens ?? 0,\n      completionTokens: res.usage?.completion_tokens ?? 0,\n      generationId: res.id,\n      latencyMs: latency,\n    };\n  }\n}\n\n// Usage\nconst or = new OpenRouterClient({ appName: \"my-saas\" });\nconst result = await or.complete(\"Explain recursion\", { model: \"openai/gpt-4o-mini\", maxTokens: 200 });\nconsole.log(result.content, `\\n${result.model} | ${result.latencyMs}ms`);\n```\n\n## Retry Strategy\n\nThe OpenAI SDK has built-in retries with exponential backoff for:\n\n- 429 (rate limit) -- respects `Retry-After` header\n- 5xx (server errors) -- retries with backoff\n- Connection errors -- retries on network failures\n\n```python\n# Configure via constructor\nclient = OpenAI(\n    base_url=\"https://openrouter.ai/api/v1\",\n    api_key=\"sk-or-v1-...\",\n    max_retries=5,           # Default is 2\n    timeout=120.0,           # Per-request timeout in seconds\n)\n```\n\nFor custom retry logic beyond the SDK:\n\n```python\nimport tenacity\n\n@tenacity.retry(\n    retry=tenacity.retry_if_exception_type((RateLimitError, APITimeoutError)),\n    wait=tenacity.wait_exponential(min=1, max=60),\n    stop=tenacity.stop_after_attempt(5),\n    before_sleep=lambda state: log.warning(f\"Retry {state.attempt_number}: {state.outcome.exception()}\"),\n)\ndef robust_complete(client, **kwargs):\n    return client.chat.completions.create(**kwargs)\n```\n\n## Middleware Pattern\n\n```python\nfrom functools import wraps\nfrom typing import Callable\n\ndef with_cost_tracking(fn: Callable) -> Callable:\n    \"\"\"Middleware that logs cost per request.\"\"\"\n    total_cost = {\"value\": 0.0}\n\n    @wraps(fn)\n    def wrapper(*args, **kwargs):\n        result = fn(*args, **kwargs)\n        # Query generation cost asynchronously\n        import requests\n        gen = requests.get(\n            f\"https://openrouter.ai/api/v1/generation?id={result.id}\",\n            headers={\"Authorization\": f\"Bearer {args[0].api_key}\"},\n        ).json()\n        cost = float(gen.get(\"data\", {}).get(\"total_cost\", 0))\n        total_cost[\"value\"] += cost\n        log.info(f\"Request cost: ${cost:.6f} | Session total: ${total_cost['value']:.4f}\")\n        return result\n    wrapper.total_cost = total_cost\n    return wrapper\n```\n\n## Error Handling\n\n| Exception | HTTP | Cause | Fix |\n|-----------|------|-------|-----|\n| `AuthenticationError` | 401 | Bad API key | Check `OPENROUTER_API_KEY` |\n| `RateLimitError` | 429 | Too many requests | SDK auto-retries; increase `max_retries` |\n| `APITimeoutError` | -- | Response too slow | Increase `timeout`; use streaming |\n| `BadRequestError` | 400 | Invalid params | Check model ID, messages format |\n\n## Enterprise Considerations\n\n- Centralize all OpenRouter calls through a single client wrapper for consistent logging, retries, and cost tracking\n- Type all response shapes with dataclasses/interfaces for compile-time safety\n- Use dependency injection to swap between OpenRouter and direct provider clients in tests\n- Set `max_retries` based on your SLA (2 for interactive, 5 for batch)\n- Wrap middleware in try/catch so instrumentation never breaks the main request flow\n\n## References\n\n- [Examples](${CLAUDE_SKILL_DIR}/references/examples.md) | [Errors](${CLAUDE_SKILL_DIR}/references/errors.md)\n- [OpenRouter SDK](https://openrouter.ai/sdk) | [API Reference](https://openrouter.ai/docs/api/reference/overview)\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "openrouter-sdk-patterns",
-    "description": "Build reusable OpenRouter client wrappers with retries, typing, and",
-    "middleware. Use when creating SDKs or client libraries. Triggers": "openrouter sdk'',",
-    "allowed-tools": "Read, Write, Edit, Bash, Grep",
-    "version": "2.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

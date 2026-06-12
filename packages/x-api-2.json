@@ -1,15 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000034253",
   "name": "x-api",
   "slug": "x-api-2",
   "description": "Read and post to X/Twitter via API. Check mentions, post tweets, search. Use app bearer tokens for read-only fetches and OAuth 1.0a user context for account actions.",
   "content": "\n# X/Twitter API Skill\n\nBasic X (Twitter) API access for the @joelclaw account until a proper CLI is built (ADR-0119).\n\n## Authentication\n\n**Recommended for read-only access: app bearer token**\n\nThere is no stored `x_bot_bearer_token` secret right now. Derive the app bearer token from the X app consumer key + secret, then use that bearer token for read-only endpoints like tweet lookup.\n\n```bash\npython3 <<'PY'\nimport base64, json, subprocess\nfrom urllib import request, parse\n\n\ndef lease(name: str) -> str:\n    raw = subprocess.check_output(['secrets', 'lease', name], text=True)\n    data = json.loads(raw)\n    return data.get('secret') or data.get('result') or raw.strip()\n\nck = lease('x_consumer_key')\ncs = lease('x_consumer_secret')\ncred = base64.b64encode(f'{ck}:{cs}'.encode()).decode()\n\nreq = request.Request(\n    'https://api.twitter.com/oauth2/token',\n    data=parse.urlencode({'grant_type': 'client_credentials'}).encode(),\n    headers={\n        'Authorization': f'Basic {cred}',\n        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',\n    },\n    method='POST',\n)\nwith request.urlopen(req) as r:\n    bearer = json.loads(r.read().decode())['access_token']\n\nreq2 = request.Request(\n    'https://api.twitter.com/2/tweets/TWEET_ID',\n    headers={'Authorization': f'Bearer {bearer}'},\n)\nwith request.urlopen(req2) as r:\n    print(r.read().decode())\nPY\n\nsecrets revoke --all\n```\n\nUse this for:\n- reading a specific tweet/post\n- fetching public user metadata\n- recent search\n- full-archive search when the app has access\n- other public read-only X v2 endpoints\n\n### Full-Archive Search\n\nThe bot app can call Full-Archive Search if the access tier permits it. Do not use Recent Search for YTD/backfill research; it rejects older `start_time` values.\n\n```bash\n# After deriving bearer as above:\ncurl \"https://api.x.com/2/tweets/search/all?query=from%3Athreepointone%20-is%3Areply&start_time=2026-01-01T00%3A00%3A00Z&end_time=2026-05-02T00%3A00%3A00Z&max_results=100&tweet.fields=created_at,public_metrics\" \\\n  -H \"Authorization: Bearer $bearer\"\n```\n\nNotes:\n- Full archive endpoint: `/2/tweets/search/all`.\n- Recent endpoint: `/2/tweets/search/recent`; last-7-days style window only.\n- `tweet.fields=context_annotations` forces `max_results <= 100`; X returns 400 if paired with `max_results=500`.\n- Full-archive docs: https://docs.x.com/x-api/posts/search/quickstart/full-archive-search\n\n\n**Alternative: OAuth 1.0a User Context** (for posting and account actions)\n\nTokens do not expire \u2014 no refresh dance needed.\n\n### Secrets (in agent-secrets)\n\n- `x_consumer_key` \u2014 API Key (OAuth 1.0a consumer key)\n- `x_consumer_secret` \u2014 API Key Secret (OAuth 1.0a consumer secret)\n- `x_access_token` \u2014 Access Token (OAuth 1.0a, format: `numeric-alphanumeric`)\n- `x_access_token_secret` \u2014 Access Token Secret (OAuth 1.0a)\n\n### Signing requests\n\nOAuth 1.0a requires cryptographic signing. Use `requests-oauthlib` (Python) or equivalent:\n\n```bash\nexport CK=$(secrets lease x_consumer_key)\nexport CS=$(secrets lease x_consumer_secret)\nexport AT=$(secrets lease x_access_token)\nexport ATS=$(secrets lease x_access_token_secret)\n\nuv run --with requests-oauthlib python3 << 'PYEOF'\nimport os\nfrom requests_oauthlib import OAuth1Session\n\nclient = OAuth1Session(\n    os.environ['CK'],\n    client_secret=os.environ['CS'],\n    resource_owner_key=os.environ['AT'],\n    resource_owner_secret=os.environ['ATS'],\n)\n\nr = client.get(\"https://api.twitter.com/2/users/me\")\nprint(r.json())\nPYEOF\n```\n\n### Revoke leases after use\n\n```bash\nsecrets revoke --all\n```\n\n## Account Info\n\n- **Account**: @joelclaw\n- **User ID**: 2022779096049311744\n- **Scopes**: Read and write (OAuth 1.0a app permissions)\n\n## Common Operations\n\nRead-only lookups can use the app bearer-token flow above.\n\nPosting, replying, following, deleting, and account-scoped actions require OAuth 1.0a signing. Use the Python pattern from Authentication section above, then:\n\n### Common API calls (inside OAuth1Session)\n\n```python\n# Check mentions\nr = client.get(\"https://api.twitter.com/2/users/2022779096049311744/mentions\",\n    params={\"max_results\": 10, \"tweet.fields\": \"created_at,author_id,text\",\n            \"expansions\": \"author_id\", \"user.fields\": \"username,name\"})\n\n# Get my timeline\nr = client.get(\"https://api.twitter.com/2/users/2022779096049311744/tweets\",\n    params={\"max_results\": 10, \"tweet.fields\": \"created_at,public_metrics\"})\n\n# Post a tweet\nr = client.post(\"https://api.twitter.com/2/tweets\", json={\"text\": \"your tweet\"})\n\n# Reply to a tweet\nr = client.post(\"https://api.twitter.com/2/tweets\",\n    json={\"text\": \"@user reply\", \"reply\": {\"in_reply_to_tweet_id\": \"TWEET_ID\"}})\n\n# Search recent tweets\nr = client.get(\"https://api.twitter.com/2/tweets/search/recent\",\n    params={\"query\": \"joelclaw\", \"max_results\": 10, \"tweet.fields\": \"created_at,author_id,text\"})\n\n# Get user by username\nr = client.get(\"https://api.twitter.com/2/users/by/username/USERNAME\",\n    params={\"user.fields\": \"description,public_metrics\"})\n\n# Follow a user\nmy_id = \"2022779096049311744\"\nr = client.post(f\"https://api.twitter.com/2/users/{my_id}/following\",\n    json={\"target_user_id\": \"TARGET_USER_ID\"})\n\n# Delete a tweet\nr = client.delete(\"https://api.twitter.com/2/tweets/TWEET_ID\")\n```\n\n## X Articles (Long-form Posts)\n\nX Articles are NOT accessible via the v2 tweets API \u2014 the tweet body is just a `t.co` link and the article endpoint returns 500. **Use agent-browser to read them:**\n\n```bash\nagent-browser open \"https://x.com/USERNAME/status/TWEET_ID\"\nagent-browser snapshot\nagent-browser close\n```\n\nThe snapshot returns the full article text in the DOM. Use this for any tweet where `article.title` is present in the API response or the `expanded_url` points to `x.com/i/article/...`.\n\nFor capturing X posts/articles as discoveries, use `joelclaw discover URL -c \"context\"` \u2014 the discovery pipeline will handle enrichment. If the pipeline can't extract content (auth-gated), fall back to agent-browser + manual vault note.\n\n## Rate Limits\n\n- Mentions: 180 requests / 15 min\n- Post tweet: 200 tweets / 15 min (app-level)\n- Search: 180 requests / 15 min\n- User lookup: 300 requests / 15 min\n\n## Rules\n\n- **Never engage with shitcoin/scam mentions.** Ignore them entirely.\n- **Never post financial advice or token endorsements.**\n- **Joel approves all tweets before posting** unless explicitly told otherwise.\n- **Always revoke leases after use** \u2014 don't leave secrets in memory.\n- **OAuth 1.0a tokens don't expire** \u2014 no refresh needed. If auth fails, tokens were regenerated in the developer portal.\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "x-api",
-    "displayName": "X/Twitter API",
-    "description": "Read and post to X/Twitter via API. Check mentions, post tweets, search. Use app bearer tokens for read-only fetches and OAuth 1.0a user context for account actions.",
-    "version": "0.1.0",
-    "author": "joel",
-    "tags": ""
+  "author": "joel",
+  "version": "0.1.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

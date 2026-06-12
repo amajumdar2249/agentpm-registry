@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000008476",
   "name": "code-context",
   "slug": "code-context",
   "description": "This skill should be used when the user asks to \"understand a codebase\", \"get code context\", \"research a library\", \"explore a repository\", \"find code examples\", \"look up documentation\", or wants to understand how a specific project or library works before making changes.",
   "content": "\n# Code Context Retrieval\n\nThis skill provides 5 methods for retrieving code context. Select methods based on the target: public GitHub repos, library docs, code search, direct inspection, or post-clone web enrichment.\n\n## Token Isolation (Critical)\n\nNever run any external lookup in the main context. Always spawn Task agents:\n\n- **DeepWiki**: Agent calls `read_wiki_structure` / `read_wiki_contents` / `ask_question`, extracts architecture summary and key relationships, returns concise overview.\n- **Context7**: Agent calls `resolve-library-id` then `query-docs`, extracts the minimum viable API surface and usage examples, returns copyable snippets with version notes.\n- **Exa**: Agent calls `get_code_context_exa`, extracts minimum viable snippets, deduplicates near-identical results (mirrors, forks, repeated StackOverflow answers), returns copyable snippets + brief explanation.\n- **Git clone**: Agent clones to `/tmp/`, reads entry points and core modules, runs `rm -rf` cleanup, returns file structure summary and key patterns.\n- **Web Search+Fetch**: Agent runs `WebSearch` with version-anchored queries derived from clone findings, calls `WebFetch` on high-signal URLs, returns only validated insights cross-referenced against cloned code.\n\nMain context stays clean regardless of search volume. Only final summaries return to the caller.\n\n## Method 1: DeepWiki (AI-powered repo documentation)\n\nBest for: Well-known public GitHub repositories where you need architecture overview, component explanations, or high-level understanding fast.\n\n**Tools**: `read_wiki_structure`, `read_wiki_contents`, `ask_question`\n\n**Process**:\n1. Call `read_wiki_structure` with the owner/repo (e.g., `\"facebook/react\"`) to get topic list\n2. Call `read_wiki_contents` for relevant topics, or `ask_question` for targeted queries\n3. Use when you need: architecture diagrams, component relationships, design decisions\n\n**Strengths**: Zero setup, instant AI-summarized documentation, good for onboarding to unfamiliar repos.\n\n**Limitations**: Only works for public GitHub repos; coverage varies by project popularity.\n\n## Method 2: Context7 (library documentation)\n\nBest for: Getting up-to-date API docs, usage examples, and version-specific documentation for npm/pip packages and frameworks.\n\n**Tools**: `resolve-library-id`, `query-docs`\n\n**Process**:\n1. Call `resolve-library-id` with the library name (e.g., `\"react\"`, `\"fastapi\"`) to get the canonical ID\n2. When the user specifies a version (e.g., `\"react@18\"`), select the matching version from the `versions` list returned by `resolve-library-id` and append it to the library ID path (e.g., `/facebook/react/18.3.1`)\n3. Call `query-docs` with `libraryId` and `query` \u2014 these are the only two parameters\n\n**Query tips**: Be specific -- `\"useCallback dependency array\"` beats `\"react hooks\"`. Include the framework version when known.\n\n**Version pinning**: Encode version into the library ID path (e.g., `/vercel/next.js/v14.3.0-canary.87`), not as a separate parameter. Use the `versions` list from `resolve-library-id` to pick the correct slug.\n\n**Strengths**: Always current docs, supports version pinning, covers thousands of libraries, excellent for API reference.\n\n**Limitations**: Requires the library to be indexed; less useful for internal/private packages.\n\n## Method 3: Exa Code Search (web-wide code examples)\n\nBest for: Finding real-world usage patterns, StackOverflow-style answers, GitHub Gist examples, and code snippets from across the web.\n\n**Tool**: `get_code_context_exa`\n\n**Setup**: Works without an API key (free tier with rate limits). For higher limits, set the `EXA_API_KEY` environment variable.\n\n**Process**:\n1. Call `get_code_context_exa` with a precise query\n2. Set `tokensNum` based on need: 3000 for quick examples, 8000 for comprehensive patterns\n3. Verify publication dates on results; prefer recent sources\n\n**Query writing guidance**:\n- Include the language or framework: `\"TypeScript React\"` not just `\"React\"`\n- Include the version when relevant: `\"Next.js 14 app router\"`\n- Use exact identifiers: `\"useServerAction\"` not `\"server action hook\"`\n- Add the pattern type: `\"example\"`, `\"error handling\"`, `\"migration guide\"`\n- Example: `\"TypeScript Next.js 14 app router server action error handling example\"`\n\n**Strengths**: Finds diverse real-world examples, not limited to official docs, surfaces community solutions.\n\n**Limitations**: Results may be outdated; always check publication dates and verify against official docs.\n\n## Method 4: Git Clone (direct code inspection)\n\nBest for: Private repositories, detailed implementation review, running local analysis, or when other methods lack depth.\n\n**Process**:\n1. Run `git clone <repo-url> /tmp/<repo-name> --depth=1` to fetch the code\n2. Read key files: entry points, configuration, core modules\n3. Use Glob to map structure; use Grep to search patterns\n4. Clean up when done: `rm -rf /tmp/<repo-name>`\n\n**Strengths**: Full code access, works with private repos (with credentials), enables static analysis tools.\n\n**Limitations**: Requires network access and disk space; slow for large repos; credentials needed for private repos.\n\n## Method 5: Web Search + Fetch (post-clone enrichment)\n\nBest for: Enriching findings from a git clone with changelogs, issue discussions, blog posts, and migration guides that live outside the repository itself.\n\n**Tools**: `WebSearch`, `WebFetch`\n\n**When to apply**: Use after completing Method 4. The clone gives you the code; this method gives you the *why* and *what changed*.\n\n**Process**:\n1. Derive targeted queries from clone findings \u2014 use exact identifiers, error strings, or design patterns found in the source\n2. Call `WebSearch` with `query` set to a precise, version-anchored string (e.g., `\"<library> <version> breaking change <symbol>\"`)\n3. For each high-signal result, call `WebFetch` with `url` (from search results) and a focused `prompt` to extract only the relevant section\n4. Cross-reference fetched content against the cloned code to validate accuracy\n5. Discard results older than 2 years unless the topic is stable/foundational\n\n**Query patterns**:\n- Changelogs: `\"<repo-name> CHANGELOG v<version>\"` or `\"<repo-name> release notes\"`\n- Design rationale: `\"<repo-name> <concept> why OR rationale site:github.com\"`\n- Known issues: `\"<repo-name> <symbol or pattern> issue OR bug site:github.com\"`\n- Migration: `\"<repo-name> migrate from <old-version> to <new-version>\"`\n\n**Strengths**: Surfaces context that never appears in source code \u2014 deprecation notices, upstream issue threads, author blog posts, community migration experiences.\n\n**Limitations**: Results may be stale or inaccurate; always validate fetched claims against the actual cloned code. Rate-limited without API key.\n\n## Method Selection Guide\n\n| Scenario | Primary Method | Fallback |\n|----------|---------------|----------|\n| \"How does X library work?\" | Context7 | DeepWiki |\n| \"Understand the architecture of Y repo\" | DeepWiki | Git Clone |\n| \"Find examples of Z pattern\" | Exa | Context7 |\n| \"Inspect private/internal repo\" | Git Clone | - |\n| \"What changed in v3 of library?\" | Context7 | Exa |\n| \"How are modules connected?\" | DeepWiki | Git Clone |\n| \"Why was this design decision made?\" | Git Clone \u2192 Web Search+Fetch | DeepWiki |\n| \"What broke between versions?\" | Web Search+Fetch | Context7 |\n\n## Combining Methods\n\nFor comprehensive context, combine methods:\n1. DeepWiki for architecture overview\n2. Context7 for specific API details\n3. Exa for community usage patterns\n4. Git Clone for implementation details when needed\n\nAlways prefer non-destructive read-only operations. When cloning, use `/tmp` and clean up after.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "code-context",
-    "description": "This skill should be used when the user asks to \"understand a codebase\", \"get code context\", \"research a library\", \"explore a repository\", \"find code examples\", \"look up documentation\", or wants to understand how a specific project or library works before making changes.",
-    "user-invocable": "false"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

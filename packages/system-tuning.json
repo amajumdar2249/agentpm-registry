@@ -1,29 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000006432",
   "name": "system-tuning",
   "slug": "system-tuning",
   "description": "Restore system responsiveness via safe, ordered process cleanup and agent-swarm",
   "content": "# System Tuning Skill\n\n> **Quick Ref:** Triage a sluggish dev box without nuking work in flight. Order: diagnose \u2192 cleanup zombies and exited sessions \u2192 kill stuck children \u2192 fix confused parents \u2192 renice survivors \u2192 verify.\n\n**YOU MUST EXECUTE THIS WORKFLOW. Do not just describe it.**\n\nWhen the box feels slow \u2014 high load, swap thrash, agent sprawl, or compile storms \u2014 work the kill hierarchy from the safest move outward and treat parent agents as the real cleanup target, not their children.\n\n## When To Use\n\n| Symptom | Use This Skill |\n|---|---|\n| Load average drifts above core count and stays there | yes |\n| Multiple agents respawn the same `cargo` / `cc1plus` after kills | yes \u2014 see [whack-a-mole-anti-pattern.md](references/whack-a-mole-anti-pattern.md) |\n| Tmux / zellij session list grew past sanity | yes \u2014 see [agent-swarm-cleanup.md](references/agent-swarm-cleanup.md) |\n| One process is genuinely the hot path | use `/perf` first; come back if cleanup is still needed |\n| Production incident on a server you do not own | escalate; do not run kills blind |\n\n## Method\n\nThe skill drives three loops, in order. Each loop has a check, an action set, and a verification.\n\n### 1. Diagnose Without Touching\n\nRead pressure metrics before signalling anything.\n\n```bash\nuptime && nproc\ncat /proc/pressure/cpu /proc/pressure/io /proc/pressure/memory 2>/dev/null\nps -eo stat | grep -c '^Z'                  # zombie count\nps aux --sort=-%cpu | head -10\n```\n\nCapture this as the baseline. Every kill below should move at least one of these numbers; if nothing moves, you killed the wrong thing.\n\n### 2. Walk the Kill Hierarchy\n\nWork from least-invasive to most-invasive. Full ordering and signal escalation rules live in [references/kill-hierarchy.md](references/kill-hierarchy.md).\n\n```\nzombies & exited sessions   \u2192  reap, no risk\nstuck child processes       \u2192  SIGTERM, wait 3s, escalate to SIGKILL\nconfused parent agents      \u2192  kill the parent so it stops respawning children\nrenice the survivors        \u2192  give interactive work room without termination\n```\n\nStop at the first loop that restores responsiveness. Do not run later steps \"just in case.\"\n\n### 3. Clean Up The Swarm\n\nIf the box hosts multiple coding agents, the second-order problem is duplicated work, not slow code. The patterns to look for are catalogued in [references/agent-swarm-cleanup.md](references/agent-swarm-cleanup.md): competing build target dirs, orphaned MCP children, abandoned tmux/zellij sessions, agents older than the work they were spawned for.\n\n### 4. Verify\n\nAfter every loop, re-read the same commands from step 1. Write a one-line delta:\n\n```\nload: 38.4 -> 12.1   |   cpu_pressure_avg10: 61% -> 8%   |   zombies: 14 -> 0\n```\n\nNo delta written \u2192 the cleanup is not done.\n\n## Quick-Start Checklist\n\n```bash\n# Baseline\nuptime; cat /proc/pressure/cpu\n\n# Reap free wins\nps -eo stat | grep -c '^Z'                                    # zombies present?\nzellij list-sessions 2>&1 | grep -c EXITED                    # dead sessions present?\nzellij delete-all-sessions --yes 2>/dev/null\n\n# Find stuck children (12h+ tests, idle dev servers)\nps -eo pid,etimes,args --sort=-etimes | awk '$2 > 43200' | head\n\n# Find confused parents (16h+ agents)\nps -eo pid,etimes,args | grep -E 'claude|codex' | awk '$2 > 57600'\n\n# Renice live compilation rather than killing it\nfor pid in $(pgrep -f /bin/cargo) $(pgrep cc1plus); do\n  renice 19 -p \"$pid\" 2>/dev/null\n  ionice -c 3 -p \"$pid\" 2>/dev/null\ndone\n\n# Verify\nsleep 10 && uptime && cat /proc/pressure/cpu\n```\n\n## Protected Processes\n\nNever signal these without explicit operator approval:\n\n```\nsystemd, sshd, dbus, cron\npostgres, mysql, redis, nginx, caddy\ndocker, containerd, k3d, kubelet\nthe multiplexer your sessions live inside (tmux server, wezterm-mux-server, zellij)\n```\n\nIf unsure, leave it running and document the candidate instead. The cost of a wrong kill is much higher than the cost of waiting.\n\n## Output\n\nRun reports go to `.agents/system-tuning/YYYY-MM-DD-triage.md`. Each report includes:\n\n1. Baseline metrics (uptime, pressure, zombies, top CPU)\n2. Kill log with reason per signal\n3. Renice / ionice changes\n4. Post-cleanup metrics\n5. Anything escalated for operator decision\n\n## See Also\n\n- [perf](../perf/SKILL.md) \u2014 Optimize a single hot path once the system is responsive\n- [bug-hunt](../bug-hunt/SKILL.md) \u2014 Investigate why a process loops or hangs\n- [scope](../scope/SKILL.md) \u2014 Lock edit scope before running cleanup in a shared workspace\n\n## Reference Documents\n\n- [references/kill-hierarchy.md](references/kill-hierarchy.md)\n- [references/whack-a-mole-anti-pattern.md](references/whack-a-mole-anti-pattern.md)\n- [references/agent-swarm-cleanup.md](references/agent-swarm-cleanup.md)\n- [references/system-tuning.feature](references/system-tuning.feature) \u2014 Executable spec: diagnose-first, ordered safe cleanup hierarchy, protect in-flight processes, verify + report (soc-qk4b)\n\n## Attribution\n\nMethodology pattern-adopted from an external `system-performance-remediation` skill corpus. See `LICENSE.md` in this skill directory for full attribution. No source text reused.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "system-tuning",
-    "description": "Restore system responsiveness via safe, ordered process cleanup and agent-swarm",
-    "practices": "",
-    "hexagonal_role": "supporting",
-    "consumes": "[]",
-    "produces": "[]",
-    "context_rel": "[]",
-    "skill_api_version": "1",
-    "user-invocable": "true",
-    "context": "",
-    "window": "fork",
-    "intent": "",
-    "mode": "task",
-    "sections": "",
-    "exclude": "",
-    "intel_scope": "topic",
-    "metadata": "",
-    "tier": "execution",
-    "dependencies": "[]",
-    "output_contract": "stdout: triage report; stderr: warnings on protected processes"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

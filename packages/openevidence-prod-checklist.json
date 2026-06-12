@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032786",
   "name": "openevidence-prod-checklist",
   "slug": "openevidence-prod-checklist",
   "description": "Prod Checklist for OpenEvidence.",
   "content": "# OpenEvidence Production Checklist\n\n## Overview\n\nOpenEvidence provides clinical decision support backed by peer-reviewed medical literature. A production integration handles Protected Health Information (PHI) subject to HIPAA, serves evidence-based answers where accuracy directly impacts patient outcomes, and must maintain complete audit trails for regulatory review. Misconfigurations can expose PHI in logs, serve stale clinical guidance, or fail compliance audits that shut down your integration entirely. This checklist enforces HIPAA-grade security, citation verification, and the SLA discipline required for healthcare-adjacent systems.\n\n## Prerequisites\n\n- Production OpenEvidence API credentials (not trial/sandbox keys)\n- Secrets manager configured (Vault, AWS Secrets Manager, or GCP Secret Manager)\n- HIPAA-compliant monitoring stack (no PHI in log aggregators without BAA)\n- Business Associate Agreement (BAA) executed with OpenEvidence\n- Compliance officer sign-off on data flow architecture\n\n## Authentication & Secrets\n\n- [ ] API keys stored in vault/secrets manager (never in code, env files, or CI logs)\n- [ ] Key rotation schedule configured (every 90 days, with zero-downtime swap)\n- [ ] Separate keys for staging vs production (staging keys cannot reach production data)\n- [ ] Service account permissions scoped to query-only (no admin endpoints)\n- [ ] API key exposure detection automated (scan logs/repos for leaked credentials)\n\n## API Integration\n\n- [ ] Base URL points to production endpoint (not sandbox/staging)\n- [ ] Request timeout set to 15 seconds for clinical queries (evidence synthesis is compute-heavy)\n- [ ] Response time SLA monitored: p95 < 3 seconds per contractual agreement\n- [ ] Pagination implemented for evidence result sets (token-based cursor)\n- [ ] Clinical query payloads never include patient identifiers (de-identify before sending)\n- [ ] Citation URLs in responses validated before displaying to clinicians\n- [ ] Fallback behavior defined when evidence confidence score is below threshold (0.7)\n\n## Error Handling & Resilience\n\n- [ ] Circuit breaker configured for OpenEvidence API calls (open after 3 consecutive failures)\n- [ ] Retry logic with exponential backoff for 429 (rate limit) and 5xx responses\n- [ ] Clinical query failures surface explicit \"no evidence available\" (never silent failure)\n- [ ] Timeout responses distinguished from empty-result responses in UI\n- [ ] Stale cache clearly labeled with retrieval timestamp when serving cached evidence\n- [ ] Degraded mode displays disclaimer: \"Results may not reflect latest evidence\"\n- [ ] All API errors logged with correlation ID (without PHI in the log entry)\n\n## Monitoring & Alerting\n\n- [ ] API latency tracked (p50, p95, p99) with 3s p95 SLA threshold\n- [ ] Error rate alerts configured (threshold: >0.5% over 5-minute window \u2014 stricter for clinical)\n- [ ] Evidence citation link validity checked daily (alert on broken DOI/PubMed links)\n- [ ] Query volume anomalies detected (sudden spike may indicate misuse or bot traffic)\n- [ ] Response confidence score distribution tracked (alert if median drops below 0.8)\n- [ ] Audit log completeness verified daily (every query must have a log entry)\n\n## Security\n\n- [ ] PHI never included in API request payloads (queries de-identified before transmission)\n- [ ] PHI never written to application logs, error reports, or monitoring dashboards\n- [ ] All data in transit encrypted via TLS 1.2+ (certificate pinning recommended)\n- [ ] All cached clinical responses encrypted at rest (AES-256)\n- [ ] Access to clinical query history restricted by role (clinician-only, auditor read-only)\n- [ ] Audit log captures: user ID, query timestamp, evidence IDs returned, confidence scores\n- [ ] Data retention policy enforced: clinical query logs retained per HIPAA minimum (6 years)\n- [ ] Annual HIPAA risk assessment includes OpenEvidence integration scope\n\n## Validation Script\n\n```typescript\nasync function validateOpenEvidenceProduction(apiKey: string): Promise<void> {\n  const base = process.env.OPENEVIDENCE_API_URL ?? 'https://api.openevidence.com/v1';\n  const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };\n\n  // 1. Connectivity check\n  const ping = await fetch(`${base}/health`, { headers, signal: AbortSignal.timeout(5000) });\n  console.assert(ping.ok, `API unreachable: ${ping.status}`);\n\n  // 2. Auth validation\n  const auth = await fetch(`${base}/me`, { headers });\n  console.assert(auth.status !== 401, 'Invalid API key');\n  console.assert(auth.status !== 403, 'Insufficient permissions \u2014 check scope');\n\n  // 3. Clinical query round-trip (de-identified test query)\n  const query = await fetch(`${base}/query`, {\n    method: 'POST',\n    headers,\n    body: JSON.stringify({ question: 'What is the standard treatment for hypertension?' }),\n    signal: AbortSignal.timeout(15000),\n  });\n  console.assert(query.ok, `Clinical query failed: ${query.status}`);\n  const result = await query.json();\n  console.assert(result.citations?.length > 0, 'No citations returned \u2014 evidence pipeline may be down');\n\n  // 4. Response time SLA\n  const start = Date.now();\n  await fetch(`${base}/query`, {\n    method: 'POST',\n    headers,\n    body: JSON.stringify({ question: 'Recommended dosage for metformin in type 2 diabetes?' }),\n    signal: AbortSignal.timeout(15000),\n  });\n  const elapsed = Date.now() - start;\n  console.assert(elapsed < 3000, `Response time ${elapsed}ms exceeds 3s SLA`);\n\n  // 5. Audit log endpoint accessible\n  const audit = await fetch(`${base}/audit-log?limit=1`, { headers });\n  console.assert(audit.ok, `Audit log endpoint failed: ${audit.status}`);\n  console.log('All OpenEvidence production checks passed');\n}\n```\n\n## Risk Matrix\n\n| Check | Risk if Skipped | Priority |\n|---|---|---|\n| PHI excluded from API payloads | HIPAA violation, regulatory penalty, BAA breach | Critical |\n| PHI excluded from logs | Data breach via log aggregator, OCR enforcement action | Critical |\n| Audit log completeness | Failed compliance audit, integration shutdown | Critical |\n| Citation URL validation | Clinicians follow broken links, lose trust in evidence | High |\n| Confidence score monitoring | Low-quality answers served without clinician awareness | High |\n\n## Resources\n\n- [OpenEvidence Platform](https://www.openevidence.com)\n\n## Next Steps\n\nSee `openevidence-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "openevidence-prod-checklist",
-    "description": "Prod Checklist for OpenEvidence.",
-    "Trigger": "openevidence prod checklist\".",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

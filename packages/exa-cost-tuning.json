@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031861",
   "name": "exa-cost-tuning",
   "slug": "exa-cost-tuning",
   "description": "Optimize Exa costs through search type selection, caching, and usage",
   "content": "# Exa Cost Tuning\n\n## Overview\n\nReduce Exa API costs through strategic search type selection, result caching, query deduplication, and usage monitoring. Exa charges per search request with costs varying by search type and content retrieval options.\n\n## Cost Drivers\n\n| Factor | Higher Cost | Lower Cost |\n|--------|-------------|------------|\n| Search type | `deep-reasoning` > `deep` > `neural` | `keyword` < `fast` < `instant` |\n| numResults | 10-100 results | 3-5 results |\n| Content retrieval | Full text + highlights + summary | Metadata only (no content) |\n| Content length | `maxCharacters: 5000` | `maxCharacters: 500` |\n| Live crawling | `livecrawl: \"always\"` | Cached content (default) |\n\n## Instructions\n\n### Step 1: Match Search Config to Use Case\n\n```typescript\nimport Exa from \"exa-js\";\n\nconst exa = new Exa(process.env.EXA_API_KEY);\n\n// Define cost tiers per use case\nconst SEARCH_PROFILES = {\n  // Cheapest: metadata-only keyword search\n  \"autocomplete\": { type: \"instant\" as const, numResults: 3 },\n\n  // Low cost: fast search with minimal content\n  \"quick-lookup\": { type: \"fast\" as const, numResults: 3 },\n\n  // Medium: balanced search for RAG\n  \"rag-context\": {\n    type: \"auto\" as const,\n    numResults: 5,\n    text: { maxCharacters: 1000 },\n  },\n\n  // Higher cost: deep research\n  \"deep-research\": {\n    type: \"neural\" as const,\n    numResults: 10,\n    text: { maxCharacters: 3000 },\n    highlights: { maxCharacters: 500 },\n  },\n};\n\nasync function costAwareSearch(\n  query: string,\n  profile: keyof typeof SEARCH_PROFILES\n) {\n  const config = SEARCH_PROFILES[profile];\n  if (\"text\" in config || \"highlights\" in config) {\n    return exa.searchAndContents(query, config);\n  }\n  return exa.search(query, config);\n}\n```\n\n### Step 2: Query-Level Caching (40-60% Cost Reduction)\n\n```typescript\nimport { LRUCache } from \"lru-cache\";\n\nconst searchCache = new LRUCache<string, any>({\n  max: 5000,\n  ttl: 3600 * 1000, // 1-hour TTL\n});\n\nasync function cachedSearch(query: string, opts: any) {\n  const key = `${query.toLowerCase().trim()}:${opts.type}:${opts.numResults}`;\n  const cached = searchCache.get(key);\n  if (cached) return cached;\n\n  const results = await exa.searchAndContents(query, opts);\n  searchCache.set(key, results);\n  return results;\n}\n// Typical RAG cache hit rate: 40-60%, directly cutting costs in half\n```\n\n### Step 3: Query Deduplication for Batch Jobs\n\n```typescript\nfunction deduplicateQueries(queries: string[]): string[] {\n  const seen = new Set<string>();\n  return queries.filter(q => {\n    const normalized = q.toLowerCase().trim().replace(/\\s+/g, \" \");\n    if (seen.has(normalized)) return false;\n    seen.add(normalized);\n    return true;\n  });\n}\n\n// Before batch processing, deduplicate\nconst uniqueQueries = deduplicateQueries(allQueries);\nconsole.log(`Deduped: ${allQueries.length} \u2192 ${uniqueQueries.length} queries`);\n// Typical dedup rate: 20-40% for batch processing\n```\n\n### Step 4: Use Keyword Search When Appropriate\n\n```typescript\n// Neural search: best for semantic/conceptual queries (more expensive)\n// Keyword search: best for specific terms/names (cheaper, faster)\n\nfunction selectCostEffectiveType(query: string): \"neural\" | \"keyword\" | \"auto\" {\n  // Use keyword for exact lookups\n  if (query.match(/^https?:\\/\\//)) return \"keyword\";     // URL lookup\n  if (query.match(/^[A-Z][a-z]+ [A-Z]/)) return \"keyword\"; // Proper nouns\n  if (query.includes('\"')) return \"keyword\";               // Quoted terms\n\n  // Use neural for conceptual queries\n  if (query.split(\" \").length > 5) return \"neural\";\n  return \"auto\"; // Let Exa decide for ambiguous queries\n}\n```\n\n### Step 5: Monitor Usage and Set Budget Alerts\n\n```bash\nset -euo pipefail\n# Check API key usage\ncurl -s https://api.exa.ai/v1/usage \\\n  -H \"x-api-key: $EXA_API_KEY\" | \\\n  python3 -c \"\nimport json, sys\nd = json.load(sys.stdin)\nprint(f'Searches today: {d.get(\\\"searches_today\\\", \\\"N/A\\\")}')\nprint(f'Monthly total: {d.get(\\\"searches_this_month\\\", \\\"N/A\\\")}')\nprint(f'Monthly limit: {d.get(\\\"monthly_limit\\\", \\\"N/A\\\")}')\n\" 2>/dev/null || echo \"Usage endpoint not available\"\n```\n\n```typescript\n// Application-level budget tracking\nclass ExaBudgetTracker {\n  private searchCount = 0;\n  private dailyLimit: number;\n\n  constructor(dailyLimit = 1000) {\n    this.dailyLimit = dailyLimit;\n  }\n\n  async search(exa: Exa, query: string, opts: any) {\n    if (this.searchCount >= this.dailyLimit) {\n      throw new Error(`Daily Exa budget exceeded (${this.dailyLimit} searches)`);\n    }\n    this.searchCount++;\n    return exa.search(query, opts);\n  }\n\n  getUsage() {\n    return {\n      used: this.searchCount,\n      remaining: this.dailyLimit - this.searchCount,\n      utilization: `${((this.searchCount / this.dailyLimit) * 100).toFixed(1)}%`,\n    };\n  }\n}\n```\n\n## Cost Optimization Checklist\n\n- [ ] Use `keyword` or `fast` for exact lookups instead of `neural`\n- [ ] Reduce `numResults` to 3-5 for most use cases (default is 10)\n- [ ] Use `highlights` instead of full `text` when snippets suffice\n- [ ] Implement query-level caching (LRU or Redis)\n- [ ] Deduplicate queries in batch pipelines\n- [ ] Set application-level budget limits\n- [ ] Monitor daily/monthly usage against budget\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Monthly limit hit early | Uncached batch queries | Add caching (40%+ savings) |\n| High cost per result | `numResults` too high | Reduce to 3-5 for most use cases |\n| Budget spike from batch | No deduplication | Deduplicate before batch execution |\n| `402 NO_MORE_CREDITS` | Account balance exhausted | Top up at dashboard.exa.ai |\n\n## Resources\n\n- [Exa Pricing](https://exa.ai/pricing)\n- [Exa API Usage](https://dashboard.exa.ai)\n- [Exa Search Types](https://docs.exa.ai/reference/search)\n\n## Next Steps\n\nFor performance optimization, see `exa-performance-tuning`. For reliability, see `exa-reliability-patterns`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "exa-cost-tuning",
-    "description": "Optimize Exa costs through search type selection, caching, and usage",
-    "allowed-tools": "Read, Grep, Bash(curl:*), Bash(node:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,14 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000028492",
   "name": "eval-skills",
   "slug": "eval-skills-2",
   "description": "Audit all skills in the current project for frontmatter completeness, effort level appropriateness, allowed-tools scoping, and content quality. Produces a scored report with effort-level recommendations for each skill. Use when onboarding to a new project, reviewing skill quality before shipping, or adding effort fields to an existing skill library.",
   "content": "\n# Skill Evaluator\n\nDiscover all skills in the project, score them across 6 criteria, and infer the appropriate `effort` level based on content analysis.\n\n## When to Use\n\n- New project: run once to establish baseline quality\n- Before committing a skill to a team repo\n- After bulk-importing skills from another project\n- When adding `effort` fields for the first time (v2.1.80+)\n\n## What Gets Audited\n\nAll `SKILL.md` files and flat `.md` files found in:\n- `.claude/skills/**`\n- `~/.claude/skills/**` (if requested)\n- Any path passed as argument: `/eval-skills ./my-skills-dir`\n\n---\n\n## Pre-Check: Use the Official Validator\n\nBefore scoring manually, run the official CLI validator first \u2014 it catches structural issues in seconds:\n\n```bash\n# Install (one-time)\nuv tool install skills-ref\n\n# Validate a skill directory\nskills-ref validate ./my-skill\n\n# Validate all skills in project\nfind .claude/skills -name \"SKILL.md\" -exec dirname {} \\; | xargs -I{} skills-ref validate {}\n```\n\nIf `skills-ref` passes cleanly, proceed to quality scoring below.\n\n---\n\n## Scoring Criteria (14 pts per skill)\n\n| # | Criterion | Max | What is checked |\n|---|-----------|-----|-----------------|\n| 1 | **name** | 1 | Present, lowercase, hyphens only, matches directory name |\n| 2 | **description** | 2 | Present + has \"Use when\" / \"when to\" / trigger phrasing |\n| 3 | **allowed-tools** | 2 | Present + not overly broad (Bash without scoping when read-only) |\n| 4 | **effort** | 3 | Present (1pt) + appropriate for content (2pt based on inference) |\n| 5 | **content structure** | 4 | Has Purpose/When section (1), has examples/usage (1), has clear workflow (1), no placeholder text (1) |\n| 6 | **bonus** | +2 | argument-hint present (1), version/author in metadata (1) |\n\n**Valid frontmatter fields** (agentskills.io spec + Claude Code extensions):\n- `name`, `description`, `allowed-tools`, `license`, `compatibility`, `metadata` \u2014 agentskills.io spec\n- `effort`, `argument-hint`, `disable-model-invocation` \u2014 Claude Code extensions\n- `model` \u2014 Claude Code extension: override the model for this skill invocation\n\n> **Note**: `tags`, `category`, `keywords`, `context`, `agent`, `usage`, `args` are NOT supported frontmatter fields in Claude Code. They are ignored by the runtime. Flag and remove them during audit.\n\n**`allowed-tools` format**: space-delimited string, NOT a YAML list. `Read Bash Grep` is correct; `[Read, Bash, Grep]` is incorrect and may not parse.\n\n**Thresholds:**\n- \u2705 Good: \u226511/14 (\u226580%)\n- \u26a0\ufe0f Needs work: 8\u201310/14 (60\u201379%)\n- \u274c Fix: <8/14 (<60%)\n\n---\n\n## Effort Level Inference Engine\n\nFor each skill, analyze description + content and classify using these signals:\n\n### `low` \u2014 Mechanical execution, no design decisions\n\nSignals:\n- Verbs: commit, push, sync, scaffold, generate (template-based), format, rename, bump, wrap, convert\n- No reasoning required: sequential steps, template instantiation, data fetching\n- allowed-tools: Bash only, or Read-only\n- No sub-agents spawned\n- Short workflow (<5 steps)\n\nExamples: `/commit`, `/release-notes`, `/scaffold`, `/sync`, `/format`\n\n### `medium` \u2014 Analysis with bounded scope, categorization\n\nSignals:\n- Verbs: review, triage, analyze, categorize, suggest, evaluate (single file or bounded scope)\n- Requires pattern recognition but not architectural reasoning\n- allowed-tools: Read + Grep + Bash combination\n- May spawn 1-2 sub-agents but with predefined scope\n- Produces structured output (tables, categorized lists)\n\nExamples: `/code-review` (single PR), `/issue-triage`, `/dependency-audit`, `/test-coverage`\n\n### `high` \u2014 Design decisions, adversarial reasoning, cross-system analysis\n\nSignals:\n- Verbs: architect, redesign, threat-model, audit (security), orchestrate (multi-agent), score, assess trade-offs\n- Requires reasoning about edge cases, attack vectors, or system-wide implications\n- allowed-tools: broad access (Read + Write + Bash + external tools)\n- Spawns multiple sub-agents or uses parallel execution\n- Produces analysis with explicit uncertainty or trade-off sections\n- Keywords in content: \"security\", \"architecture\", \"adversarial\", \"pipeline\", \"threat\", \"design decision\"\n\nExamples: `/security-audit`, `/architecture-review`, `/cyber-defense`, `/eval-agents`\n\n### Mismatch flag\n\nIf a skill has `effort:` already set but the inferred level differs, flag it:\n> \u26a0\ufe0f Effort mismatch: declared `low`, inferred `high` \u2014 skill spawns 4 sub-agents and performs security analysis\n\n---\n\n## Execution Instructions\n\n### Step 1 \u2014 Discovery\n\n```bash\n# Find all SKILL.md files\nfind .claude/skills -name \"SKILL.md\" 2>/dev/null\n\n# Find flat skill files\nfind .claude/skills -maxdepth 1 -name \"*.md\" ! -name \"README*\" 2>/dev/null\n\n# If argument provided, use that path instead\n```\n\n### Step 2 \u2014 Parse each skill\n\nFor each skill file found:\n1. Read the full file\n2. Extract YAML frontmatter (between first `---` and second `---`)\n3. Parse: name, description, allowed-tools, effort, argument-hint, model, metadata\n4. Note presence/absence of each field\n5. Read the body content for structure analysis\n\n### Step 3 \u2014 Score and infer\n\nApply the scoring criteria above to each skill:\n- Check frontmatter fields\n- Evaluate description quality (does it answer \"when to use\"? is it under 1024 chars?)\n- Evaluate allowed-tools scope (is Bash used when only Read would suffice? are tools scoped with wildcards when possible?)\n- Infer effort level from content analysis\n- Compare inferred vs declared effort (if set)\n- Evaluate content structure (scan for \"When to Use\", \"Purpose\", \"Example\", \"Workflow\" sections)\n\n### Step 4 \u2014 Output\n\nProduce a structured report:\n\n```\n# Skills Audit \u2014 [project name or path]\nDate: [today] | Scanned: N skills\n\n## Summary\n| Status | Count |\n|--------|-------|\n| \u2705 Good (\u226580%) | N |\n| \u26a0\ufe0f Needs work (60\u201379%) | N |\n| \u274c Fix (<60%) | N |\n\n**Effort coverage**: N/N skills have effort field set\n\n---\n\n## Per-Skill Results\n\n### [skill-name] \u2014 [score]/14 [\u2705/\u26a0\ufe0f/\u274c]\n\n| Criterion | Score | Notes |\n|-----------|-------|-------|\n| name | \u2705 1/1 | \u2014 |\n| description | \u26a0\ufe0f 1/2 | Missing \"Use when\" phrasing |\n| allowed-tools | \u2705 2/2 | Well-scoped |\n| effort | \u274c 0/3 | Missing \u2014 Recommended: high |\n| content structure | \u26a0\ufe0f 2/4 | No examples section |\n\n**Effort inference**: `high` \u2014 skill performs security analysis with adversarial reasoning\n  Signals: \"threat\", \"attack surface\", \"vulnerability scoring\" in content; spawns 4 agents\n\n**Priority fixes** (ordered by impact):\n1. Add `effort: high` to frontmatter\n2. Add \"Use when\" to description\n3. Add a concrete usage example section\n\n---\n```\n\nAfter all skills: print a **Fix Summary** \u2014 all missing effort fields with recommended values, ready to copy-paste.\n\n---\n\n## Fix Summary Format\n\nAt the end, print a ready-to-use patch block for all missing/mismatched effort fields:\n\n```\n## Recommended effort fields (copy-paste ready)\n\nskill-name-1: effort: low     # mechanical scaffold\nskill-name-2: effort: high    # security analysis, spawns agents\nskill-name-3: effort: medium  # code review, bounded scope\n```\n\nAnd a 1-line count: `N skills need effort field \u00b7 N mismatches \u00b7 N missing allowed-tools`\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "eval-skills",
-    "description": "Audit all skills in the current project for frontmatter completeness, effort level appropriateness, allowed-tools scoping, and content quality. Produces a scored report with effort-level recommendations for each skill. Use when onboarding to a new project, reviewing skill quality before shipping, or adding effort fields to an existing skill library.",
-    "allowed-tools": "Read Glob Bash",
-    "argument-hint": "[path \u2014 default: .claude/skills/]",
-    "effort": "medium"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

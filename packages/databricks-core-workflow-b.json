@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031744",
   "name": "databricks-core-workflow-b",
   "slug": "databricks-core-workflow-b",
   "description": "Execute Databricks secondary workflow: MLflow model training and deployment.",
   "content": "# Databricks Core Workflow B: MLflow Training & Serving\n\n## Overview\n\nFull ML lifecycle on Databricks: Feature Engineering Client for discoverable features, MLflow experiment tracking with auto-logging, Unity Catalog model registry with aliases (`champion`/`challenger`), and Mosaic AI Model Serving endpoints for real-time inference via REST API.\n\n## Prerequisites\n\n- Completed `databricks-install-auth` and `databricks-core-workflow-a`\n- `databricks-sdk`, `mlflow`, `scikit-learn` installed\n- Unity Catalog enabled (required for model registry)\n\n## Instructions\n\n### Step 1: Feature Engineering with Feature Store\n\nCreate a feature table in Unity Catalog so features are discoverable and reusable.\n\n```python\nfrom databricks.feature_engineering import FeatureEngineeringClient\nfrom pyspark.sql import SparkSession\nimport pyspark.sql.functions as F\n\nspark = SparkSession.builder.getOrCreate()\nfe = FeatureEngineeringClient()\n\n# Build features from gold layer tables\nuser_features = (\n    spark.table(\"prod_catalog.gold.user_events\")\n    .groupBy(\"user_id\")\n    .agg(\n        F.count(\"event_id\").alias(\"total_events\"),\n        F.avg(\"session_duration_sec\").alias(\"avg_session_sec\"),\n        F.max(\"event_timestamp\").alias(\"last_active\"),\n        F.countDistinct(\"event_type\").alias(\"unique_event_types\"),\n        F.datediff(F.current_date(), F.max(\"event_timestamp\")).alias(\"days_since_last_active\"),\n    )\n)\n\n# Register as a feature table (creates or updates)\nfe.create_table(\n    name=\"prod_catalog.ml_features.user_behavior\",\n    primary_keys=[\"user_id\"],\n    df=user_features,\n    description=\"User behavioral features for churn prediction\",\n)\n```\n\n### Step 2: MLflow Experiment Tracking\n\n```python\nimport mlflow\nfrom sklearn.model_selection import train_test_split\nfrom sklearn.ensemble import GradientBoostingClassifier\nfrom sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score\n\n# Point MLflow to Databricks tracking server\nmlflow.set_tracking_uri(\"databricks\")\nmlflow.set_experiment(\"/Users/team@company.com/churn-prediction\")\n\n# Load features\nfeatures_df = spark.table(\"prod_catalog.ml_features.user_behavior\").toPandas()\nX = features_df.drop(columns=[\"user_id\", \"churned\"])\ny = features_df[\"churned\"]\nX_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)\n\n# Train with experiment tracking\nwith mlflow.start_run(run_name=\"gbm-baseline\") as run:\n    params = {\"n_estimators\": 200, \"max_depth\": 5, \"learning_rate\": 0.1}\n    mlflow.log_params(params)\n\n    model = GradientBoostingClassifier(**params)\n    model.fit(X_train, y_train)\n    y_pred = model.predict(X_test)\n\n    metrics = {\n        \"accuracy\": accuracy_score(y_test, y_pred),\n        \"precision\": precision_score(y_test, y_pred),\n        \"recall\": recall_score(y_test, y_pred),\n        \"f1\": f1_score(y_test, y_pred),\n    }\n    mlflow.log_metrics(metrics)\n\n    # Log model with signature for serving validation\n    mlflow.sklearn.log_model(\n        model,\n        artifact_path=\"model\",\n        input_example=X_test.iloc[:5],\n        registered_model_name=\"prod_catalog.ml_models.churn_predictor\",\n    )\n    print(f\"Run {run.info.run_id}: accuracy={metrics['accuracy']:.3f}\")\n```\n\n### Step 3: Model Registry with Aliases\n\nUnity Catalog model registry replaces legacy stages with aliases (`champion`, `challenger`).\n\n```python\nfrom mlflow import MlflowClient\n\nclient = MlflowClient()\nmodel_name = \"prod_catalog.ml_models.churn_predictor\"\n\n# List versions\nfor mv in client.search_model_versions(f\"name='{model_name}'\"):\n    print(f\"v{mv.version}: status={mv.status}, aliases={mv.aliases}\")\n\n# Promote best version to champion\nclient.set_registered_model_alias(model_name, alias=\"champion\", version=\"3\")\n\n# Load model by alias in downstream code\nchampion = mlflow.pyfunc.load_model(f\"models:/{model_name}@champion\")\npredictions = champion.predict(X_test)\n```\n\n### Step 4: Deploy Model Serving Endpoint\n\nMosaic AI Model Serving creates a REST API endpoint with auto-scaling.\n\n```python\nfrom databricks.sdk import WorkspaceClient\nfrom databricks.sdk.service.serving import (\n    EndpointCoreConfigInput, ServedEntityInput,\n)\n\nw = WorkspaceClient()\n\n# Create or update a serving endpoint\nendpoint = w.serving_endpoints.create_and_wait(\n    name=\"churn-predictor-prod\",\n    config=EndpointCoreConfigInput(\n        served_entities=[\n            ServedEntityInput(\n                entity_name=\"prod_catalog.ml_models.churn_predictor\",\n                entity_version=\"3\",\n                workload_size=\"Small\",\n                scale_to_zero_enabled=True,\n            )\n        ]\n    ),\n)\nprint(f\"Endpoint ready: {endpoint.name} ({endpoint.state.ready})\")\n```\n\n### Step 5: Query the Serving Endpoint\n\n```python\nimport requests\n\n# Score via REST API\nurl = f\"{w.config.host}/serving-endpoints/churn-predictor-prod/invocations\"\nheaders = {\n    \"Authorization\": f\"Bearer {w.config.token}\",\n    \"Content-Type\": \"application/json\",\n}\npayload = {\n    \"dataframe_records\": [\n        {\"total_events\": 42, \"avg_session_sec\": 120.5,\n         \"unique_event_types\": 7, \"days_since_last_active\": 3},\n    ]\n}\nresponse = requests.post(url, headers=headers, json=payload)\nprint(response.json())  # {\"predictions\": [0]}\n\n# Or use the SDK\nresult = w.serving_endpoints.query(\n    name=\"churn-predictor-prod\",\n    dataframe_records=[\n        {\"total_events\": 42, \"avg_session_sec\": 120.5,\n         \"unique_event_types\": 7, \"days_since_last_active\": 3},\n    ],\n)\nprint(result.predictions)\n```\n\n### Step 6: Batch Inference Job\n\n```python\n# Scheduled Databricks job for daily batch scoring\nmodel_name = \"prod_catalog.ml_models.churn_predictor\"\nchampion = mlflow.pyfunc.load_model(f\"models:/{model_name}@champion\")\n\n# Score all active users\nactive_users = spark.table(\"prod_catalog.gold.active_users\").toPandas()\nfeature_cols = [\"total_events\", \"avg_session_sec\", \"unique_event_types\", \"days_since_last_active\"]\nactive_users[\"churn_probability\"] = champion.predict_proba(active_users[feature_cols])[:, 1]\n\n# Write scores back to Delta\n(spark.createDataFrame(active_users[[\"user_id\", \"churn_probability\"]])\n    .write.mode(\"overwrite\")\n    .saveAsTable(\"prod_catalog.gold.churn_scores\"))\n```\n\n## Output\n\n- Feature table in Unity Catalog (`prod_catalog.ml_features.user_behavior`)\n- MLflow experiment with logged runs, metrics, and artifacts\n- Model versions in registry with `champion` alias\n- Live serving endpoint at `/serving-endpoints/churn-predictor-prod/invocations`\n- Batch scoring pipeline writing to `prod_catalog.gold.churn_scores`\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `RESOURCE_DOES_NOT_EXIST` | Wrong experiment path | Verify with `mlflow.search_experiments()` |\n| `INVALID_PARAMETER_VALUE` on `log_model` | Missing signature | Pass `input_example=` to auto-infer signature |\n| `Model not found in registry` | Wrong three-level name | Use `catalog.schema.model_name` format |\n| `Endpoint FAILED` | Model loading error | Check endpoint events: `w.serving_endpoints.get(\"name\").pending_config` |\n| `429 on serving endpoint` | Rate limit exceeded | Increase `workload_size` or add traffic splitting |\n| `FEATURE_TABLE_NOT_FOUND` | Table not created | Run `fe.create_table()` first |\n\n## Examples\n\n### Hyperparameter Sweep\n\n```python\nfrom sklearn.model_selection import ParameterGrid\n\ngrid = {\"n_estimators\": [100, 200], \"max_depth\": [3, 5, 7], \"learning_rate\": [0.05, 0.1]}\nfor params in ParameterGrid(grid):\n    with mlflow.start_run(run_name=f\"gbm-d{params['max_depth']}-n{params['n_estimators']}\"):\n        mlflow.log_params(params)\n        model = GradientBoostingClassifier(**params)\n        model.fit(X_train, y_train)\n        mlflow.log_metric(\"accuracy\", accuracy_score(y_test, model.predict(X_test)))\n        mlflow.sklearn.log_model(model, \"model\")\n```\n\n## Resources\n\n- [MLflow on Databricks](https://docs.databricks.com/aws/en/mlflow/)\n- [Feature Engineering](https://docs.databricks.com/aws/en/machine-learning/feature-store/)\n- [Model Serving](https://docs.databricks.com/aws/en/machine-learning/model-serving/)\n- [Unity Catalog Models](https://docs.databricks.com/aws/en/mlflow/models)\n\n## Next Steps\n\nFor common errors, see `databricks-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "databricks-core-workflow-b",
-    "description": "Execute Databricks secondary workflow: MLflow model training and deployment.",
-    "allowed-tools": "Read, Write, Edit, Bash(databricks:*), Bash(pip:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

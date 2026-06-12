@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032398",
   "name": "klingai-known-pitfalls",
   "slug": "klingai-known-pitfalls",
   "description": "Avoid common mistakes when using Kling AI API. Use when troubleshooting",
   "content": "# Kling AI Known Pitfalls\n\n## Overview\n\nDocumented mistakes, gotchas, and anti-patterns from real Kling AI integrations. Each pitfall includes the symptom, root cause, and tested fix.\n\n## Pitfall 1: Duration as Integer\n\n**Symptom:** `400 Bad Request` on valid-looking requests.\n\n```python\n# WRONG -- duration as integer\n{\"duration\": 5}\n\n# CORRECT -- duration as string\n{\"duration\": \"5\"}\n```\n\nThe API requires `duration` as a string `\"5\"` or `\"10\"`, not an integer.\n\n## Pitfall 2: JWT Without Explicit Headers\n\n**Symptom:** `401 Unauthorized` even with correct AK/SK.\n\n```python\n# WRONG -- missing headers parameter\ntoken = jwt.encode(payload, sk, algorithm=\"HS256\")\n\n# CORRECT -- explicit JWT headers\ntoken = jwt.encode(payload, sk, algorithm=\"HS256\",\n                   headers={\"alg\": \"HS256\", \"typ\": \"JWT\"})\n```\n\nSome JWT libraries don't include `typ: \"JWT\"` by default. Kling requires it.\n\n## Pitfall 3: Token Generated Once at Import Time\n\n**Symptom:** Works for 30 minutes, then all requests fail with `401`.\n\n```python\n# WRONG -- token generated once\nTOKEN = generate_token()  # at module import\nheaders = {\"Authorization\": f\"Bearer {TOKEN}\"}\n\n# CORRECT -- generate fresh token per request (or auto-refresh)\ndef get_headers():\n    return {\"Authorization\": f\"Bearer {generate_token()}\"}\n```\n\nJWT tokens expire after 30 minutes. Always implement auto-refresh.\n\n## Pitfall 4: Polling Without Timeout\n\n**Symptom:** Script hangs forever on a failed task.\n\n```python\n# WRONG -- infinite loop\nwhile True:\n    result = check_status(task_id)\n    if result[\"status\"] == \"succeed\":\n        break\n    time.sleep(10)\n\n# CORRECT -- with timeout and failure check\nstart = time.monotonic()\nwhile time.monotonic() - start < 600:  # 10 min max\n    result = check_status(task_id)\n    if result[\"status\"] == \"succeed\":\n        break\n    elif result[\"status\"] == \"failed\":\n        raise RuntimeError(result[\"error\"])\n    time.sleep(10)\nelse:\n    raise TimeoutError(\"Generation timed out\")\n```\n\n## Pitfall 5: Not Downloading Videos Promptly\n\n**Symptom:** Video URLs return `404` or `403` after a day.\n\nKling CDN URLs are **temporary** (24-72 hours). Always download and store on your own infrastructure immediately after generation completes.\n\n```python\n# WRONG -- storing only the Kling URL\ndb.save(video_url=kling_cdn_url)  # will expire\n\n# CORRECT -- download and rehost\nlocal_path = download_video(kling_cdn_url)\npermanent_url = upload_to_s3(local_path, bucket)\ndb.save(video_url=permanent_url)\n```\n\n## Pitfall 6: Mixing Mutually Exclusive Features (I2V)\n\n**Symptom:** `400 Bad Request` on image-to-video with multiple features.\n\nThese are **mutually exclusive** for image-to-video:\n\n- `camera_control`\n- `dynamic_masks` / `static_mask`\n- `image_tail`\n\nYou can only use ONE group per request.\n\n## Pitfall 7: Wrong Model for Text-to-Video\n\n**Symptom:** `400` or unexpected behavior.\n\n```python\n# WRONG -- kling-v2-1 is I2V-only\n{\"model_name\": \"kling-v2-1\", \"prompt\": \"A sunset...\"}  # fails\n\n# CORRECT -- use models that support T2V\n{\"model_name\": \"kling-v2-master\", \"prompt\": \"A sunset...\"}\n{\"model_name\": \"kling-v2-5-turbo\", \"prompt\": \"A sunset...\"}\n```\n\nCheck the model catalog: `kling-v1-5` and `kling-v2-1` support image-to-video only.\n\n## Pitfall 8: No Error Handling on Task Status\n\n**Symptom:** Silent failures, missing videos.\n\n```python\n# WRONG -- only check for success\nif result[\"task_status\"] == \"succeed\":\n    process(result)\n# silently ignores failures\n\n# CORRECT -- handle all terminal states\nif result[\"task_status\"] == \"succeed\":\n    process(result)\nelif result[\"task_status\"] == \"failed\":\n    log_failure(result[\"task_status_msg\"])\n    retry_or_alert(task_id)\n```\n\n## Pitfall 9: Ignoring Credit Costs with Audio\n\n**Symptom:** Credits depleted 5x faster than expected.\n\nNative audio (v2.6, `motion_has_audio: true`) multiplies credit cost by 5x:\n\n- 5s standard without audio: 10 credits\n- 5s standard WITH audio: 50 credits\n\nAlways check `motion_has_audio` in cost estimates.\n\n## Pitfall 10: Vague Prompts\n\n**Symptom:** Low-quality, incoherent video output.\n\n```python\n# WEAK -- too vague\n\"A nice video of nature\"\n\n# STRONG -- specific and descriptive\n\"Close-up of a monarch butterfly landing on a lavender flower, \"\n\"soft bokeh background, golden hour lighting, macro lens, 4K\"\n```\n\nGood prompts: specific subject, clear action, lighting, camera angle, style.\n\n## Quick Reference\n\n| Pitfall | Fix |\n|---------|-----|\n| Duration as int | Use string: `\"5\"` |\n| JWT headers missing | Add `headers={\"alg\":\"HS256\",\"typ\":\"JWT\"}` |\n| Token not refreshed | Auto-refresh with 5-min buffer |\n| No poll timeout | Max 600s with failure check |\n| Kling URLs as permanent | Download and rehost immediately |\n| Mixed I2V features | One feature group per request |\n| Wrong model for T2V | Check model supports text-to-video |\n| No failure handling | Check for `\"failed\"` status |\n| Audio cost surprise | 5x multiplier with `motion_has_audio` |\n| Vague prompts | Specific subject, action, style, lighting |\n\n## Resources\n\n- [API Reference](https://app.klingai.com/global/dev/document-api/apiReference/model/textToVideo)\n- [Developer Portal](https://app.klingai.com/global/dev)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "klingai-known-pitfalls",
-    "description": "Avoid common mistakes when using Kling AI API. Use when troubleshooting",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

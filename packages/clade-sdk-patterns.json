@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031509",
   "name": "clade-sdk-patterns",
   "slug": "clade-sdk-patterns",
   "description": "Production-ready Anthropic SDK patterns \\u2014 client config, retries,\\",
   "content": "# Anthropic SDK Patterns\n\n## Overview\n\nProduction patterns for the `@claude-ai/sdk` (TypeScript) and `anthropic` (Python) SDKs.\n\n## Client Configuration\n\n## Instructions\n\n### Step 1: TypeScript\n\n```typescript\nimport Anthropic from '@claude-ai/sdk';\n\n// Default \u2014 reads ANTHROPIC_API_KEY from env\nconst client = new Anthropic();\n\n// Full configuration\nconst client = new Anthropic({\n  apiKey: process.env.ANTHROPIC_API_KEY,   // default: env var\n  maxRetries: 3,                            // default: 2\n  timeout: 60_000,                          // default: 10 minutes\n  baseURL: 'https://api.anthropic.com',     // override for proxies\n  defaultHeaders: {                         // custom headers\n    'claude-beta': 'prompt-caching-2024-07-31',\n  },\n});\n```\n\n### Step 2: Python\n\n```python\nimport anthropic\n\n# Sync client\nclient = anthropic.Anthropic()\n\n# Async client\nclient = anthropic.AsyncAnthropic()\n\n# Full configuration\nclient = anthropic.Anthropic(\n    api_key=os.environ[\"ANTHROPIC_API_KEY\"],\n    max_retries=3,\n    timeout=60.0,\n    base_url=\"https://api.anthropic.com\",\n    default_headers={\"claude-beta\": \"prompt-caching-2024-07-31\"},\n)\n```\n\n## Output\n\n- Properly configured client with retries, timeouts, and custom headers\n- Type-safe error handling with specific exception classes\n- Streaming implementation using your preferred pattern\n- Prompt caching enabled for repeated system prompts (90% cost savings)\n- Batch processing configured for bulk operations (50% cost savings)\n\n## Error Handling\n\n```typescript\nimport Anthropic from '@claude-ai/sdk';\n\ntry {\n  const message = await client.messages.create({ ... });\n} catch (err) {\n  if (err instanceof Anthropic.AuthenticationError) {\n    // 401 \u2014 bad API key\n  } else if (err instanceof Anthropic.RateLimitError) {\n    // 429 \u2014 back off and retry\n  } else if (err instanceof Anthropic.APIError) {\n    // All other API errors\n    console.error(err.status, err.error?.type, err.message);\n  } else if (err instanceof Anthropic.APIConnectionError) {\n    // Network failure \u2014 DNS, timeout, etc.\n  }\n}\n```\n\n```python\ntry:\n    message = client.messages.create(...)\nexcept anthropic.AuthenticationError:\n    ...  # 401\nexcept anthropic.RateLimitError:\n    ...  # 429\nexcept anthropic.APIStatusError as e:\n    print(e.status_code, e.message)\nexcept anthropic.APIConnectionError:\n    ...  # network failure\n```\n\n## Streaming Patterns\n\n### Event-Based (TypeScript)\n\n```typescript\nconst stream = client.messages.stream({\n  model: 'claude-sonnet-4-20250514',\n  max_tokens: 2048,\n  messages,\n});\n\nstream.on('text', (text) => process.stdout.write(text));\nstream.on('error', (err) => console.error('Stream error:', err));\nstream.on('end', () => console.log('\\nDone'));\n\nconst finalMessage = await stream.finalMessage();\n```\n\n### Async Iterator (TypeScript)\n\n```typescript\nconst stream = await client.messages.create({\n  model: 'claude-sonnet-4-20250514',\n  max_tokens: 2048,\n  messages,\n  stream: true,\n});\n\nfor await (const event of stream) {\n  if (event.type === 'content_block_delta') {\n    process.stdout.write(event.delta.text || '');\n  }\n}\n```\n\n### Context Manager (Python)\n\n```python\nwith client.messages.stream(\n    model=\"claude-sonnet-4-20250514\",\n    max_tokens=2048,\n    messages=messages,\n) as stream:\n    for text in stream.text_stream:\n        print(text, end=\"\", flush=True)\n\nmessage = stream.get_final_message()\n```\n\n## TypeScript Types\n\n```typescript\nimport Anthropic from '@claude-ai/sdk';\n\n// Message types\ntype Message = Anthropic.Message;\ntype MessageParam = Anthropic.MessageParam;\ntype ContentBlock = Anthropic.ContentBlock;\ntype TextBlock = Anthropic.TextBlock;\ntype ToolUseBlock = Anthropic.ToolUseBlock;\n\n// Tool types\ntype Tool = Anthropic.Tool;\ntype ToolResultBlockParam = Anthropic.ToolResultBlockParam;\n\n// Request/response\ntype MessageCreateParams = Anthropic.MessageCreateParams;\n```\n\n## Prompt Caching (Beta)\n\n```typescript\nconst message = await client.messages.create({\n  model: 'claude-sonnet-4-20250514',\n  max_tokens: 1024,\n  system: [\n    {\n      type: 'text',\n      text: longSystemPrompt, // 1024+ tokens to be cacheable\n      cache_control: { type: 'ephemeral' },\n    },\n  ],\n  messages: [{ role: 'user', content: userQuestion }],\n}, {\n  headers: { 'claude-beta': 'prompt-caching-2024-07-31' },\n});\n// Cache hit: 90% cheaper on input tokens\n// message.usage.cache_creation_input_tokens / cache_read_input_tokens\n```\n\n## Message Batches\n\n```typescript\n// Submit up to 10,000 messages as a batch (50% cheaper, 24h SLA)\nconst batch = await client.messages.batches.create({\n  requests: items.map((item, i) => ({\n    custom_id: `item-${i}`,\n    params: {\n      model: 'claude-sonnet-4-20250514',\n      max_tokens: 1024,\n      messages: [{ role: 'user', content: item.prompt }],\n    },\n  })),\n});\n\n// Poll for completion\nlet status = await client.messages.batches.retrieve(batch.id);\nwhile (status.processing_status !== 'ended') {\n  await new Promise(r => setTimeout(r, 30000));\n  status = await client.messages.batches.retrieve(batch.id);\n}\n```\n\n## Examples\n\nSee Client Configuration, Error Handling, Streaming Patterns, TypeScript Types, Prompt Caching, and Message Batches sections above for complete code examples.\n\n## Resources\n\n- [TypeScript SDK](https://github.com/anthropics/claude-sdk-typescript)\n- [Python SDK](https://github.com/anthropics/claude-sdk-python)\n- [Prompt Caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching)\n- [Message Batches](https://docs.anthropic.com/en/api/creating-message-batches)\n\n## Next Steps\n\nSee `clade-rate-limits` for throughput optimization.\n\n## Prerequisites\n\n- Completed `clade-install-auth`\n- Familiarity with TypeScript generics or Python type hints\n- Understanding of async/await patterns\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clade-sdk-patterns",
-    "description": "Production-ready Anthropic SDK patterns \\u2014 client config, retries,\\",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

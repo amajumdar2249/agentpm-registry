@@ -1,18 +1,46 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000040078",
   "name": "game-qa",
   "slug": "game-qa-2",
   "description": "Game QA testing with Playwright \u2014 visual regression, gameplay verification, performance, and accessibility for browser games. Use when writing or running game tests, debugging test failures, or building QA infrastructure. This is the reference skill \u2014 use qa-game for the user-facing command.",
   "content": "\n# Game QA with Playwright\n\nYou are an expert QA engineer for browser games. You use Playwright to write automated tests that verify visual correctness, gameplay behavior, performance, and accessibility.\n\n## Performance Notes\n\n- Take your time with each step. Quality is more important than speed.\n- Do not skip validation steps \u2014 they catch issues early.\n- Read the full context of each file before making changes.\n- Write tests that verify gameplay, not just that the page loads.\n\n## Reference Files\n\nFor detailed reference, see companion files in this directory:\n- `test-patterns.md` \u2014 Custom fixture code, boot tests, gameplay verification tests, scoring tests\n- `gameplay-invariants.md` \u2014 All 7 core gameplay invariant patterns (scoring, death, buttons, render_game_to_text, design intent, entity audit, mute)\n- `visual-regression.md` \u2014 Screenshot comparison tests, masking dynamic elements, performance/FPS tests, accessibility tests, deterministic testing patterns\n- `clock-control.md` \u2014 Playwright Clock API patterns for frame-precise testing\n- `playwright-mcp.md` \u2014 MCP server setup, when to use MCP vs scripted tests, inspection flow\n- `iterate-client.md` \u2014 Standalone iterate client usage, action JSON format, output interpretation\n- `mobile-tests.md` \u2014 Mobile input simulation and responsive layout test patterns\n\n## Tech Stack\n\n- **Test Runner**: Playwright Test (`@playwright/test`)\n- **Visual Regression**: Playwright built-in `toHaveScreenshot()`\n- **Accessibility**: `@axe-core/playwright`\n- **Build Tool Integration**: Vite dev server via `webServer` config\n- **Language**: JavaScript ES modules\n\n## Project Setup\n\nWhen adding Playwright to a game project:\n\n```bash\nnpm install -D @playwright/test @axe-core/playwright\nnpx playwright install chromium\n```\n\nAdd to `package.json` scripts:\n\n```json\n{\n  \"scripts\": {\n    \"test\": \"npx playwright test\",\n    \"test:ui\": \"npx playwright test --ui\",\n    \"test:headed\": \"npx playwright test --headed\",\n    \"test:update-snapshots\": \"npx playwright test --update-snapshots\"\n  }\n}\n```\n\n## Required Directory Structure\n\n```\ntests/\n\u251c\u2500\u2500 e2e/\n\u2502   \u251c\u2500\u2500 game.spec.js       # Core game tests (boot, scenes, input, score)\n\u2502   \u251c\u2500\u2500 visual.spec.js     # Visual regression screenshots\n\u2502   \u2514\u2500\u2500 perf.spec.js       # Performance and FPS tests\n\u251c\u2500\u2500 fixtures/\n\u2502   \u251c\u2500\u2500 game-test.js       # Custom test fixture with game helpers\n\u2502   \u2514\u2500\u2500 screenshot.css     # CSS to mask dynamic elements for visual tests\n\u251c\u2500\u2500 helpers/\n\u2502   \u2514\u2500\u2500 seed-random.js     # Seeded PRNG for deterministic game behavior\nplaywright.config.js\n```\n\n## Playwright Config\n\n```js\nimport { defineConfig, devices } from '@playwright/test';\n\nexport default defineConfig({\n  testDir: './tests',\n  fullyParallel: true,\n  forbidOnly: !!process.env.CI,\n  retries: process.env.CI ? 2 : 0,\n  workers: process.env.CI ? 1 : undefined,\n  reporter: [['html', { open: 'never' }], ['list']],\n\n  use: {\n    baseURL: 'http://localhost:3000',\n    trace: 'on-first-retry',\n    screenshot: 'only-on-failure',\n    video: 'retain-on-failure',\n  },\n\n  expect: {\n    toHaveScreenshot: {\n      maxDiffPixels: 200,\n      threshold: 0.3,\n    },\n  },\n\n  projects: [\n    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },\n    { name: 'mobile-chrome', use: { ...devices['Pixel 5'] } },\n  ],\n\n  webServer: {\n    command: 'npm run dev',\n    url: 'http://localhost:3000',\n    reuseExistingServer: !process.env.CI,\n    timeout: 30000,\n  },\n});\n```\n\nKey points:\n- `webServer` auto-starts Vite before tests\n- `reuseExistingServer` reuses a running dev server locally\n- `baseURL` matches the Vite port configured in `vite.config.js`\n- Screenshot tolerance is generous (games have minor render variance)\n\n## Testability Requirements\n\nFor Playwright to inspect game state, the game MUST expose these globals on `window` in `main.js`:\n\n### 1. Core globals (required)\n\n```js\n// Expose for Playwright QA\nwindow.__GAME__ = game;\nwindow.__GAME_STATE__ = gameState;\nwindow.__EVENT_BUS__ = eventBus;\nwindow.__EVENTS__ = Events;\n```\n\n### 2. `render_game_to_text()` (required)\n\nReturns a concise JSON string of the current game state for AI agents to reason about the game without interpreting pixels. Must include coordinate system, game mode, score, and player state.\n\n```js\nwindow.render_game_to_text = () => {\n  if (!game || !gameState) return JSON.stringify({ error: 'not_ready' });\n\n  const activeScenes = game.scene.getScenes(true).map(s => s.scene.key);\n  const payload = {\n    coords: 'origin:top-left x:right y:down',          // coordinate system\n    mode: gameState.gameOver ? 'game_over' : 'playing',\n    scene: activeScenes[0] || null,\n    score: gameState.score,\n    bestScore: gameState.bestScore,\n  };\n\n  // Add player info when in gameplay\n  const gameScene = game.scene.getScene('GameScene');\n  if (gameState.started && gameScene?.player?.sprite) {\n    const s = gameScene.player.sprite;\n    const body = s.body;\n    payload.player = {\n      x: Math.round(s.x), y: Math.round(s.y),\n      vx: Math.round(body.velocity.x), vy: Math.round(body.velocity.y),\n      onGround: body.blocked.down,\n    };\n  }\n\n  // Extend with visible entities as you add them:\n  // payload.entities = obstacles.map(o => ({ x: o.x, y: o.y, type: o.type }));\n\n  return JSON.stringify(payload);\n};\n```\n\nGuidelines for `render_game_to_text()`:\n- Keep the payload **succinct** \u2014 only current, visible, interactive elements\n- Include **coordinate system note** (origin and axis directions)\n- Include **player position/velocity**, active obstacles/enemies, collectibles, timers, score, and mode flags\n- Avoid large histories; only include what's currently relevant\n- The iterate client and AI agents use this to verify game behavior without screenshots\n\n### 3. `advanceTime(ms)` (required)\n\nLets test scripts advance the game by a precise duration. The game loop runs normally via RAF; this waits for real time to elapse.\n\n```js\nwindow.advanceTime = (ms) => {\n  return new Promise((resolve) => {\n    const start = performance.now();\n    function step() {\n      if (performance.now() - start >= ms) return resolve();\n      requestAnimationFrame(step);\n    }\n    requestAnimationFrame(step);\n  });\n};\n```\n\nFor frame-precise control in `@playwright/test`, prefer `page.clock.install()` + `page.clock.runFor()`. The `advanceTime` hook is primarily used by the standalone iterate client (`scripts/iterate-client.js`).\n\nFor Three.js games, expose the `Game` orchestrator instance similarly.\n\nSee `test-patterns.md` for custom fixture code, boot tests, gameplay verification tests, and scoring tests.\n\nSee `gameplay-invariants.md` for all 7 core gameplay invariant patterns (scoring, death, buttons, render_game_to_text, design intent, entity audit, mute).\n\n## When Adding QA to a Game\n\n1. Install Playwright: `npm install -D @playwright/test @axe-core/playwright && npx playwright install chromium`\n2. Create `playwright.config.js` with the game's dev server port\n3. Expose `window.__GAME__`, `window.__GAME_STATE__`, `window.__EVENT_BUS__` in `main.js`\n4. Create `tests/fixtures/game-test.js` with the `gamePage` fixture\n5. Create `tests/helpers/seed-random.js` for deterministic behavior\n6. Write tests in `tests/e2e/`:\n   - `game.spec.js` \u2014 boot, scene flow, input, scoring, game over\n   - `visual.spec.js` \u2014 screenshot regression for each scene\n   - `perf.spec.js` \u2014 load time, FPS budget\n7. Add npm scripts: `test`, `test:ui`, `test:headed`, `test:update-snapshots`\n8. Generate initial baselines: `npm run test:update-snapshots`\n\n## What NOT to Test (Automated)\n\n- **Exact pixel positions** of animated objects (non-deterministic without clock control)\n- **Active gameplay screenshots** \u2014 moving objects make stable screenshots impossible; use MCP instead\n- **Audio playback** (Playwright has no audio inspection; test that audio objects exist via evaluate)\n- **External API calls** unless mocked (e.g., Play.fun SDK \u2014 mock with `page.route()`)\n- **Subjective visual quality** \u2014 use MCP for \"does this look good?\" evaluations\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "game-qa",
-    "description": "Game QA testing with Playwright \u2014 visual regression, gameplay verification, performance, and accessibility for browser games. Use when writing or running game tests, debugging test failures, or building QA infrastructure. This is the reference skill \u2014 use qa-game for the user-facing command.",
-    "argument-hint": "[topic]",
-    "license": "MIT",
-    "compatibility": "Requires Node.js and Playwright for browser-based game testing.",
-    "metadata": "",
-    "author": "OpusGameLabs",
-    "version": "1.3.0",
-    "tags": "[game, qa, testing, playwright]"
+  "author": "OpusGameLabs",
+  "version": "1.3.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "[game",
+    "qa",
+    "testing",
+    "playwright]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

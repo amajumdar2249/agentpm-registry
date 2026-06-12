@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000000478",
   "name": "firebase-development-add-feature",
   "slug": "firebase-development-add-feature-2",
   "description": "This skill should be used when adding features to existing Firebase projects. Triggers on \"add function\", \"create endpoint\", \"new tool\", \"add api\", \"new collection\", \"implement\", \"build feature\". Guides TDD workflow with test-first development, security rules, and emulator verification.",
   "content": "\n# Firebase Add Feature\n\n## Overview\n\nThis sub-skill guides adding new features to existing Firebase projects using TDD. It handles Cloud Functions, Firestore collections, and API endpoints.\n\n**Key principles:**\n- Write tests FIRST (TDD requirement)\n- Use `{success, message, data?}` response pattern\n- Every file starts with ABOUTME comments\n- Verify with emulators before claiming done\n\n## When This Sub-Skill Applies\n\n- Adding a new Cloud Function\n- Creating a new Firestore collection with rules\n- Adding an API endpoint to Express app\n- User says: \"add function\", \"create endpoint\", \"new collection\", \"implement\"\n\n**Do not use for:**\n- Initial project setup \u2192 `firebase-development:project-setup`\n- Debugging \u2192 `firebase-development:debug`\n- Code review \u2192 `firebase-development:validate`\n\n## TodoWrite Workflow\n\nCreate checklist with these 12 steps:\n\n### Step 1: Identify Feature Type\nDetermine what's being added:\n- **HTTP Endpoint** - API route (GET/POST/etc.)\n- **Firestore Trigger** - Runs on document changes\n- **Scheduled Function** - Cron job\n- **Callable Function** - Client SDK calls\n- **New Collection** - Firestore collection with rules\n\n### Step 2: Check Existing Architecture\nExamine the project to understand patterns:\n\n```bash\nls -la functions/src/\ngrep -r \"onRequest\" functions/src/\ngrep \"express\" functions/package.json\n```\n\n**Determine:** Architecture style, auth method, security model.\n\n**Reference:** `docs/examples/express-function-architecture.md`\n\n### Step 3: Write Failing Test First (TDD)\nCreate test file before implementation:\n\n```typescript\n// ABOUTME: Unit tests for [feature name] functionality\n// ABOUTME: Tests [what the feature does] with various scenarios\n\nimport { describe, it, expect } from 'vitest';\nimport { handleYourFeature } from '../../tools/yourFeature';\n\ndescribe('handleYourFeature', () => {\n  it('should return success when given valid input', async () => {\n    const result = await handleYourFeature('user-123', { name: 'test' });\n    expect(result.success).toBe(true);\n  });\n\n  it('should return error for invalid input', async () => {\n    const result = await handleYourFeature('user-123', { name: '' });\n    expect(result.success).toBe(false);\n  });\n});\n```\n\nRun test to confirm it fails: `npm run test`\n\n### Step 4: Create Function File with ABOUTME\nCreate implementation file:\n\n```typescript\n// ABOUTME: Implements [feature name] for [purpose]\n// ABOUTME: Returns {success, message, data?} response\n\nexport async function handleYourFeature(\n  userId: string,\n  params: { name: string }\n): Promise<{ success: boolean; message: string; data?: any }> {\n  if (!userId) {\n    return { success: false, message: 'Authentication required' };\n  }\n  if (!params.name) {\n    return { success: false, message: 'Invalid input: name required' };\n  }\n\n  // Implementation here\n  return { success: true, message: 'Success', data: { /* ... */ } };\n}\n```\n\n**Reference:** `docs/examples/express-function-architecture.md`\n\n### Step 5: Add Firestore Security Rules\nUpdate `firestore.rules` for new collections:\n\n**Server-write-only (preferred):**\n```javascript\nmatch /yourCollection/{docId} {\n  allow read: if request.auth != null;\n  allow write: if false;  // Only Cloud Functions\n}\n```\n\n**Client-write (if needed):**\n```javascript\nmatch /yourCollection/{docId} {\n  allow create: if request.auth != null &&\n    request.resource.data.userId == request.auth.uid;\n  allow update: if request.auth != null &&\n    resource.data.userId == request.auth.uid &&\n    request.resource.data.diff(resource.data).affectedKeys()\n      .hasOnly(['name', 'updatedAt']);\n}\n```\n\n**Reference:** `docs/examples/firestore-rules-patterns.md`\n\n### Step 6: Update Indexes if Needed\nAdd to `firestore.indexes.json` for complex queries:\n\n```json\n{\n  \"collectionGroup\": \"yourCollection\",\n  \"fields\": [\n    {\"fieldPath\": \"userId\", \"order\": \"ASCENDING\"},\n    {\"fieldPath\": \"createdAt\", \"order\": \"DESCENDING\"}\n  ]\n}\n```\n\nSkip if no complex queries (single-field indexes are automatic).\n\n### Step 7: Add Authentication Checks\nBased on project pattern:\n\n**API Keys:**\n```typescript\napp.post('/endpoint', apiKeyGuard, async (req, res) => {\n  const userId = req.userId!;\n  // ...\n});\n```\n\n**Firebase Auth:**\n```typescript\nif (!req.auth) {\n  res.status(401).json({ success: false, message: 'Auth required' });\n  return;\n}\nconst userId = req.auth.uid;\n```\n\n**Reference:** `docs/examples/api-key-authentication.md`\n\n### Step 8: Implement Handler with Response Pattern\nAll handlers use consistent pattern:\n\n```typescript\ninterface HandlerResponse {\n  success: boolean;\n  message: string;\n  data?: any;\n}\n```\n\nInclude validation at every layer (defense in depth).\n\n### Step 9: Export Function Properly\nAdd to `functions/src/index.ts`:\n\n**Express:** Add route or switch case\n**Domain-grouped:** `export * from './yourDomain';`\n**Individual:** Import and export in index.js\n\nVerify: `npm run build`\n\n### Step 10: Make Tests Pass (TDD Green)\nRun tests: `npm run test`\n\nAll tests should pass. If not, fix implementation (not tests).\n\n### Step 11: Write Integration Test\nCreate `functions/src/__tests__/emulator/yourFeature.test.ts`:\n\nTest complete workflow with emulators:\n- HTTP request to endpoint\n- Verify Firestore data created\n- Test auth enforcement\n\nRun: `npm run test:emulator` (with emulators running)\n\n### Step 12: Test with Emulators\n```bash\nfirebase emulators:start\nopen http://127.0.0.1:4000\n```\n\n**Verify:**\n- Endpoint returns 200\n- Response follows pattern\n- Documents appear in Firestore\n- Auth enforced (401 for invalid)\n- Rules work in Rules Playground\n\n## Response Pattern\n\nAll handlers MUST return:\n\n```typescript\n// Success\n{ success: true, message: \"Created\", data: { id: \"abc\" } }\n\n// Error\n{ success: false, message: \"Invalid input\" }\n```\n\n## Verification Checklist\n\nBefore marking complete:\n- [ ] Tests written FIRST and pass\n- [ ] ABOUTME comments on all files\n- [ ] Security rules added\n- [ ] Auth checks implemented\n- [ ] Response pattern followed\n- [ ] Emulator testing successful\n- [ ] Code linted\n\n## Pattern References\n\n- **Architecture:** `docs/examples/express-function-architecture.md`\n- **Auth:** `docs/examples/api-key-authentication.md`\n- **Rules:** `docs/examples/firestore-rules-patterns.md`\n- **Emulators:** `docs/examples/emulator-workflow.md`\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "firebase-development-add-feature",
-    "description": "This skill should be used when adding features to existing Firebase projects. Triggers on \"add function\", \"create endpoint\", \"new tool\", \"add api\", \"new collection\", \"implement\", \"build feature\". Guides TDD workflow with test-first development, security rules, and emulator verification."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

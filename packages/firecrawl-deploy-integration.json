@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031960",
   "name": "firecrawl-deploy-integration",
   "slug": "firecrawl-deploy-integration",
   "description": "Deploy Firecrawl integrations to Vercel, Cloud Run, and Docker platforms.",
   "content": "# Firecrawl Deploy Integration\n\n## Overview\n\nDeploy applications using Firecrawl's web scraping API to production. Covers Vercel serverless, Cloud Run containers, self-hosted Firecrawl via Docker, and webhook endpoint deployment for async crawl results.\n\n## Prerequisites\n\n- Firecrawl API key (`FIRECRAWL_API_KEY`)\n- Application using `@mendable/firecrawl-js`\n- Platform CLI (vercel, docker, or gcloud)\n\n## Instructions\n\n### Step 1: Configure Platform Secrets\n\n```bash\nset -euo pipefail\n# Vercel\nvercel env add FIRECRAWL_API_KEY production\n\n# Cloud Run\necho -n \"$FIRECRAWL_API_KEY\" | gcloud secrets create firecrawl-api-key --data-file=-\n\n# Docker\n# Use --env-file or docker secrets\n```\n\n### Step 2: Vercel Serverless API Route\n\n```typescript\n// app/api/scrape/route.ts (Next.js App Router)\nimport FirecrawlApp from \"@mendable/firecrawl-js\";\nimport { NextRequest, NextResponse } from \"next/server\";\n\nconst firecrawl = new FirecrawlApp({\n  apiKey: process.env.FIRECRAWL_API_KEY!,\n});\n\nexport async function POST(req: NextRequest) {\n  const { url, formats = [\"markdown\"] } = await req.json();\n\n  if (!url) {\n    return NextResponse.json({ error: \"URL required\" }, { status: 400 });\n  }\n\n  try {\n    const result = await firecrawl.scrapeUrl(url, {\n      formats,\n      onlyMainContent: true,\n      waitFor: 3000,\n    });\n\n    return NextResponse.json({\n      success: result.success,\n      markdown: result.markdown,\n      title: result.metadata?.title,\n      sourceURL: result.metadata?.sourceURL,\n    });\n  } catch (error: any) {\n    return NextResponse.json(\n      { error: error.message, status: error.statusCode },\n      { status: error.statusCode || 500 }\n    );\n  }\n}\n```\n\n### Step 3: Self-Hosted Firecrawl (Docker Compose)\n\n```yaml\n# docker-compose.yml\nservices:\n  firecrawl:\n    image: mendableai/firecrawl:latest\n    ports:\n      - \"3002:3002\"\n    environment:\n      - PORT=3002\n      - USE_DB_AUTHENTICATION=false\n      - REDIS_URL=redis://redis:6379\n      - REDIS_RATE_LIMIT_URL=redis://redis:6379\n      - NUM_WORKERS_PER_QUEUE=2\n      - BULL_AUTH_KEY=${BULL_AUTH_KEY:-changeme}\n    depends_on:\n      redis:\n        condition: service_healthy\n\n  redis:\n    image: redis:7-alpine\n    ports:\n      - \"6379:6379\"\n    healthcheck:\n      test: [\"CMD\", \"redis-cli\", \"ping\"]\n      interval: 5s\n      timeout: 3s\n      retries: 5\n\n  app:\n    build: .\n    ports:\n      - \"3000:3000\"\n    environment:\n      - FIRECRAWL_API_KEY=fc-self-hosted\n      - FIRECRAWL_API_URL=http://firecrawl:3002\n    depends_on:\n      - firecrawl\n```\n\n```typescript\n// Point app to self-hosted Firecrawl\nconst firecrawl = new FirecrawlApp({\n  apiKey: process.env.FIRECRAWL_API_KEY!,\n  apiUrl: process.env.FIRECRAWL_API_URL || \"https://api.firecrawl.dev\",\n});\n```\n\n### Step 4: Cloud Run Deployment\n\n```bash\nset -euo pipefail\n# Build and deploy\ngcloud run deploy firecrawl-app \\\n  --source . \\\n  --region us-central1 \\\n  --set-secrets \"FIRECRAWL_API_KEY=firecrawl-api-key:latest\" \\\n  --memory 512Mi \\\n  --timeout 300 \\\n  --allow-unauthenticated\n```\n\n### Step 5: Webhook Endpoint for Async Crawls\n\n```typescript\n// app/api/webhooks/firecrawl/route.ts\nimport crypto from \"crypto\";\nimport { NextRequest, NextResponse } from \"next/server\";\n\nexport async function POST(req: NextRequest) {\n  const body = await req.text();\n\n  // Verify webhook signature\n  const signature = req.headers.get(\"x-firecrawl-signature\");\n  if (signature && process.env.FIRECRAWL_WEBHOOK_SECRET) {\n    const expected = crypto\n      .createHmac(\"sha256\", process.env.FIRECRAWL_WEBHOOK_SECRET)\n      .update(body)\n      .digest(\"hex\");\n    if (signature !== expected) {\n      return NextResponse.json({ error: \"Invalid signature\" }, { status: 401 });\n    }\n  }\n\n  const { type, id, data } = JSON.parse(body);\n\n  switch (type) {\n    case \"crawl.completed\":\n      console.log(`Crawl ${id} complete: ${data.length} pages`);\n      await processPages(data);\n      break;\n    case \"crawl.page\":\n      console.log(`Page scraped: ${data[0]?.metadata?.sourceURL}`);\n      break;\n    case \"crawl.started\":\n      console.log(`Crawl ${id} started`);\n      break;\n  }\n\n  return NextResponse.json({ received: true });\n}\n```\n\n### Step 6: Health Check\n\n```typescript\nexport async function GET() {\n  try {\n    const result = await firecrawl.scrapeUrl(\"https://example.com\", {\n      formats: [\"markdown\"],\n    });\n    return NextResponse.json({\n      status: result.success ? \"healthy\" : \"degraded\",\n    });\n  } catch {\n    return NextResponse.json({ status: \"unhealthy\" }, { status: 503 });\n  }\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Vercel timeout | Scrape takes > 10s | Use background functions or async crawl |\n| Self-hosted OOM | Playwright browser memory | Increase container memory to 2GB+ |\n| Cloud Run cold start | First request slow | Set min instances to 1 |\n| Webhook not received | URL not publicly accessible | Use ngrok in dev, verify HTTPS in prod |\n\n## Resources\n\n- [Firecrawl Self-Hosting](https://docs.firecrawl.dev/contributing/self-host)\n- [Firecrawl Webhooks](https://docs.firecrawl.dev/webhooks/overview)\n- [Firecrawl Node SDK](https://docs.firecrawl.dev/sdks/node)\n\n## Next Steps\n\nFor webhook handling, see `firecrawl-webhooks-events`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "firecrawl-deploy-integration",
-    "description": "Deploy Firecrawl integrations to Vercel, Cloud Run, and Docker platforms.",
-    "allowed-tools": "Read, Write, Edit, Bash(vercel:*), Bash(docker:*), Bash(gcloud:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

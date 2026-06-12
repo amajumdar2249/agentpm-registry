@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000029574",
   "name": "bio-systems-biology-metabolic-reconstruction",
   "slug": "bio-systems-biology-metabolic-reconstruction-2",
   "description": "Build genome-scale metabolic models from genome sequences using CarveMe and gapseq for automated reconstruction. Generate draft models ready for curation and analysis. Use when creating metabolic models for organisms without existing models.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: COBRApy 0.29+, NCBI BLAST+ 2.15+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Metabolic Reconstruction\n\n**\"Build a metabolic model for my organism from its genome\"** \u2192 Generate a genome-scale metabolic model by mapping protein sequences to a universal reaction database, then gap-filling to ensure growth capability on specified media.\n- CLI: `carve` (CarveMe) for automated reconstruction from protein FASTA\n- CLI: `gapseq find` + `gapseq draft` + `gapseq fill` for pathway-based reconstruction\n\n## CarveMe (Recommended)\n\n```bash\n# Install CarveMe\npip install carveme\n\n# Basic reconstruction from protein FASTA\ncarve genome.faa -o model.xml\n\n# Specify output format\ncarve genome.faa -o model.xml --format sbml\ncarve genome.faa -o model.json --format json\n\n# Gap-fill for specific media\ncarve genome.faa -o model.xml --gapfill M9\n\n# Available media: M9, LB, M9[glc], M9[glyc], etc.\n```\n\n## CarveMe Options\n\n```bash\n# Use diamond instead of blastp (faster)\ncarve genome.faa -o model.xml --diamond\n\n# Specify organism type\ncarve genome.faa -o model.xml --grampos  # Gram-positive\ncarve genome.faa -o model.xml --gramneg  # Gram-negative (default)\n\n# Initialize from template model\ncarve genome.faa -o model.xml --init M9\n\n# Verbose output for debugging\ncarve genome.faa -o model.xml -v\n```\n\n## gapseq (Alternative)\n\n```bash\n# Install gapseq\ngit clone https://github.com/jotech/gapseq\ncd gapseq\n./gapseq check  # Check dependencies\n\n# Full reconstruction workflow\n./gapseq find -p all genome.fasta  # Find metabolic pathways\n./gapseq find -t all genome.fasta  # Find transporters\n./gapseq draft -r genome-all-Reactions.tbl \\\n               -t genome-Transporters.tbl \\\n               -p genome-all-Pathways.tbl \\\n               -c genome.fasta\n./gapseq fill -m genome-draft.RDS -c genome.fasta -n M9\n```\n\n## Python API for CarveMe\n\n```python\nimport subprocess\n\ndef reconstruct_model(fasta_path, output_path, media='M9', grampos=False):\n    '''Run CarveMe reconstruction\n\n    Args:\n        fasta_path: Path to protein FASTA file\n        output_path: Output model file path (.xml or .json)\n        media: Gap-filling media (M9, LB, etc.)\n        grampos: True for Gram-positive organisms\n\n    Model size expectations:\n    - Bacteria: 1000-2500 reactions typical\n    - Fungi: 1500-3000 reactions\n    - Archaea: 800-1500 reactions\n    '''\n    cmd = ['carve', fasta_path, '-o', output_path, '--gapfill', media]\n\n    if grampos:\n        cmd.append('--grampos')\n\n    subprocess.run(cmd, check=True)\n    return output_path\n```\n\n## Load and Inspect Draft Model\n\n```python\nimport cobra\n\nmodel = cobra.io.read_sbml_model('model.xml')\n\nprint(f'Reactions: {len(model.reactions)}')\nprint(f'Metabolites: {len(model.metabolites)}')\nprint(f'Genes: {len(model.genes)}')\n\n# Check if model can grow\nsolution = model.optimize()\nprint(f'Growth rate: {solution.objective_value:.4f}')\n\n# List exchange reactions (available nutrients)\nfor rxn in model.exchanges[:10]:\n    print(f'{rxn.id}: {rxn.reaction}')\n```\n\n## Quality Metrics\n\n```python\ndef assess_model_quality(model):\n    '''Basic quality assessment for draft model\n\n    Returns metrics to evaluate reconstruction quality.\n    '''\n    metrics = {\n        'reactions': len(model.reactions),\n        'metabolites': len(model.metabolites),\n        'genes': len(model.genes),\n        'gene_reaction_ratio': len(model.reactions) / max(1, len(model.genes))\n    }\n\n    # Count reaction types\n    metrics['exchanges'] = len(model.exchanges)\n    metrics['transport'] = len([r for r in model.reactions if 'transport' in r.name.lower()])\n\n    # Test growth\n    sol = model.optimize()\n    metrics['can_grow'] = sol.status == 'optimal' and sol.objective_value > 0.001\n\n    # Gene-reaction rules\n    metrics['orphan_reactions'] = len([r for r in model.reactions if not r.genes])\n\n    return metrics\n```\n\n## Multiple Genome Reconstruction\n\n```python\nimport os\nfrom pathlib import Path\n\ndef batch_reconstruction(fasta_dir, output_dir, media='M9'):\n    '''Reconstruct models for multiple genomes\n\n    Use for comparative genomics or community modeling.\n    '''\n    os.makedirs(output_dir, exist_ok=True)\n\n    for fasta in Path(fasta_dir).glob('*.faa'):\n        output = Path(output_dir) / f'{fasta.stem}.xml'\n        reconstruct_model(str(fasta), str(output), media=media)\n        print(f'Completed: {fasta.name}')\n```\n\n## Community Model Construction\n\n```python\ndef merge_models(model_paths, community_name='community'):\n    '''Create community model from individual organisms\n\n    For microbiome FBA, need to create a shared compartment\n    for metabolite exchange between organisms.\n    '''\n    import cobra\n\n    models = [cobra.io.read_sbml_model(p) for p in model_paths]\n\n    # Add species prefix to all components\n    for i, model in enumerate(models):\n        species_id = f'sp{i+1}'\n        for rxn in model.reactions:\n            rxn.id = f'{species_id}_{rxn.id}'\n        for met in model.metabolites:\n            met.id = f'{species_id}_{met.id}'\n        for gene in model.genes:\n            gene.id = f'{species_id}_{gene.id}'\n\n    # Merge into community model\n    community = models[0].copy()\n    for model in models[1:]:\n        community.merge(model)\n\n    return community\n```\n\n## Related Skills\n\n- systems-biology/model-curation - Validate and curate draft models\n- systems-biology/flux-balance-analysis - Analyze reconstructed models\n- database-access/entrez-fetch - Download genome sequences\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-systems-biology-metabolic-reconstruction",
-    "description": "Build genome-scale metabolic models from genome sequences using CarveMe and gapseq for automated reconstruction. Generate draft models ready for curation and analysis. Use when creating metabolic models for organisms without existing models.",
-    "tool_type": "cli",
-    "primary_tool": "CarveMe"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

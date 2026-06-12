@@ -1,29 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000026308",
   "name": "curate",
   "slug": "curate-2",
   "description": "Mine transcripts, .agents, bd, and git for skill diffs, bd updates, or",
   "content": "\n# /curate \u2014 Canonical Miner Skill\n\n> **Role:** miner. Input = trinity slice (transcripts, `.agents/`, `bd`, `git`). Output = skill diffs (proposed), bd updates, rare wiki entries. **Never mutates code.**\n\n> **Status (2026-05-08):** introduced ADDITIVE in Phase 1 (m6v5.D.1 / soc-78s2v). Existing miners (dream, harvest, forge, compile, retro, post-mortem-mining, flywheel, trace, provenance, defrag) stay until Phase 3 shim conversion (m6v5.D.3). Fix-C smoke (`soc-wb2aa`) gates Phase 3.\n\n## Modes (\u22648 per Fix-F mode-flag budget)\n\n| Mode | Purpose | Replaces (post-Phase 3) |\n|---|---|---|\n| `--mode=dream` | Overnight bounded INGEST\u2192REDUCE\u2192MEASURE on `.agents/` | `/dream` |\n| `--mode=harvest` | Cross-rig promotion + post-mortem mining + flywheel rollup | `/harvest`, `/post-mortem` (mining half), `/flywheel` |\n| `--mode=forge` | Per-session transcript mining (SessionEnd cadence) | `/forge` |\n| `--mode=compile` | Mine\u2192Grow\u2192Defrag\u2192Lint corpus pipeline | `/compile` |\n| `--mode=retro` | Single-session learning capture | `/retro` |\n| `--mode=defrag` | Knowledge defragmentation (overnight) | `compile-session-defrag.sh` hook |\n| `--mode=watch` | In-session drift / loop detection (15-min cadence) | `research-loop-detector.sh` hook |\n| `--mode=provenance` | Decision-trace + artifact-provenance walk | `/provenance`, `/trace` |\n\n**Mode-budget assertion:** 8 modes. Adding a 9th requires demoting an existing one OR refusing the addition (per Fix-F \u00a7 continuous CI gate).\n\n**Anti-goals (hard constraints from architecture):**\n\n- NEVER mutates source code.\n- NEVER invokes `/rpi` or any code-mutating flow.\n- NEVER performs git operations (no commits, branches, push, rebase, checkout).\n- NEVER creates symlinks anywhere.\n\n## Quick Start\n\n```bash\n/curate --mode=harvest                  # cross-rig promotion sweep\n/curate --mode=forge                    # mine the most recent session's transcript\n/curate --mode=dream --duration=8h      # overnight bounded run\n/curate --mode=compile                  # rebuild .agents/ corpus\n/curate --mode=retro                    # capture this session's learning\n/curate --mode=defrag                   # knowledge defragmentation\n/curate --mode=watch                    # in-session drift check\n/curate --mode=provenance --bead=soc-X  # walk decision trace for a bead\n```\n\n## Execution\n\n### Step 1: Resolve mode + scope\n\nParse `--mode`. Each mode has its own scope semantics:\n\n| Mode | Reads | Writes | Cadence (typical loop binding) |\n|---|---|---|---|\n| dream | `.agents/` corpus | `.agents/overnight/<run-id>/` summary + per-iteration JSON | overnight (1\u00d7/24h) |\n| harvest | `.agents/` across rigs (`~/.agents/learnings/`) | `~/.agents/learnings/` (promotion), `.agents/harvest/latest.json` | daily (1\u00d7/24h) |\n| forge | session transcripts (`~/.claude/projects/<session>/*.jsonl`) | `.agents/learnings/`, `.agents/patterns/` | per-session (SessionEnd) or 30m loop |\n| compile | `.agents/` corpus | `wiki/INDEX.generated.md`, `.agents/compile/<date>.md` | weekly |\n| retro | this session's transcript + recent diffs | `.agents/retro/index.jsonl` (append) | per-session (manual) |\n| defrag | `.agents/` corpus | `.agents/defrag/<date>.md` (cleanup report) | overnight (1\u00d7/24h) |\n| watch | last 100 lines of current session transcript | `.agents/watch/<date>.md` (advisory) | in-session 15m loop |\n| provenance | `bd` graph + `git log` + `.agents/` for given anchor | `.agents/provenance/<anchor>.md` | on-demand |\n\n### Step 2: Acquire lock (when applicable)\n\nFor `--mode=dream`: acquire `.agents/overnight/run.lock` exclusively. If held, exit with \"another curator holds the lock\" message; do NOT block.\n\nFor `--mode=harvest`: check the dream lock. If held, defer harvest to next loop fire.\n\nFor `--mode=forge`: per-session lock at `.agents/forge/session-<id>.lock`. Auto-released at end of run.\n\nOther modes: no lock; concurrent invocation is safe.\n\n### Step 3: Run the mode-specific body\n\nEach mode delegates to a body section in this skill (see \u00a7 per-mode bodies below for outline; full content moves to `references/<mode>.md` at Phase 2 startup).\n\n### Step 4: Produce artifacts\n\nOutput is one of (priority order, per architecture knowledge-flywheel rule):\n\n1. **Skill diffs** \u2014 proposed changes to existing skill bodies, written to `.agents/skill-diffs/<date>-<skill>.diff`. Operator approves before applying. NEVER writes to `skills/` directly.\n2. **bd updates** \u2014 `bd note`, `bd remember`, or new `bd create` for surfaced issues. Direct, no approval queue.\n3. **Wiki entries** \u2014 `.agents/research/`, `.agents/learnings/`, `~/.agents/learnings/` (rare; only when knowledge is generally reusable).\n\n### Step 5: Append to LOG.md\n\nEvery mode appends one line to `.agents/LOG.md`:\n\n```\n2026-MM-DDTHH:MM:SSZ [curate --mode=<mode>] <run-id> \u2014 <short-summary> \u2014 outputs: <artifact-paths>\n```\n\n### Step 6: Report\n\n1. Mode + scope\n2. Output path(s)\n3. Surfaced bd issues (if any)\n4. Loop continuation hint (next-fire cadence per architecture catalog)\n\n## Per-mode bodies (outline)\n\n### --mode=dream\n\nOvernight INGEST \u2192 REDUCE \u2192 MEASURE iterations until halt:\n- INGEST: scan `.agents/` for new artifacts since last run\n- REDUCE: dedupe + score + cluster\n- MEASURE: compute knowledge-corpus health metrics\n- Halt when: wall-clock budget exhausted, plateau (K sub-epsilon deltas), regression beyond per-metric floor, metadata integrity failure\n- Knowledge-only; never code mutation\n- Output: `.agents/overnight/<run-id>/summary.{json,md}` + per-iteration archive\n\nDetailed body remains inline until Phase 2 extraction.\n\n### --mode=harvest\n\nCross-rig promotion sweep:\n- Walk `.agents/` across all rigs (paths from `~/.agents/rigs.yaml` or fleet config)\n- Extract learnings/patterns/research artifacts\n- Dedupe by content hash\n- Promote high-confidence items to `~/.agents/learnings/` global hub\n- Roll up flywheel-health metrics as byproduct\n- Output: `.agents/harvest/latest.json` + promoted files in global hub\n\nDetailed body remains inline until Phase 2 extraction.\n\n### --mode=forge\n\nPer-session transcript mining:\n- Locate latest transcript (`~/.claude/projects/<project>/<session>/*.jsonl`)\n- Extract knowledge candidates (decisions, patterns, anti-patterns, bug fixes)\n- Validate candidates against finding-registry contract\n- Queue to `.agents/knowledge/pending/` for curator review\n- Output: pending markdown files; bd notes for high-confidence findings\n\nDetailed body remains inline until Phase 2 extraction.\n\n### --mode=compile\n\nCorpus pipeline:\n- Mine: extract candidate knowledge from `.agents/`\n- Grow: merge into existing taxonomy\n- Defrag: collapse redundant entries\n- Lint: check for orphans, contradictions, staleness\n- Output: `wiki/INDEX.generated.md` (rebuilt), `.agents/compile/<date>.md` (lint report)\n\nDetailed body remains inline until Phase 2 extraction.\n\n### --mode=retro\n\nSingle-session learning capture:\n- Read last N turns + diff summary\n- Identify one durable insight (or none \u2014 exit clean)\n- Append to `.agents/retro/index.jsonl`\n- Optional: surface to bd as note\n\nDetailed body remains inline until Phase 2 extraction.\n\n### --mode=defrag\n\nKnowledge defragmentation:\n- Find duplicate entries across `.agents/` (content-hash + semantic-similarity)\n- Find broken backlinks\n- Find stale entries (last_cited > TTL, low hit_count)\n- Output: `.agents/defrag/<date>.md` with proposed retirements (NEVER auto-deletes; operator approves)\n\nDetailed body remains inline until Phase 2 extraction.\n\n### --mode=watch\n\nIn-session drift detection:\n- Read last 100 transcript turns\n- Detect: research loops without code change, repeated grep-without-read, oscillating decisions\n- Write advisory to `.agents/watch/<date>.md`; surface high-severity to bd note\n- Cheap; designed for 15-min cadence\n\nDetailed body remains inline until Phase 2 extraction.\n\n### --mode=provenance\n\nDecision-trace walk:\n- Given anchor (bead ID, file path, or decision marker)\n- Walk: bd graph (parents, blockers, refs) + git log (commits touching anchor) + `.agents/` mentions\n- Output: `.agents/provenance/<anchor>.md` with chronological trace\n\nDetailed body remains inline until Phase 2 extraction.\n\n## Constraints (one-role-per-skill)\n\n- **One role: miner.** Output never mutates code; always lands as proposed diffs, bd updates, or wiki entries.\n- **No new modes** without dropping/merging an existing one (Fix-F mode-budget cap = 8).\n- **Lock contract** \u2014 dream mode is exclusive; harvest defers when dream is\n  running; other modes are safe-concurrent.\n\n## See Also\n\n- `skills/rpi/SKILL.md` \u2014 orchestrator\n- `skills/validate/SKILL.md` \u2014 validator role (paired canonical skill)\n- `.agents/research/2026-05-08-fix-F-mode-flag-budget.md` \u2014 mode-cull rationale\n\n## Reference Documents\n\n- [references/curate.feature](references/curate.feature) \u2014 Executable spec: resolve mode + scope, acquire lock when writing shared state, mine into synthesis + bd notes (soc-qk4b)\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "curate",
-    "description": "Mine transcripts, .agents, bd, and git for skill diffs, bd updates, or",
-    "practices": "",
-    "hexagonal_role": "supporting",
-    "consumes": "[]",
-    "produces": "",
-    "context_rel": "[]",
-    "skill_api_version": "1",
-    "user-invocable": "true",
-    "context": "",
-    "window": "fork",
-    "intent": "",
-    "mode": "task",
-    "sections": "",
-    "exclude": "",
-    "intel_scope": "full",
-    "metadata": "",
-    "tier": "knowledge",
-    "dependencies": "[]",
-    "output_contract": ".agents/research/*.md (synthesis), bd notes, skill diffs (rare);"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

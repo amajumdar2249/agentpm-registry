@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031817",
   "name": "elevenlabs-cost-tuning",
   "slug": "elevenlabs-cost-tuning",
   "description": "Optimize ElevenLabs costs through model selection, character-efficient",
   "content": "# ElevenLabs Cost Tuning\n\n## Overview\n\nOptimize ElevenLabs costs through model selection (Flash = 50% savings), character-efficient text processing, audio caching, and real-time quota monitoring. ElevenLabs bills by character for TTS and by audio minute for STT.\n\n## Prerequisites\n\n- ElevenLabs account with usage dashboard access\n- Understanding of your monthly character consumption\n- Access to billing at https://elevenlabs.io/app/subscription\n\n## Instructions\n\n### Step 1: Understand the Billing Model\n\n**TTS billing (by character):**\n\n| Model | Credits per Character | 10K Chars Cost | Best For |\n|-------|-----------------------|----------------|----------|\n| `eleven_v3` | 1.0 | 10,000 credits | Maximum quality |\n| `eleven_multilingual_v2` | 1.0 | 10,000 credits | High quality + multilingual |\n| `eleven_flash_v2_5` | 0.5 | 5,000 credits | Real-time / budget-conscious |\n| `eleven_turbo_v2_5` | 0.5 | 5,000 credits | Fast + affordable |\n\n**Other feature billing:**\n\n| Feature | Billing Basis |\n|---------|--------------|\n| Speech-to-Text (Scribe) | Per audio minute |\n| Sound Effects | Per generation |\n| Audio Isolation | 1,000 characters per minute of audio |\n| Dubbing | Per source audio minute |\n\n**Plan character limits:**\n\n| Plan | Monthly | Price | Cost/1K Chars |\n|------|---------|-------|---------------|\n| Free | 10,000 | $0 | $0 |\n| Starter | 30,000 | $5 | $0.17 |\n| Creator | 100,000 | $22 | $0.22 |\n| Pro | 500,000 | $99 | $0.20 |\n| Scale | 2,000,000 | $330 | $0.17 |\n\n### Step 2: Model-Based Cost Reduction\n\nThe easiest win: use Flash/Turbo models where quality difference is acceptable.\n\n```typescript\n// src/elevenlabs/cost-aware-tts.ts\ntype ContentType = \"greeting\" | \"notification\" | \"narration\" | \"premium\";\n\nfunction selectCostEffectiveModel(contentType: ContentType): {\n  modelId: string;\n  costMultiplier: number;\n} {\n  switch (contentType) {\n    case \"greeting\":\n    case \"notification\":\n      // Short, functional audio \u2014 Flash is fine\n      return { modelId: \"eleven_flash_v2_5\", costMultiplier: 0.5 };\n\n    case \"narration\":\n      // Content creation \u2014 quality matters\n      return { modelId: \"eleven_multilingual_v2\", costMultiplier: 1.0 };\n\n    case \"premium\":\n      // Customer-facing, high-value \u2014 max quality\n      return { modelId: \"eleven_v3\", costMultiplier: 1.0 };\n  }\n}\n\n// Estimate cost before generating\nfunction estimateCharacterCost(text: string, modelId: string): number {\n  const multiplier = modelId.includes(\"flash\") || modelId.includes(\"turbo\") ? 0.5 : 1.0;\n  return text.length * multiplier;\n}\n```\n\n### Step 3: Character-Efficient Text Processing\n\nReduce character count without losing meaning:\n\n```typescript\n// src/elevenlabs/text-optimizer.ts\n\n/**\n * Optimize text for TTS to reduce character count.\n * ElevenLabs counts ALL characters including spaces and punctuation.\n */\nexport function optimizeTextForTTS(text: string): {\n  optimized: string;\n  originalLength: number;\n  savedCharacters: number;\n} {\n  const original = text;\n  let optimized = text;\n\n  // Remove excessive whitespace (spaces count as characters)\n  optimized = optimized.replace(/\\s+/g, \" \").trim();\n\n  // Remove markdown formatting that doesn't affect speech\n  optimized = optimized.replace(/[*_~`#]/g, \"\");\n  optimized = optimized.replace(/\\[([^\\]]+)\\]\\([^)]+\\)/g, \"$1\"); // [link](url) \u2192 link\n\n  // Remove HTML tags\n  optimized = optimized.replace(/<[^>]+>/g, \"\");\n\n  // Collapse multiple punctuation\n  optimized = optimized.replace(/\\.{2,}/g, \".\");\n  optimized = optimized.replace(/!{2,}/g, \"!\");\n\n  return {\n    optimized,\n    originalLength: original.length,\n    savedCharacters: original.length - optimized.length,\n  };\n}\n```\n\n### Step 4: Real-Time Quota Monitoring\n\n```typescript\n// src/elevenlabs/quota-monitor.ts\nimport { ElevenLabsClient } from \"@elevenlabs/elevenlabs-js\";\n\ninterface QuotaStatus {\n  plan: string;\n  used: number;\n  limit: number;\n  remaining: number;\n  pctUsed: number;\n  resetsAt: Date;\n  daysUntilReset: number;\n  dailyBudget: number;    // Characters per day until reset\n  projectedOverage: boolean;\n}\n\nexport async function getQuotaStatus(): Promise<QuotaStatus> {\n  const client = new ElevenLabsClient();\n  const user = await client.user.get();\n  const sub = user.subscription;\n\n  const now = new Date();\n  const resetsAt = new Date(sub.next_character_count_reset_unix * 1000);\n  const msUntilReset = resetsAt.getTime() - now.getTime();\n  const daysUntilReset = Math.max(1, Math.ceil(msUntilReset / 86_400_000));\n\n  const remaining = sub.character_limit - sub.character_count;\n  const dailyBudget = Math.floor(remaining / daysUntilReset);\n\n  // Project if current usage rate will exceed limit\n  const daysSinceReset = 30 - daysUntilReset;\n  const dailyRate = daysSinceReset > 0 ? sub.character_count / daysSinceReset : 0;\n  const projectedUsage = dailyRate * 30;\n\n  return {\n    plan: sub.tier,\n    used: sub.character_count,\n    limit: sub.character_limit,\n    remaining,\n    pctUsed: Math.round((sub.character_count / sub.character_limit) * 1000) / 10,\n    resetsAt,\n    daysUntilReset,\n    dailyBudget,\n    projectedOverage: projectedUsage > sub.character_limit,\n  };\n}\n\n// CLI usage\nasync function printQuota() {\n  const q = await getQuotaStatus();\n  console.log(`Plan: ${q.plan}`);\n  console.log(`Used: ${q.used.toLocaleString()} / ${q.limit.toLocaleString()} (${q.pctUsed}%)`);\n  console.log(`Remaining: ${q.remaining.toLocaleString()} characters`);\n  console.log(`Daily budget: ${q.dailyBudget.toLocaleString()} chars/day`);\n  console.log(`Resets: ${q.resetsAt.toISOString()} (${q.daysUntilReset} days)`);\n  if (q.projectedOverage) {\n    console.warn(\"WARNING: Projected to exceed quota at current usage rate\");\n  }\n}\n```\n\n### Step 5: Cost-Aware Request Guard\n\n```typescript\n// Prevent expensive operations when quota is low\nexport async function guardedTTS(\n  text: string,\n  voiceId: string,\n  contentType: ContentType = \"notification\"\n): Promise<ReadableStream | null> {\n  const client = new ElevenLabsClient();\n  const { modelId, costMultiplier } = selectCostEffectiveModel(contentType);\n  const charCost = text.length * costMultiplier;\n\n  // Check quota\n  const quota = await getQuotaStatus();\n\n  if (charCost > quota.remaining) {\n    console.error(`Insufficient quota: need ${charCost}, have ${quota.remaining}`);\n    return null;\n  }\n\n  if (quota.pctUsed > 90) {\n    // Force cheapest model when quota is critically low\n    console.warn(\"Low quota \u2014 forcing Flash model\");\n    return client.textToSpeech.convert(voiceId, {\n      text,\n      model_id: \"eleven_flash_v2_5\",\n    });\n  }\n\n  return client.textToSpeech.convert(voiceId, {\n    text,\n    model_id: modelId,\n  });\n}\n```\n\n### Step 6: Usage Tracking Dashboard\n\n```typescript\n// Track per-request costs for analysis\ninterface UsageEntry {\n  timestamp: Date;\n  operation: \"tts\" | \"sts\" | \"stt\" | \"sfx\" | \"isolation\";\n  modelId: string;\n  characterCount: number;\n  creditCost: number;\n  voiceId: string;\n  cached: boolean;\n}\n\nconst usageLog: UsageEntry[] = [];\n\nfunction trackUsage(entry: Omit<UsageEntry, \"timestamp\">) {\n  usageLog.push({ ...entry, timestamp: new Date() });\n}\n\nfunction getUsageSummary(days = 30) {\n  const cutoff = new Date(Date.now() - days * 86_400_000);\n  const recent = usageLog.filter(e => e.timestamp > cutoff);\n\n  return {\n    totalCredits: recent.reduce((sum, e) => sum + e.creditCost, 0),\n    totalCharacters: recent.reduce((sum, e) => sum + e.characterCount, 0),\n    byModel: Object.groupBy(recent, e => e.modelId),\n    byOperation: Object.groupBy(recent, e => e.operation),\n    cacheHitRate: recent.filter(e => e.cached).length / recent.length,\n  };\n}\n```\n\n## Cost Optimization Checklist\n\n| Strategy | Savings | Effort |\n|----------|---------|--------|\n| Flash/Turbo models for non-premium content | 50% | Low |\n| Cache repeated audio (greetings, prompts) | 80-95% for cached | Medium |\n| Text optimization (remove markdown, whitespace) | 5-15% | Low |\n| Quota monitoring with budget alerts | Prevents overages | Medium |\n| Usage-based billing (Creator+ plans) | Avoids hard cutoff | Low |\n| Batch short texts into single requests | Reduces overhead | Low |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `quota_exceeded` (401) | Monthly limit hit | Upgrade plan or enable usage-based billing |\n| Unexpected high usage | No monitoring | Implement `getQuotaStatus()` guard |\n| Bill shock | Wrong model in production | Audit `model_id` in all TTS calls |\n| Cache not helping | Unique content | Cache only repeated content (greetings, errors) |\n\n## Resources\n\n- [ElevenLabs Pricing](https://elevenlabs.io/pricing)\n- [Usage Dashboard](https://elevenlabs.io/app/usage)\n- [Subscription Settings](https://elevenlabs.io/app/subscription)\n- [Models Overview](https://elevenlabs.io/docs/overview/models)\n\n## Next Steps\n\nFor architecture patterns, see `elevenlabs-reference-architecture`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "elevenlabs-cost-tuning",
-    "description": "Optimize ElevenLabs costs through model selection, character-efficient",
-    "Trigger": "elevenlabs cost\", \"elevenlabs billing\", \"reduce elevenlabs costs\",",
-    "allowed-tools": "Read, Grep, Bash(curl:*), Bash(node:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

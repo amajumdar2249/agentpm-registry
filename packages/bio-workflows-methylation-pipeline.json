@@ -1,19 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009512",
   "name": "bio-workflows-methylation-pipeline",
   "slug": "bio-workflows-methylation-pipeline",
   "description": "End-to-end bisulfite sequencing workflow from FASTQ to differentially methylated regions. Covers Bismark alignment, methylation calling, and DMR detection with methylKit. Use when analyzing bisulfite sequencing data.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: Bismark 0.24+, Bowtie2 2.5.3+, FastQC 0.12+, Trim Galore 0.6.10+, fastp 0.23+, methylKit 1.28+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- R: `packageVersion('<pkg>')` then `?function_name` to verify parameters\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Methylation Pipeline\n\n**\"Analyze my bisulfite sequencing data from FASTQ to DMRs\"** \u2192 Orchestrate Bismark alignment, methylation calling, methylKit analysis, DMR detection, annotation with genomic features, and visualization of methylation patterns.\n\nComplete workflow from bisulfite sequencing FASTQ to differentially methylated regions.\n\n## Workflow Overview\n\n```\nFASTQ files\n    |\n    v\n[1. QC & Trimming] -----> fastp/Trim Galore\n    |\n    v\n[2. Alignment] ---------> Bismark\n    |\n    v\n[3. Deduplication] -----> deduplicate_bismark\n    |\n    v\n[4. Methylation Calling] -> bismark_methylation_extractor\n    |\n    v\n[5. Per-CpG Analysis] ---> methylKit (R) or scipy (Python)\n    |\n    v\n[6. DMR Detection] ------> methylKit/DSS\n    |\n    v\nDifferentially methylated regions\n```\n\n## Primary Path: Bismark + methylKit\n\n### Step 1: Quality Control\n\n```bash\n# Trim Galore recommended for bisulfite data (handles adapter bias)\ntrim_galore --paired --fastqc \\\n    -o trimmed/ \\\n    sample_R1.fastq.gz sample_R2.fastq.gz\n\n# Or fastp with conservative settings\nfastp -i sample_R1.fastq.gz -I sample_R2.fastq.gz \\\n    -o trimmed/sample_R1.fq.gz -O trimmed/sample_R2.fq.gz \\\n    --detect_adapter_for_pe \\\n    --qualified_quality_phred 20 \\\n    --length_required 35 \\\n    --html qc/sample_fastp.html\n```\n\n### Step 2: Bismark Alignment\n\n```bash\n# Prepare genome (once)\nbismark_genome_preparation --bowtie2 genome/\n\n# Align\nbismark --genome genome/ \\\n    -1 trimmed/sample_R1_val_1.fq.gz \\\n    -2 trimmed/sample_R2_val_2.fq.gz \\\n    -o aligned/ \\\n    --parallel 4 \\\n    --temp_dir tmp/\n\n# Output: sample_R1_val_1_bismark_bt2_pe.bam\n```\n\n**QC Checkpoint:** Check Bismark report\n- Mapping efficiency >50% (BS-seq has lower rates)\n- Bisulfite conversion rate >99%\n\n### Step 3: Deduplication\n\n```bash\ndeduplicate_bismark \\\n    --bam \\\n    -p \\\n    -o deduplicated/ \\\n    aligned/sample_R1_val_1_bismark_bt2_pe.bam\n```\n\n### Step 4: Methylation Calling\n\n```bash\nbismark_methylation_extractor \\\n    --paired-end \\\n    --comprehensive \\\n    --bedGraph \\\n    --cytosine_report \\\n    --genome_folder genome/ \\\n    -o methylation/ \\\n    deduplicated/sample_R1_val_1_bismark_bt2_pe.deduplicated.bam\n\n# Generate summary report\nbismark2report\nbismark2summary\n```\n\n### Step 5: Analysis with methylKit\n\n```r\nlibrary(methylKit)\n\n# Read methylation calls\nfiles <- list(\n    'methylation/control_1.CpG_report.txt',\n    'methylation/control_2.CpG_report.txt',\n    'methylation/treated_1.CpG_report.txt',\n    'methylation/treated_2.CpG_report.txt'\n)\n\nsample_ids <- c('control_1', 'control_2', 'treated_1', 'treated_2')\ntreatment <- c(0, 0, 1, 1)\n\n# Read cytosine reports\nmeth_obj <- methRead(\n    location = as.list(files),\n    sample.id = as.list(sample_ids),\n    assembly = 'hg38',\n    treatment = treatment,\n    context = 'CpG',\n    pipeline = 'bismarkCytosineReport'\n)\n\n# Filter by coverage\nmeth_filtered <- filterByCoverage(meth_obj, lo.count = 10, hi.perc = 99.9)\n\n# Normalize coverage\nmeth_norm <- normalizeCoverage(meth_filtered)\n\n# Merge samples (keep sites covered in all)\nmeth_merged <- unite(meth_norm, destrand = TRUE)\n\n# Sample statistics\ngetMethylationStats(meth_obj[[1]], plot = TRUE)\ngetCoverageStats(meth_obj[[1]], plot = TRUE)\n```\n\n### Step 5b: Python Alternative for Per-CpG Testing\n\nWhen methylKit is unavailable or a Python-only workflow is preferred, per-CpG testing can be performed with scipy and statsmodels on beta values computed from the coverage files.\n\n```python\nimport pandas as pd\nfrom scipy.stats import ttest_ind\nfrom statsmodels.stats.multitest import multipletests\nimport numpy as np\n\n# Read Bismark coverage files and compute beta values\n# beta = count_methylated / (count_methylated + count_unmethylated)\n# Filter CpGs with < 10x coverage in any sample\n# Run per-CpG Welch's t-test between groups\n# Apply BH FDR correction: multipletests(pvals, method='fdr_bh')\n# See methylation-analysis/differential-cpg-testing for full pipeline\n```\n\nThis approach is appropriate for large sample sizes (>10 per group). For small sample sizes (3-5 per group), use limma on M-values instead (also covered in the differential-cpg-testing skill).\n\n### Step 6: DMR Detection\n\n```r\n# Calculate differential methylation (per CpG)\ndiff_meth <- calculateDiffMeth(meth_merged)\n\n# Get significant DMCs\ndmc <- getMethylDiff(diff_meth, difference = 25, qvalue = 0.01)\n\n# Tile into regions (DMRs)\ntiles <- tileMethylCounts(meth_merged, win.size = 1000, step.size = 1000)\ndiff_tiles <- calculateDiffMeth(tiles)\ndmr <- getMethylDiff(diff_tiles, difference = 25, qvalue = 0.01)\n\n# Export\nwrite.csv(as.data.frame(dmc), 'dmc_results.csv')\nwrite.csv(as.data.frame(dmr), 'dmr_results.csv')\n\n# Annotate with genomic features\nlibrary(genomation)\ngene_obj <- readTranscriptFeatures('genes.bed')\nannotateWithGeneParts(as(dmr, 'GRanges'), gene_obj)\n```\n\n## Parameter Recommendations\n\n| Step | Parameter | Value |\n|------|-----------|-------|\n| Trim Galore | default | Recommended for BS-seq |\n| Bismark | --parallel | 4 (per sample parallelization) |\n| methylKit | lo.count | 10 (minimum coverage) |\n| methylKit | difference | 25 (% methylation difference) |\n| methylKit | qvalue | 0.01 |\n| DMR tiles | win.size | 500-1000 bp |\n\n## Troubleshooting\n\n| Issue | Likely Cause | Solution |\n|-------|--------------|----------|\n| Low mapping rate | Normal for BS-seq | Expect 40-70% |\n| Low conversion | Failed bisulfite treatment | Check spike-in controls |\n| Few DMRs | Low coverage, small differences | Increase sequencing, relax thresholds |\n| Biased positions | M-bias | Trim 10bp from read ends |\n\n## Complete Pipeline Script\n\n```bash\n#!/bin/bash\nset -e\n\nTHREADS=4\nGENOME=\"genome/\"\nSAMPLES=\"control_1 control_2 treated_1 treated_2\"\nOUTDIR=\"methylation_results\"\n\nmkdir -p ${OUTDIR}/{trimmed,aligned,deduplicated,methylation,qc}\n\n# Step 1: QC\nfor sample in $SAMPLES; do\n    trim_galore --paired --fastqc -o ${OUTDIR}/trimmed/ \\\n        ${sample}_R1.fastq.gz ${sample}_R2.fastq.gz\ndone\n\n# Step 2: Alignment\nfor sample in $SAMPLES; do\n    bismark --genome ${GENOME} \\\n        -1 ${OUTDIR}/trimmed/${sample}_R1_val_1.fq.gz \\\n        -2 ${OUTDIR}/trimmed/${sample}_R2_val_2.fq.gz \\\n        -o ${OUTDIR}/aligned/ \\\n        --parallel ${THREADS} --temp_dir tmp/\ndone\n\n# Step 3: Deduplication\nfor sample in $SAMPLES; do\n    deduplicate_bismark --bam -p \\\n        -o ${OUTDIR}/deduplicated/ \\\n        ${OUTDIR}/aligned/${sample}_R1_val_1_bismark_bt2_pe.bam\ndone\n\n# Step 4: Methylation calling\nfor sample in $SAMPLES; do\n    bismark_methylation_extractor --paired-end --comprehensive \\\n        --bedGraph --cytosine_report \\\n        --genome_folder ${GENOME} \\\n        -o ${OUTDIR}/methylation/ \\\n        ${OUTDIR}/deduplicated/${sample}_R1_val_1_bismark_bt2_pe.deduplicated.bam\ndone\n\nbismark2report\necho \"Pipeline complete. Run R script for DMR analysis.\"\n```\n\n## Related Skills\n\n- methylation-analysis/bismark-alignment - Bismark parameters\n- methylation-analysis/methylation-calling - Calling details\n- methylation-analysis/methylkit-analysis - methylKit functions\n- methylation-analysis/differential-cpg-testing - Per-CpG testing (Python/R alternatives)\n- methylation-analysis/dmr-detection - DMR algorithms\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-workflows-methylation-pipeline",
-    "description": "End-to-end bisulfite sequencing workflow from FASTQ to differentially methylated regions. Covers Bismark alignment, methylation calling, and DMR detection with methylKit. Use when analyzing bisulfite sequencing data.",
-    "tool_type": "mixed",
-    "primary_tool": "Bismark",
-    "workflow": "true",
-    "depends_on": "",
-    "qc_checkpoints": "",
-    "- after_qc": "Q30 >80%, adapter content removed",
-    "- after_alignment": "Mapping efficiency >50%, bisulfite conversion >99%",
-    "- after_calling": "Coverage distribution reasonable, no biased positions"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

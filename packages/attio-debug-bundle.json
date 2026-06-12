@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031366",
   "name": "attio-debug-bundle",
   "slug": "attio-debug-bundle",
   "description": "Collect Attio integration diagnostic evidence -- API health, scopes,",
   "content": "# Attio Debug Bundle\n\n## Overview\n\nCollect all diagnostic evidence needed to debug Attio API issues or file a support ticket. Checks auth, scopes, object schema, rate limit headers, and endpoint connectivity.\n\n## Prerequisites\n\n- `ATTIO_API_KEY` environment variable set\n- `curl` and `jq` available\n- Permissions to read project environment\n\n## Instructions\n\n### Step 1: Run the Full Diagnostic Script\n\n```bash\n#!/bin/bash\n# attio-debug-bundle.sh -- Collects Attio diagnostic evidence\nset -euo pipefail\n\nBUNDLE_DIR=\"attio-debug-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE_DIR\"\nSUMMARY=\"$BUNDLE_DIR/summary.txt\"\n\necho \"=== Attio Debug Bundle ===\" | tee \"$SUMMARY\"\necho \"Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" | tee -a \"$SUMMARY\"\necho \"\" | tee -a \"$SUMMARY\"\n\n# 1. Check token is set (never log the actual key)\necho \"--- Token Status ---\" | tee -a \"$SUMMARY\"\nif [ -z \"${ATTIO_API_KEY:-}\" ]; then\n  echo \"ATTIO_API_KEY: NOT SET\" | tee -a \"$SUMMARY\"\n  echo \"Cannot proceed without API key\" | tee -a \"$SUMMARY\"\n  exit 1\nelse\n  echo \"ATTIO_API_KEY: SET (${#ATTIO_API_KEY} chars, starts with ${ATTIO_API_KEY:0:3}...)\" | tee -a \"$SUMMARY\"\nfi\n\n# 2. API connectivity and auth test\necho \"\" | tee -a \"$SUMMARY\"\necho \"--- API Connectivity ---\" | tee -a \"$SUMMARY\"\nHTTP_CODE=$(curl -s -o \"$BUNDLE_DIR/objects-response.json\" -w \"%{http_code}\" \\\n  -H \"Authorization: Bearer ${ATTIO_API_KEY}\" \\\n  https://api.attio.com/v2/objects)\necho \"GET /v2/objects: HTTP $HTTP_CODE\" | tee -a \"$SUMMARY\"\n\nif [ \"$HTTP_CODE\" = \"200\" ]; then\n  echo \"AUTH: OK\" | tee -a \"$SUMMARY\"\n  jq -r '.data[] | \"  - \" + .api_slug + \" (\" + .singular_noun + \")\"' \\\n    \"$BUNDLE_DIR/objects-response.json\" | tee -a \"$SUMMARY\"\nelif [ \"$HTTP_CODE\" = \"401\" ]; then\n  echo \"AUTH: FAILED -- token invalid or revoked\" | tee -a \"$SUMMARY\"\nelif [ \"$HTTP_CODE\" = \"403\" ]; then\n  echo \"AUTH: INSUFFICIENT SCOPES\" | tee -a \"$SUMMARY\"\n  jq '.message' \"$BUNDLE_DIR/objects-response.json\" 2>/dev/null | tee -a \"$SUMMARY\"\nfi\n\n# 3. Rate limit headers\necho \"\" | tee -a \"$SUMMARY\"\necho \"--- Rate Limit Status ---\" | tee -a \"$SUMMARY\"\ncurl -s -D \"$BUNDLE_DIR/headers.txt\" -o /dev/null \\\n  -H \"Authorization: Bearer ${ATTIO_API_KEY}\" \\\n  https://api.attio.com/v2/objects\ngrep -i \"x-ratelimit\\|retry-after\" \"$BUNDLE_DIR/headers.txt\" 2>/dev/null | tee -a \"$SUMMARY\" || echo \"No rate limit headers found\" | tee -a \"$SUMMARY\"\n\n# 4. List attributes for core objects\necho \"\" | tee -a \"$SUMMARY\"\necho \"--- Object Schemas ---\" | tee -a \"$SUMMARY\"\nfor obj in people companies; do\n  echo \"  $obj attributes:\" | tee -a \"$SUMMARY\"\n  curl -s \"https://api.attio.com/v2/objects/$obj/attributes\" \\\n    -H \"Authorization: Bearer ${ATTIO_API_KEY}\" \\\n    | jq -r '.data[] | \"    \" + .api_slug + \" (\" + .type + \", required=\" + (.is_required|tostring) + \")\"' \\\n    2>/dev/null | tee -a \"$SUMMARY\" || echo \"    FAILED\" | tee -a \"$SUMMARY\"\ndone\n\n# 5. List available lists\necho \"\" | tee -a \"$SUMMARY\"\necho \"--- Lists ---\" | tee -a \"$SUMMARY\"\ncurl -s https://api.attio.com/v2/lists \\\n  -H \"Authorization: Bearer ${ATTIO_API_KEY}\" \\\n  | jq -r '.data[] | \"  - \" + .api_slug + \" (\" + .name + \")\"' \\\n  2>/dev/null | tee -a \"$SUMMARY\" || echo \"  FAILED (may need list_entry:read scope)\" | tee -a \"$SUMMARY\"\n\n# 6. Webhooks\necho \"\" | tee -a \"$SUMMARY\"\necho \"--- Webhooks ---\" | tee -a \"$SUMMARY\"\ncurl -s https://api.attio.com/v2/webhooks \\\n  -H \"Authorization: Bearer ${ATTIO_API_KEY}\" \\\n  | jq -r '.data[] | \"  - \" + .id.webhook_id + \" -> \" + .target_url' \\\n  2>/dev/null | tee -a \"$SUMMARY\" || echo \"  FAILED (may need webhook:read-write scope)\" | tee -a \"$SUMMARY\"\n\n# 7. Environment info\necho \"\" | tee -a \"$SUMMARY\"\necho \"--- Environment ---\" | tee -a \"$SUMMARY\"\necho \"Node: $(node --version 2>/dev/null || echo 'not installed')\" | tee -a \"$SUMMARY\"\necho \"OS: $(uname -s) $(uname -r)\" | tee -a \"$SUMMARY\"\n\n# 8. Status page\necho \"\" | tee -a \"$SUMMARY\"\necho \"--- Attio Status ---\" | tee -a \"$SUMMARY\"\ncurl -s https://status.attio.com/api/v2/status.json \\\n  | jq -r '.status.description' 2>/dev/null | tee -a \"$SUMMARY\" || echo \"Could not reach status page\" | tee -a \"$SUMMARY\"\n\n# Package\ntar -czf \"$BUNDLE_DIR.tar.gz\" \"$BUNDLE_DIR\"\nrm -rf \"$BUNDLE_DIR\"\necho \"\"\necho \"Bundle created: $BUNDLE_DIR.tar.gz\"\n```\n\n### Step 2: Review Before Sharing\n\n**Always check the bundle for leaked secrets before sharing:**\n\n```bash\ntar -tzf attio-debug-*.tar.gz  # List files\ntar -xzf attio-debug-*.tar.gz && cat */summary.txt\n```\n\n**Safe to share:** HTTP status codes, object slugs, attribute types, rate limit headers, error messages.\n\n**Never share:** Full API key, record IDs with PII, webhook secrets.\n\n### Step 3: Quick Single-Command Diagnostic\n\nFor fast triage without a full bundle:\n\n```bash\n# One-liner: auth + objects + rate limit check\ncurl -s -w \"\\n--- HTTP %{http_code} ---\\n\" \\\n  -H \"Authorization: Bearer ${ATTIO_API_KEY}\" \\\n  https://api.attio.com/v2/objects | jq '{objects: [.data[].api_slug], count: (.data|length)}'\n```\n\n## Programmatic Health Check\n\n```typescript\ninterface AttioDiagnostic {\n  auth: \"ok\" | \"failed\" | \"insufficient_scopes\";\n  objects: string[];\n  lists: string[];\n  latencyMs: number;\n  rateLimitRemaining?: number;\n}\n\nasync function diagnoseAttio(): Promise<AttioDiagnostic> {\n  const start = Date.now();\n  try {\n    const res = await fetch(\"https://api.attio.com/v2/objects\", {\n      headers: { Authorization: `Bearer ${process.env.ATTIO_API_KEY}` },\n    });\n\n    const latencyMs = Date.now() - start;\n\n    if (res.status === 401) return { auth: \"failed\", objects: [], lists: [], latencyMs };\n    if (res.status === 403) return { auth: \"insufficient_scopes\", objects: [], lists: [], latencyMs };\n\n    const data = await res.json();\n    return {\n      auth: \"ok\",\n      objects: data.data.map((o: any) => o.api_slug),\n      lists: [], // fetch separately if needed\n      latencyMs,\n      rateLimitRemaining: parseInt(res.headers.get(\"x-ratelimit-remaining\") || \"0\"),\n    };\n  } catch {\n    return { auth: \"failed\", objects: [], lists: [], latencyMs: Date.now() - start };\n  }\n}\n```\n\n## Error Handling\n\n| Diagnostic result | Meaning | Action |\n|-------------------|---------|--------|\n| HTTP 200, objects listed | Auth and connectivity OK | Issue is in your code or data |\n| HTTP 401 | Token invalid | Regenerate in Attio dashboard |\n| HTTP 403 | Missing scopes | Add scopes to token |\n| HTTP 429 | Rate limited right now | Wait for `Retry-After`, see `attio-rate-limits` |\n| Connection error | Network/firewall issue | Check DNS, proxy, firewall rules |\n\n## Resources\n\n- [Attio REST API Overview](https://docs.attio.com/rest-api/overview)\n- [Attio Status Page](https://status.attio.com)\n- [Attio Help Center](https://attio.com/help)\n\n## Next Steps\n\nFor rate limit issues, see `attio-rate-limits`. For error codes, see `attio-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "attio-debug-bundle",
-    "description": "Collect Attio integration diagnostic evidence -- API health, scopes,",
-    "Trigger": "attio debug\", \"attio support bundle\", \"attio diagnostic\",",
-    "allowed-tools": "Read, Bash(curl:*), Bash(jq:*), Bash(tar:*), Bash(node:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

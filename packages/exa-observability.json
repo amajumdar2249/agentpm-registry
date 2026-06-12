@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031874",
   "name": "exa-observability",
   "slug": "exa-observability",
   "description": "Set up monitoring, metrics, and alerting for Exa search integrations.",
   "content": "# Exa Observability\n\n## Overview\n\nMonitor Exa search API performance, result quality, and cost efficiency. Key metrics: search latency by type (neural ~500-2000ms, keyword ~200-500ms), result count per query, cache hit rates, error rates by status code, and daily search volume for budget tracking.\n\n## Prerequisites\n\n- Exa API integration in production\n- Metrics backend (Prometheus, Datadog, or OpenTelemetry)\n- Alerting system (PagerDuty, Slack, or equivalent)\n\n## Instructions\n\n### Step 1: Instrument the Exa Client\n\n```typescript\nimport Exa from \"exa-js\";\n\nconst exa = new Exa(process.env.EXA_API_KEY);\n\n// Generic metrics emitter (replace with your metrics library)\nfunction emitMetric(name: string, value: number, tags: Record<string, string>) {\n  // Prometheus: histogram/counter.observe(value, tags)\n  // Datadog: dogstatsd.histogram(name, value, tags)\n  // OpenTelemetry: meter.createHistogram(name).record(value, tags)\n  console.log(`[metric] ${name}=${value}`, tags);\n}\n\nasync function trackedSearch(query: string, options: any = {}) {\n  const start = performance.now();\n  const type = options.type || \"auto\";\n  const hasContents = options.text || options.highlights || options.summary;\n\n  try {\n    const method = hasContents ? \"searchAndContents\" : \"search\";\n    const results = hasContents\n      ? await exa.searchAndContents(query, options)\n      : await exa.search(query, options);\n\n    const duration = performance.now() - start;\n\n    emitMetric(\"exa.search.duration_ms\", duration, { type, method });\n    emitMetric(\"exa.search.result_count\", results.results.length, { type });\n    emitMetric(\"exa.search.success\", 1, { type });\n\n    return results;\n  } catch (err: any) {\n    const duration = performance.now() - start;\n    const status = String(err.status || \"unknown\");\n\n    emitMetric(\"exa.search.duration_ms\", duration, { type, status });\n    emitMetric(\"exa.search.error\", 1, { type, status });\n\n    throw err;\n  }\n}\n```\n\n### Step 2: Track Result Quality\n\n```typescript\n// Measure whether search results are actually used downstream\nfunction trackResultUsage(\n  searchId: string,\n  resultIndex: number,\n  action: \"clicked\" | \"used_in_context\" | \"discarded\"\n) {\n  emitMetric(\"exa.result.usage\", 1, {\n    action,\n    position: String(resultIndex),\n  });\n  // Results at position 0-2 should have high usage\n  // If top results are discarded, query needs tuning\n}\n\n// Track content extraction value\nfunction trackContentValue(result: any) {\n  if (result.text) {\n    emitMetric(\"exa.content.text_length\", result.text.length, {});\n  }\n  if (result.highlights) {\n    emitMetric(\"exa.content.highlight_count\", result.highlights.length, {});\n  }\n}\n```\n\n### Step 3: Cache Monitoring\n\n```typescript\nclass MonitoredCache {\n  private hits = 0;\n  private misses = 0;\n  private cache: Map<string, { data: any; expiry: number }> = new Map();\n\n  async search(exa: Exa, query: string, opts: any) {\n    const key = `${query}:${opts.type}:${opts.numResults}`;\n    const cached = this.cache.get(key);\n\n    if (cached && cached.expiry > Date.now()) {\n      this.hits++;\n      emitMetric(\"exa.cache.hit\", 1, {});\n      return cached.data;\n    }\n\n    this.misses++;\n    emitMetric(\"exa.cache.miss\", 1, {});\n\n    const results = await exa.searchAndContents(query, opts);\n    this.cache.set(key, { data: results, expiry: Date.now() + 3600 * 1000 });\n    return results;\n  }\n\n  getStats() {\n    const total = this.hits + this.misses;\n    return {\n      hits: this.hits,\n      misses: this.misses,\n      hitRate: total > 0 ? `${((this.hits / total) * 100).toFixed(1)}%` : \"N/A\",\n    };\n  }\n}\n```\n\n### Step 4: Prometheus Alert Rules\n\n```yaml\ngroups:\n  - name: exa_alerts\n    rules:\n      - alert: ExaHighLatency\n        expr: histogram_quantile(0.95, rate(exa_search_duration_ms_bucket[5m])) > 3000\n        for: 5m\n        annotations:\n          summary: \"Exa search P95 latency exceeds 3 seconds\"\n\n      - alert: ExaHighErrorRate\n        expr: rate(exa_search_error[5m]) / rate(exa_search_success[5m]) > 0.05\n        for: 5m\n        annotations:\n          summary: \"Exa API error rate exceeds 5%\"\n\n      - alert: ExaEmptyResults\n        expr: rate(exa_search_result_count{result_count=\"0\"}[15m]) > 0.2\n        for: 10m\n        annotations:\n          summary: \"Over 20% of Exa searches returning empty results\"\n\n      - alert: ExaCacheHitRateLow\n        expr: rate(exa_cache_hit[5m]) / (rate(exa_cache_hit[5m]) + rate(exa_cache_miss[5m])) < 0.3\n        for: 15m\n        annotations:\n          summary: \"Exa cache hit rate below 30% \u2014 check query patterns\"\n```\n\n### Step 5: Health Check Endpoint\n\n```typescript\napp.get(\"/health/exa\", async (_req, res) => {\n  const start = performance.now();\n  try {\n    const result = await exa.search(\"health check\", { numResults: 1 });\n    const latencyMs = Math.round(performance.now() - start);\n    res.json({\n      status: \"healthy\",\n      latencyMs,\n      resultCount: result.results.length,\n    });\n  } catch (err: any) {\n    res.status(503).json({\n      status: \"unhealthy\",\n      error: err.message,\n      latencyMs: Math.round(performance.now() - start),\n    });\n  }\n});\n```\n\n## Dashboard Panels\n\n| Panel | Metric | Purpose |\n|-------|--------|---------|\n| Search Volume | `rate(exa.search.success)` | Traffic trends |\n| Latency P50/P95 | `histogram_quantile(exa.search.duration_ms)` | Performance SLO |\n| Error Rate | `exa.search.error / exa.search.success` | Reliability |\n| Result Quality | `exa.result.usage{action=\"discarded\"}` | Query tuning signal |\n| Cache Hit Rate | `exa.cache.hit / (hit + miss)` | Cost efficiency |\n| Daily Cost | `sum(exa.search.success)` | Budget tracking |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `429 Too Many Requests` | Rate limit exceeded | Implement backoff + request queue |\n| Zero results returned | Query too narrow | Broaden query, remove domain filter |\n| Latency spike to 5s+ | Deep/neural on complex query | Switch to `fast` or `auto` type |\n| Budget exhausted | Uncapped search volume | Add application-level budget tracking |\n\n## Resources\n\n- [Exa API Documentation](https://docs.exa.ai)\n- [Exa Rate Limits](https://docs.exa.ai/reference/rate-limits)\n- [Prometheus Alerting Rules](https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/)\n\n## Next Steps\n\nFor incident response, see `exa-incident-runbook`. For cost optimization, see `exa-cost-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "exa-observability",
-    "description": "Set up monitoring, metrics, and alerting for Exa search integrations.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

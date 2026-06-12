@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000021617",
   "name": "test-driven-development",
   "slug": "test-driven-development-16",
   "description": "Red-green-refactor development methodology requiring verified test coverage. Use for feature implementation, bugfixes, refactoring, or any behavior changes where tests must prove correctness.",
   "content": "\n# Test-Driven Development\n\nWrite test first. Watch it fail. Write minimal code to pass. Refactor.\n\n**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.\n\n## The Iron Law\n\n```\nNO BEHAVIOR-CHANGING PRODUCTION CODE WITHOUT A FAILING TEST FIRST\n```\n\nWrote code before test? Delete it completely. Implement fresh from tests.\n\n**Refactoring is exempt:** The refactor step changes structure, not behavior. Tests stay green throughout. No new failing test required.\n\n## Red-Green-Refactor Cycle\n\n```\nRED \u2500\u2500\u25ba Verify Fail \u2500\u2500\u25ba GREEN \u2500\u2500\u25ba Verify Pass \u2500\u2500\u25ba REFACTOR \u2500\u2500\u25ba Verify Pass \u2500\u2500\u25ba Next RED\n         \u2502                         \u2502                            \u2502\n         \u25bc                         \u25bc                            \u25bc\n      Wrong failure?           Still failing?              Broke tests?\n      Fix test, retry          Fix code, retry             Fix, retry\n```\n\n### RED - Write Failing Test\n\nWrite one minimal test for one behavior.\n\n**Good example:**\n```typescript\ntest('retries failed operations 3 times', async () => {\n  let attempts = 0;\n  const operation = async () => {\n    attempts++;\n    if (attempts < 3) throw new Error('fail');\n    return 'success';\n  };\n\n  const result = await retryOperation(operation);\n\n  expect(result).toBe('success');\n  expect(attempts).toBe(3);\n});\n```\n*Clear name, tests real behavior, asserts observable outcome*\n\n**Bad example:**\n```typescript\ntest('retry works', async () => {\n  const mock = jest.fn()\n    .mockRejectedValueOnce(new Error())\n    .mockRejectedValueOnce(new Error())\n    .mockResolvedValueOnce('success');\n  await retryOperation(mock);\n  expect(mock).toHaveBeenCalledTimes(3);\n});\n```\n*Vague name, asserts only call count without verifying outcome, tests mock mechanics not behavior*\n\n**Requirements:** One behavior. Clear name. Real code (mocks only if unavoidable).\n\n### Verify RED - Watch It Fail\n\n**MANDATORY. Never skip.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nTest must go red for the right reason. Acceptable RED states:\n- Assertion failure (expected behavior missing)\n- Compile/type error (function doesn't exist yet)\n\nNot acceptable: Runtime setup errors, import failures, environment issues.\n\nTest passes immediately? You're testing existing behavior\u2014fix test.\nTest errors for wrong reason? Fix error, re-run until it fails correctly.\n\n### GREEN - Minimal Code\n\nWrite simplest code to pass the test.\n\n**Good example:**\n```typescript\nasync function retryOperation<T>(fn: () => Promise<T>): Promise<T> {\n  for (let i = 0; i < 3; i++) {\n    try {\n      return await fn();\n    } catch (e) {\n      if (i === 2) throw e;\n    }\n  }\n  throw new Error('unreachable');\n}\n```\n*Just enough to pass*\n\n**Bad example:**\n```typescript\nasync function retryOperation<T>(\n  fn: () => Promise<T>,\n  options?: { maxRetries?: number; backoff?: 'linear' | 'exponential'; }\n): Promise<T> { /* YAGNI */ }\n```\n*Over-engineered beyond test requirements*\n\nWrite only what the test demands. No extra features, no \"improvements.\"\n\n### Verify GREEN - Watch It Pass\n\n**MANDATORY.**\n\n```bash\nnpm test path/to/test.test.ts\n```\n\nConfirm: Test passes. All other tests still pass. Output pristine (no errors, warnings).\n\nTest fails? Fix code, not test.\nOther tests fail? Fix now before continuing.\n\n### REFACTOR - Clean Up\n\nAfter green only: Remove duplication. Improve names. Extract helpers.\n\nKeep tests green throughout. Add no new behavior.\n\n### Repeat\n\nNext failing test for next behavior.\n\n## Good Tests\n\n**Minimal:** One thing per test. \"and\" in name? Split it. \u274c `test('validates email and domain and whitespace')`\n\n**Clear:** Name describes behavior. \u274c `test('test1')`\n\n**Shows intent:** Demonstrates desired API usage, not implementation details.\n\n## Example: Bug Fix\n\n**Bug:** Empty email accepted\n\n**RED:**\n```typescript\ntest('rejects empty email', async () => {\n  const result = await submitForm({ email: '' });\n  expect(result.error).toBe('Email required');\n});\n```\n\n**Verify RED:**\n```bash\n$ npm test\nFAIL: expected 'Email required', got undefined\n```\n\n**GREEN:**\n```typescript\nfunction submitForm(data: FormData) {\n  if (!data.email?.trim()) {\n    return { error: 'Email required' };\n  }\n  // ...\n}\n```\n\n**Verify GREEN:**\n```bash\n$ npm test\nPASS\n```\n\n**REFACTOR:** Extract validation helper if pattern repeats.\n\n## Red Flags - STOP and Start Over\n\nAny of these means delete code and restart with TDD:\n\n- Code written before test\n- Test passes immediately (testing existing behavior)\n- Can't explain why test failed\n- Rationalizing \"just this once\" or \"this is different\"\n- Keeping code \"as reference\" while writing tests\n- Claiming \"tests after achieve the same purpose\"\n\n## When Stuck\n\n| Problem | Solution |\n|---------|----------|\n| Don't know how to test | Write the API you wish existed. Write assertion first. |\n| Test too complicated | Design too complicated. Simplify the interface. |\n| Must mock everything | Code too coupled. Introduce dependency injection. |\n| Test setup huge | Extract helpers. Still complex? Simplify design. |\n\n## Legacy Code (No Existing Tests)\n\nThe Iron Law (\"delete and restart\") applies to **new code you wrote without tests**. For inherited code with no tests, use characterization tests:\n\n1. Write tests that capture current behavior (even if \"wrong\")\n2. Run tests, observe actual outputs\n3. Update assertions to match reality (these are \"golden masters\")\n4. Now you have a safety net for refactoring\n5. Apply TDD for new behavior changes\n\nCharacterization tests lock down existing behavior so you can refactor safely. They're the on-ramp, not a permanent state.\n\n## Flakiness Rules\n\nTests must be deterministic. Ban these in unit tests:\n\n- **Real sleeps / delays** \u2192 Use fake timers (`vi.useFakeTimers()`, `jest.useFakeTimers()`)\n- **Wall clock time** \u2192 Inject clock, assert against injected time\n- **Math.random()** \u2192 Seed or inject RNG\n- **Network calls** \u2192 Mock at boundary or use MSW\n- **Filesystem race conditions** \u2192 Use temp dirs with unique names\n\nFlaky test? Fix or delete. Flaky tests erode trust in the entire suite.\n\n## Debugging Integration\n\nBug found? Write failing test reproducing it first. Then follow TDD cycle. Test proves fix and prevents regression.\n\n## Planning: Test List\n\nBefore diving into the cycle, spend 2 minutes listing the next 3-10 tests you expect to write. This prevents local-optimum design where early tests paint you into a corner.\n\nExample test list for a retry function:\n- retries N times on failure\n- returns result on success\n- throws after max retries exhausted  \n- calls onRetry callback between attempts\n- respects backoff delay\n\nWork through the list in order. Add/remove tests as you learn.\n\n## Testing Anti-Patterns\n\nWhen writing tests involving mocks, dependencies, or test utilities: See [references/testing-anti-patterns.md](references/testing-anti-patterns.md) for common pitfalls including testing mock behavior and adding test-only methods to production classes.\n\n## Philosophy and Rationalizations\n\nFor detailed rebuttals to common objections (\"I'll test after\", \"deleting work is wasteful\", \"TDD is dogmatic\"): See [references/tdd-philosophy.md](references/tdd-philosophy.md)\n\n## Final Rule\n\n```\nProduction code exists \u2192 test existed first and failed first\nOtherwise \u2192 not TDD\n```\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "test-driven-development",
-    "description": "Red-green-refactor development methodology requiring verified test coverage. Use for feature implementation, bugfixes, refactoring, or any behavior changes where tests must prove correctness."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

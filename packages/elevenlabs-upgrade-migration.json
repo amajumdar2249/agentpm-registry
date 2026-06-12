@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031829",
   "name": "elevenlabs-upgrade-migration",
   "slug": "elevenlabs-upgrade-migration",
   "description": "Upgrade ElevenLabs SDK versions and migrate between API model generations.",
   "content": "# ElevenLabs Upgrade & Migration\n\n## Overview\n\nGuide for upgrading the ElevenLabs SDK and migrating between model generations. Covers the JS SDK package rename, model ID changes, and API endpoint evolution.\n\n## Prerequisites\n\n- Current ElevenLabs SDK installed\n- Git for version control\n- Test suite available\n- Staging environment for validation\n\n## Instructions\n\n### Step 1: Check Current Versions\n\n```bash\n# Node.js SDK\nnpm list @elevenlabs/elevenlabs-js 2>/dev/null || npm list elevenlabs 2>/dev/null\nnpm view @elevenlabs/elevenlabs-js version\n\n# Python SDK\npip show elevenlabs | grep -E \"^(Name|Version)\"\n\n# Check what models your account has access to\ncurl -s https://api.elevenlabs.io/v1/models \\\n  -H \"xi-api-key: ${ELEVENLABS_API_KEY}\" | \\\n  jq '[.[] | {model_id, name}]'\n```\n\n### Step 2: JS SDK Package Migration\n\nThe official Node.js package changed names:\n\n| Era | Package | Import |\n|-----|---------|--------|\n| Legacy | `elevenlabs` (community) | `import ElevenLabs from \"elevenlabs\"` |\n| Current | `@elevenlabs/elevenlabs-js` | `import { ElevenLabsClient } from \"@elevenlabs/elevenlabs-js\"` |\n\n**Migration steps:**\n\n```bash\n# Remove old package\nnpm uninstall elevenlabs\n\n# Install current official SDK\nnpm install @elevenlabs/elevenlabs-js\n\n# Create upgrade branch\ngit checkout -b upgrade/elevenlabs-sdk\n```\n\n**Update imports:**\n\n```typescript\n// BEFORE (legacy community package)\nimport ElevenLabs from \"elevenlabs\";\nconst client = new ElevenLabs({ apiKey: \"...\" });\n\n// AFTER (official SDK)\nimport { ElevenLabsClient } from \"@elevenlabs/elevenlabs-js\";\nconst client = new ElevenLabsClient({\n  apiKey: process.env.ELEVENLABS_API_KEY,\n  maxRetries: 3,\n  timeoutInSeconds: 60,\n});\n```\n\n### Step 3: Model Migration Guide\n\nElevenLabs models evolve across generations. Migration paths:\n\n| Old Model | New Model | Migration Notes |\n|-----------|-----------|-----------------|\n| `eleven_monolingual_v1` | `eleven_multilingual_v2` | Supports 29 languages; same voice IDs work |\n| `eleven_multilingual_v1` | `eleven_multilingual_v2` | Better emotional range; same API |\n| `eleven_english_v1` | `eleven_turbo_v2_5` | Lower latency; same voice_settings |\n| `eleven_turbo_v2` | `eleven_flash_v2_5` | Same quality, lower latency (~75ms) |\n| `eleven_multilingual_v2` | `eleven_v3` | Most expressive; 70+ languages; NO WebSocket support |\n\n**Model migration code:**\n\n```typescript\n// config/models.ts\ntype ModelPreference = \"quality\" | \"balanced\" | \"speed\";\n\nconst MODEL_MAP: Record<ModelPreference, string> = {\n  quality: \"eleven_v3\",             // Best expressiveness, 70+ languages\n  balanced: \"eleven_multilingual_v2\", // Good quality, WebSocket support\n  speed: \"eleven_flash_v2_5\",       // ~75ms latency, 0.5x cost\n};\n\nfunction selectModel(preference: ModelPreference, needsWebSocket = false): string {\n  if (needsWebSocket && preference === \"quality\") {\n    // eleven_v3 doesn't support WebSocket \u2014 fall back\n    console.warn(\"eleven_v3 does not support WebSocket streaming; using multilingual_v2\");\n    return \"eleven_multilingual_v2\";\n  }\n  return MODEL_MAP[preference];\n}\n```\n\n### Step 4: Voice Settings Migration\n\nVoice settings parameters have remained stable, but defaults and ranges have evolved:\n\n```typescript\n// Voice settings are consistent across models\nconst voiceSettings = {\n  stability: 0.5,           // 0-1 (unchanged across versions)\n  similarity_boost: 0.75,   // 0-1 (unchanged)\n  style: 0.0,               // 0-1 (added in v2 models)\n  speed: 1.0,               // 0.7-1.2 (added recently)\n};\n\n// The `speed` parameter may not be available on older models\n// Always check model capabilities:\nconst models = await client.models.getAll();\nfor (const model of models) {\n  console.log(`${model.model_id}:`);\n  console.log(`  TTS: ${model.can_do_text_to_speech}`);\n  console.log(`  STS: ${model.can_do_voice_conversion}`);\n}\n```\n\n### Step 5: API Endpoint Changes\n\n```typescript\n// Endpoint paths have remained stable at /v1/\n// Key endpoints and their stability:\n\nconst STABLE_ENDPOINTS = {\n  tts:         \"POST /v1/text-to-speech/{voice_id}\",\n  ttsStream:   \"POST /v1/text-to-speech/{voice_id}/stream\",\n  sts:         \"POST /v1/speech-to-speech/{voice_id}\",\n  voices:      \"GET  /v1/voices\",\n  voiceGet:    \"GET  /v1/voices/{voice_id}\",\n  voiceAdd:    \"POST /v1/voices/add\",\n  user:        \"GET  /v1/user\",\n  models:      \"GET  /v1/models\",\n  soundGen:    \"POST /v1/sound-generation\",\n  audioIso:    \"POST /v1/audio-isolation\",\n  stt:         \"POST /v1/speech-to-text\",\n};\n\n// Newer endpoints (v2):\nconst V2_ENDPOINTS = {\n  voiceSearch: \"GET /v2/voices\",  // Enhanced search/filter\n};\n```\n\n### Step 6: Python SDK Upgrade\n\n```bash\n# Check current version\npip show elevenlabs\n\n# Upgrade\npip install --upgrade elevenlabs\n\n# Pin version for reproducibility\npip install elevenlabs==1.x.x\necho \"elevenlabs==1.x.x\" >> requirements.txt\n```\n\n```python\n# Import changes (if upgrading from very old versions)\n# Old:\nfrom elevenlabs import generate, set_api_key\nset_api_key(\"sk_...\")\naudio = generate(text=\"Hello\", voice=\"Rachel\")\n\n# New:\nfrom elevenlabs.client import ElevenLabsClient\nclient = ElevenLabsClient(api_key=\"sk_...\")\naudio = client.text_to_speech.convert(\n    voice_id=\"21m00Tcm4TlvDq8ikWAM\",\n    text=\"Hello\",\n    model_id=\"eleven_multilingual_v2\",\n)\n```\n\n### Step 7: Validation After Upgrade\n\n```bash\n# Run tests\nnpm test\n\n# Smoke test TTS\ncurl -s -o /dev/null -w \"%{http_code}\" \\\n  -X POST \"https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM\" \\\n  -H \"xi-api-key: ${ELEVENLABS_API_KEY}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"text\":\"Upgrade test.\",\"model_id\":\"eleven_flash_v2_5\"}'\n\n# Verify voice list still works\ncurl -s https://api.elevenlabs.io/v1/voices \\\n  -H \"xi-api-key: ${ELEVENLABS_API_KEY}\" | jq '.voices | length'\n```\n\n## Rollback Procedure\n\n```bash\n# Node.js \u2014 pin to previous version\nnpm install @elevenlabs/elevenlabs-js@previous.version.here --save-exact\n\n# Python\npip install elevenlabs==previous.version.here\n\n# Git rollback\ngit revert HEAD  # Revert upgrade commit\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `Cannot find module` | Old package name | Update import to `@elevenlabs/elevenlabs-js` |\n| `model_not_found` | Deprecated model ID | Map to current model (see table) |\n| WebSocket fails after model change | eleven_v3 doesn't support WS | Use `eleven_flash_v2_5` or `eleven_multilingual_v2` |\n| Voice settings ignored | Wrong parameter names | Verify `stability`, `similarity_boost`, `style`, `speed` |\n\n## Resources\n\n- [ElevenLabs JS SDK Releases](https://github.com/elevenlabs/elevenlabs-js/releases)\n- [ElevenLabs Python SDK Changelog](https://pypi.org/project/elevenlabs/#history)\n- [ElevenLabs Models](https://elevenlabs.io/docs/overview/models)\n- [ElevenLabs Changelog](https://elevenlabs.io/docs/changelog)\n\n## Next Steps\n\nFor CI integration during upgrades, see `elevenlabs-ci-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "elevenlabs-upgrade-migration",
-    "description": "Upgrade ElevenLabs SDK versions and migrate between API model generations.",
-    "Trigger": "upgrade elevenlabs\", \"elevenlabs migration\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(pip:*), Bash(git:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

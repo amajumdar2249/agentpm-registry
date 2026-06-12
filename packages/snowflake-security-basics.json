@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033302",
   "name": "snowflake-security-basics",
   "slug": "snowflake-security-basics",
   "description": "Apply Snowflake security best practices: network policies, key rotation,",
   "content": "# Snowflake Security Basics\n\n## Overview\n\nSecurity best practices for Snowflake: network policies, key pair rotation, MFA, secret management, and least-privilege roles.\n\n## Prerequisites\n\n- SECURITYADMIN or ACCOUNTADMIN role access\n- Understanding of network CIDR notation\n- Secret management solution (Vault, AWS Secrets Manager, etc.)\n\n## Instructions\n\n### Step 1: Create Network Policies\n\n```sql\n-- Restrict access to known IP ranges\nCREATE OR REPLACE NETWORK POLICY corporate_policy\n  ALLOWED_IP_LIST = (\n    '203.0.113.0/24',        -- Corporate office\n    '198.51.100.0/24',       -- VPN range\n    '10.0.0.0/8'             -- Internal network\n  )\n  BLOCKED_IP_LIST = (\n    '203.0.113.99'           -- Block specific IP\n  );\n\n-- Apply to entire account\nALTER ACCOUNT SET NETWORK_POLICY = corporate_policy;\n\n-- Or apply to specific user (service account)\nALTER USER svc_etl SET NETWORK_POLICY = corporate_policy;\n\n-- Verify current policy\nSELECT * FROM TABLE(INFORMATION_SCHEMA.POLICY_REFERENCES(POLICY_NAME => 'corporate_policy'));\n```\n\n### Step 2: Configure Key Pair Rotation\n\n```bash\n#!/bin/bash\n# rotate-snowflake-keys.sh\n\n# Generate new key pair\nopenssl genrsa 2048 | openssl pkcs8 -topk8 -inform PEM -out rsa_key_new.p8 -nocrypt\nopenssl rsa -in rsa_key_new.p8 -pubout -out rsa_key_new.pub\n\n# Extract public key (remove headers and newlines)\nPUB_KEY=$(grep -v \"BEGIN\\|END\" rsa_key_new.pub | tr -d '\\n')\n\necho \"Run in Snowflake:\"\necho \"ALTER USER svc_etl SET RSA_PUBLIC_KEY_2 = '${PUB_KEY}';\"\necho \"\"\necho \"After verifying new key works:\"\necho \"ALTER USER svc_etl UNSET RSA_PUBLIC_KEY;\"\necho \"ALTER USER svc_etl SET RSA_PUBLIC_KEY = '${PUB_KEY}';\"\necho \"ALTER USER svc_etl UNSET RSA_PUBLIC_KEY_2;\"\n```\n\n```sql\n-- Snowflake supports two active public keys for zero-downtime rotation\n-- Step 1: Set new key as RSA_PUBLIC_KEY_2\nALTER USER svc_etl SET RSA_PUBLIC_KEY_2 = 'MIIBIj...new_key...';\n\n-- Step 2: Update application to use new private key\n-- Step 3: After verification, promote and clean up\nALTER USER svc_etl SET RSA_PUBLIC_KEY = 'MIIBIj...new_key...';\nALTER USER svc_etl UNSET RSA_PUBLIC_KEY_2;\n```\n\n### Step 3: Enable MFA\n\n```sql\n-- Enforce MFA via authentication policy\nCREATE OR REPLACE AUTHENTICATION POLICY require_mfa\n  MFA_AUTHENTICATION_METHODS = ('TOTP')\n  CLIENT_TYPES = ('SNOWFLAKE_UI', 'SNOWSQL')\n  SECURITY_INTEGRATIONS = ();\n\n-- Apply to human users (not service accounts)\nALTER USER analyst_user SET AUTHENTICATION POLICY = require_mfa;\n\n-- Check MFA enrollment status\nSELECT name, has_mfa, login_name, disabled\nFROM SNOWFLAKE.ACCOUNT_USAGE.USERS\nWHERE has_mfa = 'false' AND disabled = 'false';\n```\n\n### Step 4: Secret Management for Applications\n\n```typescript\n// src/snowflake/secrets.ts\n\n// AWS Secrets Manager\nimport { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';\n\nasync function getSnowflakeCredentials(): Promise<{\n  account: string;\n  username: string;\n  privateKey: string;\n}> {\n  const client = new SecretsManagerClient({ region: 'us-east-1' });\n  const response = await client.send(\n    new GetSecretValueCommand({ SecretId: 'snowflake/production/credentials' })\n  );\n  return JSON.parse(response.SecretString!);\n}\n\n// GCP Secret Manager\nimport { SecretManagerServiceClient } from '@google-cloud/secret-manager';\n\nasync function getSnowflakeKey(): Promise<string> {\n  const client = new SecretManagerServiceClient();\n  const [version] = await client.accessSecretVersion({\n    name: 'projects/my-project/secrets/snowflake-private-key/versions/latest',\n  });\n  return version.payload!.data!.toString();\n}\n```\n\n### Step 5: Audit Access\n\n```sql\n-- Recent login activity\nSELECT user_name, client_ip, reported_client_type,\n       first_authentication_factor, second_authentication_factor,\n       is_success, error_message, event_timestamp\nFROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY\nWHERE event_timestamp >= DATEADD(days, -7, CURRENT_TIMESTAMP())\nORDER BY event_timestamp DESC;\n\n-- Privilege grants audit\nSELECT created_on, privilege, granted_on, name, granted_to, grantee_name, granted_by\nFROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES\nWHERE deleted_on IS NULL\n  AND granted_on = 'TABLE'\n  AND privilege = 'OWNERSHIP'\nORDER BY created_on DESC;\n\n-- Detect unused roles (no logins in 30 days)\nSELECT r.name AS role_name\nFROM SNOWFLAKE.ACCOUNT_USAGE.ROLES r\nLEFT JOIN (\n  SELECT DISTINCT role_name\n  FROM SNOWFLAKE.ACCOUNT_USAGE.LOGIN_HISTORY\n  WHERE event_timestamp >= DATEADD(days, -30, CURRENT_TIMESTAMP())\n) l ON r.name = l.role_name\nWHERE l.role_name IS NULL AND r.deleted_on IS NULL;\n```\n\n## Security Checklist\n\n- [ ] Network policy restricts access to known IPs\n- [ ] Service accounts use key pair auth (not passwords)\n- [ ] Key rotation automated (90-day cycle minimum)\n- [ ] MFA enabled for all human users\n- [ ] Credentials stored in secret manager (not env files in prod)\n- [ ] `.env`, `rsa_key.p8` in `.gitignore`\n- [ ] Audit LOGIN_HISTORY weekly for anomalies\n- [ ] Unused roles/users disabled\n\n## Error Handling\n\n| Security Issue | Detection | Mitigation |\n|----------------|-----------|------------|\n| Failed logins spike | `LOGIN_HISTORY WHERE is_success = 'NO'` | Check for brute force, lock user |\n| Key not rotated | `DESC USER; check RSA_PUBLIC_KEY` | Run rotation script |\n| No network policy | `SHOW PARAMETERS LIKE 'NETWORK_POLICY'` | Create and apply policy |\n| Excessive privileges | `GRANTS_TO_ROLES` audit | Revoke unnecessary grants |\n\n## Resources\n\n- [Network Policies](https://docs.snowflake.com/en/user-guide/network-policies)\n- [Key Pair Auth & Rotation](https://docs.snowflake.com/en/user-guide/key-pair-auth)\n- [MFA](https://docs.snowflake.com/en/user-guide/security-mfa)\n- [Authentication Policies](https://docs.snowflake.com/en/user-guide/authentication-policies)\n\n## Next Steps\n\nFor production deployment, see `snowflake-prod-checklist`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "snowflake-security-basics",
-    "description": "Apply Snowflake security best practices: network policies, key rotation,",
-    "allowed-tools": "Read, Write, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

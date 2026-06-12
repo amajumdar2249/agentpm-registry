@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033516",
   "name": "webflow-common-errors",
   "slug": "webflow-common-errors",
   "description": "Diagnose and fix Webflow Data API v2 errors \\u2014 400, 401, 403, 404,\\",
   "content": "# Webflow Common Errors\n\n## Overview\n\nQuick reference for the most common Webflow Data API v2 errors, their root causes,\nand concrete solutions. Covers every HTTP status code the API returns.\n\n## Prerequisites\n\n- `webflow-api` SDK installed\n- API token configured\n- Access to application logs\n\n## HTTP Error Reference\n\n### 400 Bad Request \u2014 Invalid Input\n\n```\n{ \"code\": \"validation_error\", \"message\": \"Invalid field data\" }\n```\n\n**Common causes:**\n\n- Missing required field (`name` and `slug` are always required for CMS items)\n- Wrong field type (sending string for a Number field)\n- Invalid slug format (must be lowercase, hyphens only, no spaces)\n- Bulk request exceeds 100 items\n\n**Fix:**\n\n```typescript\n// Check collection schema before creating items\nconst collection = await webflow.collections.get(collectionId);\nconst requiredFields = collection.fields?.filter(f => f.isRequired);\nconsole.log(\"Required fields:\", requiredFields?.map(f => `${f.slug} (${f.type})`));\n\n// Validate slug format\nfunction isValidSlug(slug: string): boolean {\n  return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug);\n}\n```\n\n---\n\n### 401 Unauthorized \u2014 Invalid Token\n\n```\n{ \"code\": \"unauthorized\", \"message\": \"Not authorized\" }\n```\n\n**Common causes:**\n\n- Token revoked or expired\n- Token copied with extra whitespace\n- Using v1 API key format with v2 endpoints\n\n**Fix:**\n\n```bash\n# Verify token works\ncurl -s https://api.webflow.com/v2/sites \\\n  -H \"Authorization: Bearer $WEBFLOW_API_TOKEN\" \\\n  -w \"\\nHTTP Status: %{http_code}\\n\"\n\n# Check for whitespace issues\necho -n \"$WEBFLOW_API_TOKEN\" | wc -c\n```\n\n```typescript\n// Programmatic token check\nasync function verifyToken(): Promise<boolean> {\n  try {\n    await webflow.sites.list();\n    return true;\n  } catch (err: any) {\n    if (err.statusCode === 401) {\n      console.error(\"Token invalid. Generate new token at developers.webflow.com\");\n      return false;\n    }\n    throw err;\n  }\n}\n```\n\n---\n\n### 403 Forbidden \u2014 Missing Scope\n\n```\n{ \"code\": \"forbidden\", \"message\": \"Insufficient permissions\" }\n```\n\n**Common causes:**\n\n- Token missing required scope (e.g., calling CMS write with only `cms:read`)\n- Site token used for a different site\n- OAuth app not authorized for the scope\n\n**Fix:**\n\n```typescript\n// Required scopes by operation\nconst SCOPE_MAP: Record<string, string> = {\n  \"sites.list\": \"sites:read\",\n  \"sites.publish\": \"sites:write\",\n  \"collections.list\": \"cms:read\",\n  \"collections.items.createItem\": \"cms:write\",\n  \"pages.list\": \"pages:read\",\n  \"forms.list\": \"forms:read\",\n  \"products.list\": \"ecommerce:read\",\n  \"products.create\": \"ecommerce:write\",\n  \"orders.list\": \"ecommerce:read\",\n  \"orders.refund\": \"ecommerce:write\",\n};\n```\n\nGenerate a new token with the correct scopes at `https://developers.webflow.com`.\n\n---\n\n### 404 Not Found \u2014 Wrong Resource ID\n\n```\n{ \"code\": \"not_found\", \"message\": \"Resource not found\" }\n```\n\n**Common causes:**\n\n- Wrong `site_id`, `collection_id`, or `item_id`\n- Resource deleted\n- Using staging ID against live endpoint (or vice versa)\n\n**Fix:**\n\n```typescript\n// Discovery chain: always start from sites.list()\nasync function discoverResources() {\n  const { sites } = await webflow.sites.list();\n  console.log(\"Sites:\", sites?.map(s => `${s.displayName}: ${s.id}`));\n\n  for (const site of sites!) {\n    const { collections } = await webflow.collections.list(site.id!);\n    console.log(`  Collections in ${site.displayName}:`);\n    for (const col of collections!) {\n      console.log(`    ${col.displayName}: ${col.id}`);\n    }\n  }\n}\n```\n\n---\n\n### 409 Conflict \u2014 Duplicate Resource\n\n```\n{ \"code\": \"conflict\", \"message\": \"Item with slug already exists\" }\n```\n\n**Common causes:**\n\n- CMS item with same slug already exists in collection\n- Trying to create a resource that already exists\n\n**Fix:**\n\n```typescript\n// Check for existing slug before creating\nasync function createOrUpdate(collectionId: string, slug: string, fieldData: Record<string, any>) {\n  const { items } = await webflow.collections.items.listItems(collectionId);\n  const existing = items?.find(i => i.fieldData?.slug === slug);\n\n  if (existing) {\n    return webflow.collections.items.updateItem(collectionId, existing.id!, { fieldData });\n  }\n  return webflow.collections.items.createItem(collectionId, { fieldData: { slug, ...fieldData } });\n}\n```\n\n---\n\n### 429 Too Many Requests \u2014 Rate Limited\n\n```\nHTTP/1.1 429 Too Many Requests\nRetry-After: 60\n```\n\n**Common causes:**\n\n- Exceeded per-key rate limit\n- Site publish called more than once per minute\n- Rapid-fire requests without throttling\n\n**Fix:**\n\n```typescript\n// The SDK auto-retries 429s with exponential backoff.\n// For manual control:\nasync function waitForRateLimit(retryAfterSeconds: number) {\n  console.log(`Rate limited. Waiting ${retryAfterSeconds}s...`);\n  await new Promise(r => setTimeout(r, retryAfterSeconds * 1000));\n}\n```\n\nSee `webflow-rate-limits` for comprehensive rate limit handling.\n\n---\n\n### 500/502/503 \u2014 Webflow Server Error\n\n**Fix:**\n\n```bash\n# 1. Check Webflow status\ncurl -s https://status.webflow.com/api/v2/status.json | jq '.status'\n\n# 2. Retry with backoff (SDK handles this automatically)\n# 3. If persistent, check Webflow status page and open support ticket\n```\n\n## Quick Diagnostic Commands\n\n```bash\n# Test API connectivity\ncurl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"Authorization: Bearer $WEBFLOW_API_TOKEN\" \\\n  https://api.webflow.com/v2/sites\n\n# Check rate limit headers\ncurl -v -H \"Authorization: Bearer $WEBFLOW_API_TOKEN\" \\\n  https://api.webflow.com/v2/sites 2>&1 | grep -i \"x-ratelimit\\|retry-after\"\n\n# List sites (quick token verification)\ncurl -s -H \"Authorization: Bearer $WEBFLOW_API_TOKEN\" \\\n  https://api.webflow.com/v2/sites | jq '.sites[].displayName'\n\n# Check Webflow platform status\ncurl -s https://status.webflow.com/api/v2/status.json | jq '.status.description'\n```\n\n## Error Handling Pattern\n\n```typescript\nimport { WebflowClient } from \"webflow-api\";\n\nasync function resilientCall<T>(\n  operation: () => Promise<T>,\n  label: string\n): Promise<T> {\n  try {\n    return await operation();\n  } catch (err: any) {\n    const status = err.statusCode || err.status;\n\n    const actionMap: Record<number, string> = {\n      400: \"Fix request payload \u2014 check field names and types\",\n      401: \"Rotate token at developers.webflow.com\",\n      403: \"Add missing scope to token\",\n      404: \"Verify resource IDs with discovery chain\",\n      409: \"Handle duplicate \u2014 update instead of create\",\n      429: \"Wait for Retry-After header (SDK auto-retries)\",\n      500: \"Webflow server error \u2014 retry later\",\n    };\n\n    console.error(`[${label}] HTTP ${status}: ${actionMap[status] || \"Unknown error\"}`);\n    console.error(`  Message: ${err.message}`);\n    console.error(`  Body: ${JSON.stringify(err.body)}`);\n\n    throw err;\n  }\n}\n```\n\n## Escalation Path\n\n1. Check error code against this reference\n2. Run diagnostic commands above\n3. Collect evidence with `webflow-debug-bundle`\n4. Check [Webflow Status](https://status.webflow.com)\n5. Open support ticket with request ID and error details\n\n## Output\n\n- Identified error cause from HTTP status code\n- Applied targeted fix\n- Verified resolution\n\n## Resources\n\n- [Webflow API Error Codes](https://developers.webflow.com/data/reference/rest-introduction)\n- [Webflow Status Page](https://status.webflow.com)\n- [Rate Limits Reference](https://developers.webflow.com/data/reference/rate-limits)\n\n## Next Steps\n\nFor comprehensive debugging, see `webflow-debug-bundle`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "webflow-common-errors",
-    "description": "Diagnose and fix Webflow Data API v2 errors \\u2014 400, 401, 403, 404,\\",
-    "allowed-tools": "Read, Grep, Bash(curl:*), Bash(npx:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

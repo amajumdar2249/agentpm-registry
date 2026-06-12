@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000041774",
   "name": "rw-integrate-image",
   "slug": "rw-integrate-image-2",
   "description": "Help users integrate Runway image generation APIs (text-to-image with reference images)",
   "content": "\n# Integrate Image Generation\n\n> **PREREQUISITE:** Run `+rw-check-compatibility` first. Run `+rw-fetch-api-reference` to load the latest API reference before integrating. Requires `+rw-setup-api-key` for API credentials. Requires `+rw-integrate-uploads` when the user has local reference images.\n\nHelp users add Runway image generation to their server-side code.\n\n## Available Models\n\n| Model | Best For | Cost | Speed |\n|-------|----------|------|-------|\n| `gen4_image` | Highest quality | 5 credits (720p), 8 credits (1080p) | Standard |\n| `gen4_image_turbo` | Fast generation | 2 credits | Fast |\n| `gemini_2.5_flash` | Google Gemini model | 5 credits | Standard |\n\n**Model selection guidance:**\n- Default recommendation: **`gen4_image`** \u2014 best quality\n- Budget/speed: **`gen4_image_turbo`** \u2014 cheapest and fastest\n\n## Security\n\n`referenceImages[].uri` is **fetched server-side by the Runway API** \u2014 treat it like any outbound fetch:\n\n- **Prefer `runway://` URIs** from `+rw-integrate-uploads` \u2014 scoped to your account, no arbitrary web content.\n- **If accepting URLs from clients**, validate first: require `https://`, allowlist trusted hosts, reject private addresses. See the Express.js example below.\n- **Never forward `req.body.referenceImages`** straight into `textToImage.create`. The SDK snippets below use raw URLs for brevity \u2014 they aren't production templates.\n- Treat generated outputs as untrusted when piping into downstream automations \u2014 ingested references influence the result.\n\n## Endpoint: `POST /v1/text_to_image`\n\n### Basic Text-to-Image\n\n```javascript\n// Node.js SDK\nimport RunwayML from '@runwayml/sdk';\n\nconst client = new RunwayML();\n\nconst task = await client.textToImage.create({\n  model: 'gen4_image',\n  promptText: 'A serene Japanese garden with cherry blossoms and a koi pond',\n  ratio: '1280:720'\n}).waitForTaskOutput();\n\nconst imageUrl = task.output[0];\n```\n\n```python\n# Python SDK\nfrom runwayml import RunwayML\n\nclient = RunwayML()\n\ntask = client.text_to_image.create(\n    model='gen4_image',\n    prompt_text='A serene Japanese garden with cherry blossoms and a koi pond',\n    ratio='1280:720'\n).wait_for_task_output()\n\nimage_url = task.output[0]\n```\n\n### With Reference Images\n\nReference images let you guide the generation with visual references. Use `@Tag` syntax in the prompt to reference specific images.\n\n**Recommended:** upload via `+rw-integrate-uploads` and pass the returned `runway://` URI.\n\n```javascript\nimport fs from 'fs';\n\nconst refUpload = await client.uploads.createEphemeral(\n  fs.createReadStream('/path/to/reference.jpg')\n);\n\nconst task = await client.textToImage.create({\n  model: 'gen4_image',\n  promptText: 'A portrait in the style of @Reference',\n  referenceImages: [\n    { uri: refUpload.runwayUri, tag: 'Reference' }\n  ],\n  ratio: '1280:720'\n}).waitForTaskOutput();\n```\n\nExternal URLs also work \u2014 only pass origins you control (see Security):\n\n```javascript\nconst task = await client.textToImage.create({\n  model: 'gen4_image',\n  promptText: '@EiffelTower painted in the style of @StarryNight',\n  referenceImages: [\n    { uri: 'https://cdn.yourapp.com/eiffel-tower.jpg', tag: 'EiffelTower' },\n    { uri: 'https://cdn.yourapp.com/starry-night.jpg', tag: 'StarryNight' }\n  ],\n  ratio: '1280:720'\n}).waitForTaskOutput();\n```\n\n```python\ntask = client.text_to_image.create(\n    model='gen4_image',\n    prompt_text='@EiffelTower painted in the style of @StarryNight',\n    reference_images=[\n        {\"uri\": \"https://cdn.yourapp.com/eiffel-tower.jpg\", \"tag\": \"EiffelTower\"},\n        {\"uri\": \"https://cdn.yourapp.com/starry-night.jpg\", \"tag\": \"StarryNight\"}\n    ],\n    ratio='1280:720'\n).wait_for_task_output()\n```\n\n## Common Parameters\n\n| Parameter | Type | Description |\n|-----------|------|-------------|\n| `model` | string | Model ID (required) |\n| `promptText` | string | Text description of the image (required) |\n| `ratio` | string | Aspect ratio, e.g. `'1280:720'`, `'720:1280'`, `'1080:1080'` |\n| `referenceImages` | array | Optional. Array of `{ uri, tag }` objects for visual guidance |\n\n## Integration Pattern\n\n1. **Prefer uploads over URLs** \u2014 Default to `+rw-integrate-uploads` so inputs are `runway://` URIs. External URLs only from origins you control (see Security).\n2. **Write the server-side handler** \u2014 Create an API route or server function.\n3. **Handle the output** \u2014 Download and store the image, don't serve signed URLs to clients.\n4. **Add error handling** \u2014 Wrap in try/catch.\n\n### Example: Express.js API Route\n\n```javascript\nimport RunwayML from '@runwayml/sdk';\nimport express from 'express';\n\nconst client = new RunwayML();\nconst app = express();\napp.use(express.json());\n\n// `runway://` URIs bypass this check; external URLs must match the allowlist.\nconst ALLOWED_MEDIA_HOSTS = new Set(['cdn.yourapp.com', 'uploads.yourapp.com']);\n\nfunction validateReferenceImages(refs) {\n  if (!Array.isArray(refs)) throw new Error('referenceImages must be an array');\n  return refs.map(({ uri, tag }) => {\n    if (typeof uri !== 'string' || typeof tag !== 'string') {\n      throw new Error('each reference needs a uri and tag');\n    }\n    if (uri.startsWith('runway://')) return { uri, tag };\n    const u = new URL(uri);\n    if (u.protocol !== 'https:') throw new Error('https required');\n    if (!ALLOWED_MEDIA_HOSTS.has(u.hostname)) throw new Error('untrusted media host');\n    return { uri: u.toString(), tag };\n  });\n}\n\napp.post('/api/generate-image', async (req, res) => {\n  try {\n    const { prompt, model = 'gen4_image', ratio = '1280:720', referenceImages } = req.body;\n\n    const task = await client.textToImage.create({\n      model,\n      promptText: prompt,\n      ratio,\n      ...(referenceImages && { referenceImages: validateReferenceImages(referenceImages) })\n    }).waitForTaskOutput();\n\n    res.json({ imageUrl: task.output[0] });\n  } catch (error) {\n    console.error('Image generation failed:', error);\n    res.status(400).json({ error: error.message });\n  }\n});\n```\n\n> For browser uploads: POST files to your server, upload via `+rw-integrate-uploads`, and pass the `runway://` URI. Don't accept raw URLs from the browser.\n\n### Example: Next.js API Route\n\n```typescript\n// app/api/generate-image/route.ts\nimport RunwayML from '@runwayml/sdk';\nimport { NextRequest, NextResponse } from 'next/server';\n\nconst client = new RunwayML();\n\nexport async function POST(request: NextRequest) {\n  const { prompt, referenceImages } = await request.json();\n\n  try {\n    const task = await client.textToImage.create({\n      model: 'gen4_image',\n      promptText: prompt,\n      ratio: '1280:720',\n      ...(referenceImages && { referenceImages })\n    }).waitForTaskOutput();\n\n    return NextResponse.json({ imageUrl: task.output[0] });\n  } catch (error) {\n    return NextResponse.json(\n      { error: error instanceof Error ? error.message : 'Generation failed' },\n      { status: 500 }\n    );\n  }\n}\n```\n\n### Example: FastAPI Route\n\n```python\nfrom fastapi import FastAPI, HTTPException\nfrom pydantic import BaseModel\nfrom runwayml import RunwayML\n\napp = FastAPI()\nclient = RunwayML()\n\nclass ImageRequest(BaseModel):\n    prompt: str\n    model: str = \"gen4_image\"\n    ratio: str = \"1280:720\"\n    reference_images: list[dict] | None = None\n\n@app.post(\"/api/generate-image\")\nasync def generate_image(req: ImageRequest):\n    try:\n        params = {\n            \"model\": req.model,\n            \"prompt_text\": req.prompt,\n            \"ratio\": req.ratio,\n        }\n        if req.reference_images:\n            params[\"reference_images\"] = req.reference_images\n\n        task = client.text_to_image.create(**params).wait_for_task_output()\n        return {\"image_url\": task.output[0]}\n    except Exception as e:\n        raise HTTPException(status_code=500, detail=str(e))\n```\n\n## Tips\n\n- **Output URLs expire in 24-48 hours.** Download images to your own storage immediately.\n- **Reference images use `@Tag` syntax** in the prompt \u2014 the tag must match the `tag` field in the `referenceImages` array.\n- **For local files**, always upload via `+rw-integrate-uploads` first, then use the `runway://` URI.\n- **`gen4_image_turbo`** is the cheapest option at 2 credits per image \u2014 good for prototyping.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "rw-integrate-image",
-    "description": "Help users integrate Runway image generation APIs (text-to-image with reference images)",
-    "user-invocable": "false",
-    "allowed-tools": "Read, Grep, Glob, Edit, Write"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

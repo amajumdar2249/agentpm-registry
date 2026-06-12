@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033487",
   "name": "vercel-ci-integration",
   "slug": "vercel-ci-integration",
   "description": "Configure Vercel CI/CD with GitHub Actions, preview deployments, and",
   "content": "# Vercel CI Integration\n\n## Overview\n\nSet up automated Vercel deployments in GitHub Actions with preview deployments on PRs, production deploys on merge to main, and optional test gating. Covers both Vercel's built-in Git integration and custom CI pipelines using the Vercel CLI.\n\n## Prerequisites\n\n- GitHub repository with Actions enabled\n- Vercel project linked to the repo\n- `VERCEL_TOKEN` stored as GitHub Secret\n- `VERCEL_ORG_ID` and `VERCEL_PROJECT_ID` from `.vercel/project.json`\n\n## Instructions\n\n### Step 1: Store CI Secrets in GitHub\n\n```bash\n# Get project and org IDs\ncat .vercel/project.json\n# {\"orgId\":\"team_xxx\",\"projectId\":\"prj_xxx\"}\n\n# Add secrets to GitHub repo\ngh secret set VERCEL_TOKEN --body \"your-vercel-token\"\ngh secret set VERCEL_ORG_ID --body \"team_xxx\"\ngh secret set VERCEL_PROJECT_ID --body \"prj_xxx\"\n```\n\n### Step 2: GitHub Actions \u2014 Preview on PR\n\n```yaml\n# .github/workflows/vercel-preview.yml\nname: Vercel Preview Deployment\non:\n  pull_request:\n    branches: [main]\n\njobs:\n  deploy-preview:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n\n      - name: Install Vercel CLI\n        run: npm install -g vercel@latest\n\n      - name: Pull Vercel Environment\n        run: vercel pull --yes --environment=preview --token=${{ secrets.VERCEL_TOKEN }}\n        env:\n          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}\n          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}\n\n      - name: Build Project\n        run: vercel build --token=${{ secrets.VERCEL_TOKEN }}\n        env:\n          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}\n          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}\n\n      - name: Deploy Preview\n        id: deploy\n        run: |\n          url=$(vercel deploy --prebuilt --token=${{ secrets.VERCEL_TOKEN }})\n          echo \"preview_url=$url\" >> $GITHUB_OUTPUT\n        env:\n          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}\n          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}\n\n      - name: Comment PR with Preview URL\n        uses: actions/github-script@v7\n        with:\n          script: |\n            github.rest.issues.createComment({\n              issue_number: context.issue.number,\n              owner: context.repo.owner,\n              repo: context.repo.repo,\n              body: `Preview deployed: ${{ steps.deploy.outputs.preview_url }}`\n            })\n```\n\n### Step 3: GitHub Actions \u2014 Production on Merge\n\n```yaml\n# .github/workflows/vercel-production.yml\nname: Vercel Production Deployment\non:\n  push:\n    branches: [main]\n\njobs:\n  deploy-production:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n\n      - name: Install Vercel CLI\n        run: npm install -g vercel@latest\n\n      - name: Pull Vercel Environment\n        run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}\n        env:\n          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}\n          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}\n\n      - name: Build Project\n        run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}\n        env:\n          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}\n          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}\n\n      - name: Deploy Production\n        run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}\n        env:\n          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}\n          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}\n```\n\n### Step 4: Test Gating \u2014 Run Tests Before Deploy\n\n```yaml\n# .github/workflows/vercel-gated.yml\nname: Gated Vercel Deploy\non:\n  push:\n    branches: [main]\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with: { node-version: 20 }\n      - run: npm ci\n      - run: npm test\n      - run: npm run lint\n      - run: npx tsc --noEmit\n\n  deploy:\n    needs: test  # Only deploy if tests pass\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm install -g vercel@latest\n      - run: vercel pull --yes --environment=production --token=${{ secrets.VERCEL_TOKEN }}\n        env:\n          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}\n          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}\n      - run: vercel build --prod --token=${{ secrets.VERCEL_TOKEN }}\n        env:\n          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}\n          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}\n      - run: vercel deploy --prebuilt --prod --token=${{ secrets.VERCEL_TOKEN }}\n        env:\n          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}\n          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}\n```\n\n### Step 5: Skip Builds for Non-Code Changes\n\n```json\n// vercel.json \u2014 skip build when only docs change\n{\n  \"ignoreCommand\": \"git diff HEAD^ HEAD --quiet -- . ':!docs' ':!*.md' ':!.github'\"\n}\n```\n\nOr in the dashboard: **Settings > Git > Ignored Build Step**\n\n### Step 6: Vercel's Built-In Git Integration (Alternative)\n\nIf you prefer Vercel's automatic deployments over custom CI:\n\n1. Connect your GitHub repo in the Vercel dashboard\n2. Vercel auto-deploys: preview on every push, production on merge to main\n3. Configure in **Settings > Git**:\n   - Production branch: `main`\n   - Preview branches: all other branches\n   - Auto-assign custom domains to production\n\nThis approach requires zero CI configuration but gives less control over test gating.\n\n## Output\n\n- Preview deployments on every PR with URL comment\n- Production deployments on merge to main (after tests pass)\n- Test gating preventing broken code from reaching production\n- Build skip rules for documentation-only changes\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `Error: VERCEL_TOKEN is not set` | Secret not configured | Add `VERCEL_TOKEN` as GitHub repo secret |\n| `Error: Could not find project` | Wrong ORG_ID or PROJECT_ID | Check `.vercel/project.json` values |\n| `vercel pull` fails | Token lacks project access | Regenerate token with correct scope |\n| Preview not commenting on PR | Missing `actions/github-script` | Add the comment step with correct permissions |\n| Build cache not working | CI runs on fresh runner | Use `actions/cache` for `node_modules` and `.vercel/output` |\n\n## Resources\n\n- [Vercel CLI in CI](https://vercel.com/docs/cli/deploying-from-cli)\n- [GitHub Actions](https://docs.github.com/en/actions)\n- [Vercel Git Integration](https://vercel.com/docs/deployments/git)\n- [Ignored Build Step](https://vercel.com/docs/project-configuration#ignorecommand)\n\n## Next Steps\n\nFor deployment orchestration, see `vercel-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "vercel-ci-integration",
-    "description": "Configure Vercel CI/CD with GitHub Actions, preview deployments, and",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*), Bash(vercel:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

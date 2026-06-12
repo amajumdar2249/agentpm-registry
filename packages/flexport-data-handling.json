@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032010",
   "name": "flexport-data-handling",
   "slug": "flexport-data-handling",
   "description": "Implement data handling for Flexport supply chain data including PII",
   "content": "# Flexport Data Handling\n\n## Overview\n\nFlexport logistics data encompasses shipment records, bills of lading, customs declarations, commercial invoices, tracking events, and trade compliance documents. This data crosses international borders and regulatory jurisdictions, requiring strict handling for PII (shipper/consignee contacts), controlled export data (HS codes, ITAR items), and financial records (invoices, duty payments). All integrations must enforce GDPR/CCPA compliance, customs data retention mandates, and C-TPAT supply chain security standards.\n\n## Data Classification\n\n| Data Type | Sensitivity | Retention | Encryption |\n|-----------|-------------|-----------|------------|\n| Shipment records | Medium | 1 year post-delivery | AES-256 at rest |\n| Customs declarations | High (trade compliance) | 5 years (CBP requirement) | AES-256 + TLS |\n| Commercial invoices | High (financial) | 7 years (tax/audit) | AES-256 at rest |\n| Contact PII (shipper/consignee) | High | Until deletion request | Field-level encryption |\n| Tracking events | Low | 90 days | TLS in transit |\n\n## Data Import\n\n```typescript\ninterface FlexportShipment {\n  id: string; ref: string; status: string;\n  shipper: { name: string; email: string; address: string };\n  consignee: { name: string; email: string; address: string };\n  hsCode: string; incoterm: string; cargoReadyDate: string;\n}\n\nasync function importShipments(cursor?: string): Promise<FlexportShipment[]> {\n  const allShipments: FlexportShipment[] = [];\n  let nextCursor = cursor;\n  do {\n    const res = await fetch(`https://api.flexport.com/v2/shipments?page[after]=${nextCursor || ''}`, {\n      headers: { Authorization: `Bearer ${process.env.FLEXPORT_API_TOKEN}` },\n    });\n    const data = await res.json();\n    for (const s of data.data) {\n      if (!s.id || !s.attributes.ref) throw new Error(`Invalid shipment: missing required fields`);\n      allShipments.push(s.attributes);\n    }\n    nextCursor = data.links?.next ? new URL(data.links.next).searchParams.get('page[after]') : null;\n  } while (nextCursor);\n  return allShipments;\n}\n```\n\n## Data Export\n\n```typescript\nasync function exportShipmentsCSV(shipments: FlexportShipment[], dest: string) {\n  const REDACT_FIELDS = ['email', 'phone', 'street_address', 'tax_id'];\n  const sanitized = shipments.map(s => {\n    const copy = JSON.parse(JSON.stringify(s));\n    for (const field of REDACT_FIELDS) {\n      if (copy.shipper?.[field]) copy.shipper[field] = '[REDACTED]';\n      if (copy.consignee?.[field]) copy.consignee[field] = '[REDACTED]';\n    }\n    return copy;\n  });\n  // Validate no restricted HS codes in export payload\n  const restricted = sanitized.filter(s => s.hsCode?.startsWith('9A'));\n  if (restricted.length > 0) throw new Error(`Export blocked: ${restricted.length} ITAR-restricted items`);\n  const csv = [Object.keys(sanitized[0]).join(','), ...sanitized.map(r => Object.values(r).join(','))].join('\\n');\n  await writeFile(dest, csv, 'utf-8');\n}\n```\n\n## Data Validation\n\n```typescript\nfunction validateShipment(s: FlexportShipment): string[] {\n  const errors: string[] = [];\n  if (!s.id) errors.push('Missing shipment ID');\n  if (!s.ref || s.ref.length > 50) errors.push('Invalid shipment reference');\n  if (!s.hsCode || !/^\\d{4,10}$/.test(s.hsCode)) errors.push(`Invalid HS code: ${s.hsCode}`);\n  if (!['EXW','FOB','CIF','DDP','DAP'].includes(s.incoterm)) errors.push(`Unknown incoterm: ${s.incoterm}`);\n  if (!s.shipper?.name || !s.consignee?.name) errors.push('Missing shipper or consignee name');\n  if (s.cargoReadyDate && isNaN(Date.parse(s.cargoReadyDate))) errors.push('Invalid cargo ready date');\n  return errors;\n}\n```\n\n## Compliance\n\n- [ ] PII fields (shipper/consignee contacts) encrypted at field level, redacted in logs\n- [ ] Customs declarations retained 5 years per CBP/EU customs code requirements\n- [ ] Commercial invoices retained 7 years for tax audit compliance\n- [ ] GDPR right-to-erasure: redact PII but preserve shipment skeleton for business continuity\n- [ ] CCPA opt-out signals honored for California-origin shipments\n- [ ] ITAR/EAR restricted HS codes flagged and blocked from unauthorized export\n- [ ] C-TPAT supply chain security: validate trading partner identities before data sharing\n- [ ] Audit trail for all data access, export, and deletion operations\n\n## Error Handling\n\n| Issue | Cause | Fix |\n|-------|-------|-----|\n| API 429 rate limit | Too many shipment fetches | Implement exponential backoff with jitter |\n| Invalid HS code rejected | Incorrect tariff classification | Validate against WCO HS nomenclature before submission |\n| GDPR deletion timeout | Large contact footprint across shipments | Batch updates in transactions of 100 records |\n| Customs data missing | Incomplete booking submission | Require mandatory fields at import validation step |\n| Export blocked by ITAR flag | Restricted HS code in payload | Route to trade compliance officer for manual review |\n\n## Resources\n\n- [Flexport API Reference](https://apidocs.flexport.com/)\n- [CBP Data Retention Requirements](https://www.cbp.gov/trade)\n\n## Next Steps\n\nSee `flexport-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "flexport-data-handling",
-    "description": "Implement data handling for Flexport supply chain data including PII",
-    "Trigger": "flexport data handling\", \"flexport PII\", \"flexport GDPR\", \"flexport data",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

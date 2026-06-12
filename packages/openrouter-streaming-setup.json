@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032819",
   "name": "openrouter-streaming-setup",
   "slug": "openrouter-streaming-setup",
   "description": "Implement streaming responses with OpenRouter for real-time UIs. Use",
   "content": "# OpenRouter Streaming Setup\n\n## Overview\n\nOpenRouter supports Server-Sent Events (SSE) streaming via `stream: true`, compatible with the OpenAI SDK. Streaming returns tokens as they're generated, reducing time-to-first-token (TTFT) from seconds to milliseconds. Usage stats are available via `stream_options: {include_usage: true}` in the final chunk. This skill covers Python and TypeScript streaming, SSE forwarding to browsers, and error recovery.\n\n## Python: Basic Streaming\n\n```python\nimport os\nfrom openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"https://openrouter.ai/api/v1\",\n    api_key=os.environ[\"OPENROUTER_API_KEY\"],\n    default_headers={\"HTTP-Referer\": \"https://my-app.com\", \"X-Title\": \"my-app\"},\n)\n\n# Stream with usage stats\nstream = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet\",\n    messages=[{\"role\": \"user\", \"content\": \"Explain how HTTP streaming works\"}],\n    max_tokens=500,\n    stream=True,\n    stream_options={\"include_usage\": True},  # Get token counts in final chunk\n)\n\nfull_content = []\nfor chunk in stream:\n    if chunk.choices and chunk.choices[0].delta.content:\n        token = chunk.choices[0].delta.content\n        print(token, end=\"\", flush=True)\n        full_content.append(token)\n\n    # Final chunk contains usage stats\n    if chunk.usage:\n        print(f\"\\n---\\nTokens: {chunk.usage.prompt_tokens} in + {chunk.usage.completion_tokens} out\")\n\nresult = \"\".join(full_content)\n```\n\n## Python: Streaming with Metrics\n\n```python\nimport time\n\ndef stream_with_metrics(messages, model=\"anthropic/claude-3.5-sonnet\", **kwargs):\n    \"\"\"Stream response and capture performance metrics.\"\"\"\n    start = time.monotonic()\n    first_token_time = None\n    chunks = []\n    usage = None\n\n    stream = client.chat.completions.create(\n        model=model, messages=messages, stream=True,\n        stream_options={\"include_usage\": True},\n        **kwargs,\n    )\n\n    for chunk in stream:\n        if chunk.choices and chunk.choices[0].delta.content:\n            token = chunk.choices[0].delta.content\n            if first_token_time is None:\n                first_token_time = (time.monotonic() - start) * 1000\n            chunks.append(token)\n            yield token  # Yield each token as it arrives\n\n        if chunk.usage:\n            usage = {\n                \"prompt_tokens\": chunk.usage.prompt_tokens,\n                \"completion_tokens\": chunk.usage.completion_tokens,\n            }\n\n    total_time = (time.monotonic() - start) * 1000\n    # Metrics available after generator exhausted\n    stream_with_metrics.last_metrics = {\n        \"ttft_ms\": round(first_token_time or 0),\n        \"total_ms\": round(total_time),\n        \"usage\": usage,\n        \"model\": model,\n    }\n\n# Usage\nfor token in stream_with_metrics(\n    [{\"role\": \"user\", \"content\": \"Hello\"}],\n    model=\"openai/gpt-4o-mini\",\n    max_tokens=200,\n):\n    print(token, end=\"\", flush=True)\nprint(f\"\\nMetrics: {stream_with_metrics.last_metrics}\")\n```\n\n## TypeScript: Streaming\n\n```typescript\nimport OpenAI from \"openai\";\n\nconst client = new OpenAI({\n  baseURL: \"https://openrouter.ai/api/v1\",\n  apiKey: process.env.OPENROUTER_API_KEY,\n  defaultHeaders: { \"HTTP-Referer\": \"https://my-app.com\", \"X-Title\": \"my-app\" },\n});\n\nasync function streamCompletion(prompt: string, model = \"openai/gpt-4o-mini\") {\n  const stream = await client.chat.completions.create({\n    model,\n    messages: [{ role: \"user\", content: prompt }],\n    max_tokens: 500,\n    stream: true,\n  });\n\n  const chunks: string[] = [];\n  for await (const chunk of stream) {\n    const token = chunk.choices[0]?.delta?.content;\n    if (token) {\n      process.stdout.write(token);\n      chunks.push(token);\n    }\n  }\n  return chunks.join(\"\");\n}\n```\n\n## SSE Forwarding to Browser (FastAPI)\n\n```python\nfrom fastapi import FastAPI\nfrom fastapi.responses import StreamingResponse\n\napp = FastAPI()\n\n@app.post(\"/v1/stream\")\nasync def stream_endpoint(prompt: str, model: str = \"openai/gpt-4o-mini\"):\n    \"\"\"Forward OpenRouter SSE stream to browser.\"\"\"\n    async def generate():\n        stream = client.chat.completions.create(\n            model=model,\n            messages=[{\"role\": \"user\", \"content\": prompt}],\n            max_tokens=1024,\n            stream=True,\n        )\n        for chunk in stream:\n            if chunk.choices and chunk.choices[0].delta.content:\n                token = chunk.choices[0].delta.content\n                yield f\"data: {json.dumps({'token': token})}\\n\\n\"\n        yield \"data: [DONE]\\n\\n\"\n\n    return StreamingResponse(generate(), media_type=\"text/event-stream\")\n```\n\n## Browser Client (JavaScript)\n\n```javascript\n// Consume SSE stream from your backend\nasync function streamChat(prompt) {\n  const response = await fetch(\"/v1/stream\", {\n    method: \"POST\",\n    headers: { \"Content-Type\": \"application/json\" },\n    body: JSON.stringify({ prompt }),\n  });\n\n  const reader = response.body.getReader();\n  const decoder = new TextDecoder();\n\n  while (true) {\n    const { done, value } = await reader.read();\n    if (done) break;\n\n    const text = decoder.decode(value);\n    for (const line of text.split(\"\\n\")) {\n      if (line.startsWith(\"data: \") && line !== \"data: [DONE]\") {\n        const data = JSON.parse(line.slice(6));\n        document.getElementById(\"output\").textContent += data.token;\n      }\n    }\n  }\n}\n```\n\n## Async Streaming (Python)\n\n```python\nfrom openai import AsyncOpenAI\n\naclient = AsyncOpenAI(\n    base_url=\"https://openrouter.ai/api/v1\",\n    api_key=os.environ[\"OPENROUTER_API_KEY\"],\n    default_headers={\"HTTP-Referer\": \"https://my-app.com\", \"X-Title\": \"my-app\"},\n)\n\nasync def async_stream(messages, model=\"openai/gpt-4o-mini\", **kwargs):\n    \"\"\"Async streaming for use in async web frameworks.\"\"\"\n    stream = await aclient.chat.completions.create(\n        model=model, messages=messages, stream=True, **kwargs,\n    )\n    async for chunk in stream:\n        if chunk.choices and chunk.choices[0].delta.content:\n            yield chunk.choices[0].delta.content\n```\n\n## Error Handling\n\n| Error | Cause | Fix |\n|-------|-------|-----|\n| Stream cuts off mid-response | Network timeout or provider error | Save partial content; implement retry from last position |\n| Missing `usage` in stream | Didn't set `stream_options` | Add `stream_options: {\"include_usage\": True}` |\n| Empty delta chunks | Keep-alive pings | Filter `chunk.choices[0].delta.content is None` |\n| `finish_reason: \"length\"` | Hit max_tokens limit | Increase max_tokens or continue with follow-up request |\n\n## Enterprise Considerations\n\n- Always use `stream_options: {\"include_usage\": True}` to get token counts for cost tracking\n- Set connection timeouts appropriate for streaming (longer than non-streaming, e.g., 120s)\n- Implement heartbeat detection: if no chunks for >30s, consider the stream dead and retry\n- Buffer partial tokens on the server before forwarding to the client for smoother rendering\n- Log TTFT per model to benchmark streaming performance over time\n- Use streaming for all user-facing requests; use non-streaming for batch/background processing\n\n## References\n\n- [Examples](${CLAUDE_SKILL_DIR}/references/examples.md) | [Errors](${CLAUDE_SKILL_DIR}/references/errors.md)\n- [Streaming](https://openrouter.ai/docs/features/streaming) | [API Reference](https://openrouter.ai/docs/api/reference/overview)\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "openrouter-streaming-setup",
-    "description": "Implement streaming responses with OpenRouter for real-time UIs. Use",
-    "completions. Triggers": "openrouter streaming'', ''openrouter sse'', ''stream response",
-    "allowed-tools": "Read, Write, Edit, Bash, Grep",
-    "version": "2.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

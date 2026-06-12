@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031378",
   "name": "attio-webhooks-events",
   "slug": "attio-webhooks-events",
   "description": "Implement Attio v2 webhooks -- subscribe to record/list/note/task events,",
   "content": "# Attio Webhooks & Events\n\n## Overview\n\nAttio v2 webhooks deliver real-time CRM event notifications to your HTTPS endpoint. Subscribe to record, list-entry, note, and task events with optional object or attribute filters to reduce volume. Webhooks are managed via `POST /v2/webhooks` and verified with HMAC-SHA256 signatures using a timestamp-prefixed payload.\n\n## Webhook Registration\n\n```typescript\nconst webhook = await fetch(\"https://api.attio.com/v2/webhooks\", {\n  method: \"POST\",\n  headers: {\n    \"Authorization\": `Bearer ${process.env.ATTIO_API_KEY}`,\n    \"Content-Type\": \"application/json\",\n  },\n  body: JSON.stringify({\n    target_url: \"https://yourapp.com/webhooks/attio\",\n    subscriptions: [\n      { event_type: \"record.created\" },\n      { event_type: \"record.updated\", filter: { object: { $eq: \"deals\" } } },\n      { event_type: \"note.created\" },\n      { event_type: \"task.completed\" },\n    ],\n  }),\n});\n```\n\n## Signature Verification\n\n```typescript\nimport crypto from \"crypto\";\nimport { Request, Response, NextFunction } from \"express\";\n\nfunction verifyAttioSignature(req: Request, res: Response, next: NextFunction) {\n  const signature = req.headers[\"x-attio-signature\"] as string;\n  const timestamp = req.headers[\"x-attio-timestamp\"] as string;\n  const age = Date.now() - parseInt(timestamp) * 1000;\n  if (age > 300_000) return res.status(401).json({ error: \"Timestamp too old\" });\n  const payload = `${timestamp}.${req.body.toString()}`;\n  const expected = crypto.createHmac(\"sha256\", process.env.ATTIO_WEBHOOK_SECRET!)\n    .update(payload).digest(\"hex\");\n  if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {\n    return res.status(401).json({ error: \"Invalid signature\" });\n  }\n  next();\n}\n```\n\n## Event Handler\n\n```typescript\nimport express from \"express\";\nconst app = express();\n\napp.post(\"/webhooks/attio\", express.raw({ type: \"application/json\" }), verifyAttioSignature, (req, res) => {\n  const event = JSON.parse(req.body.toString());\n  res.status(200).json({ received: true });\n\n  switch (event.event_type) {\n    case \"record.created\":\n      syncRecordToCRM(event.object?.api_slug, event.record?.id?.record_id); break;\n    case \"record.updated\":\n      reindexRecord(event.object?.api_slug, event.record?.id?.record_id); break;\n    case \"note.created\":\n      forwardToNotionSync(event.id.event_id); break;\n    case \"task.completed\":\n      closeProjectTask(event.id.event_id); break;\n  }\n});\n```\n\n## Event Types\n\n| Event | Payload Fields | Use Case |\n|-------|---------------|----------|\n| `record.created` | `object.api_slug`, `record.record_id`, `actor` | Sync new contacts/deals to external CRM |\n| `record.updated` | `object.api_slug`, `record.record_id`, `attribute` | Re-index changed records |\n| `note.created` | `event_id`, `actor`, `record` | Forward meeting notes to Notion |\n| `task.completed` | `event_id`, `actor`, `record` | Close linked project management tasks |\n| `list-entry.created` | `list.api_slug`, `entry.entry_id` | Trigger pipeline stage automation |\n\n## Retry & Idempotency\n\n```typescript\nconst processed = new Set<string>();\n\nasync function handleIdempotent(event: { id: { event_id: string }; event_type: string }) {\n  const eventId = event.id.event_id;\n  if (processed.has(eventId)) return;\n  await routeEvent(event);\n  processed.add(eventId);\n  if (processed.size > 10_000) {\n    const entries = Array.from(processed);\n    entries.slice(0, entries.length - 10_000).forEach((id) => processed.delete(id));\n  }\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Fix |\n|-------|-------|-----|\n| Signature mismatch | Body parsed before raw verification | Use `express.raw()`, verify raw body |\n| Duplicate events | Attio retry on timeout | Track `event_id` in Redis or DB |\n| Missed events | Handler returns non-200 | Return 200 immediately, process async |\n| Too many events | No subscription filtering | Add `filter` clauses to subscriptions |\n\n## Resources\n\n- [Attio Webhooks Guide](https://docs.attio.com/rest-api/guides/webhooks)\n- [Attio Webhook Events Reference](https://docs.attio.com/rest-api/webhook-reference/record-events/recordcreated)\n\n## Next Steps\n\nSee `attio-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "attio-webhooks-events",
-    "description": "Implement Attio v2 webhooks -- subscribe to record/list/note/task events,",
-    "Trigger": "attio webhook\", \"attio events\", \"attio webhook signature\",",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

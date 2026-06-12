@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000017856",
   "name": "nanoclaw-traffic-guardian",
   "slug": "nanoclaw-traffic-guardian",
   "description": "NanoClaw runtime traffic monitoring baseline for host-side proxy inspection with container-safe MCP and IPC status surfaces.",
   "content": "\n# NanoClaw Traffic Guardian\n\nThis is a baseline specification skill. It intentionally does not ship a proxy or runtime implementation yet.\n\n\n## Release Artifact Verification\n\nFor standalone installs, verify the signed release manifest before trusting `SKILL.md`, `skill.json`, or the archive. The `skill.json` file is the package metadata/SBOM source, and the release pipeline signs `checksums.json` with the ClawSec release key.\n\n```bash\nset -euo pipefail\n\nSKILL_NAME=\"nanoclaw-traffic-guardian\"\nVERSION=\"0.0.1-beta2\"\nREPO=\"prompt-security/clawsec\"\nTAG=\"${SKILL_NAME}-v${VERSION}\"\nBASE=\"https://github.com/${REPO}/releases/download/${TAG}\"\nZIP_NAME=\"${SKILL_NAME}-v${VERSION}.zip\"\nTMP_DIR=\"$(mktemp -d)\"\ntrap 'rm -rf \"$TMP_DIR\"' EXIT\n\nRELEASE_PUBKEY_SHA256=\"711424e4535f84093fefb024cd1ca4ec87439e53907b305b79a631d5befba9c8\"\n\ncurl -fsSL \"$BASE/checksums.json\" -o \"$TMP_DIR/checksums.json\"\ncurl -fsSL \"$BASE/checksums.sig\" -o \"$TMP_DIR/checksums.sig\"\ncurl -fsSL \"$BASE/signing-public.pem\" -o \"$TMP_DIR/signing-public.pem\"\ncurl -fsSL \"$BASE/$ZIP_NAME\" -o \"$TMP_DIR/$ZIP_NAME\"\ncurl -fsSL \"$BASE/SKILL.md\" -o \"$TMP_DIR/SKILL.md\"\ncurl -fsSL \"$BASE/skill.json\" -o \"$TMP_DIR/skill.json\"\n\nACTUAL_PUBKEY_SHA256=\"$(openssl pkey -pubin -in \"$TMP_DIR/signing-public.pem\" -outform DER | shasum -a 256 | awk '{print $1}')\"\nif [ \"$ACTUAL_PUBKEY_SHA256\" != \"$RELEASE_PUBKEY_SHA256\" ]; then\n  echo \"ERROR: signing-public.pem fingerprint mismatch\" >&2\n  exit 1\nfi\n\nopenssl base64 -d -A -in \"$TMP_DIR/checksums.sig\" -out \"$TMP_DIR/checksums.sig.bin\"\nopenssl pkeyutl -verify -rawin -pubin \\\n  -inkey \"$TMP_DIR/signing-public.pem\" \\\n  -sigfile \"$TMP_DIR/checksums.sig.bin\" \\\n  -in \"$TMP_DIR/checksums.json\" >/dev/null\n\nhash_file() {\n  if command -v shasum >/dev/null 2>&1; then\n    shasum -a 256 \"$1\" | awk '{print $1}'\n  else\n    sha256sum \"$1\" | awk '{print $1}'\n  fi\n}\n\nverify_manifest_file() {\n  asset=\"$1\"\n  path=\"$2\"\n  expected=\"$(jq -r --arg asset \"$asset\" '.files[$asset].sha256 // empty' \"$TMP_DIR/checksums.json\")\"\n  if [ -z \"$expected\" ]; then\n    echo \"ERROR: checksums.json missing $asset\" >&2\n    exit 1\n  fi\n  actual=\"$(hash_file \"$path\")\"\n  if [ \"$actual\" != \"$expected\" ]; then\n    echo \"ERROR: checksum mismatch for $asset\" >&2\n    exit 1\n  fi\n}\n\nexpected_archive=\"$(jq -r '.archive.sha256 // empty' \"$TMP_DIR/checksums.json\")\"\nif [ -z \"$expected_archive\" ]; then\n  echo \"ERROR: checksums.json missing archive.sha256\" >&2\n  exit 1\nfi\nactual_archive=\"$(hash_file \"$TMP_DIR/$ZIP_NAME\")\"\nif [ \"$actual_archive\" != \"$expected_archive\" ]; then\n  echo \"ERROR: archive checksum mismatch\" >&2\n  exit 1\nfi\n\nverify_manifest_file \"SKILL.md\" \"$TMP_DIR/SKILL.md\"\nverify_manifest_file \"skill.json\" \"$TMP_DIR/skill.json\"\n\necho \"Signed release manifest, archive, SKILL.md, and skill.json verified.\"\n```\n\nOnly install or extract the archive after this verification succeeds.\n\n## Scope\n\nBuilders should use this skill as the NanoClaw landing zone for runtime traffic monitoring:\n\n- host-side HTTP proxy inspection\n- optional HTTPS inspection with host-held CA material\n- outbound exfiltration detection\n- inbound injection detection\n- redacted local threat logs\n- MCP tools for status, findings, and config checks\n- IPC handlers for container-safe host communication\n\nPrefer this as an optional companion to `clawsec-nanoclaw`, not as a mandatory extension of the existing advisory/signature/integrity suite.\n\n## Safety Contract\n\n- Opt-in only.\n- Detect-and-log by default.\n- No automatic system CA installation.\n- No CA private key access from the container.\n- No blocking in the first implementation.\n- Redact secrets before logs or MCP responses.\n- Keep all state under `NANOCLAW_TRAFFIC_GUARDIAN_HOME` or the host-managed NanoClaw security data directory.\n\n## Builder Entry Points\n\nRead `SPEC.md` before implementing. Use the placeholder folders as follows:\n\n| Path | Intended use |\n|---|---|\n| `lib/` | Detector rules, redaction, types, report formatting |\n| `host-services/` | Host-side proxy lifecycle, log access, IPC handlers |\n| `mcp-tools/` | Container-side MCP tools for status and findings |\n| `test/` | Unit tests, host/container IPC tests, redaction tests |\n\n## Required First Implementation Behavior\n\n1. Validate config without starting the proxy.\n2. Start monitor through a host-managed lifecycle path.\n3. Keep CA key material on the host side.\n4. Inspect HTTP request/response text up to a bounded byte limit.\n5. Support optional HTTPS MITM only when the operator supplies per-runtime trust configuration.\n6. Emit JSONL findings with redacted snippets.\n7. Expose MCP tools that return status and redacted findings only.\n\n## Out of Scope for v0.0.1 Implementation\n\n- automatic system trust-store mutation\n- transparent network interception\n- default blocking\n- sending traffic to external services\n- exposing raw request/response bodies to the container\n\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "nanoclaw-traffic-guardian",
-    "version": "0.0.1-beta2",
-    "description": "NanoClaw runtime traffic monitoring baseline for host-side proxy inspection with container-safe MCP and IPC status surfaces.",
-    "homepage": "https://clawsec.prompt.security",
-    "author": "prompt-security",
-    "license": "AGPL-3.0-or-later",
-    "nanoclaw": "",
-    "requires": "",
-    "node": ">=18.0.0"
+  "author": "prompt-security",
+  "version": "0.0.1-beta2",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "AGPL-3.0-or-later",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

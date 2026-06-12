@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000043752",
   "name": "oauth",
   "slug": "oauth-2",
   "description": "Configure OAuth providers (Google, Apple, Microsoft, Facebook, GitHub, etc.) to work with portless local dev URLs. Use when setting up OAuth redirect URIs, fixing \"redirect_uri_mismatch\" or \"invalid redirect\" errors, configuring sign-in providers for local development, or when a provider rejects .localhost subdomains. Triggers include \"OAuth not working with portless\", \"redirect URI mismatch\", \"Google/Apple/Microsoft sign-in fails locally\", \"configure OAuth for local dev\", or any task involving OAuth callback URLs with portless domains.",
   "content": "\n# OAuth with Portless\n\nOAuth providers validate redirect URIs against domain rules. `.localhost` subdomains fail on most providers because they are not in the Public Suffix List or are explicitly blocked. Portless fixes this with `--tld` to serve apps on real, valid domains.\n\n## The Problem\n\nWhen portless uses the default `.localhost` TLD, OAuth providers reject redirect URIs like `http://myapp.localhost:1355/callback`:\n\n| Provider  | `localhost` | `.localhost` subdomains | Reason                         |\n| --------- | ----------- | ----------------------- | ------------------------------ |\n| Google    | Allowed     | Rejected                | Not in their bundled PSL       |\n| Apple     | Rejected    | Rejected                | No localhost at all            |\n| Microsoft | Allowed     | Allowed                 | Permissive localhost handling  |\n| Facebook  | Allowed     | Varies                  | Must register each URI exactly |\n| GitHub    | Allowed     | Allowed                 | Permissive                     |\n\nGoogle and Apple are the strictest. Microsoft and GitHub are more lenient with localhost.\n\n## The Fix\n\nUse a valid TLD so the redirect URI passes provider validation:\n\n```bash\nportless proxy start --tld dev\nportless myapp next dev\n# -> https://myapp.dev\n```\n\nAny TLD in the Public Suffix List works: `.dev`, `.app`, `.com`, `.io`, etc.\n\n### Use a domain you own\n\nBare TLDs like `.dev` mean `myapp.dev` could collide with a real domain. Use a subdomain of a domain you control:\n\n```bash\nportless proxy start --tld dev\nportless myapp.local.yourcompany next dev\n# -> https://myapp.local.yourcompany.dev\n```\n\nThis ensures no outbound traffic reaches something you don't own. For teams, set a wildcard DNS record (`*.local.yourcompany.dev -> 127.0.0.1`) so every developer gets resolution without `/etc/hosts`.\n\n## Provider Setup\n\n### Google\n\n1. Go to [Google Cloud Console > Credentials](https://console.cloud.google.com/apis/credentials)\n2. Create or edit an OAuth 2.0 Client ID (Web application)\n3. Add the portless domain to **Authorized JavaScript origins**: `https://myapp.dev`\n4. Add the callback to **Authorized redirect URIs**: `https://myapp.dev/api/auth/callback/google`\n\nGoogle validates domains against the Public Suffix List. The domain must end with a recognized TLD. `.localhost` subdomains fail this check; `.dev`, `.app`, `.com`, etc. all pass.\n\nHTTPS is required for `.dev` and `.app` (HSTS-preloaded). Portless handles this automatically with `--https`.\n\n### Apple\n\nApple Sign In does not allow `localhost` or IP addresses at all.\n\n1. Go to [Apple Developer > Certificates, Identifiers & Profiles](https://developer.apple.com/account/resources)\n2. Register a Services ID\n3. Configure Sign In with Apple, adding the portless domain as a **Return URL**: `https://myapp.dev/api/auth/callback/apple`\n\nThe domain must be a real, publicly-resolvable domain name. Since portless maps the domain to 127.0.0.1 locally, the browser resolves it but Apple's server-side validation may require the domain to resolve publicly too. If Apple rejects the domain, add a public DNS A record pointing to 127.0.0.1 for your dev subdomain.\n\n### Microsoft (Entra / Azure AD)\n\n1. Go to [Azure Portal > App registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps)\n2. Create or edit an app registration\n3. Under **Authentication**, add a **Web** redirect URI: `https://myapp.dev/api/auth/callback/azure-ad`\n\nMicrosoft allows `http://localhost` with any port for development. It also accepts `.localhost` subdomains in most cases. Using a custom TLD with portless is still recommended for consistency across providers.\n\n### Facebook (Meta)\n\n1. Go to [Meta for Developers > App Dashboard](https://developers.facebook.com/apps/)\n2. Under **Facebook Login > Settings**, add the portless URL to **Valid OAuth Redirect URIs**: `https://myapp.dev/api/auth/callback/facebook`\n\nFacebook requires each redirect URI to be registered exactly (no wildcards). Strict Mode (enabled by default) enforces exact matching.\n\n### GitHub\n\n1. Go to [GitHub Developer Settings > OAuth Apps](https://github.com/settings/developers)\n2. Set **Authorization callback URL**: `https://myapp.dev/api/auth/callback/github`\n\nGitHub is permissive with localhost and subdomains. A custom TLD is not strictly required but keeps the setup consistent.\n\n## Auth Library Configuration\n\n### NextAuth / Auth.js\n\nSet `NEXTAUTH_URL` to match the portless domain:\n\n```env\nNEXTAUTH_URL=https://myapp.dev\n```\n\nNextAuth uses this to construct callback URLs. Without it, callbacks may use `localhost` and cause a mismatch.\n\n### Passport.js\n\nSet the `callbackURL` in each strategy to use the portless domain:\n\n```js\nnew GoogleStrategy({\n  clientID: process.env.GOOGLE_CLIENT_ID,\n  clientSecret: process.env.GOOGLE_CLIENT_SECRET,\n  callbackURL: process.env.BASE_URL + \"/auth/google/callback\",\n});\n```\n\nSet `BASE_URL=https://myapp.dev` in your environment.\n\n### Generic / Manual\n\nRead the `PORTLESS_URL` environment variable that portless injects into the child process:\n\n```js\nconst baseUrl = process.env.PORTLESS_URL || \"http://localhost:3000\";\nconst callbackUrl = `${baseUrl}/auth/callback`;\n```\n\n## Troubleshooting\n\n### \"redirect_uri_mismatch\" or \"invalid redirect URI\"\n\nThe redirect URI sent during the OAuth flow doesn't match what's registered with the provider. Check:\n\n1. The provider's registered redirect URI matches the portless domain exactly (protocol, host, path)\n2. `NEXTAUTH_URL` or equivalent is set to the portless URL (not `localhost`)\n3. The proxy is running with the correct TLD (`portless list` to verify)\n\n### Provider requires HTTPS\n\n`.dev` and `.app` TLDs are HSTS-preloaded, so browsers force HTTPS. Start the proxy:\n\n```bash\nportless proxy start --tld dev\n```\n\nPortless defaults to HTTPS on port 443 (auto-elevates with sudo). Run `portless trust` to add the local CA to your system trust store and eliminate browser warnings.\n\n### Apple rejects the domain\n\nApple may require the domain to resolve publicly. Add a DNS A record for your dev subdomain pointing to `127.0.0.1`:\n\n```\nmyapp.local.yourcompany.dev  A  127.0.0.1\n```\n\nOr use a wildcard: `*.local.yourcompany.dev  A  127.0.0.1`.\n\n### Callback goes to wrong URL after sign-in\n\nThe auth library is constructing the callback URL from `localhost` instead of the portless domain. Set the appropriate environment variable:\n\n- **NextAuth**: `NEXTAUTH_URL=https://myapp.dev`\n- **Auth.js v5**: `AUTH_URL=https://myapp.dev`\n- **Manual**: `PORTLESS_URL` is injected automatically; use it as the base URL\n\n## Example\n\nSee [`examples/google-oauth`](../../examples/google-oauth) for a complete working example with Next.js + NextAuth + Google OAuth using `--tld dev`.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "oauth",
-    "description": "Configure OAuth providers (Google, Apple, Microsoft, Facebook, GitHub, etc.) to work with portless local dev URLs. Use when setting up OAuth redirect URIs, fixing \"redirect_uri_mismatch\" or \"invalid redirect\" errors, configuring sign-in providers for local development, or when a provider rejects .localhost subdomains. Triggers include \"OAuth not working with portless\", \"redirect URI mismatch\", \"Google/Apple/Microsoft sign-in fails locally\", \"configure OAuth for local dev\", or any task involving OAuth callback URLs with portless domains."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

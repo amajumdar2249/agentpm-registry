@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000029420",
   "name": "bio-machine-learning-survival-analysis",
   "slug": "bio-machine-learning-survival-analysis-2",
   "description": "Analyzes time-to-event data using Kaplan-Meier curves, log-rank tests, and Cox proportional hazards regression with lifelines. Builds survival models from clinical and omics features. Use when predicting patient survival or modeling time-to-event outcomes.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: matplotlib 3.8+, pandas 2.2+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Survival Prediction with lifelines\n\n**\"Analyze patient survival data\"** \u2192 Estimate survival curves (Kaplan-Meier), compare groups (log-rank test), and model time-to-event outcomes with Cox proportional hazards regression.\n- Python: `lifelines.KaplanMeierFitter()`, `lifelines.CoxPHFitter()`\n\n## Kaplan-Meier Curves\n\n**Goal:** Estimate and visualize the survival probability function from time-to-event data.\n\n**Approach:** Fit a nonparametric Kaplan-Meier estimator to censored survival data and plot the step function.\n\n```python\nfrom lifelines import KaplanMeierFitter\nimport matplotlib.pyplot as plt\n\nkmf = KaplanMeierFitter()\n\n# T: time to event or censoring\n# E: event indicator (1=event occurred, 0=censored)\nkmf.fit(T, event_observed=E)\n\n# Plot survival curve\nkmf.plot_survival_function()\nplt.xlabel('Time (months)')\nplt.ylabel('Survival probability')\nplt.savefig('km_curve.png', dpi=150)\n```\n\n## Compare Groups with Log-Rank Test\n\n**Goal:** Test whether survival distributions differ significantly between risk groups.\n\n**Approach:** Fit separate Kaplan-Meier curves per group, overlay them, and apply a log-rank test for statistical comparison.\n\n```python\nfrom lifelines import KaplanMeierFitter\nfrom lifelines.statistics import logrank_test\nimport matplotlib.pyplot as plt\n\nfig, ax = plt.subplots(figsize=(8, 6))\n\nfor group, color in zip(['high', 'low'], ['red', 'blue']):\n    mask = df['risk_group'] == group\n    kmf = KaplanMeierFitter()\n    kmf.fit(df.loc[mask, 'time'], event_observed=df.loc[mask, 'event'], label=group)\n    kmf.plot_survival_function(ax=ax, color=color)\n\n# Log-rank test\nhigh = df[df['risk_group'] == 'high']\nlow = df[df['risk_group'] == 'low']\nresults = logrank_test(high['time'], low['time'], event_observed_A=high['event'], event_observed_B=low['event'])\nprint(f'Log-rank p-value: {results.p_value:.4e}')\n\nax.set_xlabel('Time (months)')\nax.set_ylabel('Survival probability')\nax.set_title(f'Log-rank p = {results.p_value:.4e}')\nplt.savefig('km_comparison.png', dpi=150)\n```\n\n## Cox Proportional Hazards Regression\n\n**Goal:** Model the effect of covariates on survival time using a semi-parametric hazard model.\n\n**Approach:** Fit a Cox PH model to extract hazard ratios, confidence intervals, and a concordance index for predictive accuracy.\n\n```python\nfrom lifelines import CoxPHFitter\n\n# Prepare data: must have 'time' and 'event' columns\n# Include covariates as additional columns\ncph = CoxPHFitter()\ncph.fit(df, duration_col='time', event_col='event')\n\n# Summary with hazard ratios\ncph.print_summary()\n\n# Get hazard ratios as DataFrame\nhr = cph.summary[['exp(coef)', 'exp(coef) lower 95%', 'exp(coef) upper 95%', 'p']]\nprint(hr)\n\n# Concordance index (c-index): 0.5=random, 1.0=perfect\nprint(f'C-index: {cph.concordance_index_:.3f}')\n```\n\n## Multivariate Cox Model\n\n**Goal:** Assess the independent prognostic value of clinical and molecular features in a single model.\n\n**Approach:** Combine clinical covariates and gene expression values into a regularized Cox model to identify independently prognostic variables.\n\n```python\nfrom lifelines import CoxPHFitter\nimport pandas as pd\n\n# Combine clinical and omics features\ncox_df = pd.DataFrame({\n    'time': meta['survival_months'],\n    'event': meta['vital_status'],\n    'age': meta['age'],\n    'stage': meta['stage_numeric'],\n    'GENE1': expr.loc['GENE1'],\n    'GENE2': expr.loc['GENE2']\n})\n\ncph = CoxPHFitter(penalizer=0.1)  # L2 regularization for stability\ncph.fit(cox_df, duration_col='time', event_col='event')\ncph.print_summary()\n```\n\n## Predict Risk Scores\n\n**Goal:** Stratify patients into risk groups based on a fitted Cox model.\n\n**Approach:** Compute partial hazard scores from model coefficients and split at the median to define high/low risk groups for downstream KM visualization.\n\n```python\n# Partial hazard (risk score)\nrisk_scores = cph.predict_partial_hazard(cox_df)\n\n# Median risk split for KM plot\ndf['risk_group'] = (risk_scores > risk_scores.median()).map({True: 'high', False: 'low'})\n```\n\n## Check Proportional Hazards Assumption\n\n**Goal:** Verify that the proportional hazards assumption holds for all covariates.\n\n**Approach:** Run the built-in Schoenfeld residual tests and inspect diagnostic plots for time-varying effects.\n\n```python\n# Test PH assumption\ncph.check_assumptions(df, p_value_threshold=0.05, show_plots=True)\n```\n\n## Survival at Specific Time\n\n**Goal:** Extract survival probability estimates at clinically meaningful time points.\n\n**Approach:** Query the fitted Kaplan-Meier survival function at specific durations and report the median survival time.\n\n```python\n# Survival probability at specific times\nsurvival_probs = kmf.survival_function_at_times([12, 24, 60])\nprint(survival_probs)\n\n# Median survival\nprint(f'Median survival: {kmf.median_survival_time_:.1f}')\n```\n\n## Feature Selection for Survival\n\n**Goal:** Screen thousands of genes to identify those significantly associated with patient survival.\n\n**Approach:** Fit univariate Cox models for each gene, extract hazard ratios and p-values, and rank candidates for multivariate modeling.\n\n```python\nfrom lifelines import CoxPHFitter\nimport pandas as pd\n\n# Univariate screening\nresults = []\nfor gene in expr.index[:1000]:\n    cox_df = pd.DataFrame({\n        'time': meta['survival_months'],\n        'event': meta['vital_status'],\n        'gene': expr.loc[gene]\n    })\n    cph = CoxPHFitter()\n    cph.fit(cox_df, duration_col='time', event_col='event')\n    results.append({\n        'gene': gene,\n        'hr': cph.hazard_ratios_['gene'],\n        'p': cph.summary.loc['gene', 'p']\n    })\n\nresults_df = pd.DataFrame(results)\nsig_genes = results_df[results_df['p'] < 0.05].sort_values('p')\n```\n\n## Related Skills\n\n- clinical-databases/variant-prioritization - Clinical variant interpretation\n- differential-expression/de-results - Find DE genes for survival model\n- machine-learning/biomarker-discovery - Select predictive features\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-machine-learning-survival-analysis",
-    "description": "Analyzes time-to-event data using Kaplan-Meier curves, log-rank tests, and Cox proportional hazards regression with lifelines. Builds survival models from clinical and omics features. Use when predicting patient survival or modeling time-to-event outcomes.",
-    "tool_type": "python",
-    "primary_tool": "lifelines"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

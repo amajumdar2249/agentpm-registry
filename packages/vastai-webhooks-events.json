@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033460",
   "name": "vastai-webhooks-events",
   "slug": "vastai-webhooks-events",
   "description": "Build event-driven workflows around Vast.ai instance lifecycle events.",
   "content": "# Vast.ai Webhooks & Events\n\n## Overview\n\nBuild event-driven workflows around Vast.ai GPU instance lifecycle. Vast.ai does not provide traditional webhooks, so event detection relies on polling the REST API at `cloud.vast.ai/api/v0` and reacting to instance status transitions (loading, running, exited, error, offline).\n\n## Prerequisites\n\n- Vast.ai CLI authenticated\n- Understanding of instance lifecycle states\n- Python 3.8+ for event loop implementation\n\n## Instructions\n\n### Step 1: Instance Status Poller\n\n```python\nimport time, json, subprocess\nfrom typing import Callable, Dict, List\n\nclass InstanceEventPoller:\n    \"\"\"Poll Vast.ai API and emit events on status transitions.\"\"\"\n\n    def __init__(self, api_key: str, poll_interval: int = 30):\n        self.api_key = api_key\n        self.poll_interval = poll_interval\n        self.previous_states: Dict[int, str] = {}\n        self.handlers: Dict[str, List[Callable]] = {}\n\n    def on(self, event: str, handler: Callable):\n        self.handlers.setdefault(event, []).append(handler)\n\n    def poll_once(self):\n        result = subprocess.run(\n            [\"vastai\", \"show\", \"instances\", \"--raw\"],\n            capture_output=True, text=True)\n        instances = json.loads(result.stdout)\n\n        for inst in instances:\n            inst_id = inst[\"id\"]\n            status = inst.get(\"actual_status\", \"unknown\")\n            prev = self.previous_states.get(inst_id)\n\n            if prev and prev != status:\n                event = f\"{prev}_to_{status}\"\n                for handler in self.handlers.get(event, []):\n                    handler(inst)\n                for handler in self.handlers.get(\"any_change\", []):\n                    handler(inst, prev, status)\n\n            self.previous_states[inst_id] = status\n\n    def run(self):\n        print(f\"Polling every {self.poll_interval}s...\")\n        while True:\n            self.poll_once()\n            time.sleep(self.poll_interval)\n```\n\n### Step 2: Event Handlers\n\n```python\ndef on_instance_running(instance):\n    print(f\"Instance {instance['id']} is RUNNING\")\n    print(f\"  SSH: ssh -p {instance['ssh_port']} root@{instance['ssh_host']}\")\n    # Trigger: start training job, send notification, etc.\n\ndef on_instance_exited(instance):\n    print(f\"Instance {instance['id']} EXITED\")\n    # Trigger: collect results, check for errors, notify team\n\ndef on_spot_preemption(instance, old_status, new_status):\n    if old_status == \"running\" and new_status in (\"exited\", \"offline\"):\n        print(f\"ALERT: Instance {instance['id']} may have been preempted\")\n        # Trigger: auto-recovery, provision replacement\n\n# Wire up handlers\npoller = InstanceEventPoller(api_key)\npoller.on(\"loading_to_running\", on_instance_running)\npoller.on(\"running_to_exited\", on_instance_exited)\npoller.on(\"any_change\", on_spot_preemption)\npoller.run()\n```\n\n### Step 3: Auto-Recovery on Preemption\n\n```python\ndef auto_recover(instance, old_status, new_status):\n    \"\"\"Automatically replace preempted instances.\"\"\"\n    if old_status != \"running\" or new_status not in (\"exited\", \"offline\", \"error\"):\n        return\n\n    gpu_name = instance.get(\"gpu_name\", \"RTX_4090\")\n    image = instance.get(\"image_uuid\", \"pytorch/pytorch:latest\")\n\n    print(f\"Auto-recovering {instance['id']} ({gpu_name})...\")\n\n    # Search for replacement\n    offers = json.loads(subprocess.run(\n        [\"vastai\", \"search\", \"offers\",\n         f\"gpu_name={gpu_name} reliability>0.98 rentable=true\",\n         \"--order\", \"dph_total\", \"--raw\", \"--limit\", \"3\"],\n        capture_output=True, text=True, check=True).stdout)\n\n    if offers:\n        new_id = json.loads(subprocess.run(\n            [\"vastai\", \"create\", \"instance\", str(offers[0][\"id\"]),\n             \"--image\", image, \"--disk\", \"50\", \"--raw\"],\n            capture_output=True, text=True, check=True).stdout)[\"new_contract\"]\n        print(f\"Replacement instance: {new_id}\")\n```\n\n### Step 4: Cost Event Tracking\n\n```python\ndef track_costs(instance, old_status, new_status):\n    \"\"\"Log cost events for billing tracking.\"\"\"\n    if new_status == \"running\":\n        print(f\"BILLING START: Instance {instance['id']} \"\n              f\"at ${instance.get('dph_total', 0):.3f}/hr\")\n    elif old_status == \"running\":\n        print(f\"BILLING STOP: Instance {instance['id']}\")\n```\n\n## Output\n\n- Polling-based event detection for instance status changes\n- Event handlers for running, exited, preempted states\n- Auto-recovery on spot preemption\n- Cost tracking event logger\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Missed status transition | Poll interval too long | Reduce to 15-30s for critical instances |\n| False preemption alert | Instance restarted intentionally | Track expected state changes |\n| Auto-recovery loops | Same host keeps failing | Exclude failed host IDs from search |\n| API timeout during poll | Network or rate limiting | Retry with backoff; continue polling |\n\n## Resources\n\n- [Vast.ai REST API](https://vast.ai/developers/api)\n- [Instance Management](https://docs.vast.ai/api-reference/instances/create-instance)\n\n## Next Steps\n\nFor performance optimization, see `vastai-performance-tuning`.\n\n## Examples\n\n**Slack notifications**: Wire `on_instance_running` to send a Slack message with SSH connection details. Wire `on_spot_preemption` to alert the team.\n\n**Training monitor**: Track `running_to_exited` events. If exit was expected (job complete), collect results. If unexpected, trigger auto-recovery with checkpoint resume.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "vastai-webhooks-events",
-    "description": "Build event-driven workflows around Vast.ai instance lifecycle events.",
-    "allowed-tools": "Read, Write, Edit, Bash(vastai:*), Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

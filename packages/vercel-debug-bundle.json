@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033491",
   "name": "vercel-debug-bundle",
   "slug": "vercel-debug-bundle",
   "description": "Collect Vercel debug evidence for support tickets and troubleshooting.",
   "content": "# Vercel Debug Bundle\n\n## Overview\n\nCollect a comprehensive debug bundle containing deployment state, function logs, environment configuration, and build output for Vercel support escalation or team troubleshooting.\n\n## Current State\n\n!`vercel --version 2>/dev/null || echo 'Vercel CLI not installed'`\n!`node --version 2>/dev/null || echo 'Node.js N/A'`\n\n## Prerequisites\n\n- Vercel CLI installed and authenticated\n- Access to the affected deployment\n- `jq` for JSON processing (recommended)\n\n## Instructions\n\n### Step 1: Collect Deployment Information\n\n```bash\n#!/usr/bin/env bash\nset -euo pipefail\n\nDEPLOY_URL=\"${1:-$(vercel ls --json 2>/dev/null | jq -r '.[0].url')}\"\nBUNDLE_DIR=\"vercel-debug-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE_DIR\"\n\necho \"=== Collecting debug bundle for: $DEPLOY_URL ===\"\n\n# Deployment inspection\nvercel inspect \"$DEPLOY_URL\" > \"$BUNDLE_DIR/inspect.txt\" 2>&1 || true\n\n# Deployment details via API\ncurl -s -H \"Authorization: Bearer $VERCEL_TOKEN\" \\\n  \"https://api.vercel.com/v13/deployments/$DEPLOY_URL\" \\\n  | jq '{uid, name, state, target, readyState, errorMessage, meta, regions}' \\\n  > \"$BUNDLE_DIR/deployment.json\" 2>/dev/null || true\n```\n\n### Step 2: Collect Function Logs\n\n```bash\n# Recent function logs (last 100 entries)\nvercel logs \"$DEPLOY_URL\" --output=short --limit=100 \\\n  > \"$BUNDLE_DIR/function-logs.txt\" 2>&1 || true\n\n# Function logs via API with filtering\ncurl -s -H \"Authorization: Bearer $VERCEL_TOKEN\" \\\n  \"https://api.vercel.com/v2/deployments/$DEPLOY_URL/events?limit=100&direction=backward\" \\\n  | jq '.[] | {timestamp: .created, type, text}' \\\n  > \"$BUNDLE_DIR/events.json\" 2>/dev/null || true\n```\n\n### Step 3: Collect Build Output\n\n```bash\n# Build logs\ncurl -s -H \"Authorization: Bearer $VERCEL_TOKEN\" \\\n  \"https://api.vercel.com/v13/deployments/$DEPLOY_URL\" \\\n  | jq '.build' > \"$BUNDLE_DIR/build-info.json\" 2>/dev/null || true\n\n# List all functions in the deployment\ncurl -s -H \"Authorization: Bearer $VERCEL_TOKEN\" \\\n  \"https://api.vercel.com/v13/deployments/$DEPLOY_URL\" \\\n  | jq '.routes, .functions' > \"$BUNDLE_DIR/routes-functions.json\" 2>/dev/null || true\n```\n\n### Step 4: Collect Environment State (Redacted)\n\n```bash\n# Environment variable names only (no values)\nvercel env ls > \"$BUNDLE_DIR/env-vars-list.txt\" 2>&1 || true\n\n# Project configuration (redacted)\nif [ -f \"vercel.json\" ]; then\n  cp vercel.json \"$BUNDLE_DIR/vercel.json\"\nfi\n\n# Package versions\nif [ -f \"package.json\" ]; then\n  jq '{name, version, dependencies, devDependencies, engines}' package.json \\\n    > \"$BUNDLE_DIR/package-summary.json\" 2>/dev/null || true\nfi\n\n# Node.js and CLI versions\n{\n  echo \"node: $(node --version 2>/dev/null || echo 'N/A')\"\n  echo \"npm: $(npm --version 2>/dev/null || echo 'N/A')\"\n  echo \"vercel: $(vercel --version 2>/dev/null || echo 'N/A')\"\n  echo \"os: $(uname -a)\"\n  echo \"date: $(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n} > \"$BUNDLE_DIR/environment.txt\"\n```\n\n### Step 5: Check Vercel Status Page\n\n```bash\n# Vercel platform status\ncurl -s \"https://www.vercel-status.com/api/v2/summary.json\" \\\n  | jq '{status: .status.description, components: [.components[] | {name, status}]}' \\\n  > \"$BUNDLE_DIR/platform-status.json\" 2>/dev/null || true\n```\n\n### Step 6: Package the Bundle\n\n```bash\n# Create archive \u2014 excludes secrets\ntar czf \"${BUNDLE_DIR}.tar.gz\" \"$BUNDLE_DIR\"\necho \"Debug bundle created: ${BUNDLE_DIR}.tar.gz\"\necho \"Contents:\"\nls -la \"$BUNDLE_DIR\"/\n```\n\n## Bundle Contents Reference\n\n| File | Contents |\n|------|----------|\n| `inspect.txt` | Deployment inspection output |\n| `deployment.json` | Deployment state, target, errors |\n| `function-logs.txt` | Recent function invocation logs |\n| `events.json` | Deployment event timeline |\n| `build-info.json` | Build configuration and output |\n| `routes-functions.json` | Route and function mapping |\n| `env-vars-list.txt` | Environment variable names (no values) |\n| `vercel.json` | Project configuration |\n| `package-summary.json` | Dependencies and versions |\n| `environment.txt` | System info (Node, CLI, OS) |\n| `platform-status.json` | Vercel platform status at time of capture |\n\n## Support Ticket Template\n\n```\nSubject: [Project: my-app] FUNCTION_INVOCATION_TIMEOUT on /api/endpoint\n\nEnvironment:\n- Plan: Pro\n- Framework: Next.js 14\n- Region: iad1\n- Node.js: 18.x\n\nIssue:\n[Describe the error, when it started, and the user impact]\n\nSteps to Reproduce:\n1. Deploy commit abc123\n2. Send POST to /api/endpoint with body > 1MB\n3. Function times out after 60s\n\nExpected: 200 response within 5s\nActual: 504 after 60s\n\nDeployment URL: https://my-app-xxx.vercel.app\nDebug bundle: [attached]\n```\n\n## Output\n\n- `vercel-debug-YYYYMMDD-HHMMSS.tar.gz` archive\n- All secrets redacted (env var values never captured)\n- Platform status snapshot included\n- Ready to attach to Vercel support ticket\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `vercel inspect` fails | Deployment deleted or token expired | Use API directly with curl |\n| `jq: command not found` | jq not installed | `apt install jq` or `brew install jq` |\n| Empty function logs | Function not invoked or log retention expired | Check Observability tab in dashboard |\n| VERCEL_TOKEN not set | Not authenticated for API calls | Export token or run `vercel login` |\n\n## Resources\n\n- [Vercel Support Portal](https://vercel.com/support)\n- [Vercel Logs CLI](https://vercel.com/docs/cli/logs)\n- [Vercel Inspect CLI](https://vercel.com/docs/cli/inspect)\n- [Vercel Status Page](https://www.vercel-status.com)\n\n## Next Steps\n\nFor rate limit issues, see `vercel-rate-limits`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "vercel-debug-bundle",
-    "description": "Collect Vercel debug evidence for support tickets and troubleshooting.",
-    "allowed-tools": "Read, Bash(vercel:*), Bash(curl:*), Bash(tar:*), Bash(jq:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

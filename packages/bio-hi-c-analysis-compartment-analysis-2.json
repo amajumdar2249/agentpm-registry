@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000029382",
   "name": "bio-hi-c-analysis-compartment-analysis",
   "slug": "bio-hi-c-analysis-compartment-analysis-2",
   "description": "Detect A/B compartments from Hi-C data using cooltools and eigenvector decomposition. Identify active (A) and inactive (B) chromatin compartments from contact matrices. Use when identifying A/B compartments from Hi-C data.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: cooler 0.9+, cooltools 0.6+, matplotlib 3.8+, numpy 1.26+, pandas 2.2+, scipy 1.12+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Compartment Analysis\n\n**\"Identify A/B compartments from my Hi-C data\"** \u2192 Decompose the contact matrix via eigenvector analysis to classify chromatin into active (A) and inactive (B) compartments.\n- Python: `cooltools.eigs_cis(clr, gc_cov)` for eigenvector decomposition\n\nDetect A/B compartments from Hi-C contact matrices.\n\n## Required Imports\n\n```python\nimport cooler\nimport cooltools\nimport cooltools.lib.plotting\nimport numpy as np\nimport pandas as pd\nimport matplotlib.pyplot as plt\nimport bioframe\n```\n\n## Compute Compartment Eigenvectors\n\n```python\nclr = cooler.Cooler('matrix.mcool::resolutions/100000')\n\n# Get reference genome info\nview_df = bioframe.make_viewframe(clr.chromsizes)\n\n# Compute expected values first\nexpected = cooltools.expected_cis(clr, view_df=view_df, ignore_diags=2)\n\n# Compute eigenvector decomposition (compartments)\neigenvector_track = cooltools.eigs_cis(\n    clr,\n    view_df=view_df,\n    phasing_track=None,  # Or provide GC content track\n    n_eigs=3,\n)\n\n# Results are returned as a tuple (eigenvalues, eigenvectors)\neigenvalues, eigenvectors = eigenvector_track\nprint(f'Eigenvalues shape: {eigenvalues.shape}')\nprint(eigenvectors.head())\n```\n\n## Use GC Content for Phasing\n\n```python\n# GC content helps orient A/B compartments correctly\n# (A compartments typically have higher GC)\n\n# Fetch GC content\ngc_track = bioframe.frac_gc(\n    bioframe.make_viewframe(clr.chromsizes),\n    bioframe.load_fasta('genome.fa'),\n)\n\n# Compute eigenvectors with GC phasing\neigenvalues, eigenvectors = cooltools.eigs_cis(\n    clr,\n    view_df=view_df,\n    phasing_track=gc_track,\n    n_eigs=1,\n)\n```\n\n## Extract Compartment Calls\n\n```python\n# E1 (first eigenvector) defines compartments\n# Positive = A (active), Negative = B (inactive)\n\neigenvectors['compartment'] = np.where(eigenvectors['E1'] > 0, 'A', 'B')\nprint(eigenvectors[['chrom', 'start', 'end', 'E1', 'compartment']].head(20))\n\n# Count compartments\nprint(eigenvectors['compartment'].value_counts())\n```\n\n## Compartment Strength (Saddle Plot)\n\n```python\n# Compute saddle plot to quantify compartmentalization strength\nsaddle_data = cooltools.saddle(\n    clr,\n    expected=expected,\n    eigenvector_track=eigenvectors,\n    view_df=view_df,\n    n_bins=50,\n    vrange=(-0.5, 0.5),\n)\n\n# saddle_data contains: (saddledata, binedges)\n# saddledata is the saddle matrix\nsaddle_matrix = saddle_data[0]\nprint(f'Saddle matrix shape: {saddle_matrix.shape}')\n```\n\n## Plot Saddle\n\n```python\nfig, ax = plt.subplots(figsize=(6, 6))\n\n# Get saddle matrix (aggregate over chromosomes)\nsaddle_agg = np.nanmean(saddle_data[0], axis=0)\n\nim = ax.imshow(saddle_agg, cmap='coolwarm', vmin=-1, vmax=1)\nax.set_xlabel('E1 (compartment)')\nax.set_ylabel('E1 (compartment)')\nax.set_title('Saddle plot')\nplt.colorbar(im, ax=ax, label='log2(O/E)')\n\n# Mark A and B regions\nn = saddle_agg.shape[0]\nax.axhline(n/2, color='k', linewidth=0.5)\nax.axvline(n/2, color='k', linewidth=0.5)\nax.text(n*0.25, n*0.25, 'B-B', ha='center', va='center', fontsize=12)\nax.text(n*0.75, n*0.75, 'A-A', ha='center', va='center', fontsize=12)\nax.text(n*0.25, n*0.75, 'B-A', ha='center', va='center', fontsize=12)\nax.text(n*0.75, n*0.25, 'A-B', ha='center', va='center', fontsize=12)\n\nplt.savefig('saddle_plot.png', dpi=150)\n```\n\n## Compartment Strength Score\n\n**Goal:** Quantify the degree of compartmentalization by measuring the enrichment of A-A and B-B contacts relative to A-B contacts.\n\n**Approach:** Partition the saddle matrix into four quadrants (AA, BB, AB, BA) and compute the difference between same-compartment and cross-compartment average contact enrichment.\n\n```python\n# Compute compartment strength from saddle\ndef compartment_strength(saddle_matrix):\n    n = saddle_matrix.shape[0]\n    half = n // 2\n\n    # AA and BB corners\n    AA = np.nanmean(saddle_matrix[half:, half:])\n    BB = np.nanmean(saddle_matrix[:half, :half])\n    AB = np.nanmean(saddle_matrix[:half, half:])\n    BA = np.nanmean(saddle_matrix[half:, :half])\n\n    # Compartment strength = (AA + BB) / (AB + BA)\n    strength = (AA + BB) / 2 - (AB + BA) / 2\n    return strength\n\nstrength = compartment_strength(saddle_agg)\nprint(f'Compartment strength: {strength:.3f}')\n```\n\n## Plot Eigenvector Track\n\n```python\nfig, ax = plt.subplots(figsize=(15, 3))\n\n# Plot for one chromosome\nchr_data = eigenvectors[eigenvectors['chrom'] == 'chr1']\n\n# Color by compartment\ncolors = ['red' if e > 0 else 'blue' for e in chr_data['E1']]\nax.bar(chr_data['start'] / 1e6, chr_data['E1'], width=0.1, color=colors)\n\nax.axhline(0, color='k', linewidth=0.5)\nax.set_xlabel('Position (Mb)')\nax.set_ylabel('E1 (compartment)')\nax.set_title('chr1 compartments (red=A, blue=B)')\n\nplt.tight_layout()\nplt.savefig('compartment_track.png', dpi=150)\n```\n\n## Export Compartment Calls\n\n```python\n# Save as BED file\ncompartment_bed = eigenvectors[['chrom', 'start', 'end', 'E1', 'compartment']].copy()\ncompartment_bed.to_csv('compartments.bed', sep='\\t', index=False, header=False)\n\n# Save as bedGraph\neigenvectors[['chrom', 'start', 'end', 'E1']].to_csv(\n    'compartment_eigenvector.bedgraph',\n    sep='\\t',\n    index=False,\n    header=False\n)\n```\n\n## Compare Compartments Between Samples\n\n**Goal:** Identify genomic regions that switch between A and B compartments across two experimental conditions.\n\n**Approach:** Compute eigenvectors for both samples, correlate E1 values genome-wide, and flag bins where the sign of E1 flips between conditions.\n\n```python\n# Load two samples\nclr1 = cooler.Cooler('sample1.mcool::resolutions/100000')\nclr2 = cooler.Cooler('sample2.mcool::resolutions/100000')\n\n# Compute eigenvectors for both\n_, eig1 = cooltools.eigs_cis(clr1, view_df=view_df, n_eigs=1)\n_, eig2 = cooltools.eigs_cis(clr2, view_df=view_df, n_eigs=1)\n\n# Merge and compare\nmerged = eig1.merge(eig2, on=['chrom', 'start', 'end'], suffixes=('_1', '_2'))\n\n# Correlation\nfrom scipy.stats import pearsonr\nr, p = pearsonr(merged['E1_1'].dropna(), merged['E1_2'].dropna())\nprint(f'E1 correlation: r={r:.3f}, p={p:.2e}')\n\n# Compartment switches\nmerged['switch'] = (merged['E1_1'] > 0) != (merged['E1_2'] > 0)\nprint(f'Compartment switches: {merged[\"switch\"].sum()} bins')\n```\n\n## Correlate with Gene Expression\n\n```python\n# Load gene expression data\n# Assume: gene_expr with columns ['chrom', 'start', 'end', 'expression']\n\n# Bin genes into compartment bins\ncompartment_expr = eigenvectors.merge(\n    gene_expr,\n    on=['chrom'],\n    how='left'\n)\ncompartment_expr = compartment_expr[\n    (compartment_expr['start_y'] >= compartment_expr['start_x']) &\n    (compartment_expr['start_y'] < compartment_expr['end_x'])\n]\n\n# Compare expression in A vs B\na_expr = compartment_expr[compartment_expr['compartment'] == 'A']['expression']\nb_expr = compartment_expr[compartment_expr['compartment'] == 'B']['expression']\n\nprint(f'A compartment expression: {a_expr.mean():.2f}')\nprint(f'B compartment expression: {b_expr.mean():.2f}')\n```\n\n## Related Skills\n\n- matrix-operations - Prepare matrices for compartment analysis\n- hic-visualization - Visualize compartments\n- chip-seq - Correlate with histone marks\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-hi-c-analysis-compartment-analysis",
-    "description": "Detect A/B compartments from Hi-C data using cooltools and eigenvector decomposition. Identify active (A) and inactive (B) chromatin compartments from contact matrices. Use when identifying A/B compartments from Hi-C data.",
-    "tool_type": "python",
-    "primary_tool": "cooltools"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

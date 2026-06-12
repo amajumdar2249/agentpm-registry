@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031582",
   "name": "clickhouse-observability",
   "slug": "clickhouse-observability",
   "description": "Monitor ClickHouse with Prometheus metrics, Grafana dashboards, system",
   "content": "# ClickHouse Observability\n\n## Overview\n\nSet up comprehensive monitoring for ClickHouse using built-in system tables,\nPrometheus integration, Grafana dashboards, and alerting rules.\n\n## Prerequisites\n\n- ClickHouse instance with `system.*` table access\n- Prometheus (or compatible: Grafana Alloy, Victoria Metrics)\n- Grafana for dashboards\n- AlertManager or PagerDuty for alerts\n\n## Instructions\n\n### Step 1: Key Metrics from System Tables\n\n```sql\n-- Real-time server health snapshot\nSELECT\n    (SELECT count() FROM system.processes) AS running_queries,\n    (SELECT value FROM system.metrics WHERE metric = 'MemoryTracking') AS memory_bytes,\n    (SELECT value FROM system.metrics WHERE metric = 'Query') AS concurrent_queries,\n    (SELECT count() FROM system.merges) AS active_merges,\n    (SELECT value FROM system.asynchronous_metrics WHERE metric = 'Uptime') AS uptime_sec;\n\n-- Query throughput (last hour, per minute)\nSELECT\n    toStartOfMinute(event_time) AS minute,\n    count() AS queries,\n    countIf(exception_code != 0) AS errors,\n    round(avg(query_duration_ms)) AS avg_ms,\n    round(quantile(0.95)(query_duration_ms)) AS p95_ms,\n    formatReadableSize(sum(read_bytes)) AS total_read\nFROM system.query_log\nWHERE type IN ('QueryFinish', 'ExceptionWhileProcessing')\n  AND event_time >= now() - INTERVAL 1 HOUR\nGROUP BY minute ORDER BY minute;\n\n-- Insert throughput (last hour)\nSELECT\n    toStartOfMinute(event_time) AS minute,\n    count() AS inserts,\n    sum(written_rows) AS rows_written,\n    formatReadableSize(sum(written_bytes)) AS bytes_written\nFROM system.query_log\nWHERE type = 'QueryFinish' AND query_kind = 'Insert'\n  AND event_time >= now() - INTERVAL 1 HOUR\nGROUP BY minute ORDER BY minute;\n\n-- Part count per table (merge health indicator)\nSELECT database, table, count() AS parts, sum(rows) AS rows,\n       formatReadableSize(sum(bytes_on_disk)) AS size\nFROM system.parts WHERE active\nGROUP BY database, table\nHAVING parts > 50\nORDER BY parts DESC;\n```\n\n### Step 2: Prometheus Integration\n\n**ClickHouse Cloud** exposes a managed Prometheus endpoint:\n\n```yaml\n# prometheus.yml\nscrape_configs:\n  - job_name: clickhouse-cloud\n    metrics_path: /v1/organizations/<ORG_ID>/prometheus\n    basic_auth:\n      username: <API_KEY_ID>\n      password: <API_KEY_SECRET>\n    static_configs:\n      - targets: ['api.clickhouse.cloud']\n    params:\n      filtered_metrics: ['true']   # 125 critical metrics only\n```\n\n**Self-hosted** \u2014 use clickhouse-exporter or built-in metrics endpoint:\n\n```yaml\n# prometheus.yml\nscrape_configs:\n  - job_name: clickhouse\n    static_configs:\n      - targets: ['clickhouse-server:9363']  # Built-in Prometheus endpoint\n    metrics_path: /metrics\n```\n\n```xml\n<!-- Enable Prometheus endpoint in config.xml -->\n<prometheus>\n    <endpoint>/metrics</endpoint>\n    <port>9363</port>\n    <metrics>true</metrics>\n    <events>true</events>\n    <asynchronous_metrics>true</asynchronous_metrics>\n</prometheus>\n```\n\n### Step 3: Application-Level Metrics\n\n```typescript\nimport { Registry, Counter, Histogram, Gauge } from 'prom-client';\n\nconst registry = new Registry();\n\nconst queryDuration = new Histogram({\n  name: 'clickhouse_query_duration_seconds',\n  help: 'ClickHouse query duration',\n  labelNames: ['query_type', 'status'],\n  buckets: [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],\n  registers: [registry],\n});\n\nconst queryErrors = new Counter({\n  name: 'clickhouse_query_errors_total',\n  help: 'ClickHouse query errors',\n  labelNames: ['error_code'],\n  registers: [registry],\n});\n\nconst insertRows = new Counter({\n  name: 'clickhouse_insert_rows_total',\n  help: 'Total rows inserted into ClickHouse',\n  labelNames: ['table'],\n  registers: [registry],\n});\n\n// Instrumented query wrapper\nasync function instrumentedQuery<T>(\n  queryType: string,\n  fn: () => Promise<T>,\n): Promise<T> {\n  const timer = queryDuration.startTimer({ query_type: queryType });\n  try {\n    const result = await fn();\n    timer({ status: 'success' });\n    return result;\n  } catch (err: any) {\n    timer({ status: 'error' });\n    queryErrors.inc({ error_code: err.code ?? 'unknown' });\n    throw err;\n  }\n}\n\n// Expose /metrics endpoint\napp.get('/metrics', async (req, res) => {\n  res.set('Content-Type', registry.contentType);\n  res.send(await registry.metrics());\n});\n```\n\n### Step 4: Grafana Dashboard Panels\n\n```json\n{\n  \"panels\": [\n    {\n      \"title\": \"Query Rate (QPS)\",\n      \"type\": \"timeseries\",\n      \"targets\": [{ \"expr\": \"rate(clickhouse_query_duration_seconds_count[5m])\" }]\n    },\n    {\n      \"title\": \"Query Latency P50 / P95 / P99\",\n      \"type\": \"timeseries\",\n      \"targets\": [\n        { \"expr\": \"histogram_quantile(0.5, rate(clickhouse_query_duration_seconds_bucket[5m]))\" },\n        { \"expr\": \"histogram_quantile(0.95, rate(clickhouse_query_duration_seconds_bucket[5m]))\" },\n        { \"expr\": \"histogram_quantile(0.99, rate(clickhouse_query_duration_seconds_bucket[5m]))\" }\n      ]\n    },\n    {\n      \"title\": \"Error Rate\",\n      \"type\": \"stat\",\n      \"targets\": [{\n        \"expr\": \"rate(clickhouse_query_errors_total[5m]) / rate(clickhouse_query_duration_seconds_count[5m])\"\n      }]\n    },\n    {\n      \"title\": \"Insert Throughput (rows/sec)\",\n      \"type\": \"timeseries\",\n      \"targets\": [{ \"expr\": \"rate(clickhouse_insert_rows_total[5m])\" }]\n    }\n  ]\n}\n```\n\nImport the official ClickHouse Grafana dashboard: `https://grafana.com/grafana/dashboards/23415`\n\n### Step 5: Alert Rules\n\n```yaml\n# clickhouse-alerts.yml\ngroups:\n  - name: clickhouse\n    rules:\n      - alert: ClickHouseHighErrorRate\n        expr: |\n          rate(clickhouse_query_errors_total[5m]) /\n          rate(clickhouse_query_duration_seconds_count[5m]) > 0.05\n        for: 5m\n        labels:\n          severity: warning\n        annotations:\n          summary: \"ClickHouse error rate > 5%\"\n\n      - alert: ClickHouseHighLatency\n        expr: |\n          histogram_quantile(0.95,\n            rate(clickhouse_query_duration_seconds_bucket[5m])) > 5\n        for: 5m\n        labels:\n          severity: warning\n        annotations:\n          summary: \"ClickHouse P95 latency > 5 seconds\"\n\n      - alert: ClickHouseTooManyParts\n        expr: clickhouse_table_parts > 300\n        for: 10m\n        labels:\n          severity: critical\n        annotations:\n          summary: \"Table has > 300 active parts \u2014 merges falling behind\"\n\n      - alert: ClickHouseMemoryHigh\n        expr: clickhouse_server_memory_usage / clickhouse_server_memory_limit > 0.9\n        for: 5m\n        labels:\n          severity: critical\n        annotations:\n          summary: \"ClickHouse memory usage > 90%\"\n\n      - alert: ClickHouseDiskLow\n        expr: clickhouse_disk_free_bytes / clickhouse_disk_total_bytes < 0.15\n        for: 10m\n        labels:\n          severity: critical\n        annotations:\n          summary: \"ClickHouse disk space < 15% free\"\n```\n\n### Step 6: Structured Logging\n\n```typescript\nimport pino from 'pino';\n\nconst logger = pino({ name: 'clickhouse' });\n\n// Log query performance for analysis\nfunction logQuery(queryType: string, durationMs: number, rowsRead: number) {\n  logger.info({\n    service: 'clickhouse',\n    query_type: queryType,\n    duration_ms: durationMs,\n    rows_read: rowsRead,\n    status: durationMs > 5000 ? 'slow' : 'ok',\n  });\n}\n```\n\n## Key System Tables for Monitoring\n\n| Table | What to Monitor | Frequency |\n|-------|-----------------|-----------|\n| `system.processes` | Running queries, memory usage | Every 10s |\n| `system.query_log` | Query performance history | Every 1m |\n| `system.parts` | Part count, merge health | Every 1m |\n| `system.merges` | Active merge progress | Every 30s |\n| `system.metrics` | Server-wide gauges (connections, memory) | Every 10s |\n| `system.events` | Cumulative counters | Every 1m |\n| `system.replicas` | Replication lag | Every 30s |\n| `system.disks` | Disk space | Every 5m |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Metrics endpoint empty | Prometheus not configured | Enable `/metrics` in config |\n| High cardinality alerts | Too many label values | Reduce label cardinality |\n| Missing query_log data | Logging disabled | Set `log_queries = 1` in config |\n| Dashboard gaps | Scrape interval too long | Use 10-15s scrape interval |\n\n## Resources\n\n- [Prometheus Integration](https://clickhouse.com/docs/integrations/prometheus)\n- [ClickHouse Grafana Dashboard](https://grafana.com/grafana/dashboards/23415)\n- [System Tables Reference](https://clickhouse.com/docs/operations/system-tables)\n- [Cloud Monitoring](https://clickhouse.com/blog/clickhouse-cloud-now-supports-prometheus-monitoring)\n\n## Next Steps\n\nFor incident response, see `clickhouse-incident-runbook`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clickhouse-observability",
-    "description": "Monitor ClickHouse with Prometheus metrics, Grafana dashboards, system",
-    "Trigger": "clickhouse monitoring\", \"clickhouse metrics\", \"clickhouse Grafana\",",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

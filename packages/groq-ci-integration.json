@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032184",
   "name": "groq-ci-integration",
   "slug": "groq-ci-integration",
   "description": "Configure Groq CI/CD integration with GitHub Actions, testing, and model",
   "content": "# Groq CI Integration\n\n## Overview\n\nSet up CI/CD pipelines for Groq integrations with unit tests (mocked), integration tests (live API), and model deprecation checks. Groq's fast inference makes live integration tests practical in CI -- a completion round-trip takes < 500ms.\n\n## Prerequisites\n\n- GitHub repository with Actions enabled\n- Groq API key stored as GitHub secret\n- vitest or jest for testing\n\n## Instructions\n\n### Step 1: GitHub Actions Workflow\n\n```yaml\n# .github/workflows/groq-tests.yml\nname: Groq Integration Tests\n\non:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n  schedule:\n    - cron: \"0 6 * * 1\"  # Weekly model deprecation check\n\njobs:\n  unit-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: \"20\"\n          cache: \"npm\"\n      - run: npm ci\n      - run: npm test -- --coverage\n        # Unit tests use mocked groq-sdk -- no API key needed\n\n  integration-tests:\n    runs-on: ubuntu-latest\n    if: github.event_name != 'pull_request'  # Only on push to main\n    env:\n      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: \"20\"\n          cache: \"npm\"\n      - run: npm ci\n      - name: Run Groq integration tests\n        run: GROQ_INTEGRATION=1 npx vitest tests/groq.integration.ts --reporter=verbose\n        timeout-minutes: 2\n\n  model-check:\n    runs-on: ubuntu-latest\n    env:\n      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}\n    steps:\n      - uses: actions/checkout@v4\n      - name: Check for deprecated models\n        run: |\n          set -euo pipefail\n          # Get current models from Groq API\n          MODELS=$(curl -sf https://api.groq.com/openai/v1/models \\\n            -H \"Authorization: Bearer $GROQ_API_KEY\" | jq -r '.data[].id')\n\n          # Check our code references valid models\n          USED=$(grep -roh \"model.*['\\\"].*['\\\"]\" src/ --include=\"*.ts\" | \\\n            grep -oP \"(?<=['\\\"])[\\w./-]+(?=['\\\"])\" | sort -u)\n\n          echo \"=== Models in our code ===\"\n          echo \"$USED\"\n          echo \"\"\n          echo \"=== Available on Groq ===\"\n          echo \"$MODELS\"\n\n          # Flag any model in our code that's not in the API response\n          MISSING=\"\"\n          while IFS= read -r model; do\n            if ! echo \"$MODELS\" | grep -qF \"$model\"; then\n              MISSING=\"$MISSING\\n  - $model\"\n            fi\n          done <<< \"$USED\"\n\n          if [ -n \"$MISSING\" ]; then\n            echo \"WARNING: These models in code are not available on Groq:$MISSING\"\n            exit 1\n          fi\n          echo \"All models valid.\"\n```\n\n### Step 2: Configure Secrets\n\n```bash\n# Store Groq API key as GitHub secret\ngh secret set GROQ_API_KEY --body \"gsk_your_ci_key_here\"\n\n# Use a separate key for CI (easier to rotate, track usage)\n```\n\n### Step 3: Integration Test Suite\n\n```typescript\n// tests/groq.integration.ts\nimport { describe, it, expect } from \"vitest\";\nimport Groq from \"groq-sdk\";\n\nconst shouldRun = !!process.env.GROQ_INTEGRATION;\n\ndescribe.skipIf(!shouldRun)(\"Groq API Integration\", () => {\n  const groq = new Groq();\n\n  it(\"lists available models\", async () => {\n    const models = await groq.models.list();\n    expect(models.data.length).toBeGreaterThan(0);\n\n    const ids = models.data.map((m) => m.id);\n    expect(ids).toContain(\"llama-3.1-8b-instant\");\n    expect(ids).toContain(\"llama-3.3-70b-versatile\");\n  }, 10_000);\n\n  it(\"completes a chat request with 8B model\", async () => {\n    const result = await groq.chat.completions.create({\n      model: \"llama-3.1-8b-instant\",\n      messages: [{ role: \"user\", content: \"Reply with exactly one word: PONG\" }],\n      temperature: 0,\n      max_tokens: 10,\n    });\n\n    expect(result.choices[0].message.content).toContain(\"PONG\");\n    expect(result.usage?.total_tokens).toBeGreaterThan(0);\n  }, 10_000);\n\n  it(\"streams a response\", async () => {\n    const stream = await groq.chat.completions.create({\n      model: \"llama-3.1-8b-instant\",\n      messages: [{ role: \"user\", content: \"Count from 1 to 5.\" }],\n      stream: true,\n      max_tokens: 50,\n    });\n\n    let content = \"\";\n    for await (const chunk of stream) {\n      content += chunk.choices[0]?.delta?.content || \"\";\n    }\n\n    expect(content).toContain(\"1\");\n    expect(content).toContain(\"5\");\n  }, 10_000);\n\n  it(\"returns JSON mode output\", async () => {\n    const result = await groq.chat.completions.create({\n      model: \"llama-3.1-8b-instant\",\n      messages: [\n        { role: \"system\", content: \"Respond with JSON: {\\\"status\\\": \\\"ok\\\"}\" },\n        { role: \"user\", content: \"Health check\" },\n      ],\n      response_format: { type: \"json_object\" },\n      temperature: 0,\n      max_tokens: 50,\n    });\n\n    const parsed = JSON.parse(result.choices[0].message.content!);\n    expect(parsed).toHaveProperty(\"status\");\n  }, 10_000);\n});\n```\n\n### Step 4: Release Workflow\n\n```yaml\n# .github/workflows/release.yml\non:\n  push:\n    tags: [\"v*\"]\n\njobs:\n  release:\n    runs-on: ubuntu-latest\n    env:\n      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY_PROD }}\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: \"20\"\n      - run: npm ci\n      - run: npm test\n      - name: Verify Groq API in production\n        run: GROQ_INTEGRATION=1 npx vitest tests/groq.integration.ts\n      - run: npm run build\n      - run: npm publish\n        env:\n          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}\n```\n\n## CI Best Practices\n\n- Mock `groq-sdk` in unit tests (no API key needed, no network)\n- Run integration tests only on `main` push (not PRs -- saves quota)\n- Use `llama-3.1-8b-instant` for CI tests (cheapest, fastest)\n- Set `max_tokens` low (5-50) in CI to minimize token usage\n- Add `timeout-minutes: 2` to prevent hung jobs\n- Schedule weekly model deprecation checks\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Secret not found | `GROQ_API_KEY` not configured | `gh secret set GROQ_API_KEY` |\n| Integration test timeout | Network issue or rate limit | Increase timeout, add retry |\n| Model check fails | Model deprecated | Update model ID in source code |\n| Flaky tests | Rate limiting in CI | Add backoff, run integration tests less often |\n\n## Resources\n\n- [GitHub Actions Docs](https://docs.github.com/en/actions)\n- [Groq API Reference](https://console.groq.com/docs/api-reference)\n- [Groq Model Deprecations](https://console.groq.com/docs/deprecations)\n\n## Next Steps\n\nFor deployment patterns, see `groq-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "groq-ci-integration",
-    "description": "Configure Groq CI/CD integration with GitHub Actions, testing, and model",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033408",
   "name": "together-reference-architecture",
   "slug": "together-reference-architecture",
   "description": "Together AI reference architecture for inference, fine-tuning, and model",
   "content": "# Together AI Reference Architecture\n\n## Overview\n\nProduction architecture for AI inference, fine-tuning, and batch processing with Together AI's OpenAI-compatible API. Designed for teams routing requests across 100+ open-source models (Llama, Mixtral, Qwen, FLUX) with intelligent model selection, response caching, fine-tune pipeline management, and cost optimization via batch inference at 50% discount. Key design drivers: model routing for cost/quality tradeoffs, inference caching for repeated queries, fine-tune lifecycle management, and graceful degradation across model providers.\n\n## Architecture Diagram\n\n```\nApplication \u2500\u2500\u2192 Model Router \u2500\u2500\u2192 Cache (Redis) \u2500\u2500\u2192 Together API (v1)\n                    \u2193                                /chat/completions\n               Queue (Bull) \u2500\u2500\u2192 Batch Worker         /completions\n                    \u2193                                /images/generations\n               Fine-Tune Manager \u2500\u2500\u2192 Together API    /fine-tunes\n                    \u2193                                /models\n               Cost Tracker \u2500\u2500\u2192 Analytics Dashboard\n```\n\n## Service Layer\n\n```typescript\nclass InferenceService {\n  constructor(private together: TogetherClient, private cache: CacheLayer, private router: ModelRouter) {}\n\n  async complete(request: InferenceRequest): Promise<InferenceResponse> {\n    const model = this.router.selectModel(request.task, request.priority);\n    const cacheKey = `inference:${model}:${this.hashPrompt(request.prompt)}`;\n    const cached = await this.cache.get(cacheKey);\n    if (cached && request.allowCached) return cached;\n    const response = await this.together.chatCompletions({ model, messages: request.messages, temperature: request.temperature ?? 0.7 });\n    await this.cache.set(cacheKey, response, CACHE_CONFIG.inference.ttl);\n    await this.costTracker.record(model, response.usage);\n    return response;\n  }\n\n  async submitBatch(requests: InferenceRequest[]): Promise<string> {\n    const batchId = await this.together.createBatch(requests.map(r => ({\n      model: this.router.selectModel(r.task, 'batch'), messages: r.messages })));\n    return batchId;  // 50% cost reduction for batch processing\n  }\n}\n```\n\n## Caching Strategy\n\n```typescript\nconst CACHE_CONFIG = {\n  inference:   { ttl: 3600,  prefix: 'infer' },    // 1 hr \u2014 deterministic prompts (temp=0) cache well\n  embeddings:  { ttl: 86400, prefix: 'embed' },     // 24 hr \u2014 embeddings are stable for same input\n  modelList:   { ttl: 3600,  prefix: 'models' },    // 1 hr \u2014 available models change infrequently\n  fineTune:    { ttl: 60,    prefix: 'ft' },         // 1 min \u2014 training status needs near-real-time\n  batchStatus: { ttl: 30,    prefix: 'batch' },      // 30s \u2014 batch completion polling\n};\n// Cache only temp=0 responses by default; stochastic responses bypass cache unless explicitly opted in\n```\n\n## Event Pipeline\n\n```typescript\nclass InferencePipeline {\n  private queue = new Bull('together-events', { redis: process.env.REDIS_URL });\n\n  async onFineTuneComplete(event: FineTuneEvent): Promise<void> {\n    await this.queue.add('deploy-model', event, { attempts: 3, backoff: { type: 'exponential', delay: 5000 } });\n  }\n\n  async processFineTuneEvent(event: FineTuneEvent): Promise<void> {\n    if (event.status === 'completed') {\n      await this.router.registerModel(event.modelId, { task: event.task, cost: event.inferCostPerToken });\n      await this.runEvalSuite(event.modelId, event.evalDataset);\n    }\n    if (event.status === 'failed') await this.notifyTeam(event.error);\n  }\n\n  async processBatchComplete(batchId: string): Promise<void> {\n    const results = await this.together.getBatchResults(batchId);\n    await this.storeResults(results);\n    await this.costTracker.recordBatch(batchId, results.usage);\n  }\n}\n```\n\n## Data Model\n\n```typescript\ninterface InferenceRequest  { task: 'chat' | 'code' | 'embedding' | 'image'; messages: Message[]; prompt?: string; temperature?: number; priority: 'realtime' | 'standard' | 'batch'; allowCached?: boolean; }\ninterface ModelRoute         { modelId: string; task: string; costPerToken: number; latencyP50Ms: number; qualityScore: number; }\ninterface FineTuneJob        { id: string; baseModel: string; trainingFile: string; status: 'pending' | 'running' | 'completed' | 'failed'; epochs: number; learningRate: number; }\ninterface CostRecord         { model: string; promptTokens: number; completionTokens: number; costUsd: number; timestamp: string; }\n```\n\n## Scaling Considerations\n\n- Route low-priority requests to cheaper models (Llama 8B) and high-priority to larger models (Llama 70B, Mixtral)\n- Use batch API for non-interactive workloads \u2014 50% cost savings with acceptable latency tradeoff\n- Cache embeddings aggressively \u2014 identical text produces identical vectors, high cache hit rate\n- Monitor per-model cost and latency; auto-shift traffic when a model degrades or pricing changes\n- Fine-tune pipeline should use a separate API key with isolated rate limits from production inference\n\n## Error Handling\n\n| Component | Failure Mode | Recovery |\n|-----------|-------------|----------|\n| Inference request | Model overloaded (500) | Fallback to alternative model in same task category |\n| Rate limiting | 429 Too Many Requests | Token bucket with exponential backoff, queue overflow to batch |\n| Fine-tune job | Training divergence | Auto-stop on loss plateau, notify team with checkpoint artifacts |\n| Batch processing | Partial batch failure | Retry failed items individually, report partial results |\n| Model routing | Selected model deprecated | Auto-reroute to replacement model, alert team to update config |\n\n## Resources\n\n- [Together AI Docs](https://docs.together.ai/)\n- [API Reference](https://docs.together.ai/reference/chat-completions-1)\n- [Model List](https://docs.together.ai/docs/inference-models)\n\n## Next Steps\n\nSee `together-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "together-reference-architecture",
-    "description": "Together AI reference architecture for inference, fine-tuning, and model",
-    "Trigger": "together reference architecture\".",
-    "allowed-tools": "Read, Write, Edit, Bash(pip:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,15 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000010896",
   "name": "mux-video",
   "slug": "mux-video",
   "description": "Upload, manage, and embed videos via Mux. Covers direct uploads, API asset management, webhook event flow, playback embedding, and the Mux CLI. Use when uploading video, creating assets, checking encoding status, embedding playback, or handling Mux webhook events.",
   "content": "\n# Mux Video\n\nUpload, manage, and embed videos through Mux's API and CLI. Integrates with joelclaw's webhook infrastructure and Inngest event pipeline.\n\n## When to Use\n\nTriggers on: \"upload video to mux\", \"create mux asset\", \"embed mux video\", \"check video status\", \"mux playback\", \"direct upload\", \"video encoding\", \"mux webhook\", or any task involving video hosting via Mux.\n\n## Credentials\n\nStored in agent-secrets:\n- `mux_token_id` \u2014 API token ID\n- `mux_token_secret` \u2014 API token secret\n- `mux_signing_key_id` \u2014 URL signing key ID\n- `mux_signing_secret` \u2014 webhook signing secret (per-endpoint, HMAC)\n\nLease credentials:\n```bash\nsecrets lease mux_token_id\nsecrets lease mux_token_secret\n```\n\nOr use env vars `MUX_TOKEN_ID` and `MUX_TOKEN_SECRET`.\n\n## Core Operations\n\n### Create Asset from URL\n\nIngest a video from a public URL:\n```bash\ncurl https://api.mux.com/video/v1/assets \\\n  -X POST \\\n  -H \"Content-Type: application/json\" \\\n  -u ${MUX_TOKEN_ID}:${MUX_TOKEN_SECRET} \\\n  -d '{\n    \"input\": [{\"url\": \"https://example.com/video.mp4\"}],\n    \"playback_policy\": [\"public\"],\n    \"video_quality\": \"plus\"\n  }'\n```\n\nVideo quality tiers: `basic` (fastest/cheapest), `plus` (default, good quality), `premium` (highest).\n\n### Direct Upload (browser/client-side)\n\nTwo-step process:\n\n**Step 1: Create authenticated upload URL (server-side)**\n```bash\ncurl https://api.mux.com/video/v1/uploads \\\n  -X POST \\\n  -H \"Content-Type: application/json\" \\\n  -u ${MUX_TOKEN_ID}:${MUX_TOKEN_SECRET} \\\n  -d '{\n    \"new_asset_settings\": {\n      \"playback_policies\": [\"public\"],\n      \"video_quality\": \"plus\"\n    },\n    \"cors_origin\": \"*\"\n  }'\n```\n\nResponse includes `data.url` (resumable upload endpoint) and `data.id` (upload ID).\n\n**Step 2: PUT the file to the URL (client-side)**\n```bash\ncurl -X PUT \"${UPLOAD_URL}\" \\\n  -H \"Content-Type: video/mp4\" \\\n  --data-binary @video.mp4\n```\n\nThe URL is resumable \u2014 large files can be uploaded in chunks. Use [UpChunk](https://github.com/muxinc/upchunk) for browser uploads.\n\n### List Assets\n```bash\ncurl https://api.mux.com/video/v1/assets \\\n  -u ${MUX_TOKEN_ID}:${MUX_TOKEN_SECRET}\n```\n\n### Get Asset Details\n```bash\ncurl https://api.mux.com/video/v1/assets/${ASSET_ID} \\\n  -u ${MUX_TOKEN_ID}:${MUX_TOKEN_SECRET}\n```\n\n### Delete Asset\n```bash\ncurl -X DELETE https://api.mux.com/video/v1/assets/${ASSET_ID} \\\n  -u ${MUX_TOKEN_ID}:${MUX_TOKEN_SECRET}\n```\n\n### Auto-Generated Captions\n```bash\ncurl https://api.mux.com/video/v1/assets \\\n  -X POST \\\n  -H \"Content-Type: application/json\" \\\n  -u ${MUX_TOKEN_ID}:${MUX_TOKEN_SECRET} \\\n  -d '{\n    \"input\": [{\"url\": \"https://example.com/video.mp4\"}],\n    \"playback_policy\": [\"public\"],\n    \"auto_generated_captions\": [{\"language\": \"en\"}]\n  }'\n```\n\n## Playback\n\n### Embed URL\nOnce an asset is ready and has a playback ID:\n```\nhttps://stream.mux.com/${PLAYBACK_ID}.m3u8\n```\n\n### Thumbnail/Poster\n```\nhttps://image.mux.com/${PLAYBACK_ID}/thumbnail.jpg\nhttps://image.mux.com/${PLAYBACK_ID}/thumbnail.jpg?time=10\nhttps://image.mux.com/${PLAYBACK_ID}/animated.gif?start=5&end=10\n```\n\n### Mux Player (Web Component)\n```html\n<mux-player\n  playback-id=\"${PLAYBACK_ID}\"\n  metadata-video-title=\"My Video\"\n  accent-color=\"#FF0000\"\n></mux-player>\n```\n\nInstall: `npm install @mux/mux-player-react` for React, or use the web component directly.\n\n### React Component\n```tsx\nimport MuxPlayer from \"@mux/mux-player-react\";\n\n<MuxPlayer\n  playbackId={playbackId}\n  metadata={{ video_title: \"My Video\" }}\n  accentColor=\"#FF0000\"\n/>\n```\n\n## Webhook Events\n\nMux webhooks are registered at: `https://panda.tail7af24.ts.net/webhooks/mux`\n\nThe webhook provider (`packages/system-bus/src/webhooks/providers/mux.ts`) handles HMAC-SHA256 verification and normalizes events into the Inngest pipeline.\n\n### Key Events\n\n| Mux Event | Inngest Event | When |\n|-----------|---------------|------|\n| `video.asset.created` | `mux/asset.created` | Asset record created |\n| `video.asset.ready` | `mux/asset.ready` | Encoding complete, playable |\n| `video.asset.errored` | `mux/asset.errored` | Encoding failed |\n| `video.upload.created` | `mux/upload.created` | Direct upload URL created |\n| `video.upload.asset_created` | `mux/upload.asset_created` | Upload completed, asset created |\n| `video.upload.cancelled` | `mux/upload.cancelled` | Upload cancelled or timed out |\n| `video.asset.live_stream_completed` | `mux/asset.live_stream_completed` | Live stream recording ready |\n\n### Event Payload Structure\n```json\n{\n  \"type\": \"video.asset.ready\",\n  \"data\": {\n    \"id\": \"asset_id\",\n    \"playback_ids\": [{\"id\": \"playback_id\", \"policy\": \"public\"}],\n    \"status\": \"ready\",\n    \"duration\": 120.5,\n    \"passthrough\": \"your_custom_id\",\n    \"tracks\": [...]\n  }\n}\n```\n\nThe `passthrough` field carries your custom identifier through the entire pipeline \u2014 use it to correlate uploads with your application records.\n\n### Building Inngest Functions for Mux Events\n\n```typescript\n// Example: Notify when video is ready\nconst onVideoReady = inngest.createFunction(\n  { id: \"mux-video-ready\", name: \"Mux Video Ready\" },\n  { event: \"mux/asset.ready\" },\n  async ({ event, step }) => {\n    const { data } = event;\n    const playbackId = data.playback_ids?.[0]?.id;\n    const duration = data.duration;\n\n    // Your logic here \u2014 update DB, notify user, etc.\n    await step.run(\"notify\", async () => {\n      // ...\n    });\n  }\n);\n```\n\n## passthrough Pattern\n\nAlways set `passthrough` when creating assets or uploads. This is your correlation ID that flows through all webhook events:\n\n```bash\ncurl https://api.mux.com/video/v1/assets \\\n  -X POST \\\n  -H \"Content-Type: application/json\" \\\n  -u ${MUX_TOKEN_ID}:${MUX_TOKEN_SECRET} \\\n  -d '{\n    \"input\": [{\"url\": \"https://example.com/video.mp4\"}],\n    \"playback_policy\": [\"public\"],\n    \"passthrough\": \"my-unique-correlation-id\"\n  }'\n```\n\n## Rules\n\n- **Always use `passthrough`** for tracking \u2014 it's your only way to correlate webhooks back to your records.\n- **Don't poll for status** in production \u2014 use webhooks. Mux has rate limits.\n- **Webhook signing secret is per-endpoint** \u2014 it's the secret you get when registering the webhook URL in the Mux dashboard, NOT the API token secret or signing key.\n- **Video quality tiers affect cost** \u2014 `basic` for drafts/previews, `plus` for production, `premium` only when needed.\n- **Direct upload URLs expire** \u2014 default 1 hour timeout. Create them on-demand, not ahead of time.\n- **Playback IDs are stable** \u2014 once an asset is ready, the playback ID doesn't change. Safe to cache/store.\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "mux-video",
-    "displayName": "Mux Video",
-    "description": "Upload, manage, and embed videos via Mux. Covers direct uploads, API asset management, webhook event flow, playback embedding, and the Mux CLI. Use when uploading video, creating assets, checking encoding status, embedding playback, or handling Mux webhook events.",
-    "version": "0.1.0",
-    "author": "joel",
-    "tags": ""
+  "author": "joel",
+  "version": "0.1.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

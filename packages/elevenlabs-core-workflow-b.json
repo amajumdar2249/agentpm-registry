@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031816",
   "name": "elevenlabs-core-workflow-b",
   "slug": "elevenlabs-core-workflow-b",
   "description": "Implement ElevenLabs speech-to-speech, sound effects, audio isolation,",
   "content": "# ElevenLabs Core Workflow B \u2014 Speech-to-Speech, Sound Effects & Audio Isolation\n\n## Overview\n\nSecondary ElevenLabs workflows beyond TTS: (1) Speech-to-Speech voice conversion, (2) Sound Effects generation from text descriptions, (3) Audio Isolation for noise removal, and (4) Speech-to-Text transcription.\n\n## Prerequisites\n\n- Completed `elevenlabs-install-auth` setup\n- For STS: source audio file in MP3/WAV/M4A format\n- For audio isolation: noisy audio file to clean\n\n## Instructions\n\n### Step 1: Speech-to-Speech (Voice Changer)\n\nTransform audio from one voice to another using `POST /v1/speech-to-speech/{voice_id}`:\n\n```typescript\nimport { ElevenLabsClient } from \"@elevenlabs/elevenlabs-js\";\nimport { createReadStream, createWriteStream } from \"fs\";\nimport { Readable } from \"stream\";\nimport { pipeline } from \"stream/promises\";\n\nconst client = new ElevenLabsClient();\n\nasync function speechToSpeech(\n  sourceAudioPath: string,\n  targetVoiceId: string,\n  outputPath: string\n) {\n  const audio = await client.speechToSpeech.convert(targetVoiceId, {\n    audio: createReadStream(sourceAudioPath),\n    model_id: \"eleven_english_sts_v2\",  // STS-specific model\n    voice_settings: JSON.stringify({\n      stability: 0.5,\n      similarity_boost: 0.8,\n      style: 0.0,\n    }),\n    remove_background_noise: true,  // Built-in noise removal\n  });\n\n  await pipeline(Readable.fromWeb(audio as any), createWriteStream(outputPath));\n  console.log(`Voice-converted audio saved to ${outputPath}`);\n}\n\n// Convert your voice recording to sound like \"Rachel\"\nawait speechToSpeech(\n  \"my_recording.mp3\",\n  \"21m00Tcm4TlvDq8ikWAM\",\n  \"converted.mp3\"\n);\n```\n\n**cURL equivalent:**\n\n```bash\ncurl -X POST \"https://api.elevenlabs.io/v1/speech-to-speech/21m00Tcm4TlvDq8ikWAM\" \\\n  -H \"xi-api-key: ${ELEVENLABS_API_KEY}\" \\\n  -F \"audio=@my_recording.mp3\" \\\n  -F \"model_id=eleven_english_sts_v2\" \\\n  -F 'voice_settings={\"stability\":0.5,\"similarity_boost\":0.8}' \\\n  -F \"remove_background_noise=true\" \\\n  --output converted.mp3\n```\n\n### Step 2: Sound Effects Generation\n\nGenerate cinematic sound effects from text descriptions using `POST /v1/sound-generation`:\n\n```typescript\nasync function generateSoundEffect(\n  description: string,\n  outputPath: string,\n  options?: {\n    duration?: number;      // 0.5-30 seconds (null = auto)\n    promptInfluence?: number; // 0-1 (default 0.3, higher = follows prompt more closely)\n    loop?: boolean;          // Seamless looping (default false)\n  }\n) {\n  const audio = await client.textToSoundEffects.convert({\n    text: description,\n    duration_seconds: options?.duration,\n    prompt_influence: options?.promptInfluence ?? 0.3,\n    // model_id: \"eleven_text_to_sound_v2\",  // default\n  });\n\n  await pipeline(Readable.fromWeb(audio as any), createWriteStream(outputPath));\n  console.log(`Sound effect saved to ${outputPath}`);\n}\n\n// Generate various sound effects\nawait generateSoundEffect(\n  \"Heavy rain on a tin roof with distant thunder\",\n  \"rain.mp3\",\n  { duration: 10, promptInfluence: 0.6 }\n);\n\nawait generateSoundEffect(\n  \"Sci-fi laser gun firing three quick bursts\",\n  \"laser.mp3\",\n  { duration: 3, promptInfluence: 0.8 }\n);\n\nawait generateSoundEffect(\n  \"Gentle forest ambiance with birds chirping\",\n  \"forest_loop.mp3\",\n  { duration: 15, loop: true }  // Seamless loop for background audio\n);\n```\n\n**cURL equivalent:**\n\n```bash\ncurl -X POST \"https://api.elevenlabs.io/v1/sound-generation\" \\\n  -H \"xi-api-key: ${ELEVENLABS_API_KEY}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"text\": \"Heavy rain on a tin roof with distant thunder\",\n    \"duration_seconds\": 10,\n    \"prompt_influence\": 0.6\n  }' \\\n  --output rain.mp3\n```\n\n### Step 3: Audio Isolation (Voice Isolator)\n\nRemove background noise from audio using `POST /v1/audio-isolation`:\n\n```typescript\nasync function isolateVoice(\n  noisyAudioPath: string,\n  cleanOutputPath: string\n) {\n  const cleanAudio = await client.audioIsolation.audioIsolation({\n    audio: createReadStream(noisyAudioPath),\n  });\n\n  await pipeline(\n    Readable.fromWeb(cleanAudio as any),\n    createWriteStream(cleanOutputPath)\n  );\n  console.log(`Clean audio saved to ${cleanOutputPath}`);\n}\n\n// Remove background noise from a recording\nawait isolateVoice(\"noisy_interview.mp3\", \"clean_interview.mp3\");\n```\n\n**Streaming variant** for large files (`POST /v1/audio-isolation/stream`):\n\n```typescript\nasync function isolateVoiceStreaming(\n  noisyAudioPath: string,\n  cleanOutputPath: string\n) {\n  const stream = await client.audioIsolation.audioIsolationStream({\n    audio: createReadStream(noisyAudioPath),\n  });\n\n  const writer = createWriteStream(cleanOutputPath);\n  for await (const chunk of stream) {\n    writer.write(chunk);\n  }\n  writer.end();\n}\n```\n\n**cURL equivalent:**\n\n```bash\ncurl -X POST \"https://api.elevenlabs.io/v1/audio-isolation\" \\\n  -H \"xi-api-key: ${ELEVENLABS_API_KEY}\" \\\n  -F \"audio=@noisy_interview.mp3\" \\\n  --output clean_interview.mp3\n```\n\n### Step 4: Speech-to-Text (Transcription)\n\nTranscribe audio with speaker diarization using `POST /v1/speech-to-text`:\n\n```typescript\nasync function transcribeAudio(audioPath: string) {\n  const result = await client.speechToText.convert({\n    audio: createReadStream(audioPath),\n    model_id: \"scribe_v1\",  // ElevenLabs' STT model\n    // language_code: \"en\",  // Optional: force language\n    // diarize: true,        // Enable speaker detection\n    // timestamps_granularity: \"word\",  // \"word\" or \"character\"\n  });\n\n  console.log(\"Transcription:\", result.text);\n\n  // Word-level timestamps\n  if (result.words) {\n    for (const word of result.words) {\n      console.log(`[${word.start.toFixed(2)}-${word.end.toFixed(2)}] ${word.text}`);\n    }\n  }\n\n  return result;\n}\n\nawait transcribeAudio(\"podcast_episode.mp3\");\n```\n\n## API Endpoint Summary\n\n| Feature | Method | Endpoint | Billing |\n|---------|--------|----------|---------|\n| Speech-to-Speech | POST | `/v1/speech-to-speech/{voice_id}` | Per character |\n| Sound Effects | POST | `/v1/sound-generation` | Per generation |\n| Audio Isolation | POST | `/v1/audio-isolation` | 1,000 chars/min of audio |\n| Audio Isolation Stream | POST | `/v1/audio-isolation/stream` | 1,000 chars/min of audio |\n| Speech-to-Text | POST | `/v1/speech-to-text` | Per audio minute |\n\n## Sound Effect Tips\n\n- Be specific: \"wooden door creaking slowly open in a quiet room\" beats \"door sound\"\n- Specify quantity: \"three quick gunshots\" vs \"gunshots\"\n- Set mood: \"eerie\", \"cheerful\", \"aggressive\" changes the output character\n- Use `prompt_influence: 0.6-0.8` for precise results, `0.2-0.4` for creative variation\n- Max duration: 30 seconds per generation\n\n## Audio Isolation Limits\n\n| Aspect | Limit |\n|--------|-------|\n| Max file size | 500 MB |\n| Max duration | 1 hour |\n| Supported formats | MP3, WAV, M4A, FLAC, OGG, WEBM |\n| PCM optimization | Use `file_format: \"pcm_s16le_16\"` for lowest latency |\n\n## Error Handling\n\n| Error | HTTP | Cause | Solution |\n|-------|------|-------|----------|\n| `model_can_not_do_voice_conversion` | 400 | Wrong model for STS | Use `eleven_english_sts_v2` |\n| `audio_too_short` | 400 | STS input under 1 second | Use longer audio clip |\n| `audio_too_long` | 400 | STS input over limit | Trim to under 5 minutes |\n| `invalid_sound_prompt` | 400 | Nonsensical SFX description | Write descriptive, specific prompts |\n| `file_too_large` | 413 | Audio isolation over 500MB | Compress or split the file |\n| `quota_exceeded` | 401 | Character/generation limit hit | Check usage dashboard |\n\n## Resources\n\n- [Speech-to-Speech API](https://elevenlabs.io/docs/api-reference/speech-to-speech/convert)\n- [Sound Effects API](https://elevenlabs.io/docs/api-reference/text-to-sound-effects/convert)\n- [Audio Isolation API](https://elevenlabs.io/docs/api-reference/audio-isolation/convert)\n- [Speech-to-Text API](https://elevenlabs.io/docs/api-reference/speech-to-text/convert)\n\n## Next Steps\n\nFor common errors, see `elevenlabs-common-errors`. For SDK patterns, see `elevenlabs-sdk-patterns`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "elevenlabs-core-workflow-b",
-    "description": "Implement ElevenLabs speech-to-speech, sound effects, audio isolation,",
-    "Trigger": "elevenlabs speech to speech\", \"voice changer\", \"sound effects\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

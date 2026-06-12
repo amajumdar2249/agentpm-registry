@@ -1,13 +1,47 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000021194",
   "name": "apscheduler",
   "slug": "apscheduler-2",
   "description": "Advanced Python Scheduler - Task scheduling and job queue system",
   "content": "\n# APScheduler\n\nAPScheduler is a flexible task scheduling and job queue system for Python applications. It supports both synchronous and asynchronous execution with multiple scheduling mechanisms including cron-style, interval-based, and one-off scheduling.\n\n## Quick Start\n\n### Basic Synchronous Scheduler\n\n```python\nfrom datetime import datetime\nfrom apscheduler import Scheduler\nfrom apscheduler.triggers.interval import IntervalTrigger\n\ndef tick():\n    print(f\"Tick: {datetime.now()}\")\n\n# Create and start scheduler with memory datastore\nwith Scheduler() as scheduler:\n    scheduler.add_schedule(tick, IntervalTrigger(seconds=1))\n    scheduler.run_until_stopped()\n```\n\n### Async Scheduler with FastAPI\n\n```python\nfrom contextlib import asynccontextmanager\nfrom fastapi import FastAPI\nfrom apscheduler import AsyncScheduler\nfrom apscheduler.triggers.interval import IntervalTrigger\n\ndef cleanup_task():\n    print(\"Running cleanup task...\")\n\n@asynccontextmanager\nasync def lifespan(app: FastAPI):\n    scheduler = AsyncScheduler()\n    async with scheduler:\n        await scheduler.add_schedule(\n            cleanup_task,\n            IntervalTrigger(hours=1),\n            id=\"cleanup\"\n        )\n        await scheduler.start_in_background()\n        yield\n\napp = FastAPI(lifespan=lifespan)\n```\n\n## Common Patterns\n\n### Schedulers\n\n**In-memory scheduler (development):**\n\n```python\nfrom apscheduler import AsyncScheduler\n\nasync def main():\n    async with AsyncScheduler() as scheduler:\n        # Jobs lost on restart\n        await scheduler.add_schedule(my_task, trigger)\n        await scheduler.run_until_stopped()\n```\n\n**Persistent scheduler (production):**\n\n```python\nfrom sqlalchemy.ext.asyncio import create_async_engine\nfrom apscheduler import AsyncScheduler\nfrom apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore\n\nasync def main():\n    engine = create_async_engine(\"postgresql+asyncpg://user:pass@localhost/db\")\n    data_store = SQLAlchemyDataStore(engine)\n\n    async with AsyncScheduler(data_store) as scheduler:\n        # Jobs survive restarts\n        await scheduler.add_schedule(my_task, trigger)\n        await scheduler.run_until_stopped()\n```\n\n**Distributed scheduler:**\n\n```python\nfrom apscheduler import AsyncScheduler, SchedulerRole\nfrom apscheduler.datastores.sqlalchemy import SQLAlchemyDataStore\nfrom apscheduler.eventbrokers.asyncpg import AsyncpgEventBroker\n\n# Scheduler node - creates jobs from schedules\nasync def scheduler_node():\n    async with AsyncScheduler(\n        data_store,\n        event_broker,\n        role=SchedulerRole.scheduler\n    ) as scheduler:\n        await scheduler.add_schedule(task, trigger)\n        await scheduler.run_until_stopped()\n\n# Worker node - executes jobs only\nasync def worker_node():\n    async with AsyncScheduler(\n        data_store,\n        event_broker,\n        role=SchedulerRole.worker\n    ) as scheduler:\n        await scheduler.run_until_stopped()\n```\n\n### Jobs\n\n**Simple function jobs:**\n\n```python\ndef send_daily_report():\n    generate_report()\n    email_report(\"admin@example.com\")\n\nscheduler.add_schedule(\n    send_daily_report,\n    CronTrigger(hour=9, minute=0)  # 9 AM daily\n)\n```\n\n**Jobs with arguments:**\n\n```python\ndef process_data(source: str, destination: str, batch_size: int):\n    # Data processing logic\n    pass\n\nscheduler.add_schedule(\n    process_data,\n    IntervalTrigger(hours=1),\n    kwargs={\n        'source': 's3://incoming',\n        'destination': 's3://processed',\n        'batch_size': 1000\n    }\n)\n```\n\n**Async jobs:**\n\n```python\nasync def fetch_external_api():\n    async with aiohttp.ClientSession() as session:\n        async with session.get('https://api.example.com/data') as resp:\n            data = await resp.json()\n            await save_to_database(data)\n\nscheduler.add_schedule(\n    fetch_external_api,\n    IntervalTrigger(minutes=5)\n)\n```\n\n### Triggers\n\n**Interval trigger:**\n\n```python\nfrom apscheduler.triggers.interval import IntervalTrigger\n\n# Every 30 seconds\nIntervalTrigger(seconds=30)\n\n# Every 2 hours and 15 minutes\nIntervalTrigger(hours=2, minutes=15)\n\n# Every 3 days\nIntervalTrigger(days=3)\n```\n\n**Cron trigger:**\n\n```python\nfrom apscheduler.triggers.cron import CronTrigger\n\n# 9:00 AM Monday-Friday\nCronTrigger(hour=9, minute=0, day_of_week='mon-fri')\n\n# Every 15 minutes\nCronTrigger(minute='*/15')\n\n# Last day of month at midnight\nCronTrigger(day='last', hour=0, minute=0)\n\n# Using crontab syntax\nCronTrigger.from_crontab('0 9 * * 1-5')  # 9 AM weekdays\n```\n\n**Date trigger (one-time):**\n\n```python\nfrom datetime import datetime, timedelta\nfrom apscheduler.triggers.date import DateTrigger\n\n# 5 minutes from now\nrun_time = datetime.now() + timedelta(minutes=5)\nDateTrigger(run_time=run_time)\n\n# Specific datetime\nDateTrigger(run_time=datetime(2024, 12, 31, 23, 59, 59))\n```\n\n**Calendar interval:**\n\n```python\nfrom apscheduler.triggers.calendarinterval import CalendarIntervalTrigger\n\n# First day of every month at 9 AM\nCalendarIntervalTrigger(months=1, hour=9, minute=0)\n\n# Every Monday at 10 AM\nCalendarIntervalTrigger(weeks=1, day_of_week='mon', hour=10, minute=0)\n```\n\n### Persistence\n\n**SQLite:**\n\n```python\nengine = create_async_engine(\"sqlite+aiosqlite:///scheduler.db\")\ndata_store = SQLAlchemyDataStore(engine)\n```\n\n**PostgreSQL:**\n\n```python\nengine = create_async_engine(\"postgresql+asyncpg://user:pass@localhost/db\")\ndata_store = SQLAlchemyDataStore(engine)\nevent_broker = AsyncpgEventBroker.from_async_sqla_engine(engine)\n```\n\n**Redis (event broker):**\n\n```python\nfrom apscheduler.eventbrokers.redis import RedisEventBroker\n\nevent_broker = RedisEventBroker.from_url(\"redis://localhost:6379\")\n```\n\n### Job Management\n\n**Get job results:**\n\n```python\nasync def main():\n    async with AsyncScheduler() as scheduler:\n        await scheduler.start_in_background()\n\n        # Add job with result retention\n        job_id = await scheduler.add_job(\n            calculate_result,\n            args=(10, 20),\n            result_expiration_time=timedelta(hours=1)\n        )\n\n        # Wait for result\n        result = await scheduler.get_job_result(job_id, wait=True)\n        print(f\"Result: {result.return_value}\")\n```\n\n**Schedule management:**\n\n```python\n# Pause schedule\nawait scheduler.pause_schedule(\"my_schedule\")\n\n# Resume schedule\nawait scheduler.unpause_schedule(\"my_schedule\")\n\n# Remove schedule\nawait scheduler.remove_schedule(\"my_schedule\")\n\n# Get schedule info\nschedule = await scheduler.get_schedule(\"my_schedule\")\nprint(f\"Next run: {schedule.next_fire_time}\")\n```\n\n**Event handling:**\n\n```python\nfrom apscheduler import JobAdded, JobReleased\n\ndef on_job_completed(event: JobReleased):\n    if event.outcome == Outcome.success:\n        print(f\"Job {event.job_id} completed successfully\")\n    else:\n        print(f\"Job {event.job_id} failed: {event.exception}\")\n\nscheduler.subscribe(on_job_completed, JobReleased)\n```\n\n## Configuration\n\n**Task defaults:**\n\n```python\nfrom apscheduler import TaskDefaults\n\ntask_defaults = TaskDefaults(\n    job_executor='threadpool',\n    max_running_jobs=3,\n    misfire_grace_time=timedelta(minutes=5)\n)\n\nscheduler = AsyncScheduler(task_defaults=task_defaults)\n```\n\n**Job execution options:**\n\n```python\n# Configure task behavior\nawait scheduler.configure_task(\n    my_function,\n    job_executor='processpool',\n    max_running_jobs=5,\n    misfire_grace_time=timedelta(minutes=10)\n)\n\n# Override per schedule\nawait scheduler.add_schedule(\n    my_function,\n    trigger,\n    job_executor='threadpool',  # Override default\n    coalesce=CoalescePolicy.latest\n)\n```\n\n## Requirements\n\n```bash\n# Core package\nuv add apscheduler\n\n# Database backends\nuv add \"apscheduler[postgresql]\"  # PostgreSQL\nuv add \"apscheduler[mongodb]\"     # MongoDB\nuv add \"apscheduler[sqlite]\"      # SQLite\n\n# Event brokers\nuv add \"apscheduler[redis]\"       # Redis\nuv add \"apscheduler[mqtt]\"        # MQTT\n```\n\n**Dependencies by use case:**\n\n- **Basic scheduling**: `apscheduler`\n- **PostgreSQL persistence**: `asyncpg`, `sqlalchemy`\n- **Redis distributed**: `redis`\n- **MongoDB**: `motor`\n- **SQLite**: `aiosqlite`\n\n## Best Practices\n\n1. **Use persistent storage** for production to survive restarts\n2. **Set appropriate misfire_grace_time** to handle system delays\n3. **Use conflict policies** when updating schedules\n4. **Subscribe to events** for monitoring and debugging\n5. **Choose appropriate executors** (threadpool for I/O, processpool for CPU)\n6. **Implement error handling** in job functions\n7. **Use unique schedule IDs** for management operations\n8. **Set result expiration** to prevent memory leaks\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "apscheduler",
-    "description": "Advanced Python Scheduler - Task scheduling and job queue system",
-    "when_to_use": "Background task execution, periodic jobs, cron scheduling, distributed task processing",
-    "tags": "[scheduling, background-jobs, cron, async, task-queue]"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "[scheduling",
+    "background-jobs",
+    "cron",
+    "async",
+    "task-queue]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

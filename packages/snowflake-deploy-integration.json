@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033284",
   "name": "snowflake-deploy-integration",
   "slug": "snowflake-deploy-integration",
   "description": "Deploy Snowflake-powered applications with proper connection management",
   "content": "# Snowflake Deploy Integration\n\n## Overview\n\nDeploy applications that connect to Snowflake on serverless platforms, containers, and VMs with proper connection lifecycle management.\n\n## Prerequisites\n\n- Snowflake service account with key pair auth\n- Platform CLI installed (gcloud, aws, docker)\n- Application tested against staging Snowflake\n\n## Instructions\n\n### Step 1: Connection Management for Serverless\n\n```typescript\n// src/snowflake/serverless-connection.ts\nimport snowflake from 'snowflake-sdk';\n\nlet cachedConnection: snowflake.Connection | null = null;\n\n/**\n * Reuse connection across Lambda/Cloud Function invocations.\n * Serverless containers may be reused \u2014 avoid reconnecting every call.\n */\nexport async function getConnection(): Promise<snowflake.Connection> {\n  if (cachedConnection?.isUp()) {\n    return cachedConnection;\n  }\n\n  const conn = snowflake.createConnection({\n    account: process.env.SNOWFLAKE_ACCOUNT!,\n    username: process.env.SNOWFLAKE_USER!,\n    authenticator: 'SNOWFLAKE_JWT',\n    privateKey: process.env.SNOWFLAKE_PRIVATE_KEY!,\n    warehouse: process.env.SNOWFLAKE_WAREHOUSE!,\n    database: process.env.SNOWFLAKE_DATABASE!,\n    schema: process.env.SNOWFLAKE_SCHEMA || 'PUBLIC',\n    clientSessionKeepAlive: true,  // Keep session alive between invocations\n  });\n\n  await new Promise<void>((resolve, reject) => {\n    conn.connect((err) => (err ? reject(err) : resolve()));\n  });\n\n  cachedConnection = conn;\n  return conn;\n}\n```\n\n### Step 2: Google Cloud Run Deployment\n\n```dockerfile\n# Dockerfile\nFROM node:20-slim\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci --only=production\nCOPY dist/ ./dist/\nENV NODE_ENV=production\nCMD [\"node\", \"dist/index.js\"]\n```\n\n```bash\n#!/bin/bash\n# deploy-cloud-run.sh\nPROJECT_ID=\"${GCP_PROJECT_ID}\"\nSERVICE_NAME=\"snowflake-api\"\nREGION=\"us-central1\"\n\n# Build and push\ngcloud builds submit --tag gcr.io/$PROJECT_ID/$SERVICE_NAME\n\n# Deploy with Snowflake credentials from Secret Manager\ngcloud run deploy $SERVICE_NAME \\\n  --image gcr.io/$PROJECT_ID/$SERVICE_NAME \\\n  --region $REGION \\\n  --platform managed \\\n  --set-secrets=\"SNOWFLAKE_ACCOUNT=snowflake-account:latest,\\\nSNOWFLAKE_USER=snowflake-user:latest,\\\nSNOWFLAKE_PRIVATE_KEY=snowflake-private-key:latest\" \\\n  --set-env-vars=\"SNOWFLAKE_WAREHOUSE=PROD_ANALYTICS_WH,\\\nSNOWFLAKE_DATABASE=PROD_DB,\\\nSNOWFLAKE_SCHEMA=PUBLIC\" \\\n  --min-instances=1 \\\n  --max-instances=10 \\\n  --timeout=300\n```\n\n### Step 3: AWS Lambda Deployment\n\n```typescript\n// lambda/handler.ts\nimport { getConnection } from './snowflake/serverless-connection';\n\nexport async function handler(event: any) {\n  try {\n    const conn = await getConnection();\n    const rows = await new Promise<any[]>((resolve, reject) => {\n      conn.execute({\n        sqlText: 'SELECT COUNT(*) AS total FROM orders WHERE order_date = CURRENT_DATE()',\n        complete: (err, stmt, rows) => (err ? reject(err) : resolve(rows || [])),\n      });\n    });\n    return { statusCode: 200, body: JSON.stringify(rows[0]) };\n  } catch (error: any) {\n    return { statusCode: 500, body: JSON.stringify({ error: error.message }) };\n  }\n}\n```\n\n```bash\n# Store Snowflake private key in AWS Secrets Manager\naws secretsmanager create-secret \\\n  --name snowflake/prod/private-key \\\n  --secret-string \"$(cat rsa_key.p8)\"\n\n# Lambda environment variables\naws lambda update-function-configuration \\\n  --function-name snowflake-api \\\n  --environment \"Variables={\n    SNOWFLAKE_ACCOUNT=myorg-myaccount,\n    SNOWFLAKE_USER=svc_lambda,\n    SNOWFLAKE_WAREHOUSE=PROD_ANALYTICS_WH,\n    SNOWFLAKE_DATABASE=PROD_DB\n  }\" \\\n  --timeout 300\n```\n\n### Step 4: Docker Compose for Self-Hosted\n\n```yaml\n# docker-compose.yml\nservices:\n  snowflake-app:\n    build: .\n    environment:\n      - SNOWFLAKE_ACCOUNT=${SNOWFLAKE_ACCOUNT}\n      - SNOWFLAKE_USER=${SNOWFLAKE_USER}\n      - SNOWFLAKE_PRIVATE_KEY_PATH=/run/secrets/snowflake_key\n      - SNOWFLAKE_WAREHOUSE=PROD_ANALYTICS_WH\n      - SNOWFLAKE_DATABASE=PROD_DB\n    secrets:\n      - snowflake_key\n    healthcheck:\n      test: [\"CMD\", \"curl\", \"-f\", \"http://localhost:3000/health\"]\n      interval: 30s\n      timeout: 10s\n      retries: 3\n\nsecrets:\n  snowflake_key:\n    file: ./rsa_key.p8  # Never commit this file\n```\n\n### Step 5: Health Check Endpoint\n\n```typescript\n// src/health.ts\nimport { getConnection } from './snowflake/serverless-connection';\n\nexport async function healthCheck() {\n  const start = Date.now();\n  try {\n    const conn = await getConnection();\n    const rows = await new Promise<any[]>((resolve, reject) => {\n      conn.execute({\n        sqlText: 'SELECT 1 AS health_check',\n        complete: (err, _, rows) => (err ? reject(err) : resolve(rows || [])),\n      });\n    });\n    return {\n      status: 'healthy',\n      snowflake: { connected: true, latencyMs: Date.now() - start },\n    };\n  } catch (error: any) {\n    return {\n      status: 'degraded',\n      snowflake: { connected: false, error: error.message, latencyMs: Date.now() - start },\n    };\n  }\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Cold start timeout | Warehouse resuming | Set `min-instances=1` or pre-warm warehouse |\n| Connection refused in container | Wrong network config | Check DNS resolution for `*.snowflakecomputing.com` |\n| Secret not found | Missing secret binding | Verify secret manager config |\n| `privateKey` format error | Key has headers/newlines | Strip PEM headers or use file path |\n| Session expired | Long-running serverless | Set `clientSessionKeepAlive: true` |\n\n## Resources\n\n- [Node.js Connection Options](https://docs.snowflake.com/en/developer-guide/node-js/nodejs-driver-options)\n- [Cloud Run Docs](https://cloud.google.com/run/docs)\n- [AWS Lambda Docs](https://docs.aws.amazon.com/lambda/latest/dg/)\n\n## Next Steps\n\nFor event-driven patterns, see `snowflake-webhooks-events`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "snowflake-deploy-integration",
-    "description": "Deploy Snowflake-powered applications with proper connection management",
-    "allowed-tools": "Read, Write, Edit, Bash(gcloud:*), Bash(aws:*), Bash(docker:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031353",
   "name": "assemblyai-performance-tuning",
   "slug": "assemblyai-performance-tuning",
   "description": "Optimize AssemblyAI API performance with caching, parallel processing,",
   "content": "# AssemblyAI Performance Tuning\n\n## Overview\n\nOptimize AssemblyAI transcription performance through model selection, parallel processing, caching, and webhook-based architectures.\n\n## Prerequisites\n\n- `assemblyai` package installed\n- Understanding of async patterns\n- Redis or in-memory cache available (optional)\n\n## Latency Benchmarks (Actual)\n\n### Async Transcription\n\n| Audio Duration | Approx. Processing Time | Notes |\n|----------------|------------------------|-------|\n| 30 seconds | ~10-15 seconds | Includes queue time |\n| 5 minutes | ~30-60 seconds | Scales sub-linearly |\n| 1 hour | ~3-5 minutes | Depends on queue load |\n| 10 hours | ~15-30 minutes | Max async duration |\n\n### Streaming\n\n| Metric | Value |\n|--------|-------|\n| First partial transcript | ~300ms (P50) |\n| Final transcript latency | ~500ms (P50) |\n| End-of-turn detection | Automatic with endpointing |\n\n### Model Speed vs. Accuracy\n\n| Model | Speed | Accuracy | Price/hr |\n|-------|-------|----------|----------|\n| `nano` | Fastest | Good | $0.12 |\n| `best` (Universal-3) | Standard | Highest | $0.37 |\n| `nova-3` (streaming) | Real-time | High | $0.47 |\n| `nova-3-pro` (streaming) | Real-time | Highest | $0.47 |\n\n## Instructions\n\n### Step 1: Choose the Right Model\n\n```typescript\nimport { AssemblyAI } from 'assemblyai';\n\nconst client = new AssemblyAI({\n  apiKey: process.env.ASSEMBLYAI_API_KEY!,\n});\n\n// For highest accuracy (default)\nconst accurate = await client.transcripts.transcribe({\n  audio: audioUrl,\n  speech_model: 'best',\n});\n\n// For fastest processing and lowest cost\nconst fast = await client.transcripts.transcribe({\n  audio: audioUrl,\n  speech_model: 'nano',\n});\n```\n\n### Step 2: Parallel Batch Processing\n\n```typescript\nimport PQueue from 'p-queue';\n\nconst queue = new PQueue({ concurrency: 10 });\n\nasync function batchTranscribe(audioUrls: string[]) {\n  const results = await Promise.all(\n    audioUrls.map(url =>\n      queue.add(() =>\n        client.transcripts.transcribe({ audio: url, speech_model: 'nano' })\n      )\n    )\n  );\n\n  return results.filter(t => t.status === 'completed');\n}\n\n// Process 100 files with 10 concurrent jobs\nconst urls = Array.from({ length: 100 }, (_, i) => `https://storage.example.com/audio-${i}.mp3`);\nconst transcripts = await batchTranscribe(urls);\nconsole.log(`Completed: ${transcripts.length}/${urls.length}`);\n```\n\n### Step 3: Use Webhooks Instead of Polling\n\n```typescript\n// SLOW: transcribe() polls every 3 seconds until done\nconst slow = await client.transcripts.transcribe({ audio: audioUrl });\n\n// FAST: submit() returns immediately, webhook notifies on completion\nconst fast = await client.transcripts.submit({\n  audio: audioUrl,\n  webhook_url: 'https://your-app.com/webhooks/assemblyai',\n});\n// Your webhook handler processes the result \u2014 no polling overhead\n```\n\n### Step 4: Cache Transcript Results\n\n```typescript\nimport { LRUCache } from 'lru-cache';\nimport type { Transcript } from 'assemblyai';\n\nconst transcriptCache = new LRUCache<string, Transcript>({\n  max: 500,\n  ttl: 60 * 60 * 1000, // 1 hour\n});\n\nasync function getCachedTranscript(transcriptId: string): Promise<Transcript> {\n  const cached = transcriptCache.get(transcriptId);\n  if (cached) return cached;\n\n  const transcript = await client.transcripts.get(transcriptId);\n  if (transcript.status === 'completed') {\n    transcriptCache.set(transcriptId, transcript);\n  }\n  return transcript;\n}\n```\n\n### Step 5: Redis Cache for Distributed Systems\n\n```typescript\nimport Redis from 'ioredis';\n\nconst redis = new Redis(process.env.REDIS_URL!);\n\nasync function getCachedTranscriptRedis(transcriptId: string): Promise<Transcript> {\n  const cached = await redis.get(`transcript:${transcriptId}`);\n  if (cached) return JSON.parse(cached);\n\n  const transcript = await client.transcripts.get(transcriptId);\n  if (transcript.status === 'completed') {\n    await redis.setex(\n      `transcript:${transcriptId}`,\n      3600, // 1 hour TTL\n      JSON.stringify(transcript)\n    );\n  }\n  return transcript;\n}\n```\n\n### Step 6: Minimize Feature Overhead\n\n```typescript\n// Only enable features you actually need \u2014 each adds processing time\n\n// Minimal (fastest)\nconst minimal = await client.transcripts.transcribe({\n  audio: audioUrl,\n  speech_model: 'nano',\n  punctuate: true,\n  format_text: true,\n});\n\n// Full intelligence (slower, more expensive)\nconst full = await client.transcripts.transcribe({\n  audio: audioUrl,\n  speech_model: 'best',\n  speaker_labels: true,\n  sentiment_analysis: true,\n  entity_detection: true,\n  auto_highlights: true,\n  content_safety: true,\n  iab_categories: true,\n  summarization: true,\n  summary_type: 'bullets',\n});\n```\n\n### Step 7: Performance Monitoring\n\n```typescript\nasync function timedTranscribe(audioUrl: string, options: Record<string, any> = {}) {\n  const start = Date.now();\n  const transcript = await client.transcripts.transcribe({\n    audio: audioUrl,\n    ...options,\n  });\n  const durationMs = Date.now() - start;\n\n  const stats = {\n    transcriptId: transcript.id,\n    status: transcript.status,\n    audioDuration: transcript.audio_duration,\n    processingTimeMs: durationMs,\n    ratio: transcript.audio_duration\n      ? (durationMs / 1000 / transcript.audio_duration).toFixed(2)\n      : 'N/A',\n    wordCount: transcript.words?.length ?? 0,\n    model: options.speech_model ?? 'best',\n  };\n\n  console.log('Transcription stats:', stats);\n  return { transcript, stats };\n}\n```\n\n## Output\n\n- Optimal model selection based on speed/accuracy/cost trade-offs\n- Parallel batch processing with concurrency control\n- Webhook-based architecture (eliminates polling overhead)\n- In-memory and Redis caching for transcript retrieval\n- Performance monitoring with processing time ratios\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Slow transcription | Large file + best model | Use `nano` model or split audio |\n| Queue backlog | Too many concurrent submissions | Limit concurrency with p-queue |\n| Cache stale data | Transcript re-processed | Set appropriate TTL, invalidate on webhook |\n| Polling overhead | Using `transcribe()` for many files | Switch to `submit()` + webhooks |\n\n## Resources\n\n- [AssemblyAI Speech Models](https://www.assemblyai.com/docs/speech-to-text/speech-recognition)\n- [AssemblyAI Processing FAQ](https://www.assemblyai.com/docs/concepts/faq)\n- [LRU Cache](https://github.com/isaacs/node-lru-cache)\n- [p-queue](https://github.com/sindresorhus/p-queue)\n\n## Next Steps\n\nFor cost optimization, see `assemblyai-cost-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "assemblyai-performance-tuning",
-    "description": "Optimize AssemblyAI API performance with caching, parallel processing,",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

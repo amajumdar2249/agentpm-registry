@@ -1,16 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000010915",
   "name": "tanstack-start",
   "slug": "tanstack-start",
   "description": "Build full-stack React apps with TanStack Start \u2014 server functions, type-safe routing, loaders, middleware, SSR/streaming, and deployment patterns. Use when working on TanStack Start apps, server functions, TanStack Router, or any gremlin-cms development.",
   "content": "\n# TanStack Start\n\nFull-stack React framework built on TanStack Router + Vite. Client-first with opt-in server capabilities. Type-safe from routes to server functions.\n\n## When to Use\n\nTriggers: `tanstack start`, `tanstack router`, `server function`, `createServerFn`, `createFileRoute`, `gremlin-cms`, `tanstack app`, or any work in a TanStack Start project.\n\n## Core Concepts\n\n### Execution Model \u2014 Critical\n\n**Route loaders are ISOMORPHIC** \u2014 they run on BOTH server and client. This is the #1 gotcha.\n\n```ts\n// \u274c WRONG \u2014 loader runs on client too, exposes secrets\nexport const Route = createFileRoute('/users')({\n  loader: () => {\n    const secret = process.env.SECRET // Exposed to client!\n    return fetch(`/api/users?key=${secret}`)\n  },\n})\n\n// \u2705 CORRECT \u2014 server function wraps server-only logic\nconst getUsers = createServerFn().handler(() => {\n  const secret = process.env.SECRET // Server-only\n  return fetch(`/api/users?key=${secret}`)\n})\n\nexport const Route = createFileRoute('/users')({\n  loader: () => getUsers(), // Isomorphic call to server function\n})\n```\n\n### Server Functions\n\nType-safe RPC that replaces REST/tRPC/GraphQL for internal data access. Build process replaces server implementations with RPC stubs in client bundles.\n\n```ts\nimport { createServerFn } from '@tanstack/react-start'\n\n// GET (default)\nexport const getPosts = createServerFn().handler(async () => {\n  return db.posts.findMany()\n})\n\n// POST with input validation\nexport const createPost = createServerFn({ method: 'POST' })\n  .inputValidator((data: { title: string; body: string }) => data)\n  .handler(async ({ data }) => {\n    return db.posts.create(data)\n  })\n```\n\n**Where to call server functions:**\n- Route loaders \u2014 data fetching\n- Components \u2014 via `useServerFn()` hook\n- Other server functions \u2014 compose server logic\n- Event handlers \u2014 form submissions, clicks\n\n### Server-Only Functions\n\nFor utilities that must NEVER reach the client bundle:\n\n```ts\nimport { createServerOnlyFn } from '@tanstack/react-start'\n\nconst getDbUrl = createServerOnlyFn(() => process.env.DATABASE_URL)\n// Calling from client THROWS \u2014 crashes intentionally\n```\n\n### File-Based Routing\n\n```\napp/\n\u251c\u2500\u2500 routes/\n\u2502   \u251c\u2500\u2500 __root.tsx          # Root layout\n\u2502   \u251c\u2500\u2500 index.tsx           # /\n\u2502   \u251c\u2500\u2500 about.tsx           # /about\n\u2502   \u251c\u2500\u2500 posts/\n\u2502   \u2502   \u251c\u2500\u2500 index.tsx       # /posts\n\u2502   \u2502   \u2514\u2500\u2500 $postId.tsx     # /posts/:postId\n\u2502   \u2514\u2500\u2500 _authed/\n\u2502       \u2514\u2500\u2500 dashboard.tsx   # /dashboard (with auth layout)\n\u251c\u2500\u2500 client.tsx              # Client entry\n\u251c\u2500\u2500 router.tsx              # Router config\n\u2514\u2500\u2500 ssr.tsx                 # SSR entry\n```\n\n- `$param` = dynamic segment\n- `_prefix` = pathless layout route (groups routes without adding URL segments)\n- `__root.tsx` = root layout (wraps everything)\n\n### Route Definition\n\n```ts\nimport { createFileRoute } from '@tanstack/react-router'\n\nexport const Route = createFileRoute('/posts/$postId')({\n  // Loader runs before render (isomorphic!)\n  loader: ({ params }) => getPost({ data: params.postId }),\n\n  // Component receives loader data\n  component: PostPage,\n\n  // Error boundary\n  errorComponent: ({ error }) => <div>Error: {error.message}</div>,\n\n  // Pending component (while loader runs)\n  pendingComponent: () => <div>Loading...</div>,\n})\n\nfunction PostPage() {\n  const post = Route.useLoaderData()\n  return <h1>{post.title}</h1>\n}\n```\n\n### Middleware\n\nCompose reusable server function middleware:\n\n```ts\nimport { createMiddleware } from '@tanstack/react-start'\n\nconst authMiddleware = createMiddleware({ type: 'function' }).server(\n  async ({ next }) => {\n    const session = await getSessionFn()\n    if (!session?.user) throw new Error('Unauthorized')\n    return next({ context: { session } })\n  }\n)\n\n// Use in server functions\nexport const listPosts = createServerFn({ method: 'GET' })\n  .middleware([authMiddleware])\n  .handler(async ({ context }) => {\n    return db.posts.where({ userId: context.session.user.id })\n  })\n```\n\n### Server Routes (API endpoints)\n\n```ts\nexport const Route = createFileRoute('/api/health')({\n  server: {\n    handlers: ({ createHandlers }) => createHandlers({\n      GET: async ({ request }) => {\n        return new Response(JSON.stringify({ ok: true }), {\n          headers: { 'Content-Type': 'application/json' },\n        })\n      },\n    }),\n  },\n})\n```\n\n### Using with TanStack Query\n\n```ts\nimport { useServerFn } from '@tanstack/react-start'\nimport { useQuery, useMutation } from '@tanstack/react-query'\n\nfunction PostList() {\n  const getPostsFn = useServerFn(getPosts)\n  const createPostFn = useServerFn(createPost)\n\n  const { data } = useQuery({\n    queryKey: ['posts'],\n    queryFn: () => getPostsFn(),\n  })\n\n  const mutation = useMutation({\n    mutationFn: (data) => createPostFn({ data }),\n    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['posts'] }),\n  })\n}\n```\n\n## File Organization (Large Apps)\n\n```\nsrc/utils/\n\u251c\u2500\u2500 users.functions.ts    # createServerFn wrappers (safe to import anywhere)\n\u251c\u2500\u2500 users.server.ts       # Server-only helpers (DB queries, internal logic)\n\u2514\u2500\u2500 schemas.ts            # Shared validation schemas (client-safe)\n```\n\n- `.functions.ts` \u2014 server function wrappers, safe to import anywhere\n- `.server.ts` \u2014 server-only helpers, NEVER import from client code\n\n## App Config\n\n```ts\n// app.config.ts\nimport { defineConfig } from '@tanstack/react-start/config'\nimport tsConfigPaths from 'vite-tsconfig-paths'\n\nexport default defineConfig({\n  vite: {\n    plugins: [tsConfigPaths({ projects: ['./tsconfig.json'] })],\n  },\n})\n```\n\n## BetterAuth Integration\n\n```ts\n// Server function for session\nimport { createServerFn } from '@tanstack/react-start'\nimport { getRequestHeaders } from '@tanstack/react-start/server'\nimport { auth } from '@/lib/auth'\n\nexport const getSessionFn = createServerFn({ method: 'GET' }).handler(\n  async () => {\n    const headers = getRequestHeaders()\n    return auth.api.getSession({ headers })\n  }\n)\n\n// Protected layout route\nexport const Route = createFileRoute('/_authed')({\n  beforeLoad: async () => {\n    const session = await getSessionFn()\n    if (!session?.user) throw redirect({ to: '/sign-in' })\n  },\n  component: () => <Outlet />,\n})\n```\n\n## Deployment\n\nTanStack Start deploys to any Node/Bun target, Vercel, Cloudflare Workers, Netlify.\n\n### Vercel (Critical)\n\n**You MUST add the `nitro()` Vite plugin** \u2014 without it, Vercel builds succeed but serve 404s.\n\n```ts\n// vite.config.ts\nimport { nitro } from 'nitro/vite'\n\nexport default defineConfig({\n  plugins: [\n    tanstackStart(),\n    nitro(),        // \u2190 REQUIRED for Vercel\n    viteReact(),\n  ],\n})\n```\n\nInstall: `pnpm add nitro`\n\n**Monorepo (pnpm + Turborepo) quirks:**\n- Set `rootDirectory` in Vercel project settings to the app dir (e.g., `apps/gremlin-cms`)\n- Framework preset should be **TanStack Start** or auto-detect \u2014 never Next.js\n- Do NOT manually set `outputDirectory` \u2014 Nitro generates `.vercel/output` automatically\n- Build command from repo root: `turbo run build --filter=<app-name>` or let Vercel auto-detect\n- If you get 404 after successful build, check: (1) nitro plugin present, (2) framework preset correct, (3) no stale `.vercel` config\n\n**No CLI deploys** \u2014 push to git, let Vercel auto-deploy. Only use `vercel --prod` for emergency hotfixes.\n\n## Rules\n\n1. **Never access `process.env` in loaders directly** \u2014 use `createServerFn` or `createServerOnlyFn`\n2. **Loaders are isomorphic** \u2014 they run on both server AND client during navigation\n3. **Server functions are the boundary** \u2014 anything that touches DB, env vars, or secrets goes through `createServerFn`\n4. **Prefer server functions over API routes** for internal data access \u2014 type-safe, no manual fetch\n5. **Use `useServerFn()` hook** when calling server functions from components (not direct calls)\n6. **Middleware composes** \u2014 stack auth, validation, logging as reusable middleware\n\n## Living Document\n\nThis skill will grow as we build gremlin-cms. Update with patterns discovered during development.\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "tanstack-start",
-    "displayName": "TanStack Start",
-    "description": "Build full-stack React apps with TanStack Start \u2014 server functions, type-safe routing, loaders, middleware, SSR/streaming, and deployment patterns. Use when working on TanStack Start apps, server functions, TanStack Router, or any gremlin-cms development.",
-    "version": "0.1.0",
-    "author": "joel",
-    "tags": "",
-    "disable-model-invocation": "true"
+  "author": "joel",
+  "version": "0.1.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

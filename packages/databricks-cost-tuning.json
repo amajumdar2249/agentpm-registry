@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031745",
   "name": "databricks-cost-tuning",
   "slug": "databricks-cost-tuning",
   "description": "Optimize Databricks costs with cluster policies, spot instances, and",
   "content": "# Databricks Cost Tuning\n\n## Overview\n\nReduce Databricks spending through cluster policies, spot instances, SQL warehouse right-sizing, and cost governance. Databricks charges per DBU (Databricks Unit) with rates varying by compute type: Jobs Compute (~$0.15/DBU), All-Purpose Compute (~$0.40/DBU), SQL Compute (~$0.22/DBU), Serverless (~$0.07/DBU). System tables (`system.billing.usage` and `system.billing.list_prices`) provide cost visibility.\n\n## Prerequisites\n\n- Databricks Premium or Enterprise workspace\n- Access to `system.billing.usage` and `system.billing.list_prices` tables\n- Workspace admin for cluster policy creation\n\n## Instructions\n\n### Step 1: Identify Top Cost Drivers\n\n```sql\n-- Top 10 most expensive resources this month\nSELECT cluster_id,\n       COALESCE(usage_metadata.cluster_name, 'unnamed') AS cluster_name,\n       sku_name,\n       SUM(usage_quantity) AS total_dbus,\n       ROUND(SUM(usage_quantity * p.pricing.default), 2) AS estimated_cost_usd\nFROM system.billing.usage u\nLEFT JOIN system.billing.list_prices p ON u.sku_name = p.sku_name\nWHERE u.usage_date >= date_trunc('month', current_date())\nGROUP BY cluster_id, cluster_name, u.sku_name\nORDER BY estimated_cost_usd DESC\nLIMIT 10;\n\n-- Cost by team (requires cluster tags)\nSELECT usage_metadata.cluster_tags.Team AS team,\n       sku_name,\n       ROUND(SUM(usage_quantity), 1) AS total_dbus,\n       ROUND(SUM(usage_quantity * p.pricing.default), 2) AS cost_usd\nFROM system.billing.usage u\nLEFT JOIN system.billing.list_prices p ON u.sku_name = p.sku_name\nWHERE u.usage_date >= date_trunc('month', current_date())\nGROUP BY team, u.sku_name\nORDER BY cost_usd DESC;\n```\n\n### Step 2: Enforce Cluster Policies\n\nCluster policies restrict what users can configure, preventing runaway costs.\n\n```python\nfrom databricks.sdk import WorkspaceClient\n\nw = WorkspaceClient()\n\n# Create a cost-optimized policy for interactive clusters\npolicy = w.cluster_policies.create(\n    name=\"cost-optimized-interactive\",\n    definition=\"\"\"{\n        \"autotermination_minutes\": {\n            \"type\": \"range\", \"minValue\": 10, \"maxValue\": 60, \"defaultValue\": 20\n        },\n        \"num_workers\": {\n            \"type\": \"range\", \"minValue\": 0, \"maxValue\": 8\n        },\n        \"node_type_id\": {\n            \"type\": \"allowlist\",\n            \"values\": [\"m5.xlarge\", \"m5.2xlarge\", \"c5.xlarge\", \"c5.2xlarge\"],\n            \"defaultValue\": \"m5.xlarge\"\n        },\n        \"aws_attributes.availability\": {\n            \"type\": \"fixed\", \"value\": \"SPOT_WITH_FALLBACK\"\n        },\n        \"custom_tags.CostCenter\": {\n            \"type\": \"fixed\", \"value\": \"engineering\"\n        }\n    }\"\"\",\n)\n\n# Assign policy to a group\nw.cluster_policies.set_permissions(\n    cluster_policy_id=policy.policy_id,\n    access_control_list=[{\n        \"group_name\": \"data-analysts\",\n        \"all_permissions\": [{\"permission_level\": \"CAN_USE\"}],\n    }],\n)\n```\n\n### Step 3: Spot Instances for Batch Jobs\n\nSpot instances save 60-90% on worker nodes. Always keep the driver on-demand.\n\n```python\n# Job cluster config with spot instances\njob_cluster_config = {\n    \"spark_version\": \"14.3.x-scala2.12\",\n    \"node_type_id\": \"i3.xlarge\",\n    \"num_workers\": 4,\n    \"aws_attributes\": {\n        \"availability\": \"SPOT_WITH_FALLBACK\",\n        \"first_on_demand\": 1,          # Driver is on-demand\n        \"spot_bid_price_percent\": 100,  # Pay up to on-demand price\n        \"zone_id\": \"auto\",             # Let Databricks pick cheapest AZ\n    },\n}\n# Workers use spot, driver uses on-demand\n# If spot instances unavailable, falls back to on-demand automatically\n```\n\n### Step 4: Right-Size SQL Warehouses\n\n```sql\n-- Check warehouse utilization\nSELECT warehouse_id, warehouse_name,\n       COUNT(*) AS query_count,\n       ROUND(AVG(total_duration_ms) / 1000, 1) AS avg_duration_sec,\n       ROUND(MAX(queue_duration_ms) / 1000, 1) AS max_queue_sec,\n       ROUND(AVG(queue_duration_ms) / 1000, 1) AS avg_queue_sec\nFROM system.query.history\nWHERE start_time > current_timestamp() - INTERVAL 7 DAYS\nGROUP BY warehouse_id, warehouse_name;\n\n-- If avg_queue_sec is near 0 \u2192 warehouse is oversized, reduce cluster_size\n-- If avg_queue_sec > 30 \u2192 warehouse needs more capacity or auto-scaling\n```\n\n```python\n# Migrate to serverless for bursty workloads (cheaper per-second billing)\nfor wh in w.warehouses.list():\n    print(f\"{wh.name}: type={wh.warehouse_type}, size={wh.cluster_size}, \"\n          f\"auto_stop={wh.auto_stop_mins}min, state={wh.state}\")\n    # Serverless (~$0.07/DBU) vs Classic (~$0.22/DBU) for bursty workloads\n```\n\n### Step 5: Auto-Terminate Idle Development Clusters\n\n```bash\n# Find and set aggressive auto-termination on dev clusters\ndatabricks clusters list --output JSON | \\\n  jq -r '.[] | select(.cluster_name | test(\"dev|sandbox|test\")) | .cluster_id' | \\\n  while read CID; do\n    echo \"Setting 15min auto-stop on cluster $CID\"\n    databricks clusters edit --cluster-id \"$CID\" --json '{\"autotermination_minutes\": 15}'\n  done\n```\n\n```python\n# Find idle running clusters wasting money\nfrom datetime import datetime, timedelta\n\nfor c in w.clusters.list():\n    if c.state.value == \"RUNNING\" and c.last_activity_time:\n        idle_minutes = (datetime.now().timestamp() * 1000 - c.last_activity_time) / 60000\n        if idle_minutes > 60:\n            print(f\"IDLE {idle_minutes:.0f}min: {c.cluster_name} \"\n                  f\"({c.num_workers} x {c.node_type_id})\")\n```\n\n### Step 6: Instance Pools for Faster + Cheaper Startup\n\n```python\n# Create a pool of pre-allocated instances\npool = w.instance_pools.create(\n    instance_pool_name=\"etl-pool\",\n    node_type_id=\"i3.xlarge\",\n    min_idle_instances=2,     # Keep 2 warm for instant startup\n    max_capacity=10,\n    idle_instance_autotermination_minutes=15,\n    aws_attributes={\"availability\": \"SPOT_WITH_FALLBACK\"},\n)\n\n# Reference in job cluster config\njob_cluster = {\n    \"instance_pool_id\": pool.instance_pool_id,\n    \"num_workers\": 4,\n    # No node_type_id needed \u2014 inherited from pool\n}\n```\n\n## Output\n\n- Cost breakdown by cluster, team, and SKU\n- Cluster policies enforcing auto-termination and instance limits\n- Spot instance config for 60-90% savings on batch workers\n- SQL warehouse utilization report for right-sizing\n- Instance pools for faster cluster startup\n- Idle cluster detection script\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Spot interruption | Cloud provider reclaiming capacity | `SPOT_WITH_FALLBACK` auto-recovers; checkpoint long jobs |\n| Policy too restrictive | Workers can't handle workload | Increase `max_workers` or add larger instance types |\n| SQL warehouse idle but running | Auto-stop not configured | Set `auto_stop_mins` to 5-10 for serverless |\n| Billing data not available | System tables not enabled | Enable in Account Console > System Tables |\n\n## Examples\n\n### Monthly Cost Report\n\n```sql\nSELECT date_trunc('week', usage_date) AS week,\n       sku_name,\n       ROUND(SUM(usage_quantity), 0) AS total_dbus\nFROM system.billing.usage\nWHERE usage_date >= current_date() - INTERVAL 30 DAYS\nGROUP BY week, sku_name\nORDER BY week, total_dbus DESC;\n```\n\n### Cost Savings Checklist\n\n- [ ] Auto-termination enabled on ALL interactive clusters (15-30 min)\n- [ ] Spot instances enabled for all batch job workers\n- [ ] Instance pools for frequently-used cluster configs\n- [ ] Serverless SQL warehouses for bursty query workloads\n- [ ] Cluster policies assigned to all non-admin groups\n- [ ] Team tags on all clusters for cost attribution\n- [ ] Weekly cost review using `system.billing.usage`\n\n## Resources\n\n- [Cost Optimization Best Practices](https://docs.databricks.com/aws/en/lakehouse-architecture/cost-optimization/best-practices)\n- [Cluster Policies](https://docs.databricks.com/aws/en/admin/clusters/policy-definition)\n- [Billing Usage Tables](https://docs.databricks.com/aws/en/admin/system-tables/)\n- [Serverless SQL Warehouses](https://docs.databricks.com/aws/en/admin/sql/serverless)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "databricks-cost-tuning",
-    "description": "Optimize Databricks costs with cluster policies, spot instances, and",
-    "allowed-tools": "Read, Write, Edit, Bash(databricks:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

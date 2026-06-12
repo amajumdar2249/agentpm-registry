@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032377",
   "name": "klaviyo-prod-checklist",
   "slug": "klaviyo-prod-checklist",
   "description": "Execute Klaviyo production deployment checklist and validation procedures.",
   "content": "# Klaviyo Production Checklist\n\n## Overview\n\nComplete checklist for deploying Klaviyo integrations to production, with health checks, rollback procedures, and validation against real Klaviyo API endpoints.\n\n## Prerequisites\n\n- Staging environment tested and verified\n- Production API key with correct scopes (`pk_*`)\n- Webhook signing secret configured\n- Monitoring and alerting ready\n\n## Instructions\n\n### Pre-Deployment Checklist\n\n#### Authentication & Secrets\n\n- [ ] Production `KLAVIYO_PRIVATE_KEY` stored in secret manager (not env file)\n- [ ] Key has minimal scopes (only what the app needs)\n- [ ] Webhook signing secret (`KLAVIYO_WEBHOOK_SIGNING_SECRET`) configured\n- [ ] Public key (`KLAVIYO_PUBLIC_KEY`) set for client-side tracking (if used)\n- [ ] No hardcoded keys in codebase (`grep -r \"pk_\" src/`)\n\n#### API Integration\n\n- [ ] All API calls use `klaviyo-api` SDK (not raw HTTP)\n- [ ] SDK version pinned in `package.json` (not `^` or `*`)\n- [ ] `revision` header set to `2024-10-15` (or current supported revision)\n- [ ] All profile creates use `createOrUpdateProfile` (upsert, not create)\n- [ ] Events include `uniqueId` for deduplication where applicable\n- [ ] Phone numbers validated as E.164 format (`+15551234567`)\n\n#### Error Handling & Resilience\n\n- [ ] 429 retry logic honors `Retry-After` header\n- [ ] 5xx errors retried with exponential backoff\n- [ ] 401/403 errors logged with alert (key rotation needed)\n- [ ] Circuit breaker or graceful degradation when Klaviyo is down\n- [ ] Request queue prevents exceeding 75 req/s burst limit\n\n#### Webhook Security\n\n- [ ] Webhook endpoint uses HTTPS only\n- [ ] HMAC-SHA256 signature verification enabled\n- [ ] Idempotency handling (dedup by event ID)\n- [ ] Webhook endpoint returns 200 within 30 seconds\n\n#### Monitoring\n\n- [ ] Health check endpoint includes Klaviyo connectivity test\n- [ ] Alert on 429 rate (>5/min = P2)\n- [ ] Alert on 401/403 errors (any = P1)\n- [ ] Alert on 5xx errors (>10/min = P1)\n- [ ] API latency tracked (P95 > 5s = P2)\n- [ ] Klaviyo status page monitored ([status.klaviyo.com](https://status.klaviyo.com))\n\n### Health Check Implementation\n\n```typescript\n// src/health/klaviyo.ts\nimport { ApiKeySession, AccountsApi } from 'klaviyo-api';\n\nexport async function checkKlaviyoHealth(): Promise<{\n  status: 'healthy' | 'degraded' | 'down';\n  latencyMs: number;\n  accountId?: string;\n  error?: string;\n}> {\n  const start = Date.now();\n  try {\n    const session = new ApiKeySession(process.env.KLAVIYO_PRIVATE_KEY!);\n    const accountsApi = new AccountsApi(session);\n    const result = await accountsApi.getAccounts();\n\n    return {\n      status: 'healthy',\n      latencyMs: Date.now() - start,\n      accountId: result.body.data[0].id,\n    };\n  } catch (error: any) {\n    return {\n      status: error.status === 429 ? 'degraded' : 'down',\n      latencyMs: Date.now() - start,\n      error: `${error.status}: ${error.body?.errors?.[0]?.detail || error.message}`,\n    };\n  }\n}\n\n// Express health endpoint\napp.get('/health', async (req, res) => {\n  const klaviyo = await checkKlaviyoHealth();\n  const overallStatus = klaviyo.status === 'healthy' ? 200 : 503;\n  res.status(overallStatus).json({\n    status: klaviyo.status,\n    services: { klaviyo },\n    timestamp: new Date().toISOString(),\n  });\n});\n```\n\n### Pre-Flight Validation Script\n\n```bash\n#!/bin/bash\n# scripts/preflight-klaviyo.sh\nset -euo pipefail\n\necho \"=== Klaviyo Production Pre-Flight ===\"\n\n# 1. Check Klaviyo status\necho -n \"Klaviyo Status Page: \"\nSTATUS=$(curl -s \"https://status.klaviyo.com/api/v2/status.json\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['status']['description'])\" 2>/dev/null)\necho \"$STATUS\"\n[ \"$STATUS\" = \"All Systems Operational\" ] || echo \"WARNING: Klaviyo has active incidents\"\n\n# 2. Verify API key\necho -n \"API Auth: \"\nHTTP_CODE=$(curl -s -w \"%{http_code}\" -o /dev/null \\\n  -H \"Authorization: Klaviyo-API-Key $KLAVIYO_PRIVATE_KEY\" \\\n  -H \"revision: 2024-10-15\" \\\n  \"https://a.klaviyo.com/api/accounts/\")\necho \"HTTP $HTTP_CODE\"\n[ \"$HTTP_CODE\" = \"200\" ] || { echo \"FAIL: API auth returned $HTTP_CODE\"; exit 1; }\n\n# 3. Check rate limit headroom\necho -n \"Rate Limit: \"\ncurl -s -I \\\n  -H \"Authorization: Klaviyo-API-Key $KLAVIYO_PRIVATE_KEY\" \\\n  -H \"revision: 2024-10-15\" \\\n  \"https://a.klaviyo.com/api/profiles/?page[size]=1\" 2>/dev/null \\\n  | grep -i \"ratelimit-remaining\" || echo \"Headers not available\"\n\n# 4. Verify SDK version\necho -n \"SDK Version: \"\nnode -e \"console.log(require('klaviyo-api/package.json').version)\" 2>/dev/null || echo \"Not installed\"\n\necho \"\"\necho \"=== Pre-flight complete ===\"\n```\n\n### Rollback Procedure\n\n```bash\n# Immediate rollback: disable Klaviyo integration\n# Option 1: Feature flag (preferred)\n# Set KLAVIYO_ENABLED=false in your deployment platform\n\n# Option 2: Deploy previous version\ngit log --oneline -5  # Find last known-good commit\ngit revert HEAD        # Revert the deployment commit\n# Push and deploy\n\n# Option 3: If using Kubernetes\nkubectl rollout undo deployment/your-app\nkubectl rollout status deployment/your-app\n```\n\n## Alert Thresholds\n\n| Alert | Condition | Severity |\n|-------|-----------|----------|\n| API Auth Failure | Any 401/403 | P1 -- key may be revoked |\n| API Unreachable | 5xx > 10/min | P1 -- check status page |\n| Rate Limited | 429 > 5/min | P2 -- reduce request volume |\n| High Latency | P95 > 5s | P2 -- check network/Klaviyo load |\n| Webhook Signature Invalid | Any rejection | P2 -- verify signing secret |\n\n## Resources\n\n- [Klaviyo Status Page](https://status.klaviyo.com)\n- [API Versioning Policy](https://developers.klaviyo.com/en/docs/api_versioning_and_deprecation_policy)\n- [Rate Limits](https://developers.klaviyo.com/en/docs/rate_limits_and_error_handling)\n\n## Next Steps\n\nFor version upgrades, see `klaviyo-upgrade-migration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "klaviyo-prod-checklist",
-    "description": "Execute Klaviyo production deployment checklist and validation procedures.",
-    "allowed-tools": "Read, Bash(curl:*), Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

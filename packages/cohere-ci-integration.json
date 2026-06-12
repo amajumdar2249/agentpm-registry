@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031639",
   "name": "cohere-ci-integration",
   "slug": "cohere-ci-integration",
   "description": "Configure CI/CD for Cohere integrations with GitHub Actions and automated",
   "content": "# Cohere CI Integration\n\n## Overview\n\nSet up CI/CD pipelines with automated unit tests (mocked) and integration tests (real API) for Cohere API v2 applications.\n\n## Prerequisites\n\n- GitHub repository with Actions enabled\n- Cohere trial or production API key\n- `cohere-ai` package installed\n\n## Instructions\n\n### Step 1: GitHub Actions Workflow\n\n```yaml\n# .github/workflows/cohere-ci.yml\nname: Cohere CI\n\non:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n\njobs:\n  unit-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n      - run: npm test -- --coverage\n        # Unit tests use mocked Cohere responses \u2014 no API key needed\n\n  integration-tests:\n    runs-on: ubuntu-latest\n    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n    env:\n      CO_API_KEY: ${{ secrets.CO_API_KEY }}\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n      - name: Run Cohere integration tests\n        run: npm run test:integration\n        timeout-minutes: 5\n```\n\n### Step 2: Configure GitHub Secrets\n\n```bash\n# Store Cohere API key as a repo secret\ngh secret set CO_API_KEY --body \"your-production-key-here\"\n\n# Verify it was set\ngh secret list\n```\n\n### Step 3: Unit Tests (Mocked \u2014 No API Key)\n\n```typescript\n// tests/unit/cohere-chat.test.ts\nimport { describe, it, expect, vi, beforeEach } from 'vitest';\n\n// Mock the entire SDK\nvi.mock('cohere-ai', () => ({\n  CohereClientV2: vi.fn().mockImplementation(() => ({\n    chat: vi.fn().mockResolvedValue({\n      message: { content: [{ type: 'text', text: 'mocked response' }] },\n      finishReason: 'COMPLETE',\n      usage: { billedUnits: { inputTokens: 5, outputTokens: 3 } },\n    }),\n    embed: vi.fn().mockResolvedValue({\n      embeddings: { float: [[0.1, 0.2, 0.3]] },\n    }),\n    rerank: vi.fn().mockResolvedValue({\n      results: [{ index: 0, relevanceScore: 0.95 }],\n    }),\n  })),\n}));\n\ndescribe('Chat service', () => {\n  it('returns text from chat completion', async () => {\n    const { CohereClientV2 } = await import('cohere-ai');\n    const cohere = new CohereClientV2();\n\n    const response = await cohere.chat({\n      model: 'command-a-03-2025',\n      messages: [{ role: 'user', content: 'test' }],\n    });\n\n    expect(response.message?.content?.[0]?.text).toBe('mocked response');\n    expect(cohere.chat).toHaveBeenCalledWith(\n      expect.objectContaining({ model: 'command-a-03-2025' })\n    );\n  });\n\n  it('handles embed with correct input type', async () => {\n    const { CohereClientV2 } = await import('cohere-ai');\n    const cohere = new CohereClientV2();\n\n    const response = await cohere.embed({\n      model: 'embed-v4.0',\n      texts: ['test'],\n      inputType: 'search_document',\n      embeddingTypes: ['float'],\n    });\n\n    expect(response.embeddings.float).toHaveLength(1);\n  });\n});\n```\n\n### Step 4: Integration Tests (Real API \u2014 Gated)\n\n```typescript\n// tests/integration/cohere.test.ts\nimport { describe, it, expect } from 'vitest';\nimport { CohereClientV2 } from 'cohere-ai';\n\nconst hasApiKey = !!process.env.CO_API_KEY;\n\ndescribe.skipIf(!hasApiKey)('Cohere Integration', () => {\n  const cohere = new CohereClientV2();\n\n  it('chat completion works', async () => {\n    const response = await cohere.chat({\n      model: 'command-r7b-12-2024', // cheapest model for CI\n      messages: [{ role: 'user', content: 'Reply with exactly: OK' }],\n      maxTokens: 5,\n    });\n    expect(response.message?.content?.[0]?.text).toBeTruthy();\n    expect(response.finishReason).toBe('COMPLETE');\n  }, 15_000);\n\n  it('embed generates vectors', async () => {\n    const response = await cohere.embed({\n      model: 'embed-v4.0',\n      texts: ['CI test embedding'],\n      inputType: 'search_document',\n      embeddingTypes: ['float'],\n    });\n    expect(response.embeddings.float[0].length).toBeGreaterThan(0);\n  }, 15_000);\n\n  it('rerank scores documents', async () => {\n    const response = await cohere.rerank({\n      model: 'rerank-v3.5',\n      query: 'machine learning',\n      documents: ['ML is AI', 'cooking recipes', 'deep learning'],\n      topN: 2,\n    });\n    expect(response.results).toHaveLength(2);\n    expect(response.results[0].relevanceScore).toBeGreaterThan(0.5);\n  }, 15_000);\n});\n```\n\n### Step 5: Package Scripts\n\n```json\n{\n  \"scripts\": {\n    \"test\": \"vitest --run\",\n    \"test:watch\": \"vitest --watch\",\n    \"test:integration\": \"COHERE_INTEGRATION=1 vitest --run tests/integration/\",\n    \"test:coverage\": \"vitest --run --coverage\"\n  }\n}\n```\n\n## CI Cost Control\n\n- Use `command-r7b-12-2024` (cheapest) for integration tests\n- Set `maxTokens: 5` on all CI chat calls\n- Run integration tests only on `main` pushes (not PRs)\n- Use trial key for CI if under 1000 monthly calls\n\n## Error Handling\n\n| CI Issue | Cause | Solution |\n|----------|-------|----------|\n| Secret not found | Missing GitHub secret | `gh secret set CO_API_KEY` |\n| 429 in CI | Rate limited (trial key) | Reduce test count or upgrade key |\n| Integration timeout | Slow API response | Set `timeout-minutes: 5` |\n| Flaky tests | API latency variance | Add retry in test setup |\n\n## Resources\n\n- [GitHub Actions Secrets](https://docs.github.com/en/actions/security-guides/encrypted-secrets)\n- [Vitest Configuration](https://vitest.dev/config/)\n- [Cohere Rate Limits](https://docs.cohere.com/docs/rate-limits)\n\n## Next Steps\n\nFor deployment patterns, see `cohere-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "cohere-ci-integration",
-    "description": "Configure CI/CD for Cohere integrations with GitHub Actions and automated",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

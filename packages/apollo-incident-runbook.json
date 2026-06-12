@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031287",
   "name": "apollo-incident-runbook",
   "slug": "apollo-incident-runbook",
   "description": "Apollo.io incident response procedures.",
   "content": "# Apollo Incident Runbook\n\n## Overview\n\nStructured incident response for Apollo.io API failures. Covers severity classification, quick diagnosis, circuit breaker implementation, graceful degradation, and post-incident review. Apollo's public status page is at [status.apollo.io](https://status.apollo.io).\n\n## Prerequisites\n\n- Valid Apollo API key\n- Access to monitoring dashboards\n\n## Instructions\n\n### Step 1: Classify Severity\n\n```\nSeverity | Criteria                                    | Response Time\n---------+---------------------------------------------+--------------\nP1       | Apollo API completely unreachable            | 15 min\n         | All enrichments/searches returning 5xx       |\nP2       | Partial failures (>10% error rate)           | 1 hour\n         | Rate limiting blocking critical workflows    |\nP3       | Intermittent errors (<10%), degraded latency | 4 hours\n         | Non-critical endpoint failures               |\nP4       | Cosmetic issues, minor data inconsistencies  | Next sprint\n```\n\n### Step 2: Quick Diagnosis Script\n\n```bash\n#!/bin/bash\n# scripts/apollo-diagnosis.sh\nset -euo pipefail\necho \"=== Apollo Quick Diagnosis $(date -u +%Y-%m-%dT%H:%M:%SZ) ===\"\n\n# 1. Check Apollo status page\necho -e \"\\n--- Status Page ---\"\ncurl -s https://status.apollo.io/api/v2/status.json 2>/dev/null | \\\n  python3 -c \"import sys,json; d=json.load(sys.stdin); print(f'Status: {d[\\\"status\\\"][\\\"description\\\"]}')\" \\\n  2>/dev/null || echo \"Could not reach status page\"\n\n# 2. Test auth\necho -e \"\\n--- Auth Check ---\"\ncurl -s -w \"HTTP %{http_code} in %{time_total}s\\n\" \\\n  -H \"x-api-key: $APOLLO_API_KEY\" \\\n  \"https://api.apollo.io/api/v1/auth/health\" | head -1\n\n# 3. Test people search (free endpoint)\necho -e \"\\n--- People Search ---\"\ncurl -s -w \"HTTP %{http_code} in %{time_total}s\\n\" -o /dev/null \\\n  -X POST -H \"Content-Type: application/json\" -H \"x-api-key: $APOLLO_API_KEY\" \\\n  -d '{\"q_organization_domains_list\":[\"apollo.io\"],\"per_page\":1}' \\\n  \"https://api.apollo.io/api/v1/mixed_people/api_search\"\n\n# 4. Check rate limit headers\necho -e \"\\n--- Rate Limits ---\"\ncurl -s -D - -o /dev/null \\\n  -X POST -H \"Content-Type: application/json\" -H \"x-api-key: $APOLLO_API_KEY\" \\\n  -d '{\"q_organization_domains_list\":[\"apollo.io\"],\"per_page\":1}' \\\n  \"https://api.apollo.io/api/v1/mixed_people/api_search\" 2>/dev/null | grep -i \"x-rate-limit\" || echo \"No rate limit headers\"\n\n# 5. DNS resolution\necho -e \"\\n--- DNS ---\"\ndig +short api.apollo.io 2>/dev/null || nslookup api.apollo.io 2>/dev/null || echo \"DNS lookup failed\"\n```\n\n### Step 3: Circuit Breaker\n\n```typescript\n// src/resilience/circuit-breaker.ts\ntype State = 'closed' | 'open' | 'half-open';\n\nexport class CircuitBreaker {\n  private state: State = 'closed';\n  private failures = 0;\n  private lastFailure = 0;\n  private halfOpenSuccesses = 0;\n\n  constructor(\n    private failureThreshold: number = 5,\n    private resetTimeoutMs: number = 60_000,\n    private requiredSuccesses: number = 3,\n  ) {}\n\n  async execute<T>(fn: () => Promise<T>, fallback?: () => T): Promise<T> {\n    if (this.state === 'open') {\n      if (Date.now() - this.lastFailure > this.resetTimeoutMs) {\n        this.state = 'half-open';\n        this.halfOpenSuccesses = 0;\n      } else {\n        if (fallback) return fallback();\n        throw new Error(`Circuit OPEN \u2014 Apollo calls blocked for ${Math.round((this.resetTimeoutMs - (Date.now() - this.lastFailure)) / 1000)}s`);\n      }\n    }\n\n    try {\n      const result = await fn();\n      if (this.state === 'half-open') {\n        this.halfOpenSuccesses++;\n        if (this.halfOpenSuccesses >= this.requiredSuccesses) {\n          this.state = 'closed';\n          this.failures = 0;\n        }\n      } else {\n        this.failures = 0;\n      }\n      return result;\n    } catch (err) {\n      this.failures++;\n      this.lastFailure = Date.now();\n      if (this.failures >= this.failureThreshold) this.state = 'open';\n      if (fallback) return fallback();\n      throw err;\n    }\n  }\n\n  get status() { return { state: this.state, failures: this.failures }; }\n}\n```\n\n### Step 4: Graceful Degradation by Severity\n\n```typescript\nimport { CircuitBreaker } from './circuit-breaker';\n\nconst breaker = new CircuitBreaker(5, 60_000);\n\n// P1: Total outage \u2014 serve cached data\nasync function handleP1() {\n  console.error('[P1] Apollo API unreachable');\n  return breaker.execute(\n    () => client.post('/mixed_people/api_search', { per_page: 1 }),\n    () => {\n      console.warn('Serving cached search results');\n      return { data: { people: [], source: 'cache', degraded: true } };\n    },\n  );\n}\n\n// P2: Partial failures \u2014 reduce load\nasync function handleP2() {\n  console.warn('[P2] Apollo degraded \u2014 reducing concurrency');\n  // Disable bulk enrichment, reduce search concurrency to 1\n  // Continue serving search from cache where possible\n}\n\n// P3: Intermittent \u2014 retry with backoff\nasync function handleP3() {\n  console.info('[P3] Intermittent errors \u2014 backoff enabled');\n  // Retry with longer delays, log for monitoring\n}\n```\n\n### Step 5: Post-Incident Review Template\n\n```markdown\n## Post-Incident Review: Apollo Integration\n\n**Incident ID:** INC-YYYY-MM-DD-NNN\n**Severity:** P1 / P2 / P3\n**Duration:** HH:MM start to HH:MM resolved (X minutes)\n**Apollo Status Page:** Reporting outage? Y/N\n\n### Timeline\n| Time (UTC) | Event |\n|------------|-------|\n| HH:MM | First alert fired (source: Prometheus/PagerDuty) |\n| HH:MM | On-call acknowledged |\n| HH:MM | Root cause identified |\n| HH:MM | Mitigation applied (circuit breaker / cache fallback) |\n| HH:MM | Apollo API restored |\n| HH:MM | Circuit breaker closed, normal operations resumed |\n\n### Impact\n- Searches affected: N requests failed / served from cache\n- Enrichments failed: N (credits not consumed)\n- Sequences paused: N contacts delayed\n- Revenue impact: $X (estimated pipeline delay)\n\n### Root Cause\n[Apollo-side outage / rate limiting / key rotation / network issue]\n\n### Action Items\n- [ ] Add/improve circuit breaker coverage (owner, due)\n- [ ] Increase cache TTL for critical data (owner, due)\n- [ ] Add alerting for [specific gap] (owner, due)\n```\n\n## Output\n\n- Severity classification matrix (P1-P4) with response times\n- Bash diagnostic script (status page, auth, search, rate limits, DNS)\n- Circuit breaker with closed/open/half-open states\n- Graceful degradation procedures per severity level\n- Post-incident review template\n\n## Error Handling\n\n| Issue | Escalation |\n|-------|------------|\n| P1 > 15 min | Page on-call, open Apollo support ticket |\n| P2 > 2 hours | Notify engineering management |\n| Recurring P3 | Promote to P2 tracking issue |\n| Apollo outage | Verify at [status.apollo.io](https://status.apollo.io), enable cache fallback |\n\n## Resources\n\n- [Apollo Status Page](https://status.apollo.io)\n- [Apollo Support](https://support.apollo.io)\n- [API Usage Stats](https://docs.apollo.io/reference/view-api-usage-stats)\n\n## Next Steps\n\nProceed to `apollo-data-handling` for data management.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "apollo-incident-runbook",
-    "description": "Apollo.io incident response procedures.",
-    "allowed-tools": "Read, Write, Edit, Bash(kubectl:*), Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

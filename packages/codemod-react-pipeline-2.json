@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000041030",
   "name": "codemod-react-pipeline",
   "slug": "codemod-react-pipeline-2",
   "description": "Guided, scripted pipeline for running JSX/TSX/React codemods safely across large legacy codebases. Use when you need to scaffold a codemod, dry-run it, validate its findings, and apply it across many files (50 to 100k+) without breaking the build. Walks the full inner/outer loop with the Codemod CLI (JSSG, ast-grep, workflows). Triggers on large-scale refactor, legacy React migration, codemod a prop/API change, migrate components across the codebase, run a codemod safely, batched/resumable codemod apply, dry-run a codemod.",
   "content": "\n# Codemod React Pipeline\n\nA safe, repeatable workflow for applying **JSX / TSX / React codemods to large legacy\ncodebases** \u2014 from a 50-file rename to a 100k-file API migration. It composes the\n[Codemod CLI](https://docs.codemod.com) (JSSG, ast-grep, workflows) into an inner/outer loop and\ngates every mass change behind a dry-run plus validation. For the *why* behind each rule it cites,\nsee the sibling [`codemod`](../codemod/) best-practices reference.\n\n## When to Apply\n\nUse this skill when:\n- You're migrating a pattern across a large React/TS codebase (component/prop rename, deprecated\n  API, import swap, hook migration) and a hand-run `codemod jssg run ./t.ts ./src` is too risky.\n- You need the change to land **incrementally and reviewably** \u2014 per-batch commits, resumable on\n  failure, with the build/typecheck/tests green at every checkpoint.\n- You want to **see and validate the findings** (what would change, and whether it's safe) before\n  touching files at scale.\n- The transform must be **idempotent** and proven so before mass apply.\n\nDon't use it for a one-file edit, or a change better done by hand in a single PR.\n\n## Workflow Overview\n\n```\n00 plan \u2500\u25b6 01 scaffold \u2500\u25b6 02 inner loop \u2500\u25b6 03 dry-run \u2500\u25b6 04 validate \u2500\u25b6 05 batched apply \u2500\u25b6 06 verify\n   goal       templates      fixture tests     preview       gates          per-batch            final\n   + blast    (transform/    + 1-file trial    + findings     (idempotency,  apply+verify+commit  assertions\n   radius     rule/wf/tests)                    report        type/lint/test) (resumable)\n                                                  \u2502                                  \u2502\n                                                  \u2514\u2500\u2500 sentinel \u2500\u2500\u2500\u2500 required by \u2500\u2500\u2500\u2500\u2500\u2500\u2518\n                              (on any failure: working tree reverted; fix and re-run \u2014 nothing committed yet)\n```\n\n| Step | Action | Tool / Script | Risk |\n|------|--------|---------------|------|\n| 0 | Capture goal, classify transform, count blast radius | `scripts/00-plan.sh` | read-only |\n| 1 | Scaffold transform + fixtures + workflow from templates | `scripts/01-scaffold.sh` | write (new files) |\n| 2 | Fixture tests + single-file trial run (auto-reverted) | `scripts/02-inner-loop.sh` | read-only (reverts) |\n| 3 | Preview changes; write findings report + dry-run sentinel | `scripts/03-dry-run.sh` | read-only (reverts) |\n| 4 | Gate: idempotency, typecheck, lint, format, tests | `scripts/04-validate-findings.sh` | read-only (reverts) |\n| 5 | Apply in resumable batches, verify + commit each | `scripts/05-run-batched.sh` | **destructive** (commits) |\n| 6 | Final assertions over the whole migration | `scripts/verify.sh` | read-only |\n\nA PreToolUse hook (`hooks/hooks.json`) blocks a broad `codemod jssg run` that lacks `--dry-run`\nwhen no dry-run sentinel exists \u2014 so step 5 (or an ad-hoc apply) cannot skip steps 3\u20134.\n\n## Requirements\n\n- **Codemod CLI** \u2014 `npm i -g codemod` (or the scripts fall back to `npx codemod`). Provides\n  `jssg run/test` and `workflow run/validate/resume/status`.\n- **git** \u2014 the pipeline requires a clean tree and makes per-batch checkpoint commits.\n- **jq** \u2014 the scripts read `config.json` with it.\n- **Your project's gate tooling** \u2014 TypeScript, ESLint, Prettier, a test runner (whichever gates\n  you enable in `config.json`).\n\n## Setup\n\nEdit `config.json` for the target repo (see each field's `_setup_instructions`):\n- `src_globs`: the files the codemod may touch (scopes blast radius + gates)\n- `language`: `tsx` | `jsx` | `typescript` | `javascript`\n- `typecheck_cmd` / `lint_cmd` / `format_cmd` / `test_cmd`: gate commands (empty disables a gate)\n- `batch_size`: files per checkpoint in the outer loop\n- `gates`: per-gate on/off toggles\n\nAdd your `state_dir` (default `.codemod-pipeline`) to the target repo's `.gitignore`.\n\n## Quick Reference\n\n| Script | Purpose |\n|--------|---------|\n| `scripts/00-plan.sh \"<goal>\" [name]` | Plan + blast-radius estimate |\n| `scripts/01-scaffold.sh <name> [--rule]` | Scaffold a JSSG transform (or ast-grep rule) |\n| `scripts/02-inner-loop.sh <name> [--watch\\|--file P\\|-u]` | Tight loop: fixture tests / 1-file trial |\n| `scripts/03-dry-run.sh <name> [--sample N]` | Preview; write findings + sentinel |\n| `scripts/04-validate-findings.sh <name>` | Run validation gates |\n| `scripts/05-run-batched.sh <name> [--batch-size N\\|--dry]` | Resumable batched apply + commits |\n| `scripts/verify.sh <name>` | Final sign-off assertions |\n| `scripts/selftest.sh` | Self-test this skill's scripts/assets |\n\n## How to Use\n\n1. From the **target repo root**, run `00-plan.sh \"<goal>\"` and read the generated `plan.md`.\n2. `01-scaffold.sh <name>`, then implement `codemods/<name>/transform.ts` and its fixtures.\n3. Iterate with `02-inner-loop.sh <name> --watch` until fixtures pass; try `--file <path>` on a real file.\n4. `03-dry-run.sh <name>` and read the findings report; then `04-validate-findings.sh <name>`.\n5. Only after gates pass: `05-run-batched.sh <name>` (resume by re-running it after any fix).\n6. `verify.sh <name>` to confirm the migration is complete and idempotent.\n\nSee [references/workflow.md](references/workflow.md) for per-step inputs, outputs, failure handling,\nand rollback; [references/inner-outer-loop.md](references/inner-outer-loop.md) for the mental model;\nand [references/safety-and-scale.md](references/safety-and-scale.md) for batching and rollback at\n100k-file scale.\n\n## Gotchas\n\nSee [gotchas.md](gotchas.md). The big ones: workflow `commit:` checkpoints are **cloud-only** (the\npipeline commits locally instead); always exclude generated/vendored trees; and design for\nidempotency from the first line.\n\n## Related Skills\n\n- [`codemod`](../codemod/) \u2014 the best-practices reference (48 rules) this pipeline operationalizes.\n  Steps here cite specific rules (e.g. `test-run-on-subset-first`, `state-use-for-resumability`,\n  `pattern-ensure-idempotency`, `security-minimize-capabilities`).\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "codemod-react-pipeline",
-    "description": "Guided, scripted pipeline for running JSX/TSX/React codemods safely across large legacy codebases. Use when you need to scaffold a codemod, dry-run it, validate its findings, and apply it across many files (50 to 100k+) without breaking the build. Walks the full inner/outer loop with the Codemod CLI (JSSG, ast-grep, workflows). Triggers on large-scale refactor, legacy React migration, codemod a prop/API change, migrate components across the codebase, run a codemod safely, batched/resumable codemod apply, dry-run a codemod."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

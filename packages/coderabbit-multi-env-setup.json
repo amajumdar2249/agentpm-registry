@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031629",
   "name": "coderabbit-multi-env-setup",
   "slug": "coderabbit-multi-env-setup",
   "description": "Configure CodeRabbit review behavior per branch and environment using",
   "content": "# CodeRabbit Multi-Environment Setup\n\n## Overview\n\nConfigure CodeRabbit review behavior based on branch targets and environments. CodeRabbit reads `.coderabbit.yaml` from the PR's base branch, allowing different review configurations per branch. This enables stricter reviews for production branches, relaxed reviews for development, and custom instructions per environment.\n\n## Prerequisites\n\n- CodeRabbit GitHub App installed on repository\n- Branch strategy defined (e.g., GitFlow, trunk-based, GitHub Flow)\n- `.coderabbit.yaml` committed to each relevant branch\n\n## How Branch-Based Config Works\n\n```\nDeveloper opens PR: feature/auth \u2192 develop\n  CodeRabbit reads: .coderabbit.yaml from develop branch\n  Profile: \"chill\" (development, quick iteration)\n\nDeveloper opens PR: develop \u2192 main\n  CodeRabbit reads: .coderabbit.yaml from main branch\n  Profile: \"assertive\" (production, thorough review)\n\nDeveloper opens PR: hotfix/fix \u2192 release/v2.1\n  CodeRabbit reads: .coderabbit.yaml from release/v2.1 branch\n  Profile: \"assertive\" + security-focused instructions\n```\n\n## Instructions\n\n### Step 1: Configure Development Branch (Relaxed)\n\n```yaml\n# .coderabbit.yaml on develop branch\nlanguage: \"en-US\"\n\nreviews:\n  profile: \"chill\"                     # Fewer comments for rapid iteration\n  request_changes_workflow: false      # Don't block merges to develop\n  high_level_summary: true\n  sequence_diagrams: false             # Skip diagrams for dev PRs\n\n  auto_review:\n    enabled: true\n    drafts: false\n    base_branches:\n      - develop\n    ignore_title_keywords:\n      - \"WIP\"\n      - \"DO NOT MERGE\"\n      - \"experiment\"\n\n  path_filters:\n    - \"!**/*.lock\"\n    - \"!**/*.snap\"\n    - \"!dist/**\"\n    - \"!**/*.generated.*\"\n\n  path_instructions:\n    - path: \"**\"\n      instructions: |\n        Development branch review:\n        - Only flag bugs, security issues, and obvious errors\n        - Do NOT comment on code style, naming, or formatting\n        - Do NOT suggest refactoring unless it fixes a bug\n\nchat:\n  auto_reply: true\n```\n\n### Step 2: Configure Production Branch (Strict)\n\n```yaml\n# .coderabbit.yaml on main branch\nlanguage: \"en-US\"\n\nreviews:\n  profile: \"assertive\"                 # Thorough review for production\n  request_changes_workflow: true       # Block merge on issues\n  high_level_summary: true\n  high_level_summary_in_walkthrough: true\n  sequence_diagrams: true\n  review_status: true\n\n  auto_review:\n    enabled: true\n    drafts: false\n    base_branches:\n      - main\n\n  path_filters:\n    - \"!**/*.lock\"\n    - \"!**/*.snap\"\n    - \"!dist/**\"\n    - \"!vendor/**\"\n\n  path_instructions:\n    - path: \"**\"\n      instructions: |\n        Production review checklist:\n        1. Flag any hardcoded secrets, API keys, or credentials\n        2. Check error handling: no empty catch blocks, proper error propagation\n        3. Verify input validation on all API endpoints\n        4. Check for proper logging (structured, no PII)\n\n    - path: \"src/api/**\"\n      instructions: |\n        API review (production):\n        - Verify proper HTTP status codes\n        - Check auth middleware is applied to protected routes\n        - Validate request bodies with schema validation\n        - Ensure error responses follow RFC 7807 format\n        - Flag missing rate limiting\n\n    - path: \"src/db/**\"\n      instructions: |\n        Database review (production):\n        - All queries MUST use parameterized statements\n        - Transactions required for multi-table mutations\n        - Check for N+1 query patterns\n        - Verify index usage for complex queries\n        - Flag any raw SQL string concatenation\n\n    - path: \".github/workflows/**\"\n      instructions: |\n        CI/CD review (production):\n        - Pin ALL action versions to SHA (not tags)\n        - Never echo or log secrets\n        - Include timeout-minutes on all jobs\n        - Use OIDC for cloud provider authentication\n\nchat:\n  auto_reply: true\n```\n\n### Step 3: Configure Release Branch (Security-Focused)\n\n```yaml\n# .coderabbit.yaml on release/* branches\nlanguage: \"en-US\"\n\nreviews:\n  profile: \"assertive\"\n  request_changes_workflow: true       # Block merges on issues\n\n  auto_review:\n    enabled: true\n    drafts: false\n    base_branches:\n      - \"release/*\"\n\n  path_instructions:\n    - path: \"**\"\n      instructions: |\n        RELEASE BRANCH - Security and stability focus:\n        1. Flag ANY security vulnerability (priority over all other feedback)\n        2. Check for backward compatibility\n        3. Verify no debug code (console.log, debugger statements)\n        4. Ensure proper error messages (no stack traces exposed to users)\n        5. Check for feature flags guarding unreleased features\n        Only provide feedback on bugs and security. Skip style comments entirely.\n\n    - path: \"src/auth/**\"\n      instructions: |\n        CRITICAL PATH for release. Check:\n        - Token validation and expiry\n        - Session management security\n        - CSRF protection\n        - No auth bypass vulnerabilities\n\nchat:\n  auto_reply: true\n```\n\n### Step 4: Maintain Branch Configs with a Script\n\n```bash\n#!/bin/bash\n# update-coderabbit-configs.sh - Keep branch configs in sync\nset -euo pipefail\n\nCURRENT_BRANCH=$(git branch --show-current)\n\n# Update develop branch config\ngit checkout develop 2>/dev/null || git checkout -b develop\ncp configs/coderabbit-develop.yaml .coderabbit.yaml\ngit add .coderabbit.yaml\ngit diff --cached --quiet || git commit -m \"chore: update CodeRabbit config for develop\"\n\n# Update main branch config\ngit checkout main\ncp configs/coderabbit-main.yaml .coderabbit.yaml\ngit add .coderabbit.yaml\ngit diff --cached --quiet || git commit -m \"chore: update CodeRabbit config for main\"\n\n# Return to original branch\ngit checkout \"$CURRENT_BRANCH\"\n\necho \"CodeRabbit configs updated on develop and main\"\necho \"Push both branches to apply: git push origin develop main\"\n```\n\n### Step 5: Verify Per-Branch Configuration\n\n```markdown\n# On a PR targeting develop:\n@coderabbitai configuration\n# Should show: profile: \"chill\", request_changes_workflow: false\n\n# On a PR targeting main:\n@coderabbitai configuration\n# Should show: profile: \"assertive\", request_changes_workflow: true\n\n# If both show the same config, the branch-specific .coderabbit.yaml\n# is not committed to the base branch. Verify with:\n# git show main:.coderabbit.yaml\n# git show develop:.coderabbit.yaml\n```\n\n### Step 6: Branch Protection per Environment\n\n```bash\nset -euo pipefail\nOWNER=\"your-org\"\nREPO=\"your-repo\"\n\n# Main: require CodeRabbit approval\ngh api \"repos/$OWNER/$REPO/branches/main/protection\" \\\n  --method PUT \\\n  --field 'required_status_checks={\"strict\":true,\"contexts\":[\"coderabbitai\"]}' \\\n  --field 'required_pull_request_reviews={\"required_approving_review_count\":1}' \\\n  --field 'enforce_admins=true' \\\n  --field 'restrictions=null'\n\n# Develop: CodeRabbit review optional (not required)\ngh api \"repos/$OWNER/$REPO/branches/develop/protection\" \\\n  --method PUT \\\n  --field 'required_status_checks={\"strict\":false,\"contexts\":[]}' \\\n  --field 'required_pull_request_reviews={\"required_approving_review_count\":0}' \\\n  --field 'enforce_admins=false' \\\n  --field 'restrictions=null'\n\necho \"Branch protection configured\"\necho \"  main: CodeRabbit required\"\necho \"  develop: CodeRabbit optional\"\n```\n\n## Output\n\n- Branch-specific `.coderabbit.yaml` configs committed\n- Development branch with relaxed review profile\n- Production branch with strict review and security instructions\n- Release branches with security-focused review\n- Branch protection rules aligned with review policies\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Same review profile on all branches | Config only on one branch | Commit different `.coderabbit.yaml` to each base branch |\n| Config changes not applied | YAML not on the base branch | Merge config changes to the target branch first |\n| PR to main gets \"chill\" review | `.coderabbit.yaml` on main has wrong profile | Check config with `git show main:.coderabbit.yaml` |\n| Release branch not reviewed | `base_branches` doesn't include `release/*` | Add glob pattern `release/*` to base_branches |\n\n## Resources\n\n- [CodeRabbit Configuration Reference](https://docs.coderabbit.ai/reference/configuration)\n- [CodeRabbit Branch-Based Config](https://docs.coderabbit.ai/guides/review-instructions)\n- [GitHub Branch Protection](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository)\n\n## Next Steps\n\nFor deployment and org-wide rollout, see `coderabbit-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "coderabbit-multi-env-setup",
-    "description": "Configure CodeRabbit review behavior per branch and environment using",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*), Bash(git:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

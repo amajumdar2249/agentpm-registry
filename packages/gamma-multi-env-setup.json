@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032102",
   "name": "gamma-multi-env-setup",
   "slug": "gamma-multi-env-setup",
   "description": "Configure Gamma across development, staging, and production environments.",
   "content": "# Gamma Multi-Environment Setup\n\n## Overview\n\nConfigure Gamma API access across development, staging, and production environments. Since Gamma is a SaaS API with no self-hosted option, environment separation is achieved through separate workspaces (API keys), mock servers for development, and environment-aware client configuration.\n\n## Prerequisites\n\n- Separate Gamma workspaces (or at minimum separate API keys) per environment\n- Secret management solution\n- Completed `gamma-install-auth` setup\n\n## Environment Architecture\n\n```\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2502  Development                                             \u2502\n\u2502  API: localhost:9876 (mock server) or Gamma API          \u2502\n\u2502  Key: GAMMA_API_KEY=gma_dev_xxx                         \u2502\n\u2502  Mock: enabled (no credits consumed)                     \u2502\n\u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524\n\u2502  Staging                                                 \u2502\n\u2502  API: public-api.gamma.app (separate workspace)         \u2502\n\u2502  Key: GAMMA_API_KEY=gma_stg_xxx                         \u2502\n\u2502  Mock: disabled                                          \u2502\n\u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524\n\u2502  Production                                              \u2502\n\u2502  API: public-api.gamma.app (production workspace)       \u2502\n\u2502  Key: GAMMA_API_KEY=gma_prod_xxx (from secret manager)  \u2502\n\u2502  Mock: disabled                                          \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n```\n\n## Instructions\n\n### Step 1: Environment Configuration\n\n```typescript\n// src/config/gamma.ts\ninterface GammaEnvConfig {\n  apiKey: string;\n  baseUrl: string;\n  useMock: boolean;\n  timeoutMs: number;\n  maxRetries: number;\n}\n\nfunction getGammaConfig(): GammaEnvConfig {\n  const env = process.env.NODE_ENV ?? \"development\";\n\n  const configs: Record<string, Partial<GammaEnvConfig>> = {\n    development: {\n      baseUrl: process.env.GAMMA_MOCK === \"true\"\n        ? \"http://localhost:9876/v1.0\"\n        : \"https://public-api.gamma.app/v1.0\",\n      useMock: process.env.GAMMA_MOCK === \"true\",\n      timeoutMs: 60000,\n      maxRetries: 1,\n    },\n    staging: {\n      baseUrl: \"https://public-api.gamma.app/v1.0\",\n      useMock: false,\n      timeoutMs: 30000,\n      maxRetries: 3,\n    },\n    production: {\n      baseUrl: \"https://public-api.gamma.app/v1.0\",\n      useMock: false,\n      timeoutMs: 30000,\n      maxRetries: 5,\n    },\n  };\n\n  const apiKey = process.env.GAMMA_API_KEY;\n  if (!apiKey && !configs[env]?.useMock) {\n    throw new Error(`GAMMA_API_KEY required for ${env} environment`);\n  }\n\n  return {\n    apiKey: apiKey ?? \"mock-key\",\n    ...configs[env],\n  } as GammaEnvConfig;\n}\n\nexport const gammaConfig = getGammaConfig();\n```\n\n### Step 2: Environment-Aware Client Factory\n\n```typescript\n// src/gamma/factory.ts\nimport { createGammaClient } from \"./client\";\nimport { gammaConfig } from \"../config/gamma\";\n\nlet client: ReturnType<typeof createGammaClient> | null = null;\n\nexport function getGammaClient() {\n  if (!client) {\n    client = createGammaClient({\n      apiKey: gammaConfig.apiKey,\n      baseUrl: gammaConfig.baseUrl,\n      timeoutMs: gammaConfig.timeoutMs,\n    });\n  }\n  return client;\n}\n\n// Reset for testing\nexport function resetGammaClient() {\n  client = null;\n}\n```\n\n### Step 3: Environment Files\n\n```bash\n# .env.development\nGAMMA_API_KEY=gma_dev_xxxxxxxxxxxx\nGAMMA_MOCK=false\nNODE_ENV=development\nLOG_LEVEL=debug\n\n# .env.test\nGAMMA_MOCK=true\nNODE_ENV=test\nLOG_LEVEL=warn\n\n# .env.staging\nGAMMA_API_KEY=gma_stg_xxxxxxxxxxxx\nNODE_ENV=staging\nLOG_LEVEL=info\n\n# .env.production (use secret manager instead)\n# GAMMA_API_KEY loaded from AWS Secrets Manager / Vault\nNODE_ENV=production\nLOG_LEVEL=warn\n```\n\n### Step 4: Production Secret Management\n\n```typescript\n// src/config/secrets.ts\n// For production, fetch API key from secret manager at startup\n\nimport { SecretsManager } from \"@aws-sdk/client-secrets-manager\";\n\nlet cachedKey: string | null = null;\nlet cacheExpiry = 0;\n\nasync function getProductionApiKey(): Promise<string> {\n  if (cachedKey && Date.now() < cacheExpiry) return cachedKey;\n\n  const sm = new SecretsManager({ region: \"us-east-1\" });\n  const secret = await sm.getSecretValue({ SecretId: \"gamma/api-key\" });\n  cachedKey = JSON.parse(secret.SecretString!).apiKey;\n  cacheExpiry = Date.now() + 300000; // Cache for 5 minutes\n\n  return cachedKey!;\n}\n```\n\n### Step 5: Environment Guards\n\n```typescript\n// src/guards.ts\nfunction blockProduction(operation: string) {\n  if (process.env.NODE_ENV === \"production\") {\n    throw new Error(`${operation} is blocked in production`);\n  }\n}\n\n// Block destructive operations in production\nasync function deleteAllGenerations() {\n  blockProduction(\"deleteAllGenerations\");\n  // ... cleanup logic for dev/staging\n}\n\n// Warn about credit-consuming operations in non-production\nfunction warnCredits(env: string) {\n  if (env !== \"production\" && !gammaConfig.useMock) {\n    console.warn(\"WARNING: Using live Gamma API \u2014 credits will be consumed\");\n  }\n}\n```\n\n### Step 6: CI/CD Environment Configuration\n\n```yaml\n# .github/workflows/gamma.yml\njobs:\n  test:\n    runs-on: ubuntu-latest\n    env:\n      GAMMA_MOCK: 'true'\n      NODE_ENV: test\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm ci && npm test\n      # Uses mock server \u2014 no API key needed, no credits consumed\n\n  staging:\n    runs-on: ubuntu-latest\n    if: github.ref == 'refs/heads/develop'\n    env:\n      GAMMA_API_KEY: ${{ secrets.GAMMA_STAGING_API_KEY }}\n      NODE_ENV: staging\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm ci && npm run test:integration\n\n  production:\n    runs-on: ubuntu-latest\n    if: github.ref == 'refs/heads/main'\n    env:\n      GAMMA_API_KEY: ${{ secrets.GAMMA_PRODUCTION_API_KEY }}\n      NODE_ENV: production\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm ci && npm run deploy\n```\n\n## Environment Checklist\n\n| Check | Dev | Test | Staging | Production |\n|-------|-----|------|---------|------------|\n| API key source | .env file | Not needed (mock) | GitHub Secret | Secret Manager |\n| Mock mode | Optional | Yes | No | No |\n| Debug logging | On | On | On | Off |\n| Credit consumption | Optional | None | Real (staging workspace) | Real |\n| Secret manager | No | No | Optional | Required |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Wrong API key for env | Env var mismatch | Verify `NODE_ENV` and matching key |\n| Credits consumed in dev | Mock mode off | Set `GAMMA_MOCK=true` in development |\n| Secret fetch fails | IAM permissions | Check secret manager access policy |\n| Production data in dev | No env guard | Add `blockProduction()` guards |\n\n## Resources\n\n- [12-Factor App Config](https://12factor.net/config)\n- [Gamma API Key Management](https://gamma.app/settings)\n- [AWS Secrets Manager](https://docs.aws.amazon.com/secretsmanager/)\n\n## Next Steps\n\nProceed to `gamma-observability` for monitoring setup.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "gamma-multi-env-setup",
-    "description": "Configure Gamma across development, staging, and production environments.",
-    "allowed-tools": "Read, Write, Edit, Bash(aws:*), Bash(gcloud:*), Bash(vault:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

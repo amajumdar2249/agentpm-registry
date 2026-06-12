@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031971",
   "name": "firecrawl-performance-tuning",
   "slug": "firecrawl-performance-tuning",
   "description": "Optimize Firecrawl scraping performance with caching, batch scraping,",
   "content": "# Firecrawl Performance Tuning\n\n## Overview\n\nOptimize Firecrawl API performance by choosing efficient scraping modes, caching results, using batch endpoints, and minimizing unnecessary rendering. Key levers: format selection (markdown vs HTML vs screenshot), `waitFor` tuning, `onlyMainContent`, and batch vs individual scraping.\n\n## Latency Benchmarks\n\n| Operation | Typical | With JS Wait | With Screenshot |\n|-----------|---------|--------------|-----------------|\n| scrapeUrl (markdown) | 2-5s | 5-10s | 8-15s |\n| scrapeUrl (extract) | 3-8s | 8-15s | N/A |\n| crawlUrl (10 pages) | 20-40s | 40-80s | N/A |\n| mapUrl | 1-3s | N/A | N/A |\n| batchScrapeUrls (10) | 10-20s | 20-40s | N/A |\n\n## Instructions\n\n### Step 1: Minimize Formats (Biggest Win)\n\n```typescript\nimport FirecrawlApp from \"@mendable/firecrawl-js\";\n\nconst firecrawl = new FirecrawlApp({\n  apiKey: process.env.FIRECRAWL_API_KEY!,\n});\n\n// SLOW: requesting everything\nconst slow = await firecrawl.scrapeUrl(url, {\n  formats: [\"markdown\", \"html\", \"links\", \"screenshot\"],\n  // screenshot + full HTML = 3-5x slower\n});\n\n// FAST: request only what you need\nconst fast = await firecrawl.scrapeUrl(url, {\n  formats: [\"markdown\"],   // markdown only = fastest\n  onlyMainContent: true,   // skip nav/footer/sidebar\n});\n```\n\n### Step 2: Tune waitFor for JS-Heavy Pages\n\n```typescript\n// Default: no JS wait (fastest, works for static sites)\nconst staticResult = await firecrawl.scrapeUrl(\"https://docs.example.com\", {\n  formats: [\"markdown\"],\n  // No waitFor needed \u2014 content is in initial HTML\n});\n\n// SPA/dynamic pages: add minimal wait\nconst spaResult = await firecrawl.scrapeUrl(\"https://app.example.com\", {\n  formats: [\"markdown\"],\n  waitFor: 3000,  // 3s \u2014 enough for most SPAs\n  onlyMainContent: true,\n});\n\n// Heavy interactive page: use actions instead of long wait\nconst heavyResult = await firecrawl.scrapeUrl(\"https://dashboard.example.com\", {\n  formats: [\"markdown\"],\n  actions: [\n    { type: \"wait\", selector: \".data-table\" },  // wait for specific element\n    { type: \"scroll\", direction: \"down\" },        // trigger lazy loading\n  ],\n});\n```\n\n### Step 3: Cache Scraped Content\n\n```typescript\nimport { LRUCache } from \"lru-cache\";\nimport { createHash } from \"crypto\";\n\nconst scrapeCache = new LRUCache<string, any>({\n  max: 500,          // max 500 cached pages\n  ttl: 3600000,      // 1 hour TTL\n});\n\nasync function cachedScrape(url: string) {\n  const key = createHash(\"md5\").update(url).digest(\"hex\");\n  const cached = scrapeCache.get(key);\n  if (cached) {\n    console.log(`Cache hit: ${url}`);\n    return cached;\n  }\n\n  const result = await firecrawl.scrapeUrl(url, {\n    formats: [\"markdown\"],\n    onlyMainContent: true,\n  });\n\n  if (result.success) {\n    scrapeCache.set(key, result);\n  }\n  return result;\n}\n// Typical savings: 50-80% credit reduction for repeated scrapes\n```\n\n### Step 4: Use Batch Scrape for Multiple URLs\n\n```typescript\n// SLOW: sequential individual scrapes\nconst urls = [\"https://a.com\", \"https://b.com\", \"https://c.com\"];\nfor (const url of urls) {\n  await firecrawl.scrapeUrl(url, { formats: [\"markdown\"] }); // 3 API calls\n}\n\n// FAST: single batch scrape call\nconst batchResult = await firecrawl.batchScrapeUrls(urls, {\n  formats: [\"markdown\"],\n  onlyMainContent: true,\n});\n// 1 API call, internally parallelized\n```\n\n### Step 5: Map Before Crawl (Save Credits)\n\n```typescript\n// EXPENSIVE: crawl everything, filter later\nawait firecrawl.crawlUrl(\"https://docs.example.com\", { limit: 1000 });\n\n// CHEAPER: map first (1 credit), then scrape only what you need\nconst map = await firecrawl.mapUrl(\"https://docs.example.com\");\nconst apiDocs = (map.links || []).filter(url =>\n  url.includes(\"/api/\") || url.includes(\"/reference/\")\n);\nconsole.log(`Map: ${map.links?.length} total, ${apiDocs.length} relevant`);\n\n// Batch scrape only relevant URLs\nconst result = await firecrawl.batchScrapeUrls(apiDocs.slice(0, 50), {\n  formats: [\"markdown\"],\n});\n```\n\n### Step 6: Measure Scrape Performance\n\n```typescript\nasync function timedScrape(url: string) {\n  const start = Date.now();\n  const result = await firecrawl.scrapeUrl(url, { formats: [\"markdown\"] });\n  const duration = Date.now() - start;\n\n  console.log({\n    url,\n    durationMs: duration,\n    contentLength: result.markdown?.length || 0,\n    success: result.success,\n    charsPerSecond: Math.round((result.markdown?.length || 0) / (duration / 1000)),\n  });\n\n  return result;\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Scrape > 10s | Screenshot or full HTML requested | Use `formats: [\"markdown\"]` only |\n| Empty content | `waitFor` too short for SPA | Increase or use `actions` with selector |\n| High credit burn | Scraping same URLs repeatedly | Implement URL-based caching |\n| Batch timeout | Too many URLs in one batch | Split into chunks of 50 |\n| Cache stale data | TTL too long | Reduce TTL or add cache invalidation |\n\n## Examples\n\n### Performance Comparison Script\n\n```typescript\nconst url = \"https://docs.firecrawl.dev\";\n\n// Compare different format configurations\nfor (const formats of [[\"markdown\"], [\"markdown\", \"html\"], [\"markdown\", \"html\", \"screenshot\"]]) {\n  const start = Date.now();\n  await firecrawl.scrapeUrl(url, { formats: formats as any, onlyMainContent: true });\n  console.log(`${formats.join(\",\")}: ${Date.now() - start}ms`);\n}\n```\n\n## Resources\n\n- [Advanced Scraping Guide](https://docs.firecrawl.dev/advanced-scraping-guide)\n- [Batch Scrape](https://docs.firecrawl.dev/features/batch-scrape)\n- [Map Endpoint](https://docs.firecrawl.dev/features/map)\n- [LRU Cache](https://github.com/isaacs/node-lru-cache)\n\n## Next Steps\n\nFor cost optimization, see `firecrawl-cost-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "firecrawl-performance-tuning",
-    "description": "Optimize Firecrawl scraping performance with caching, batch scraping,",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

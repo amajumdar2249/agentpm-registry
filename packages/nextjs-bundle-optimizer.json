@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000017421",
   "name": "nextjs-bundle-optimizer",
   "slug": "nextjs-bundle-optimizer",
   "description": "Use this skill whenever a Next.js 16 app needs smaller bundles or faster builds \u2014 even if the user doesn't say \"optimize\" explicitly. Triggers on phrases like \"First Load JS is huge\", \"bundle size\", \"build takes too long\", \"page is slow to TTI\", \"reduce bundle\", \"tree-shake\", or when the user shares output from `next experimental-analyze` / `@next/bundle-analyzer`. Runs a data-driven iteration loop \u2014 measure baseline \u2192 analyze top offenders \u2192 apply ONE recipe \u2192 re-measure \u2192 verify nothing broke (build + types + tests + no regression) \u2192 commit or revert. Built for Next.js 16 with Turbopack default, and falls back to webpack-mode tooling when the project hasn't migrated yet.",
   "content": "\n# Next.js Bundle & Build-Time Optimizer\n\nData-driven optimization loop for Next.js 16 applications. The skill orchestrates `next experimental-analyze`, builds, type checks, and tests to make verifiable improvements one change at a time.\n\n## When to Apply\n\nUse this skill when:\n- The user wants to reduce bundle size / First Load JS / route bundles in a Next.js 16 app.\n- Production builds are slow and the user wants to diagnose and fix the bottleneck.\n- The user shares analyzer output, a screenshot of the treemap, or asks \"why is `<X>` so big?\"\n- A new dependency was added and bundles grew \u2014 they want to understand why and unwind it.\n- The user wants to set a performance budget and enforce it iteratively.\n\n## Why iterative (not \"apply all optimizations at once\")\n\nBundle optimization is full of foot-guns. Examples:\n- Moving a \"client-only\" dep behind `next/dynamic` can break SSR consumers that depended on its presence at first paint.\n- `experimental.optimizePackageImports` with the wrong package can mis-resolve subpath exports.\n- Aggressive `modularizeImports` regex rewrites can hit unintended modules.\n- Narrowing the polyfill target can break older mobile browsers in production.\n\nThe only reliable way is: **one change, measure, verify, commit (or revert)**. This skill enforces that discipline through scripts.\n\n## Prerequisites\n\n- Next.js 16+ project (the skill auto-detects from `package.json`).\n- `git` (the workflow uses commits as checkpoints and revert as rollback).\n- `jq` available on PATH (used by analyze/compare scripts).\n- A clean working tree before starting (the verify step uses `git status` to confirm).\n- For projects still on Next.js 15 or earlier in webpack mode: the skill detects this and uses `@next/bundle-analyzer` instead of `experimental-analyze`. See [gotchas.md](gotchas.md).\n\n## Setup\n\nOn first use, run:\n\n```bash\nbash scripts/baseline.sh --setup\n```\n\nThis walks through `config.json` interactively. If `config.json` already has values, scripts use those and skip the prompts.\n\n## Workflow Overview\n\n```\n\u250c\u2500\u2500 1. baseline \u2500\u2500\u2510   Clean build, snapshot bundles + timing \u2192 baselines/{timestamp}/\n\u2502                 \u2502\n\u2502   2. analyze \u2500\u2500\u2500\u2524   Run `next experimental-analyze --output`, extract top offenders\n\u2502                 \u2502\n\u2502   3. diagnose \u2500\u2500\u2524   Map each offender to a recipe in references/optimizations.md\n\u2502                 \u2502\n\u2502   \u2500\u2500 apply \u2500\u2500\u2500\u2500\u2500\u2524   User (or agent) applies ONE recipe. Skill helps draft the change.\n\u2502                 \u2502\n\u2502   4. measure \u2500\u2500\u2500\u2524   Re-build, re-analyze, save to iterations/{n}/\n\u2502                 \u2502\n\u2502   5. compare \u2500\u2500\u2500\u2524   Diff vs baseline; flag regressions; print delta table\n\u2502                 \u2502\n\u2502   6. verify \u2500\u2500\u2500\u2500\u2524   Build + tsc + tests + no overall regression. Hard PASS/FAIL.\n\u2502                 \u2502\n\u2502   commit OR \u2500\u2500\u2500\u2500\u2518   `git commit` (PASS+improvement) or `git revert` (FAIL/no win)\n\u2502   revert\n\u2502\n\u2514\u2500\u2500 loop back to step 2 with new baseline if you want a fresh measurement point.\n```\n\nRead [references/workflow.md](references/workflow.md) for the detailed loop with error handling, rollback procedures, and what each script's output looks like.\n\n## Quick Reference\n\n### Scripts (run from the Next.js app root)\n\n| Script | Purpose | Output |\n|--------|---------|--------|\n| `scripts/baseline.sh` | Establish the reference point | `baselines/{ts}/{bundle,timing,manifest}.json` |\n| `scripts/analyze.sh` | Run analyzer, parse top offenders | `iterations/{n}/findings.json` |\n| `scripts/diagnose.sh [findings.json]` | Map findings \u2192 recipes | stdout: prioritized recipe list |\n| `scripts/measure.sh` | Re-measure after a change | `iterations/{n}/{bundle,timing}.json` |\n| `scripts/compare.sh [baseline] [current]` | Diff snapshots | stdout: delta table; exit 1 on regression |\n| `scripts/verify.sh` | Full verification | exit 0 = safe to commit, exit 1 = revert |\n\n### Optimization Recipes\n\n[references/optimizations.md](references/optimizations.md) catalogs recipes by analyzer signal:\n\n**Bundle size**\n- Barrel-import bloat \u2192 `experimental.optimizePackageImports` (webpack) / auto in Turbopack\n- Heavy client lib pulled in on every route \u2192 `next/dynamic({ ssr: false })`\n- Server-only lib imported from a client component \u2192 move to Server Component\n- Duplicate dependency versions \u2192 dedupe via `overrides` / `resolutions`\n- Polyfill bloat \u2192 tighten `browserslist`\n- Per-icon imports for icon libraries\n\n**Build time**\n- Enable `experimental.turbopackFileSystemCacheForBuild`\n- Narrow `transpilePackages` (overuse balloons compile time)\n- Split `tsc --noEmit` from `next build` in CI\n- Identify single-file bottlenecks with `NEXT_TURBOPACK_TRACING=1`\n\nEach recipe documents: **signal \u2192 fix \u2192 expected impact \u2192 verify step**.\n\n## Gotchas\n\nSee [gotchas.md](gotchas.md) for accumulated failure points. Initially seeded with the most common Next.js 16 traps:\n- `next build` no longer prints First Load JS \u2014 don't grep build output for it.\n- `optimizePackageImports` is a no-op under Turbopack (default in 16) \u2014 Turbopack auto-optimizes.\n- Comparing build times needs cache state controlled \u2014 either delete `.next/` (cold) or pre-warm (warm).\n\n## Related Skills\n\n- `vercel:nextjs` \u2014 general Next.js App Router guidance; consult for refactoring decisions while applying recipes.\n- `vercel:turbopack` \u2014 for build-time debugging beyond what this skill covers.\n- `vercel:next-cache-components` \u2014 when a recipe touches caching boundaries.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "nextjs-bundle-optimizer",
-    "description": "Use this skill whenever a Next.js 16 app needs smaller bundles or faster builds \u2014 even if the user doesn't say \"optimize\" explicitly. Triggers on phrases like \"First Load JS is huge\", \"bundle size\", \"build takes too long\", \"page is slow to TTI\", \"reduce bundle\", \"tree-shake\", or when the user shares output from `next experimental-analyze` / `@next/bundle-analyzer`. Runs a data-driven iteration loop \u2014 measure baseline \u2192 analyze top offenders \u2192 apply ONE recipe \u2192 re-measure \u2192 verify nothing broke (build + types + tests + no regression) \u2192 commit or revert. Built for Next.js 16 with Turbopack default, and falls back to webpack-mode tooling when the project hasn't migrated yet."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

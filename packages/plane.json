@@ -1,18 +1,47 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031100",
   "name": "plane",
   "slug": "plane",
   "description": "|",
   "content": "\n# Plane \u2014 Team Behavior Observatory\n\nA behavioral observation layer on top of Plane's project-tracking API. This skill **does not** wrap Plane CRUD \u2014 `mcp__plane` already does that and you should call it directly for ticket entry, status changes, etc.\n\nInstead, this skill answers behavioral questions about how a team is actually performing under pressure: cycle velocity vs. plan, ownership churn, reviewer gate strength, priority drift, and cross-project load. Each question is answered by a compound command that synthesizes data across multiple Plane endpoints \u2014 observations no single endpoint exposes.\n\n## Overview\n\nThe NOI (`references/noi.md`) is the design anchor: **Plane is a team behavior observatory**. Five compound commands derive from that framing:\n\n1. `/plane-cycle-velocity` \u2014 does cycle close-out match cycle planning?\n2. `/plane-stale-tickets` \u2014 which `In Progress` tickets are quietly failing under shared ownership?\n3. `/plane-reviewer-gate-strength` \u2014 which reviewers gate-keep harder than the spec demands?\n4. `/plane-priority-drift` \u2014 does the team plan high-priority work but ship low-priority work?\n5. `/plane-cross-project-load` \u2014 which engineers are spread across too many active projects?\n\nNone of these are answerable from any single Plane API call. Each requires cross-endpoint synthesis. That synthesis is the value.\n\n## Prerequisites\n\n- `mcp__plane` MCP server installed and configured (env vars `PLANE_API_KEY`, `PLANE_WORKSPACE_SLUG`, `PLANE_API_HOST_URL`)\n- A Plane workspace with at least one project, cycle, and active issues (otherwise the commands return informative empty states)\n\n## Authentication\n\nThis skill does not handle credentials directly. Auth is delegated to the MCP server. See `references/api-surface.md` for the env-var setup; if `mcp__plane` returns an auth error, the skill surfaces the error verbatim and instructs the user to verify their token.\n\n## Instructions\n\n### Mode detection\n\nDetermine user intent from their prompt:\n\n- **Compound query mode** (default): user asks about cycle health, team behavior, stale tickets, reviewer patterns, priority drift, or workload distribution \u2192 route to `plane-analyst` agent (see `agents/plane-analyst.md`) which orchestrates the compound commands.\n- **API help mode**: user asks \"how do I query X in Plane\" or \"what endpoint does Y\" \u2192 route to `plane-expert` agent (see `agents/plane-expert.md`) which answers from `references/api-surface.md` without firing live API calls.\n- **Skill metadata**: user asks \"what does this skill do\" / \"explain plane skill\" \u2192 return the Overview above + the 5 commands.\n\nIf unclear, use `AskUserQuestion`:\n\n> Are you asking about (a) team behavior / cycle health / patterns, or (b) how to use a specific Plane API endpoint?\n\n### Step 1: Resolve target project\n\nMost compound commands operate on a specific project. Extract the project slug or readable identifier (e.g., `BRAVES`, `OPS`) from the user's prompt.\n\nIf absent, list available projects via `mcp__plane__get_projects` and ask which one. Cache the chosen project for the rest of the conversation.\n\n### Step 2: Route to compound command\n\nMatch user intent to one of the five commands:\n\n| User asks about... | Command |\n|---|---|\n| cycle velocity, sprint completion, overrun | `/plane-cycle-velocity` |\n| stale tickets, orphan work, ownership churn | `/plane-stale-tickets` |\n| reviewer bottlenecks, blocked PRs, gate-keeping | `/plane-reviewer-gate-strength` |\n| priority drift, planning vs. reality, P1 vs. P3 | `/plane-priority-drift` |\n| workload distribution, project sprawl, focus | `/plane-cross-project-load` |\n\nRead `references/compound-commands.md` for the exact endpoint sequence and output format per command.\n\n### Step 3: Execute via `plane-analyst` agent\n\nInvoke the analyst agent (`agents/plane-analyst.md`) with the chosen command + project. The agent:\n\n1. Calls the relevant `mcp__plane__*` tools in sequence\n2. Performs the JOIN logic\n3. Computes the behavioral score per the command's formula\n4. Renders the output table per the format in `compound-commands.md`\n5. Adds a \"Behavioral signal\" interpretation paragraph\n\nIf `mcp__plane` is unavailable, the agent emits a documentation-only response: shows what the command WOULD return, plus the install hint.\n\n### Step 4: Interpret the signal\n\nThe output is observations, not prescriptions. The skill says \"this team plans P1s and ships P3s \u2014 the planning conversation is theater.\" It does NOT say \"fire the planner.\" Interpretation belongs to the human reading the report.\n\n## Output\n\nEach compound command produces:\n\n- A table of metrics specific to that observation\n- A \"Behavioral signal\" paragraph that names the pattern in plain language\n- Optionally, a follow-up suggestion (e.g., \"consolidate projects\" / \"split this queue\") \u2014 framed as a question the team can take to its retro\n\n## Error Handling\n\n| Error | Recovery |\n|---|---|\n| `mcp__plane` unavailable | Emit documentation-only output + install hint pointing at `~/.claude.json` MCP config |\n| API rate limit (429) | Back off + retry with exponential delay; if persistent, advise user to wait and re-run |\n| Empty project (no cycles / issues) | Return informative empty state explaining why the command can't compute |\n| Auth error (401/403) | Surface verbatim + instruct user to verify env vars or re-issue token |\n| Workspace member lookup fails | Fall back to assignee UUIDs in output (less readable but functional) |\n\n## Examples\n\n**\"How is my team performing on cycle velocity?\"**\n\n```\n/plane-cycle-velocity BRAVES\n```\n\n\u2192 Renders the cycle-velocity table from `references/compound-commands.md` \u00a7 Command 1.\n\n**\"Are we shipping what we plan?\"**\n\n```\n/plane-priority-drift BRAVES\n```\n\n\u2192 Renders the priority-drift table; surfaces the gap between planned and shipped priorities.\n\n**\"Which engineers are stretched too thin?\"**\n\n```\n/plane-cross-project-load\n```\n\n\u2192 Walks the entire workspace; lists engineers with their active-project / active-cycle / open-issue counts; flags crisis-level stretch.\n\n## Resources\n\n- [NOI](references/noi.md) \u2014 the secret-identity statement that anchors every command\n- [API surface](references/api-surface.md) \u2014 endpoints consumed + auth + pagination\n- [Compound commands](references/compound-commands.md) \u2014 exact endpoint sequence + output format per command\n- [Plane docs](https://docs.plane.so/) \u2014 upstream API reference\n- `mcp__plane` MCP server \u2014 direct CRUD wrapper this skill builds on top of\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "plane",
-    "description": "|",
-    "allowed-tools": "Read,Bash(jq:*),Bash(date:*),AskUserQuestion",
-    "version": "0.1.0",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "license": "MIT",
-    "compatibility": "Designed for Claude Code; requires mcp__plane MCP server configured (PLANE_API_KEY, PLANE_WORKSPACE_SLUG, PLANE_API_HOST_URL env vars)",
-    "tags": "[plane, project-management, team-behavior, observability, productivity]",
-    "model": "inherit"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "0.1.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "[plane",
+    "project-management",
+    "team-behavior",
+    "observability",
+    "productivity]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

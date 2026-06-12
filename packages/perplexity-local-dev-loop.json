@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032889",
   "name": "perplexity-local-dev-loop",
   "slug": "perplexity-local-dev-loop",
   "description": "Configure Perplexity local development with mocking, testing, and hot",
   "content": "# Perplexity Local Dev Loop\n\n## Overview\n\nSet up a fast, cost-effective local development workflow for Perplexity Sonar API. Key challenge: every real API call performs a web search and costs money, so mocking and caching are essential for development.\n\n## Prerequisites\n\n- Completed `perplexity-install-auth` setup\n- Node.js 18+ with npm/pnpm\n- `vitest` for testing\n\n## Instructions\n\n### Step 1: Project Structure\n\n```\nmy-perplexity-project/\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 perplexity/\n\u2502   \u2502   \u251c\u2500\u2500 client.ts       # OpenAI client wrapper for Perplexity\n\u2502   \u2502   \u251c\u2500\u2500 search.ts       # Search functions with citation handling\n\u2502   \u2502   \u2514\u2500\u2500 types.ts        # Response type extensions\n\u2502   \u2514\u2500\u2500 index.ts\n\u251c\u2500\u2500 tests/\n\u2502   \u251c\u2500\u2500 fixtures/           # Saved API responses for mocking\n\u2502   \u2502   \u2514\u2500\u2500 sonar-response.json\n\u2502   \u251c\u2500\u2500 perplexity.test.ts\n\u2502   \u2514\u2500\u2500 setup.ts\n\u251c\u2500\u2500 .env.local              # API key (git-ignored)\n\u251c\u2500\u2500 .env.example            # Template\n\u2514\u2500\u2500 package.json\n```\n\n### Step 2: Type-Safe Client Wrapper\n\n```typescript\n// src/perplexity/client.ts\nimport OpenAI from \"openai\";\n\nexport interface PerplexityResponse extends OpenAI.ChatCompletion {\n  citations?: string[];\n  search_results?: Array<{\n    title: string;\n    url: string;\n    snippet: string;\n  }>;\n  related_questions?: string[];\n}\n\nexport type PerplexityModel = \"sonar\" | \"sonar-pro\" | \"sonar-reasoning-pro\" | \"sonar-deep-research\";\n\nexport function createClient(apiKey?: string): OpenAI {\n  return new OpenAI({\n    apiKey: apiKey || process.env.PERPLEXITY_API_KEY,\n    baseURL: \"https://api.perplexity.ai\",\n  });\n}\n\nexport async function search(\n  client: OpenAI,\n  query: string,\n  opts: {\n    model?: PerplexityModel;\n    systemPrompt?: string;\n    maxTokens?: number;\n    searchRecencyFilter?: \"hour\" | \"day\" | \"week\" | \"month\";\n    searchDomainFilter?: string[];\n  } = {}\n): Promise<PerplexityResponse> {\n  const response = await client.chat.completions.create({\n    model: opts.model || \"sonar\",\n    messages: [\n      ...(opts.systemPrompt\n        ? [{ role: \"system\" as const, content: opts.systemPrompt }]\n        : []),\n      { role: \"user\" as const, content: query },\n    ],\n    max_tokens: opts.maxTokens,\n    ...(opts.searchRecencyFilter && { search_recency_filter: opts.searchRecencyFilter }),\n    ...(opts.searchDomainFilter && { search_domain_filter: opts.searchDomainFilter }),\n  } as any);\n\n  return response as unknown as PerplexityResponse;\n}\n```\n\n### Step 3: Save Fixtures for Offline Development\n\n```typescript\n// scripts/capture-fixture.ts\nimport { createClient, search } from \"../src/perplexity/client\";\nimport { writeFileSync } from \"fs\";\n\nasync function captureFixture() {\n  const client = createClient();\n  const response = await search(client, \"What is TypeScript 5.5?\");\n\n  writeFileSync(\n    \"tests/fixtures/sonar-response.json\",\n    JSON.stringify(response, null, 2)\n  );\n  console.log(\"Fixture saved with\", (response.citations || []).length, \"citations\");\n}\n\ncaptureFixture();\n```\n\n### Step 4: Mock Client for Tests\n\n```typescript\n// tests/setup.ts\nimport { vi } from \"vitest\";\nimport fixture from \"./fixtures/sonar-response.json\";\n\nexport function mockPerplexityClient() {\n  return {\n    chat: {\n      completions: {\n        create: vi.fn().mockResolvedValue(fixture),\n      },\n    },\n  };\n}\n```\n\n### Step 5: Write Tests\n\n```typescript\n// tests/perplexity.test.ts\nimport { describe, it, expect } from \"vitest\";\nimport { mockPerplexityClient } from \"./setup\";\nimport { search } from \"../src/perplexity/client\";\n\ndescribe(\"Perplexity Search\", () => {\n  it(\"returns answer with citations\", async () => {\n    const client = mockPerplexityClient() as any;\n    const result = await search(client, \"test query\");\n\n    expect(result.choices[0].message.content).toBeDefined();\n    expect(result.citations).toBeDefined();\n    expect(result.citations!.length).toBeGreaterThan(0);\n  });\n\n  it.skipIf(!process.env.PERPLEXITY_API_KEY)(\n    \"live API returns citations\",\n    async () => {\n      const { createClient, search } = await import(\"../src/perplexity/client\");\n      const client = createClient();\n      const result = await search(client, \"What is Node.js?\", {\n        model: \"sonar\",\n        maxTokens: 100,\n      });\n      expect(result.citations!.length).toBeGreaterThan(0);\n    }\n  );\n});\n```\n\n### Step 6: Dev Scripts\n\n```json\n{\n  \"scripts\": {\n    \"dev\": \"tsx watch src/index.ts\",\n    \"test\": \"vitest\",\n    \"test:watch\": \"vitest --watch\",\n    \"test:live\": \"PERPLEXITY_API_KEY=$PERPLEXITY_API_KEY vitest --run\",\n    \"capture-fixtures\": \"tsx scripts/capture-fixture.ts\"\n  }\n}\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Fixture missing | Never captured | Run `npm run capture-fixtures` once |\n| Tests hit real API | Missing mock | Ensure mock client is injected |\n| Stale fixtures | API response format changed | Re-capture fixtures |\n| High dev costs | Making live calls in loop | Use fixtures; reserve live calls for CI |\n\n## Output\n\n- Type-safe Perplexity client wrapper\n- Fixture-based test suite that runs offline\n- Live integration test gated on API key presence\n- Hot-reload dev server\n\n## Resources\n\n- [Vitest Documentation](https://vitest.dev/)\n- [Perplexity API Reference](https://docs.perplexity.ai/api-reference/chat-completions-post)\n\n## Next Steps\n\nSee `perplexity-sdk-patterns` for production-ready code patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "perplexity-local-dev-loop",
-    "description": "Configure Perplexity local development with mocking, testing, and hot",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(pnpm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

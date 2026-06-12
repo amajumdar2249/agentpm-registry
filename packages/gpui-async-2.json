@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000034984",
   "name": "gpui-async",
   "slug": "gpui-async-2",
   "description": "Async operations and background tasks in GPUI. Use when working with async, spawn, background tasks, or concurrent operations. Essential for handling async I/O, long-running computations, and coordinating between foreground UI updates and background work.",
   "content": "\n## Overview\n\nGPUI provides integrated async runtime for foreground UI updates and background computation.\n\n**Key Concepts:**\n\n- **Foreground tasks**: UI thread, can update entities (`cx.spawn`)\n- **Background tasks**: Worker threads, CPU-intensive work (`cx.background_spawn`)\n- All entity updates happen on foreground thread\n\n## Quick Start\n\n### Foreground Tasks (UI Updates)\n\n```rust\nimpl MyComponent {\n    fn fetch_data(&mut self, cx: &mut Context<Self>) {\n        let entity = cx.entity().downgrade();\n\n        cx.spawn(async move |cx| {\n            // Runs on UI thread, can await and update entities\n            let data = fetch_from_api().await;\n\n            entity.update(cx, |state, cx| {\n                state.data = Some(data);\n                cx.notify();\n            }).ok();\n        }).detach();\n    }\n}\n```\n\n### Background Tasks (Heavy Work)\n\n```rust\nimpl MyComponent {\n    fn process_file(&mut self, cx: &mut Context<Self>) {\n        let entity = cx.entity().downgrade();\n\n        cx.background_spawn(async move {\n            // Runs on background thread, CPU-intensive\n            let result = heavy_computation().await;\n            result\n        })\n        .then(cx.spawn(move |result, cx| {\n            // Back to foreground to update UI\n            entity.update(cx, |state, cx| {\n                state.result = result;\n                cx.notify();\n            }).ok();\n        }))\n        .detach();\n    }\n}\n```\n\n### Task Management\n\n```rust\nstruct MyView {\n    _task: Task<()>,  // Prefix with _ if stored but not accessed\n}\n\nimpl MyView {\n    fn new(cx: &mut Context<Self>) -> Self {\n        let entity = cx.entity().downgrade();\n\n        let _task = cx.spawn(async move |cx| {\n            // Task automatically cancelled when dropped\n            loop {\n                tokio::time::sleep(Duration::from_secs(1)).await;\n                entity.update(cx, |state, cx| {\n                    state.tick();\n                    cx.notify();\n                }).ok();\n            }\n        });\n\n        Self { _task }\n    }\n}\n```\n\n## Core Patterns\n\n### 1. Async Data Fetching\n\n```rust\ncx.spawn(async move |cx| {\n    let data = fetch_data().await?;\n    entity.update(cx, |state, cx| {\n        state.data = Some(data);\n        cx.notify();\n    })?;\n    Ok::<_, anyhow::Error>(())\n}).detach();\n```\n\n### 2. Background Computation + UI Update\n\n```rust\ncx.background_spawn(async move {\n    heavy_work()\n})\n.then(cx.spawn(move |result, cx| {\n    entity.update(cx, |state, cx| {\n        state.result = result;\n        cx.notify();\n    }).ok();\n}))\n.detach();\n```\n\n### 3. Periodic Tasks\n\n```rust\ncx.spawn(async move |cx| {\n    loop {\n        tokio::time::sleep(Duration::from_secs(5)).await;\n        // Update every 5 seconds\n    }\n}).detach();\n```\n\n### 4. Task Cancellation\n\nTasks are automatically cancelled when dropped. Store in struct to keep alive.\n\n## Common Pitfalls\n\n### \u274c Don't: Use `defer_in` and then update the same entity through its handle\n\n`cx.defer_in(window, callback)` schedules `callback` to run **on the current entity** \u2014 GPUI re-acquires that entity's lock to execute it. Calling `entity.update(cx, \u2026)` on the *same* entity from within the deferred callback re-enters the lock and panics:\n\n```\ncannot update \u2026 while it is already being updated\n```\n\n```rust\n// \u274c Panic: list entity is locked for the defer_in; calling list.update re-enters\nfn confirm(&mut self, _: bool, window: &mut Window, cx: &mut Context<ListState<Self>>) {\n    cx.defer_in(window, |list_state, window, cx| {\n        parent.update(cx, |this, cx| {\n            this.inner_list.update(cx, |_, _| {}); // PANIC if inner_list == the deferred entity\n        });\n    });\n}\n```\n\n```rust\n// \u2705 Correct: use the direct &mut reference \u2014 no lock needed\nfn confirm(&mut self, _: bool, window: &mut Window, cx: &mut Context<ListState<Self>>) {\n    cx.defer_in(window, |list_state, window, cx| {\n        // Access list data directly through the &mut reference\n        list_state.delegate_mut().some_method();\n\n        // Update a *different* entity \u2014 fine, different lock\n        parent.update(cx, |this, cx| { /* \u2026 */ });\n\n        // Sync list state directly after parent update \u2014 no lock needed\n        list_state.delegate_mut().update_snapshot(new_val);\n    });\n}\n```\n\nThe rule: inside a `defer_in` callback, **never call `entity.update(cx, \u2026)` or `entity.read(cx)` on the entity the `defer_in` was scheduled on**. Use the `&mut Entity` direct reference the callback provides instead.\n\n### \u274c Don't: Update entities from background tasks\n\n```rust\n// \u274c Wrong: Can't update entities from background thread\ncx.background_spawn(async move {\n    entity.update(cx, |state, cx| { // Compile error!\n        state.data = data;\n    });\n});\n```\n\n### \u2705 Do: Use foreground task or chain\n\n```rust\n// \u2705 Correct: Chain with foreground task\ncx.background_spawn(async move { data })\n    .then(cx.spawn(move |data, cx| {\n        entity.update(cx, |state, cx| {\n            state.data = data;\n            cx.notify();\n        }).ok();\n    }))\n    .detach();\n```\n\n## Reference Documentation\n\n### Complete Guides\n\n- **API Reference**: See [api-reference.md](references/api-reference.md)\n  - Task types, spawning methods, contexts\n  - Executors, cancellation, error handling\n\n- **Patterns**: See [patterns.md](references/patterns.md)\n  - Data fetching, background processing\n  - Polling, debouncing, parallel tasks\n  - Pattern selection guide\n\n- **Best Practices**: See [best-practices.md](references/best-practices.md)\n  - Error handling, cancellation\n  - Performance optimization, testing\n  - Common pitfalls and solutions\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "gpui-async",
-    "description": "Async operations and background tasks in GPUI. Use when working with async, spawn, background tasks, or concurrent operations. Essential for handling async I/O, long-running computations, and coordinating between foreground UI updates and background work."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

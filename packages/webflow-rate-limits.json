@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033533",
   "name": "webflow-rate-limits",
   "slug": "webflow-rate-limits",
   "description": "Handle Webflow Data API v2 rate limits \\u2014 per-key limits, Retry-After\\",
   "content": "# Webflow Rate Limits\n\n## Overview\n\nHandle Webflow Data API v2 rate limits using the SDK's built-in retry, manual\nbackoff strategies, request queuing, and bulk endpoints to maximize throughput\nwithout hitting 429 errors.\n\n## Prerequisites\n\n- `webflow-api` SDK installed\n- Understanding of async/await patterns\n- Knowledge of your site plan's rate limits\n\n## Webflow Rate Limit Rules\n\n### Per-Key Rate Limits\n\nRate limits are applied **per API key** (not per site or per user). Each token\nhas its own independent rate limit counter.\n\n| Rule | Details |\n|------|---------|\n| Scope | Per API key |\n| Reset window | 60 seconds (Retry-After header) |\n| CDN-cached requests | Do **not** count against rate limits |\n| Bulk endpoints | 1 request = 1 rate limit count (up to 100 items) |\n| Site publish | Max 1 successful publish per minute |\n| Webhook registrations | Max 75 per `triggerType` per site |\n\n### Rate Limit Response Headers\n\n| Header | Description |\n|--------|-------------|\n| `X-RateLimit-Limit` | Max requests allowed in the window |\n| `X-RateLimit-Remaining` | Requests remaining in current window |\n| `Retry-After` | Seconds to wait before retrying (on 429) |\n\n### 429 Response\n\n```json\n{\n  \"code\": \"rate_limit\",\n  \"message\": \"Rate limit exceeded. Please retry after 60 seconds.\"\n}\n```\n\n## Instructions\n\n### Step 1: SDK Built-In Retry\n\nThe `webflow-api` SDK automatically retries 429 and 5xx errors with exponential backoff:\n\n```typescript\nimport { WebflowClient } from \"webflow-api\";\n\nconst webflow = new WebflowClient({\n  accessToken: process.env.WEBFLOW_API_TOKEN!,\n  maxRetries: 3, // Default: 2. SDK uses exponential backoff.\n});\n\n// The SDK handles 429s transparently \u2014 no extra code needed\nconst { sites } = await webflow.sites.list();\n```\n\n### Step 2: Manual Exponential Backoff with Jitter\n\nFor operations outside the SDK or when you need custom retry logic:\n\n```typescript\nasync function withBackoff<T>(\n  operation: () => Promise<T>,\n  config = {\n    maxRetries: 5,\n    baseDelayMs: 1000,\n    maxDelayMs: 60000,\n    jitterMs: 500,\n  }\n): Promise<T> {\n  for (let attempt = 0; attempt <= config.maxRetries; attempt++) {\n    try {\n      return await operation();\n    } catch (error: any) {\n      const status = error.statusCode || error.status;\n\n      // Only retry on 429 (rate limit) and 5xx (server errors)\n      if (attempt === config.maxRetries) throw error;\n      if (status !== 429 && (status < 500 || status >= 600)) throw error;\n\n      // Honor Retry-After header if present\n      const retryAfter = error.headers?.get?.(\"Retry-After\");\n      let delay: number;\n\n      if (retryAfter) {\n        delay = parseInt(retryAfter) * 1000;\n      } else {\n        // Exponential backoff with jitter to prevent thundering herd\n        const exponential = config.baseDelayMs * Math.pow(2, attempt);\n        const jitter = Math.random() * config.jitterMs;\n        delay = Math.min(exponential + jitter, config.maxDelayMs);\n      }\n\n      console.log(`Rate limited (attempt ${attempt + 1}). Retrying in ${delay}ms...`);\n      await new Promise(r => setTimeout(r, delay));\n    }\n  }\n  throw new Error(\"Unreachable\");\n}\n\n// Usage\nconst items = await withBackoff(() =>\n  webflow.collections.items.listItems(collectionId)\n);\n```\n\n### Step 3: Request Queue with Concurrency Control\n\nUse `p-queue` to limit concurrent requests and prevent rate limit bursts:\n\n```typescript\nimport PQueue from \"p-queue\";\n\n// Webflow rate limits reset every 60 seconds\n// Adjust concurrency based on your plan's limit\nconst queue = new PQueue({\n  concurrency: 5,       // Max parallel requests\n  interval: 1000,       // Time window (ms)\n  intervalCap: 10,      // Max requests per interval\n});\n\nasync function queuedRequest<T>(operation: () => Promise<T>): Promise<T> {\n  return queue.add(operation) as Promise<T>;\n}\n\n// Usage \u2014 requests are automatically queued and throttled\nconst results = await Promise.all(\n  collectionIds.map(id =>\n    queuedRequest(() => webflow.collections.items.listItems(id))\n  )\n);\n```\n\n### Step 4: Use Bulk Endpoints to Reduce Request Count\n\nA single bulk request counts as **one** rate limit hit but handles up to 100 items:\n\n```typescript\n// BAD: 100 individual requests = 100 rate limit counts\nfor (const item of items) {\n  await webflow.collections.items.createItem(collectionId, { fieldData: item });\n}\n\n// GOOD: 1 bulk request = 1 rate limit count\nawait webflow.collections.items.createItemsBulk(collectionId, {\n  items: items.slice(0, 100).map(item => ({ fieldData: item })),\n});\n```\n\nAvailable bulk endpoints:\n\n- `createItemsBulk` \u2014 Create up to 100 items\n- `updateItemsBulk` \u2014 Update up to 100 items\n- `deleteItemsBulk` \u2014 Delete up to 100 items\n- `publishItem` \u2014 Publish multiple items by ID\n\n### Step 5: Rate Limit Monitor\n\nTrack rate limit usage across your application:\n\n```typescript\nclass RateLimitMonitor {\n  private remaining = Infinity;\n  private limit = 0;\n  private resetAt: Date = new Date();\n\n  updateFromHeaders(headers: Headers) {\n    const remaining = headers.get(\"X-RateLimit-Remaining\");\n    const limit = headers.get(\"X-RateLimit-Limit\");\n    const retryAfter = headers.get(\"Retry-After\");\n\n    if (remaining) this.remaining = parseInt(remaining);\n    if (limit) this.limit = parseInt(limit);\n    if (retryAfter) {\n      this.resetAt = new Date(Date.now() + parseInt(retryAfter) * 1000);\n    }\n  }\n\n  shouldThrottle(): boolean {\n    return this.remaining < 5 && new Date() < this.resetAt;\n  }\n\n  async waitIfNeeded(): Promise<void> {\n    if (this.shouldThrottle()) {\n      const waitMs = Math.max(0, this.resetAt.getTime() - Date.now());\n      console.log(`Throttling: waiting ${waitMs}ms for rate limit reset`);\n      await new Promise(r => setTimeout(r, waitMs));\n    }\n  }\n\n  getStatus() {\n    return {\n      remaining: this.remaining,\n      limit: this.limit,\n      resetAt: this.resetAt.toISOString(),\n      throttled: this.shouldThrottle(),\n    };\n  }\n}\n```\n\n### Step 6: Batch Processing Large Datasets\n\nFor operations involving thousands of items:\n\n```typescript\nasync function processLargeDataset(\n  collectionId: string,\n  allItems: Array<Record<string, any>>,\n  batchSize = 100,\n  delayBetweenBatchesMs = 1000\n) {\n  const results = { created: 0, failed: 0, errors: [] as any[] };\n\n  for (let i = 0; i < allItems.length; i += batchSize) {\n    const batch = allItems.slice(i, i + batchSize);\n    const batchNum = Math.floor(i / batchSize) + 1;\n    const totalBatches = Math.ceil(allItems.length / batchSize);\n\n    try {\n      await withBackoff(() =>\n        webflow.collections.items.createItemsBulk(collectionId, {\n          items: batch.map(item => ({ fieldData: item, isDraft: false })),\n        })\n      );\n      results.created += batch.length;\n      console.log(`Batch ${batchNum}/${totalBatches}: ${batch.length} items created`);\n    } catch (error) {\n      results.failed += batch.length;\n      results.errors.push({ batch: batchNum, error });\n    }\n\n    // Delay between batches to stay within rate limits\n    if (i + batchSize < allItems.length) {\n      await new Promise(r => setTimeout(r, delayBetweenBatchesMs));\n    }\n  }\n\n  return results;\n}\n```\n\n## Output\n\n- SDK auto-retry configured for 429 errors\n- Manual backoff with Retry-After header support\n- Request queue with concurrency control\n- Bulk endpoints reducing request count by 100x\n- Rate limit monitoring and adaptive throttling\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Persistent 429s | Too many keys sharing same plan | Reduce concurrency or upgrade plan |\n| Site publish 429 | >1 publish/minute | Enforce 60s cooldown between publishes |\n| Thundering herd | Multiple processes retry simultaneously | Add random jitter to backoff |\n| Bulk request 400 | >100 items in batch | Cap batch size at 100 |\n\n## Resources\n\n- [Rate Limits Reference](https://developers.webflow.com/data/reference/rate-limits)\n- [Bulk CMS Endpoints](https://developers.webflow.com/data/changelog/10232024)\n- [p-queue Documentation](https://github.com/sindresorhus/p-queue)\n\n## Next Steps\n\nFor security configuration, see `webflow-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "webflow-rate-limits",
-    "description": "Handle Webflow Data API v2 rate limits \\u2014 per-key limits, Retry-After\\",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

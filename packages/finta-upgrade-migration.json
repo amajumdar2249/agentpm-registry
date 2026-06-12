@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031949",
   "name": "finta-upgrade-migration",
   "slug": "finta-upgrade-migration",
   "description": "Handle Finta platform updates and data migration.",
   "content": "# Finta Upgrade & Migration\n\n## Overview\n\nFinta is a fundraising CRM built for founders managing investor pipelines, deal rooms, and investor updates. The API exposes endpoints for funding rounds, investor contacts, and deal room documents. Tracking API changes matters because Finta evolves its data model around fundraising workflows \u2014 field renames in round stages, investor contact schema updates, and deal room permission changes can break integrations that sync pipeline data to external analytics or reporting tools.\n\n## Version Detection\n\n```typescript\nconst FINTA_BASE = \"https://api.trustfinta.com/v1\";\n\nasync function detectFintaApiVersion(apiKey: string): Promise<void> {\n  const res = await fetch(`${FINTA_BASE}/rounds`, {\n    headers: { Authorization: `Bearer ${apiKey}`, \"Content-Type\": \"application/json\" },\n  });\n  const data = await res.json();\n  const apiVersion = res.headers.get(\"x-finta-version\") ?? \"unknown\";\n  console.log(`Finta API version: ${apiVersion}`);\n\n  // Check for deprecated fields in round objects\n  const knownFields = [\"id\", \"name\", \"stage\", \"target_amount\", \"raised_amount\", \"investors\", \"created_at\"];\n  if (data.rounds?.[0]) {\n    const actual = Object.keys(data.rounds[0]);\n    const deprecated = knownFields.filter((f) => !actual.includes(f));\n    const added = actual.filter((f) => !knownFields.includes(f));\n    if (deprecated.length) console.warn(`Removed fields: ${deprecated.join(\", \")}`);\n    if (added.length) console.log(`New fields: ${added.join(\", \")}`);\n  }\n}\n```\n\n## Migration Checklist\n\n- [ ] Review Finta changelog for breaking changes to round or investor endpoints\n- [ ] Audit codebase for hardcoded round stage values (e.g., `\"pre-seed\"`, `\"series-a\"`)\n- [ ] Verify investor contact schema \u2014 check for `firm` vs. `organization` field rename\n- [ ] Update deal room document upload endpoint if file size limits changed\n- [ ] Test investor update email delivery via API (template format may change)\n- [ ] Validate webhook payloads for round status change events\n- [ ] Migrate CSV import mappings if column headers were renamed\n- [ ] Check OAuth token expiry and refresh behavior for API key rotation\n- [ ] Update pipeline stage enum values if Finta added custom stage support\n- [ ] Run data export and re-import test to verify round-trip data integrity\n\n## Schema Migration\n\n```typescript\n// Finta round schema evolved: flat stage string \u2192 structured stage object\ninterface OldRound {\n  id: string;\n  name: string;\n  stage: string; // \"pre-seed\", \"seed\", \"series-a\"\n  target_amount: number;\n  raised_amount: number;\n  investors: string[]; // investor IDs\n}\n\ninterface NewRound {\n  id: string;\n  name: string;\n  stage: { key: string; label: string; order: number }; // structured stage\n  target: { amount: number; currency: string };\n  raised: { amount: number; currency: string };\n  investors: Array<{ id: string; committed_amount: number }>;\n  updated_at: string;\n}\n\nfunction migrateRound(old: OldRound): NewRound {\n  const stageMap: Record<string, { label: string; order: number }> = {\n    \"pre-seed\": { label: \"Pre-Seed\", order: 1 },\n    seed: { label: \"Seed\", order: 2 },\n    \"series-a\": { label: \"Series A\", order: 3 },\n  };\n  return {\n    id: old.id,\n    name: old.name,\n    stage: { key: old.stage, ...stageMap[old.stage] ?? { label: old.stage, order: 0 } },\n    target: { amount: old.target_amount, currency: \"USD\" },\n    raised: { amount: old.raised_amount, currency: \"USD\" },\n    investors: old.investors.map((id) => ({ id, committed_amount: 0 })),\n    updated_at: new Date().toISOString(),\n  };\n}\n```\n\n## Rollback Strategy\n\n```typescript\nclass FintaClient {\n  constructor(private apiKey: string, private version: \"v1\" | \"legacy\" = \"v1\") {}\n\n  private get baseUrl(): string {\n    return `https://api.trustfinta.com/${this.version}`;\n  }\n\n  async getRounds(): Promise<any> {\n    try {\n      const res = await fetch(`${this.baseUrl}/rounds`, {\n        headers: { Authorization: `Bearer ${this.apiKey}` },\n      });\n      if (!res.ok) throw new Error(`Finta ${res.status}`);\n      return await res.json();\n    } catch (err) {\n      if (this.version !== \"legacy\") {\n        console.warn(\"Falling back to legacy Finta API\");\n        this.version = \"legacy\";\n        return this.getRounds();\n      }\n      throw err;\n    }\n  }\n}\n```\n\n## Error Handling\n\n| Migration Issue | Symptom | Fix |\n|----------------|---------|-----|\n| Stage enum changed | `400 Bad Request` on round creation with old stage value | Fetch current stage options from `/rounds/stages` endpoint |\n| Investor schema mismatch | `investors` returns objects instead of string IDs | Update parser to handle both `string[]` and `{id, committed_amount}[]` |\n| Deal room permissions | `403 Forbidden` on document upload | Re-check deal room access scopes after API key rotation |\n| CSV import column mismatch | Import fails silently with 0 records created | Re-map columns using updated Finta field names from `/schema` endpoint |\n| Webhook signature invalid | Webhook verification fails after API update | Update HMAC secret from Finta dashboard settings |\n\n## Resources\n\n- [Finta Changelog](https://www.trustfinta.com/change-log)\n- [Finta API Documentation](https://www.trustfinta.com/developers)\n\n## Next Steps\n\nFor CI pipeline integration, see `finta-ci-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "finta-upgrade-migration",
-    "description": "Handle Finta platform updates and data migration.",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

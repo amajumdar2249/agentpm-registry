@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032363",
   "name": "klaviyo-core-workflow-b",
   "slug": "klaviyo-core-workflow-b",
   "description": "Execute Klaviyo secondary workflow: event tracking, segments, and campaigns.",
   "content": "# Klaviyo Core Workflow B -- Events, Segments & Campaigns\n\n## Overview\n\nSecondary workflow: track customer events, query segments, create/send campaigns, and trigger metric-based flows via the `klaviyo-api` SDK.\n\n## Prerequisites\n\n- Completed `klaviyo-core-workflow-a` (profiles/lists set up)\n- API key scopes: `events:write`, `segments:read`, `campaigns:read`, `campaigns:write`, `flows:read`\n\n## Instructions\n\n### Step 1: Track Server-Side Events\n\n```typescript\nimport {\n  ApiKeySession,\n  EventsApi,\n  EventEnum,\n  ProfileEnum,\n  MetricsApi,\n} from 'klaviyo-api';\n\nconst session = new ApiKeySession(process.env.KLAVIYO_PRIVATE_KEY!);\nconst eventsApi = new EventsApi(session);\n\n// Track a purchase event (creates the metric if it doesn't exist)\nawait eventsApi.createEvent({\n  data: {\n    type: EventEnum.Event,\n    attributes: {\n      metric: {\n        data: {\n          type: 'metric',\n          attributes: { name: 'Placed Order' },\n        },\n      },\n      profile: {\n        data: {\n          type: ProfileEnum.Profile,\n          attributes: { email: 'customer@example.com' },\n        },\n      },\n      properties: {\n        orderId: 'ORD-12345',\n        items: [\n          { productId: 'SKU-001', name: 'Widget', quantity: 2, price: 29.99 },\n          { productId: 'SKU-002', name: 'Gadget', quantity: 1, price: 49.99 },\n        ],\n        itemCount: 3,\n        discount: 10.00,\n      },\n      // Monetary value for revenue attribution\n      value: 99.97,\n      time: new Date().toISOString(),\n      uniqueId: 'ORD-12345',  // Deduplication key\n    },\n  },\n});\n\n// Track a custom event (triggers flows listening for this metric)\nawait eventsApi.createEvent({\n  data: {\n    type: EventEnum.Event,\n    attributes: {\n      metric: {\n        data: { type: 'metric', attributes: { name: 'Started Checkout' } },\n      },\n      profile: {\n        data: { type: ProfileEnum.Profile, attributes: { email: 'customer@example.com' } },\n      },\n      properties: {\n        cartValue: 149.97,\n        cartUrl: 'https://shop.example.com/cart/abc123',\n        items: ['Widget x2', 'Gadget x1'],\n      },\n      value: 149.97,\n      time: new Date().toISOString(),\n    },\n  },\n});\n```\n\n### Step 2: Query Events and Metrics\n\n```typescript\nconst metricsApi = new MetricsApi(session);\n\n// List all metrics (event types) in your account\nconst metrics = await metricsApi.getMetrics();\nfor (const m of metrics.body.data) {\n  console.log(`${m.attributes.name} (${m.id})`);\n}\n\n// Get recent events sorted by newest first\nconst events = await eventsApi.getEvents({\n  sort: '-datetime',\n  filter: 'equals(metric_id,\"METRIC_ID_HERE\")',\n});\n\nfor (const event of events.body.data) {\n  console.log(`${event.attributes.datetime}: ${event.attributes.eventProperties?.orderId}`);\n}\n```\n\n### Step 3: Work with Segments\n\n```typescript\nimport { SegmentsApi } from 'klaviyo-api';\n\nconst segmentsApi = new SegmentsApi(session);\n\n// List all segments\nconst segments = await segmentsApi.getSegments();\nfor (const seg of segments.body.data) {\n  console.log(`${seg.attributes.name} (${seg.id}) - active: ${seg.attributes.isActive}`);\n}\n\n// Get profiles in a segment\nconst segmentProfiles = await segmentsApi.getSegmentProfiles({\n  id: 'SEGMENT_ID',\n});\nfor (const profile of segmentProfiles.body.data) {\n  console.log(profile.attributes.email);\n}\n\n// Check segment size (useful before campaign sends)\nconst segmentWithCount = await segmentsApi.getSegment({\n  id: 'SEGMENT_ID',\n  additionalFieldsSegment: ['profile_count'],\n});\nconsole.log(`Segment size: ${segmentWithCount.body.data.attributes.profileCount}`);\n```\n\n### Step 4: Create an Email Campaign\n\n```typescript\nimport { CampaignsApi, CampaignEnum, TemplatesApi } from 'klaviyo-api';\n\nconst campaignsApi = new CampaignsApi(session);\nconst templatesApi = new TemplatesApi(session);\n\n// 1. Create an email template\nconst template = await templatesApi.createTemplate({\n  data: {\n    type: 'template',\n    attributes: {\n      name: 'Weekly Sale Announcement',\n      editorType: 'CODE',\n      html: `\n        <html>\n          <body>\n            <h1>Hey {{ first_name|default:\"there\" }}!</h1>\n            <p>Check out our weekly deals.</p>\n            <a href=\"{{ url }}\">Shop Now</a>\n            {% unsubscribe %}Unsubscribe{% endunsubscribe %}\n          </body>\n        </html>\n      `,\n    },\n  },\n});\n\n// 2. Create a campaign targeting a list or segment\nconst campaign = await campaignsApi.createCampaign({\n  data: {\n    type: CampaignEnum.Campaign,\n    attributes: {\n      name: 'Weekly Sale - March 2025',\n      channel: 'email',\n      audiences: {\n        included: [{ type: 'segment', id: 'SEGMENT_ID' }],\n        excluded: [{ type: 'list', id: 'SUPPRESSION_LIST_ID' }],\n      },\n      sendOptions: {\n        useSmartSending: true,  // Skip recently emailed contacts\n      },\n    },\n  },\n});\nconst campaignId = campaign.body.data.id;\n\n// 3. Assign template to campaign message\nconst messages = await campaignsApi.getCampaignCampaignMessages({ id: campaignId });\nconst messageId = messages.body.data[0].id;\n\nawait campaignsApi.assignTemplateToCampaignMessage({\n  id: messageId,\n  body: {\n    data: {\n      type: 'template',\n      id: template.body.data.id,\n    },\n  },\n});\n\n// 4. Send the campaign (or schedule)\nawait campaignsApi.createCampaignSendJob({\n  data: {\n    type: 'campaign-send-job',\n    id: campaignId,\n  },\n});\nconsole.log('Campaign queued for sending');\n```\n\n### Step 5: Query Flows (Read-Only)\n\n```typescript\nimport { FlowsApi } from 'klaviyo-api';\n\nconst flowsApi = new FlowsApi(session);\n\n// List all flows\nconst flows = await flowsApi.getFlows();\nfor (const flow of flows.body.data) {\n  console.log(`${flow.attributes.name} - status: ${flow.attributes.status}`);\n}\n\n// Get flow actions (the steps in a flow)\nconst flowActions = await flowsApi.getFlowFlowActions({ id: 'FLOW_ID' });\nfor (const action of flowActions.body.data) {\n  console.log(`  Action: ${action.attributes.actionType} - ${action.attributes.status}`);\n}\n```\n\n## Common Event Names for Flow Triggers\n\n| Event Name | Typical Trigger | Flow Type |\n|-----------|----------------|-----------|\n| `Placed Order` | Purchase completed | Post-purchase / cross-sell |\n| `Started Checkout` | Cart created | Abandoned cart |\n| `Viewed Product` | Product page visit | Browse abandonment |\n| `Ordered Product` | Per-item tracking | Product review request |\n| `Fulfilled Order` | Shipment sent | Shipping confirmation |\n| `Cancelled Order` | Order cancelled | Win-back |\n| `Subscribed to List` | Email/SMS signup | Welcome series |\n| `Custom Event` | Any API event | Custom automation |\n\n## Error Handling\n\n| Error | Status | Cause | Solution |\n|-------|--------|-------|----------|\n| Invalid metric name | 400 | Empty or null metric | Always include `metric.data.attributes.name` |\n| Segment not found | 404 | Wrong segment ID | List segments with `getSegments()` |\n| Campaign send failed | 400 | Missing template/audience | Assign template and set audience first |\n| Duplicate event | N/A | Same `uniqueId` | Deduplication built-in; safe to retry |\n\n## Resources\n\n- [Events API](https://developers.klaviyo.com/en/reference/events_api_overview)\n- [Segments API](https://developers.klaviyo.com/en/reference/segments_api_overview)\n- [Campaigns API](https://developers.klaviyo.com/en/reference/campaigns_api_overview)\n- [Flows API](https://developers.klaviyo.com/en/reference/flows_api_overview)\n- [Metrics API](https://developers.klaviyo.com/en/reference/metrics_api_overview)\n\n## Next Steps\n\nFor common errors, see `klaviyo-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "klaviyo-core-workflow-b",
-    "description": "Execute Klaviyo secondary workflow: event tracking, segments, and campaigns.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

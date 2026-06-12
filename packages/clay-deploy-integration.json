@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031522",
   "name": "clay-deploy-integration",
   "slug": "clay-deploy-integration",
   "description": "Deploy Clay-powered applications to Vercel, Cloud Run, or Docker with",
   "content": "# Clay Deploy Integration\n\n## Overview\n\nDeploy applications that integrate with Clay (webhook receivers, enrichment processors, CRM sync services) to production platforms. Clay itself is a hosted SaaS -- you deploy the code that *interacts* with Clay, not Clay itself. The critical requirement is a publicly accessible HTTPS endpoint for Clay's HTTP API columns to call back to.\n\n## Prerequisites\n\n- Application code that handles Clay webhooks or HTTP API callbacks\n- Platform CLI installed (vercel, gcloud, or docker)\n- Clay webhook URL and/or API key stored securely\n- HTTPS endpoint accessible from the public internet\n\n## Instructions\n\n### Step 1: Vercel Deployment (Serverless)\n\nBest for: Webhook receivers, small-scale enrichment handlers.\n\n```bash\n# Set Clay secrets in Vercel\nvercel env add CLAY_WEBHOOK_URL production\nvercel env add CLAY_API_KEY production\nvercel env add CLAY_WEBHOOK_SECRET production\n\n# Deploy\nvercel --prod\n```\n\n```typescript\n// api/clay/callback.ts \u2014 Vercel serverless function\nimport type { VercelRequest, VercelResponse } from '@vercel/node';\nimport crypto from 'crypto';\n\nexport default async function handler(req: VercelRequest, res: VercelResponse) {\n  if (req.method !== 'POST') return res.status(405).end();\n\n  // Validate webhook signature\n  const signature = req.headers['x-clay-signature'] as string;\n  const secret = process.env.CLAY_WEBHOOK_SECRET!;\n  const expected = crypto.createHmac('sha256', secret)\n    .update(JSON.stringify(req.body))\n    .digest('hex');\n\n  if (!crypto.timingSafeEqual(Buffer.from(signature || ''), Buffer.from(expected))) {\n    return res.status(401).json({ error: 'Invalid signature' });\n  }\n\n  // Process enriched data from Clay HTTP API column\n  const enrichedLead = req.body;\n  console.log('Received enriched lead:', {\n    email: enrichedLead.email,\n    company: enrichedLead.company_name,\n    score: enrichedLead.icp_score,\n  });\n\n  // Push to CRM, database, or outreach tool\n  await processLead(enrichedLead);\n\n  return res.status(200).json({ status: 'processed' });\n}\n```\n\n### Step 2: Cloud Run Deployment (Container)\n\nBest for: High-volume enrichment pipelines, CRM sync services.\n\n```dockerfile\n# Dockerfile\nFROM node:20-slim\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci --only=production\nCOPY dist/ ./dist/\nEXPOSE 8080\nENV PORT=8080\nCMD [\"node\", \"dist/index.js\"]\n```\n\n```bash\n# Build and deploy to Cloud Run\ngcloud builds submit --tag gcr.io/$PROJECT_ID/clay-handler\n\ngcloud run deploy clay-handler \\\n  --image gcr.io/$PROJECT_ID/clay-handler \\\n  --platform managed \\\n  --region us-central1 \\\n  --allow-unauthenticated \\\n  --set-secrets \"CLAY_API_KEY=clay-api-key:latest,CLAY_WEBHOOK_SECRET=clay-webhook-secret:latest\" \\\n  --min-instances 1 \\\n  --max-instances 10\n```\n\n### Step 3: Docker Compose (Self-Hosted)\n\nBest for: On-premise deployments, development staging.\n\n```yaml\n# docker-compose.yml\nversion: '3.8'\nservices:\n  clay-handler:\n    build: .\n    ports:\n      - \"3000:3000\"\n    environment:\n      - CLAY_WEBHOOK_URL=${CLAY_WEBHOOK_URL}\n      - CLAY_API_KEY=${CLAY_API_KEY}\n      - CLAY_WEBHOOK_SECRET=${CLAY_WEBHOOK_SECRET}\n      - DATABASE_URL=${DATABASE_URL}\n    restart: unless-stopped\n    healthcheck:\n      test: [\"CMD\", \"curl\", \"-f\", \"http://localhost:3000/health\"]\n      interval: 30s\n      timeout: 10s\n      retries: 3\n```\n\n### Step 4: Configure Clay to Call Your Deployed Endpoint\n\nOnce deployed, update your Clay table's HTTP API column:\n\n1. Get your deployment URL (e.g., `https://clay-handler.vercel.app` or Cloud Run URL)\n2. In Clay table, edit the HTTP API column\n3. Set URL to: `https://your-deployment.com/api/clay/callback`\n4. Test on a single row before enabling auto-run\n\n### Step 5: Health Check Endpoint\n\n```typescript\n// src/health.ts \u2014 health check that verifies Clay connectivity\napp.get('/health', async (req, res) => {\n  const checks: Record<string, string> = {\n    server: 'ok',\n    clay_webhook: 'unknown',\n    database: 'unknown',\n  };\n\n  // Check Clay webhook reachability\n  try {\n    const webhookTest = await fetch(process.env.CLAY_WEBHOOK_URL!, {\n      method: 'POST',\n      headers: { 'Content-Type': 'application/json' },\n      body: JSON.stringify({ _health_check: true }),\n    });\n    checks.clay_webhook = webhookTest.ok ? 'ok' : `error: ${webhookTest.status}`;\n  } catch {\n    checks.clay_webhook = 'unreachable';\n  }\n\n  const allHealthy = Object.values(checks).every(v => v === 'ok');\n  res.status(allHealthy ? 200 : 503).json({ status: allHealthy ? 'healthy' : 'degraded', checks });\n});\n```\n\n### Step 6: Production Environment Variables\n\n```bash\n# Required for all deployments\nCLAY_WEBHOOK_URL=https://app.clay.com/api/v1/webhooks/your-id\nCLAY_WEBHOOK_SECRET=your-shared-secret\n\n# Optional (Enterprise only)\nCLAY_API_KEY=clay_ent_your_key\n\n# Application-specific\nDATABASE_URL=postgresql://...\nCRM_API_KEY=your-crm-key\nPORT=3000\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Clay can't reach callback | Endpoint not public HTTPS | Verify URL is accessible, check firewall |\n| Cold start timeout | Serverless function too slow | Set min-instances=1 on Cloud Run |\n| Missing secrets in deploy | Env vars not configured | Add via platform CLI before deploying |\n| Health check fails | Clay webhook URL invalid | Re-copy webhook URL from Clay table |\n\n## Resources\n\n- [Vercel Serverless Functions](https://vercel.com/docs/functions)\n- [Cloud Run Documentation](https://cloud.google.com/run/docs)\n- [Clay University -- HTTP API Integration](https://university.clay.com/docs/http-api-integration-overview)\n\n## Next Steps\n\nFor webhook handling patterns, see `clay-webhooks-events`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clay-deploy-integration",
-    "description": "Deploy Clay-powered applications to Vercel, Cloud Run, or Docker with",
-    "allowed-tools": "Read, Write, Edit, Bash(vercel:*), Bash(gcloud:*), Bash(docker:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

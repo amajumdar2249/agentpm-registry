@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031201",
   "name": "algolia-multi-env-setup",
   "slug": "algolia-multi-env-setup",
   "description": "Configure Algolia across dev/staging/production: index prefixing, per-environment",
   "content": "# Algolia Multi-Environment Setup\n\n## Overview\n\nAlgolia doesn't have built-in environment separation. You either use **separate Algolia applications** (strongest isolation) or **index prefixing** within one application (simpler). This skill covers both approaches.\n\n## Environment Strategies\n\n| Strategy | Isolation | Cost | Complexity |\n|----------|-----------|------|------------|\n| Index prefixing | Shared app, prefixed names | Lowest | Low |\n| Separate API keys | Shared app, scoped keys | Low | Medium |\n| Separate applications | Full isolation | Highest | High |\n\n## Instructions\n\n### Step 1: Index Prefixing (Recommended for Most Teams)\n\n```typescript\n// src/algolia/config.ts\nimport { algoliasearch, type Algoliasearch } from 'algoliasearch';\n\ntype Environment = 'development' | 'staging' | 'production';\n\ninterface AlgoliaConfig {\n  appId: string;\n  apiKey: string;\n  searchKey: string;\n  environment: Environment;\n}\n\nfunction getConfig(): AlgoliaConfig {\n  const env = (process.env.NODE_ENV || 'development') as Environment;\n\n  return {\n    appId: process.env.ALGOLIA_APP_ID!,\n    apiKey: process.env.ALGOLIA_ADMIN_KEY!,\n    searchKey: process.env.ALGOLIA_SEARCH_KEY!,\n    environment: env,\n  };\n}\n\n// Prefix index names with environment\nexport function indexName(base: string): string {\n  const { environment } = getConfig();\n  if (environment === 'production') return base;  // No prefix in prod\n  return `${environment}_${base}`;\n  // development_products, staging_products, products\n}\n\nlet _client: Algoliasearch | null = null;\n\nexport function getClient(): Algoliasearch {\n  if (!_client) {\n    const config = getConfig();\n    _client = algoliasearch(config.appId, config.apiKey);\n  }\n  return _client;\n}\n```\n\n### Step 2: Scoped API Keys Per Environment\n\n```typescript\nimport { algoliasearch } from 'algoliasearch';\n\nconst adminClient = algoliasearch(process.env.ALGOLIA_APP_ID!, process.env.ALGOLIA_ADMIN_KEY!);\n\n// Create environment-scoped keys that can ONLY access their own indices\nasync function createEnvironmentKeys() {\n  // Staging key: can only access staging_* indices\n  const { key: stagingKey } = await adminClient.addApiKey({\n    apiKey: {\n      acl: ['search', 'addObject', 'deleteObject', 'editSettings', 'browse'],\n      description: 'Staging environment \u2014 full access to staging indices only',\n      indexes: ['staging_*'],\n      maxQueriesPerIPPerHour: 10000,\n    },\n  });\n  console.log(`Staging key: ${stagingKey}`);\n\n  // Dev key: can only access development_* indices\n  const { key: devKey } = await adminClient.addApiKey({\n    apiKey: {\n      acl: ['search', 'addObject', 'deleteObject', 'editSettings', 'browse'],\n      description: 'Development environment \u2014 full access to dev indices only',\n      indexes: ['development_*'],\n      maxQueriesPerIPPerHour: 5000,\n    },\n  });\n  console.log(`Dev key: ${devKey}`);\n\n  // Production search key: search only, restricted\n  const { key: prodSearchKey } = await adminClient.addApiKey({\n    apiKey: {\n      acl: ['search'],\n      description: 'Production search \u2014 read only',\n      indexes: ['products', 'articles', 'faq'],\n      maxQueriesPerIPPerHour: 50000,\n      maxHitsPerQuery: 100,\n    },\n  });\n  console.log(`Prod search key: ${prodSearchKey}`);\n}\n```\n\n### Step 3: Environment Variables Per Platform\n\n```bash\n# .env.development\nALGOLIA_APP_ID=YourAppID\nALGOLIA_ADMIN_KEY=dev_scoped_key_here\nALGOLIA_SEARCH_KEY=dev_search_key_here\nNODE_ENV=development\n\n# .env.staging\nALGOLIA_APP_ID=YourAppID\nALGOLIA_ADMIN_KEY=staging_scoped_key_here\nALGOLIA_SEARCH_KEY=staging_search_key_here\nNODE_ENV=staging\n\n# Production: use secret manager, not env files\n# GitHub Actions:\n#   ALGOLIA_ADMIN_KEY: ${{ secrets.ALGOLIA_ADMIN_KEY_PROD }}\n# GCP Secret Manager:\n#   gcloud secrets versions access latest --secret=algolia-admin-key\n# Vercel:\n#   vercel env add ALGOLIA_ADMIN_KEY production\n```\n\n### Step 4: Settings-as-Code with Environment Overrides\n\n```typescript\n// config/algolia-settings.ts\nimport type { IndexSettings } from 'algoliasearch';\n\nconst baseSettings: IndexSettings = {\n  searchableAttributes: ['name', 'brand', 'category', 'unordered(description)'],\n  attributesForFaceting: ['searchable(brand)', 'category', 'filterOnly(price)'],\n  customRanking: ['desc(review_count)', 'desc(rating)'],\n};\n\nconst envOverrides: Partial<Record<string, Partial<IndexSettings>>> = {\n  development: {\n    // Faster iteration: no replicas in dev\n    replicas: [],\n  },\n  staging: {\n    // Mirror prod replicas for testing\n    replicas: ['virtual(staging_products_price_asc)'],\n  },\n  production: {\n    replicas: [\n      'virtual(products_price_asc)',\n      'virtual(products_price_desc)',\n      'virtual(products_newest)',\n    ],\n  },\n};\n\nexport function getSettings(env: string): IndexSettings {\n  return { ...baseSettings, ...envOverrides[env] };\n}\n```\n\n### Step 5: Environment Isolation Guard\n\n```typescript\n// Prevent accidental cross-environment operations\nexport function guardEnvironment(operation: string, targetIndex: string) {\n  const env = process.env.NODE_ENV || 'development';\n\n  if (env === 'production') {\n    // In production, block access to dev/staging indices\n    if (targetIndex.startsWith('development_') || targetIndex.startsWith('staging_')) {\n      throw new Error(`Blocked: ${operation} on ${targetIndex} from production`);\n    }\n  } else {\n    // In dev/staging, block access to production indices (no prefix = production)\n    if (!targetIndex.startsWith(`${env}_`)) {\n      throw new Error(`Blocked: ${operation} on ${targetIndex} from ${env}. Use prefixed index.`);\n    }\n  }\n}\n\n// Usage in service layer\nasync function deleteIndex(name: string) {\n  guardEnvironment('deleteIndex', name);\n  await getClient().deleteIndex({ indexName: name });\n}\n```\n\n### Step 6: Seed Script Per Environment\n\n```typescript\n// scripts/seed-environment.ts\nimport { getClient, indexName } from '../src/algolia/config';\nimport { getSettings } from '../config/algolia-settings';\n\nasync function seedEnvironment() {\n  const env = process.env.NODE_ENV || 'development';\n  const client = getClient();\n  const idx = indexName('products');\n\n  console.log(`Seeding ${env} environment \u2192 index: ${idx}`);\n\n  // Apply settings\n  await client.setSettings({ indexName: idx, indexSettings: getSettings(env) });\n\n  // Seed data (dev/staging only)\n  if (env !== 'production') {\n    const testData = await import('../fixtures/products.json');\n    const { taskID } = await client.replaceAllObjects({\n      indexName: idx,\n      objects: testData.default,\n    });\n    await client.waitForTask({ indexName: idx, taskID });\n    console.log(`Seeded ${testData.default.length} records`);\n  }\n}\n\nseedEnvironment().catch(console.error);\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Wrong index in production | Missing prefix logic | Use `indexName()` helper everywhere |\n| Staging data leaking to prod | Shared API key | Use scoped keys restricted to index patterns |\n| Settings drift between envs | Manual dashboard changes | Apply settings from code in CI |\n| Dev index polluting record count | Old test indices | Scheduled cleanup job for `development_*` indices |\n\n## Resources\n\n- [API Key Index Restrictions](https://www.algolia.com/doc/guides/security/api-keys/in-depth/api-key-restrictions/)\n- [Settings API](https://www.algolia.com/doc/api-reference/api-methods/set-settings/)\n- [12-Factor App Config](https://12factor.net/config)\n\n## Next Steps\n\nFor observability setup, see `algolia-observability`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "algolia-multi-env-setup",
-    "description": "Configure Algolia across dev/staging/production: index prefixing, per-environment",
-    "Trigger": "algolia environments\", \"algolia staging\", \"algolia dev prod\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(gcloud:*), Bash(vault:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

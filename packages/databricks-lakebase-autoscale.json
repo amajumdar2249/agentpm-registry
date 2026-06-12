@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000006877",
   "name": "databricks-lakebase-autoscale",
   "slug": "databricks-lakebase-autoscale",
   "description": "Patterns and best practices for Lakebase Autoscaling (next-gen managed PostgreSQL). Use when creating or managing Lakebase Autoscaling projects, configuring autoscaling compute or scale-to-zero, working with database branching for dev/test workflows, implementing reverse ETL via synced tables, or connecting applications to Lakebase with OAuth credentials.",
   "content": "\n# Lakebase Autoscaling\n\nLakebase Autoscaling is Databricks' next-generation managed PostgreSQL service for OLTP workloads: autoscaling compute, database branching, scale-to-zero, instant restore, and Delta-to-Postgres synced tables.\n\nUse this skill when creating/managing Lakebase Autoscaling projects, branches, endpoints/computes, credentials, reverse ETL synced tables, or app connections.\n\n## Core framing\n\n> **There is no separate Python \u201cLakebase SDK.\u201d** Use `databricks-sdk` for management and for minting short-lived database credentials with `WorkspaceClient().postgres.generate_database_credential(...)`; use standard Postgres drivers (`psycopg`, SQLAlchemy, JDBC, `pgx`, etc.) for SQL.\n\n| Language | Credential / management SDK | DB driver / wrapper |\n|---|---|---|\n| **Python** | `databricks-sdk` `WorkspaceClient().postgres` | `psycopg[binary,pool]` canonical; SQLAlchemy supported |\n| **Node/TS** | `@databricks/lakebase` convenience wrapper, Autoscaling only | Wrapper manages `pg` pool |\n| **Java/Go** | Databricks SDK for Java/Go | Standard JDBC / `pgx` |\n\n## Lead connection pattern\n\nFor production Python apps, start with:\n\n1. `psycopg_pool.ConnectionPool`\n2. `connection_class=OAuthConnection`, where `OAuthConnection(psycopg.Connection).connect()` calls `w.postgres.generate_database_credential(endpoint=...)`\n3. `max_lifetime=2700`\n\nThis is the canonical pattern from the official Databricks Apps + Lakebase Autoscaling tutorial lineage and `databricks-ai-bridge`: no background token thread; physical connections get fresh credentials when opened/recycled.\n\nPrefer `max_lifetime=2700` as a defensive 45-minute recycle before 1-hour token expiry. The official tutorial does not set `max_lifetime`; `databricks-ai-bridge` uses `2700`.\n\nSee `connections.md`.\n\n## Critical auth warning\n\nDo **not** use `WorkspaceClient().config.token`, `w.config.oauth_token().access_token`, or any workspace-scoped OAuth token as the Postgres password. It will fail at Postgres login.\n\nUse:\n\n```python\ncred = WorkspaceClient().postgres.generate_database_credential(endpoint=endpoint_name)\npassword = cred.token\n```\n\nThat token is Lakebase-scoped and is used as the Postgres password with `sslmode=require`.\n\n## Resource model\n\n```text\nProject\n  \u2514\u2500\u2500 Branches\n        \u251c\u2500\u2500 Endpoint/Compute: primary read-write endpoint\n        \u251c\u2500\u2500 Read replicas: optional read-only endpoints\n        \u251c\u2500\u2500 Roles\n        \u2514\u2500\u2500 Databases\n              \u2514\u2500\u2500 Schemas/Tables\n```\n\nCanonical names:\n\n```text\nprojects/{project_id}\nprojects/{project_id}/branches/{branch_id}\nprojects/{project_id}/branches/{branch_id}/endpoints/{endpoint_id}\n```\n\nDefaults on project creation:\n- default branch: `production`\n- default database: `databricks_postgres`\n- primary read-write endpoint/compute\n- Postgres role for the creator\u2019s Databricks identity\n\nKey SDK namespace: `WorkspaceClient().postgres`.\n\nMost create/update/delete calls return long-running operations; call `.wait()`.\n\n## Lakebase Autoscaling vs Provisioned\n\n| Aspect | Provisioned | Autoscaling |\n|---|---|---|\n| SDK module | `w.database` | `w.postgres` |\n| Top-level resource | Instance | Project |\n| Capacity | fixed CU tiers, ~16 GB/CU | 0.5\u2013112 CU, ~2 GB/CU |\n| Branching | no | yes |\n| Scale-to-zero | no | yes |\n| Operations | mostly synchronous | LROs; use `.wait()` |\n| Reverse ETL | synced tables | synced tables |\n| Read replicas | readable secondaries | dedicated read-only endpoints |\n\n## Non-obvious facts to preserve\n\n- Postgres versions: **16 and 17**.\n- AWS regions: `us-east-1`, `us-east-2`, `eu-central-1`, `eu-west-1`, `eu-west-2`, `ap-south-1`, `ap-southeast-1`, `ap-southeast-2`.\n- Azure beta regions: `eastus2`, `westeurope`, `westus`.\n- Autoscaling computes: 0.5\u201332 CU with `max - min <= 16`.\n- Fixed-size always-on computes: 40\u2013112 CU.\n- Autoscaling CU \u2248 2 GB RAM.\n- `sslmode=require` on all driver connections.\n- Endpoint host comes from `w.postgres.get_endpoint(...).status.hosts.host`.\n- GET responses often return effective properties under `status`; create/update payloads use `spec`.\n- All update calls need a `FieldMask`.\n- Scale-to-zero wake-up is automatic but apps should retry.\n- Connections can be closed by platform timeouts: 24-hour idle timeout and 3-day max connection lifetime.\n- macOS DNS can fail on long Lakebase hostnames; if so, resolve to IP and pass both `host` and `hostaddr` to psycopg.\n- Triggered/Continuous synced tables require Delta Change Data Feed.\n- Reverse ETL is Delta-to-Postgres only; not Postgres-to-Delta.\n\n## Task files\n\n- `connections.md` \u2014 app/notebook connection patterns and credential rotation.\n- `operations.md` \u2014 project, branch, endpoint/compute, scale-to-zero, limits, MCP mapping.\n- `reverse-etl.md` \u2014 synced tables from Delta Lake to Lakebase.\n\n## SDK / package versions\n\n```bash\npip install -U \"databricks-sdk>=0.81.0\" \"psycopg[binary,pool]>=3.1\" \"sqlalchemy>=2\"\n```\n\nUse SQLAlchemy URL prefix `postgresql+psycopg://...` for psycopg3.\n\n## Current limitations\n\nNot yet supported or not equivalent to Provisioned:\n- High availability with readable secondaries; use read replicas instead.\n- Databricks Apps UI integration may lag; Apps can connect manually via credentials/resource env vars.\n- Feature Store integration.\n- Stateful AI-agent memory integrations.\n- Postgres-to-Delta sync.\n- Custom billing tags / serverless budget policies.\n- Direct migration from Lakebase Provisioned; use `pg_dump`/`pg_restore` or reverse ETL patterns where appropriate.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "databricks-lakebase-autoscale",
-    "description": "Patterns and best practices for Lakebase Autoscaling (next-gen managed PostgreSQL). Use when creating or managing Lakebase Autoscaling projects, configuring autoscaling compute or scale-to-zero, working with database branching for dev/test workflows, implementing reverse ETL via synced tables, or connecting applications to Lakebase with OAuth credentials."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

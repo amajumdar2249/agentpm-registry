@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000030553",
   "name": "laravel-api-resource-patterns",
   "slug": "laravel-api-resource-patterns-2",
   "description": "Best practices for Laravel API Resources including resource transformation, collection handling, conditional attributes, and relationship loading.",
   "content": "\n# API Resource Patterns\n\n## Basic Resource Structure\n\n```php\n<?php\n\nnamespace App\\Http\\Resources;\n\nuse Illuminate\\Http\\Resources\\Json\\JsonResource;\n\nclass PostResource extends JsonResource\n{\n    public function toArray($request): array\n    {\n        return [\n            'id' => $this->id,\n            'title' => $this->title,\n            'content' => $this->content,\n            'created_at' => $this->created_at->toISOString(),\n            'updated_at' => $this->updated_at->toISOString(),\n        ];\n    }\n}\n```\n\n## Conditional Attributes\n\n```php\npublic function toArray($request): array\n{\n    return [\n        'id' => $this->id,\n        'title' => $this->title,\n        \n        // Only include if loaded\n        'author' => new UserResource($this->whenLoaded('user')),\n        \n        // Only include if condition is true\n        'content' => $this->when($request->user()?->can('view', $this->resource), $this->content),\n        \n        // Only include if not null\n        'comments_count' => $this->when($this->comments_count !== null, $this->comments_count),\n        \n        // Merge conditionally\n        $this->mergeWhen($request->user()?->isAdmin(), [\n            'internal_notes' => $this->internal_notes,\n        ]),\n    ];\n}\n```\n\n## Nested Relationships\n\n```php\npublic function toArray($request): array\n{\n    return [\n        'id' => $this->id,\n        'title' => $this->title,\n        \n        // Single relationship\n        'author' => new UserResource($this->whenLoaded('user')),\n        \n        // Collection relationship\n        'comments' => CommentResource::collection($this->whenLoaded('comments')),\n        \n        // Nested relationships\n        'category' => new CategoryResource($this->whenLoaded('category')),\n    ];\n}\n```\n\n## Resource Collections\n\n```php\n<?php\n\nnamespace App\\Http\\Resources;\n\nuse Illuminate\\Http\\Resources\\Json\\ResourceCollection;\n\nclass PostCollection extends ResourceCollection\n{\n    public function toArray($request): array\n    {\n        return [\n            'data' => $this->collection,\n            'meta' => [\n                'total' => $this->total(),\n                'count' => $this->count(),\n                'per_page' => $this->perPage(),\n                'current_page' => $this->currentPage(),\n                'total_pages' => $this->lastPage(),\n            ],\n            'links' => [\n                'self' => $request->url(),\n                'first' => $this->url(1),\n                'last' => $this->url($this->lastPage()),\n                'prev' => $this->previousPageUrl(),\n                'next' => $this->nextPageUrl(),\n            ],\n        ];\n    }\n}\n```\n\n## Adding Links\n\n```php\npublic function toArray($request): array\n{\n    return [\n        'id' => $this->id,\n        'title' => $this->title,\n        'links' => [\n            'self' => route('posts.show', $this->id),\n            'author' => route('users.show', $this->user_id),\n            'comments' => route('posts.comments.index', $this->id),\n        ],\n    ];\n}\n```\n\n## Resource Response Customization\n\n```php\n// In controller\npublic function store(Request $request)\n{\n    $post = Post::create($request->validated());\n    \n    return (new PostResource($post))\n        ->response()\n        ->setStatusCode(201)\n        ->header('Location', route('posts.show', $post));\n}\n```\n\n## Pivot Data in Resources\n\n```php\npublic function toArray($request): array\n{\n    return [\n        'id' => $this->id,\n        'name' => $this->name,\n        'assigned_at' => $this->whenPivotLoaded('role_user', function () {\n            return $this->pivot->created_at;\n        }),\n        'expires_at' => $this->whenPivotLoadedAs('assignment', 'role_user', function () {\n            return $this->assignment->expires_at;\n        }),\n    ];\n}\n```\n\n## Wrapping and Unwrapping\n\n```php\n// Disable wrapping in AppServiceProvider\nuse Illuminate\\Http\\Resources\\Json\\JsonResource;\n\npublic function boot()\n{\n    JsonResource::withoutWrapping();\n}\n\n// Or per resource\npublic static $wrap = 'post';\n```\n\n## With Additional Data\n\n```php\npublic function with($request): array\n{\n    return [\n        'version' => '1.0.0',\n        'timestamp' => now()->toISOString(),\n    ];\n}\n\npublic function withResponse($request, $response)\n{\n    $response->header('X-Value', 'True');\n}\n```\n\n## Best Practices\n\n### Always Use whenLoaded for Relationships\n\n```php\n// \u2705 Prevents N+1 queries\n'author' => new UserResource($this->whenLoaded('user')),\n\n// \u274c Will cause N+1 queries\n'author' => new UserResource($this->user),\n```\n\n### Use Type Hints\n\n```php\nuse Illuminate\\Http\\Request;\n\npublic function toArray(Request $request): array\n{\n    // ...\n}\n```\n\n### Keep Resources Focused\n\n```php\n// \u2705 Create separate resources for different contexts\nclass PostResource extends JsonResource { }\nclass PostListResource extends JsonResource { }\nclass PostDetailResource extends JsonResource { }\n\n// \u274c Don't make one resource do everything\n```\n\n### Use Resource Collections\n\n```php\n// \u2705 Use collection class\nreturn new PostCollection(Post::paginate());\n\n// \u2705 Or collection method\nreturn PostResource::collection(Post::all());\n```\n\n## Controller Usage\n\n```php\nclass PostController extends Controller\n{\n    public function index()\n    {\n        $posts = Post::with(['user', 'category'])\n            ->withCount('comments')\n            ->paginate(15);\n        \n        return new PostCollection($posts);\n    }\n    \n    public function show(Post $post)\n    {\n        $post->load(['user', 'comments.user', 'tags']);\n        \n        return new PostResource($post);\n    }\n    \n    public function store(StorePostRequest $request)\n    {\n        $post = Post::create($request->validated());\n        \n        return (new PostResource($post))\n            ->response()\n            ->setStatusCode(201);\n    }\n}\n```\n\n## Checklist\n\n- [ ] Resources transform models consistently\n- [ ] Relationships loaded with whenLoaded()\n- [ ] Conditional attributes use when()\n- [ ] Collections include pagination metadata\n- [ ] Links included for HATEOAS\n- [ ] Type hints used\n- [ ] Proper HTTP status codes\n- [ ] No N+1 queries\n- [ ] Consistent date formatting\n- [ ] Appropriate wrapping strategy\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "laravel-api-resource-patterns",
-    "description": "Best practices for Laravel API Resources including resource transformation, collection handling, conditional attributes, and relationship loading."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000029655",
   "name": "oma-orchestrator",
   "slug": "oma-orchestrator-2",
   "description": "Automated multi-agent orchestrator that spawns CLI subagents in parallel, coordinates via MCP Memory, and monitors progress. Use for orchestration, parallel execution, and automated multi-agent workflows.",
   "content": "\n# Orchestrator - Automated Multi-Agent Coordinator\n\n## When to use\n- Complex feature requires multiple specialized agents working in parallel\n- User wants automated execution without manually spawning agents\n- Full-stack implementation spanning backend, frontend, mobile, and QA\n- User says \"run it automatically\", \"run in parallel\", or similar automation requests\n\n## When NOT to use\n- Simple single-domain task -> use the specific agent directly\n- User wants step-by-step manual control -> use oma-coordination\n- Quick bug fixes or minor changes\n\n## Important\nThis skill orchestrates CLI subagents via `oh-my-ag agent:spawn`. The CLI vendor (gemini, claude, codex, qwen) is resolved from configuration. Vendor-specific execution protocols are injected automatically. Each subagent runs as an independent process.\n\n## Configuration\n\n| Setting | Default | Description |\n|---------|---------|-------------|\n| MAX_PARALLEL | 3 | Max concurrent subagents |\n| MAX_RETRIES | 2 | Retry attempts per failed task |\n| POLL_INTERVAL | 30s | Status check interval |\n| MAX_TURNS (impl) | 20 | Turn limit for backend/frontend/mobile |\n| MAX_TURNS (review) | 15 | Turn limit for qa/debug |\n| MAX_TURNS (plan) | 10 | Turn limit for pm |\n\n## Memory Configuration\n\nMemory provider and tool names are configurable via `mcp.json`:\n```json\n{\n  \"memoryConfig\": {\n    \"provider\": \"serena\",\n    \"basePath\": \".serena/memories\",\n    \"tools\": {\n      \"read\": \"read_memory\",\n      \"write\": \"write_memory\",\n      \"edit\": \"edit_memory\"\n    }\n  }\n}\n```\n\n## Workflow Phases\n\n**PHASE 1 - Plan**: Analyze request -> decompose tasks -> generate session ID\n**PHASE 2 - Setup**: Use memory write tool to create `orchestrator-session.md` + `task-board.md`\n**PHASE 3 - Execute**: Spawn agents by priority tier (never exceed MAX_PARALLEL)\n**PHASE 4 - Monitor**: Poll every POLL_INTERVAL; handle completed/failed/crashed agents\n**PHASE 4.5 - Verify**: Run `oh-my-ag verify {agent-type}` per completed agent\n**PHASE 5 - Collect**: Read all `result-{agent}.md`, compile summary, cleanup progress files\n\nSee `resources/subagent-prompt-template.md` for prompt construction.\nSee `resources/memory-schema.md` for memory file formats.\n\n## Memory File Ownership\n\n| File | Owner | Others |\n|------|-------|--------|\n| `orchestrator-session.md` | orchestrator | read-only |\n| `task-board.md` | orchestrator | read-only |\n| `progress-{agent}.md` | that agent | orchestrator reads |\n| `result-{agent}.md` | that agent | orchestrator reads |\n\n## Agent-to-Agent Review Loop (PHASE 4.5)\n\nAfter each agent completes, enter an iterative review loop \u2014 not a single-pass verification.\n\n### Loop Flow\n\n```\nAgent completes work\n    \u2193\n[1] Self-Review: Agent reviews its own changes\n    \u2193\n[2] Verify: Run `oh-my-ag verify {agent-type} --workspace {workspace}`\n    \u2193 FAIL \u2192 Agent receives feedback, fixes, back to [1]\n    \u2193 PASS\n[3] Cross-Review: QA agent reviews the changes\n    \u2193 FAIL \u2192 Agent receives review feedback, fixes, back to [1]\n    \u2193 PASS\nAccept result \u2713\n```\n\n### Step Details\n\n**[1] Self-Review**: Before requesting external review, the implementation agent must:\n- Re-read its own diff and check against the task's acceptance criteria\n- Run lint, type-check, and tests in the workspace\n- Fix any issues found before proceeding\n\n**[2] Automated Verify**:\n```bash\noh-my-ag verify {agent-type} --workspace {workspace} --json\n```\n- **PASS (exit 0)**: Proceed to cross-review\n- **FAIL (exit 1)**: Feed verify output back to the agent as correction context\n\n**[3] Cross-Review**: Spawn QA agent to review the changes:\n- QA agent reads the diff, runs checks, evaluates against acceptance criteria\n- If `docs/CODE-REVIEW.md` exists, QA agent uses it as the review checklist\n- QA agent outputs: PASS (with optional nits) or FAIL (with specific issues)\n- On FAIL: issues are fed back to the implementation agent for fixing\n\n### Loop Limits\n\n| Counter | Max | On Exceeded |\n|---------|-----|-------------|\n| Self-review + fix cycles | 3 | Escalate to cross-review regardless |\n| Cross-review rejections | 2 | Report to user with review history |\n| Total loop iterations | 5 | Force-complete with quality warning |\n\n### Review Feedback Format\n\nWhen feeding review results back to the implementation agent:\n```\n## Review Feedback (iteration {n}/{max})\n**Reviewer**: {self / verify / qa-agent}\n**Verdict**: FAIL\n**Issues**:\n1. {specific issue with file and line reference}\n2. {specific issue}\n**Fix instruction**: {what to change}\n```\n\nThis replaces single-pass verification. Most \"nitpicking\" should happen agent-to-agent.\nHuman review is reserved for final approval, not catching lint errors.\n\n## Retry Logic (after review loop exhaustion)\n- 1st retry: Re-spawn agent with full review history as context\n- 2nd retry: Re-spawn with \"Try a different approach\" + review history\n- Final failure: Report to user with complete review trail, ask whether to continue or abort\n\n## Clarification Debt (CD) Monitoring\n\nTrack user corrections during session execution. See `../_shared/core/session-metrics.md` for full protocol.\n\n### Event Classification\nWhen user sends feedback during session:\n- **clarify** (+10): User answering agent's question\n- **correct** (+25): User correcting agent's misunderstanding\n- **redo** (+40): User rejecting work, requesting restart\n\n### Threshold Actions\n| CD Score | Action |\n|----------|--------|\n| CD >= 50 | **RCA Required**: QA agent must add entry to `lessons-learned.md` |\n| CD >= 80 | **Session Pause**: Request user to re-specify requirements |\n| `redo` >= 2 | **Scope Lock**: Request explicit allowlist confirmation before continuing |\n\n### Recording\nAfter each user correction event:\n```\n[EDIT](\"session-metrics.md\", append event to Events table)\n```\n\nAt session end, if CD >= 50:\n1. Include CD summary in final report\n2. Trigger QA agent RCA generation\n3. Update `lessons-learned.md` with prevention measures\n\n\n\n## References\n- Prompt template: `resources/subagent-prompt-template.md`\n- Memory schema: `resources/memory-schema.md`\n- Config: `config/cli-config.yaml`\n- Scripts: `scripts/spawn-agent.sh`, `scripts/parallel-run.sh`, `scripts/verify.sh`\n- Task templates: `templates/`\n- Skill-to-agent mapping: `../_shared/core/skill-routing.md`\n- Verification: `scripts/verify.sh <agent-type>`\n- Session metrics: `../_shared/core/session-metrics.md`\n- API contracts: `../_shared/core/api-contracts/`\n- Context loading: `../_shared/core/context-loading.md`\n- Difficulty guide: `../_shared/core/difficulty-guide.md`\n- Reasoning templates: `../_shared/core/reasoning-templates.md`\n- Clarification protocol: `../_shared/core/clarification-protocol.md`\n- Context budget: `../_shared/core/context-budget.md`\n- Lessons learned: `../_shared/core/lessons-learned.md`\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "oma-orchestrator",
-    "description": "Automated multi-agent orchestrator that spawns CLI subagents in parallel, coordinates via MCP Memory, and monitors progress. Use for orchestration, parallel execution, and automated multi-agent workflows."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

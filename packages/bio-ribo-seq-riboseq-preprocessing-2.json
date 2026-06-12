@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000029508",
   "name": "bio-ribo-seq-riboseq-preprocessing",
   "slug": "bio-ribo-seq-riboseq-preprocessing-2",
   "description": "Preprocess ribosome profiling data including adapter trimming, size selection, rRNA removal, and alignment. Use when preparing Ribo-seq reads for downstream analysis of translation.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: Bowtie2 2.5.3+, STAR 2.7.11+, cutadapt 4.4+, numpy 1.26+, pysam 0.22+, samtools 1.19+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Ribo-seq Preprocessing\n\n**\"Preprocess my ribosome profiling data\"** \u2192 Trim adapters, size-select ribosome-protected fragments (26-34 nt), remove rRNA contamination, and align to the transcriptome for translation analysis.\n- CLI: `cutadapt` \u2192 `bowtie2` (rRNA removal) \u2192 `STAR` (genome alignment)\n\n## Workflow Overview\n\n```\nRaw Ribo-seq FASTQ\n    |\n    v\nAdapter trimming (cutadapt)\n    |\n    v\nSize selection (25-35 nt typical)\n    |\n    v\nrRNA removal (SortMeRNA/bowtie2)\n    |\n    v\nAlignment to transcriptome\n    |\n    v\nQuality filtered BAM\n```\n\n## Adapter Trimming\n\n**Goal:** Remove 3' adapter sequences from ribosome footprint reads to recover the true insert.\n\n**Approach:** Run cutadapt with the known adapter sequence and length filters to discard fragments outside the expected footprint range.\n\n```bash\n# Trim 3' adapter\ncutadapt \\\n    -a CTGTAGGCACCATCAAT \\\n    -m 20 \\\n    -M 40 \\\n    -o trimmed.fastq.gz \\\n    input.fastq.gz\n```\n\n## Size Selection\n\n**Goal:** Retain only reads corresponding to ribosome-protected fragments (typically 28-32 nt).\n\n**Approach:** Apply minimum and maximum length filters with cutadapt to select the footprint size range.\n\n```bash\n# Select ribosome footprint size range\n# Typical: 28-32 nt (protected by ribosome)\ncutadapt \\\n    -m 28 \\\n    -M 32 \\\n    -o size_selected.fastq.gz \\\n    trimmed.fastq.gz\n```\n\n## rRNA Removal\n\n**Goal:** Deplete ribosomal RNA reads that typically constitute the majority of a Ribo-seq library.\n\n**Approach:** Align reads against rRNA reference databases using SortMeRNA or Bowtie2 and collect only unmapped (non-rRNA) reads.\n\n```bash\n# Option 1: SortMeRNA (comprehensive)\nsortmerna \\\n    --ref rRNA_databases/silva-bac-16s-id90.fasta \\\n    --ref rRNA_databases/silva-euk-18s-id95.fasta \\\n    --ref rRNA_databases/silva-euk-28s-id98.fasta \\\n    --reads size_selected.fastq.gz \\\n    --aligned rRNA_reads \\\n    --other non_rRNA_reads \\\n    --fastx \\\n    --threads 8\n\n# Option 2: Bowtie2 to rRNA index\nbowtie2 -x rRNA_index \\\n    -U size_selected.fastq.gz \\\n    --un non_rRNA.fastq.gz \\\n    -S /dev/null \\\n    -p 8\n```\n\n## Alignment to Transcriptome\n\n**Goal:** Map cleaned ribosome footprint reads to the genome or transcriptome for positional analysis.\n\n**Approach:** Align with STAR (spliced) or Bowtie2 (transcriptome) using stringent filters for uniquely mapped reads with few mismatches.\n\n```bash\n# STAR alignment (spliced)\nSTAR --runMode alignReads \\\n    --genomeDir STAR_index \\\n    --readFilesIn non_rRNA.fastq.gz \\\n    --readFilesCommand zcat \\\n    --outFilterMultimapNmax 1 \\\n    --outFilterMismatchNmax 2 \\\n    --alignIntronMax 1 \\\n    --outSAMtype BAM SortedByCoordinate \\\n    --outFileNamePrefix riboseq_\n\n# Or bowtie2 to transcriptome\nbowtie2 -x transcriptome_index \\\n    -U non_rRNA.fastq.gz \\\n    -S aligned.sam \\\n    --no-unal \\\n    -p 8\n```\n\n## Quality Metrics\n\n**Goal:** Assess preprocessing success by checking read length distribution and mapping rates.\n\n**Approach:** Extract read lengths from the aligned BAM and run samtools flagstat to verify expected footprint sizes and mapping efficiency.\n\n```bash\n# Check read length distribution\nsamtools view aligned.bam | \\\n    awk '{print length($10)}' | \\\n    sort | uniq -c | sort -k2n\n\n# Expected: Peak at 28-30 nt\n\n# Check mapping rate\nsamtools flagstat aligned.bam\n```\n\n## Python Preprocessing\n\n```python\nimport pysam\nimport numpy as np\nfrom collections import Counter\n\ndef get_length_distribution(bam_path):\n    '''Get read length distribution from BAM'''\n    lengths = Counter()\n    with pysam.AlignmentFile(bam_path, 'rb') as bam:\n        for read in bam:\n            if not read.is_unmapped:\n                lengths[read.query_length] += 1\n    return lengths\n\ndef filter_by_length(bam_in, bam_out, min_len=28, max_len=32):\n    '''Filter BAM by read length'''\n    with pysam.AlignmentFile(bam_in, 'rb') as infile:\n        with pysam.AlignmentFile(bam_out, 'wb', template=infile) as outfile:\n            for read in infile:\n                if min_len <= read.query_length <= max_len:\n                    outfile.write(read)\n```\n\n## Related Skills\n\n- ribosome-periodicity - Validate preprocessing quality\n- read-qc - General quality control\n- read-alignment - Alignment concepts\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-ribo-seq-riboseq-preprocessing",
-    "description": "Preprocess ribosome profiling data including adapter trimming, size selection, rRNA removal, and alignment. Use when preparing Ribo-seq reads for downstream analysis of translation.",
-    "tool_type": "cli",
-    "primary_tool": "bowtie2"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

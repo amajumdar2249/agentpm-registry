@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032128",
   "name": "glean-performance-tuning",
   "slug": "glean-performance-tuning",
   "description": "Optimize Glean search relevance and indexing throughput with batch sizing,",
   "content": "# Glean Performance Tuning\n\n## Overview\n\nGlean's enterprise search API handles search queries across multiple connectors, bulk document indexing, and connector sync throughput. Search latency compounds when querying across dozens of datasources simultaneously. Large indexing jobs (10K+ documents) require careful batching to avoid rate limits and maintain connector sync schedules. Optimizing batch sizes, caching frequent search results, and tuning connector configurations reduces search P95 latency and keeps indexing pipelines within SLA windows.\n\n## Caching Strategy\n\n```typescript\nconst cache = new Map<string, { data: any; expiry: number }>();\nconst TTL = { search: 60_000, suggestions: 30_000, datasources: 600_000 };\n\nasync function cached(key: string, ttlKey: keyof typeof TTL, fn: () => Promise<any>) {\n  const entry = cache.get(key);\n  if (entry && entry.expiry > Date.now()) return entry.data;\n  const data = await fn();\n  cache.set(key, { data, expiry: Date.now() + TTL[ttlKey] });\n  return data;\n}\n// Search results expire fast (1 min). Datasource metadata is stable (10 min).\n```\n\n## Batch Operations\n\n```typescript\nimport PQueue from 'p-queue';\nconst BATCH_SIZE = 100;\n\nasync function indexDocsBatched(glean: any, dsName: string, docs: any[]) {\n  const batches = [];\n  for (let i = 0; i < docs.length; i += BATCH_SIZE) batches.push(docs.slice(i, i + BATCH_SIZE));\n  const queue = new PQueue({ concurrency: 3, interval: 500 });\n  await Promise.all(batches.map(batch =>\n    queue.add(() => glean.indexDocuments(dsName, batch))\n  ));\n}\n```\n\n## Connection Pooling\n\n```typescript\nimport { Agent } from 'https';\nconst agent = new Agent({ keepAlive: true, maxSockets: 15, maxFreeSockets: 5, timeout: 30_000 });\n// High socket count for parallel indexing across multiple datasources\n```\n\n## Rate Limit Management\n\n```typescript\nasync function withGleanRateLimit(fn: () => Promise<any>): Promise<any> {\n  try { return await fn(); }\n  catch (err: any) {\n    if (err.status === 429) {\n      const retryMs = parseInt(err.headers?.['retry-after'] || '5') * 1000;\n      await new Promise(r => setTimeout(r, retryMs));\n      return fn();\n    }\n    throw err;\n  }\n}\n```\n\n## Monitoring\n\n```typescript\nconst metrics = { searches: 0, indexOps: 0, cacheHits: 0, p95LatencyMs: 0, errors: 0 };\nconst latencies: number[] = [];\nfunction trackSearch(startMs: number, cached: boolean) {\n  const lat = Date.now() - startMs; latencies.push(lat); metrics.searches++;\n  if (cached) metrics.cacheHits++;\n  latencies.sort((a, b) => a - b);\n  metrics.p95LatencyMs = latencies[Math.floor(latencies.length * 0.95)] || 0;\n}\n```\n\n## Performance Checklist\n\n- [ ] Batch indexing calls at 100 docs per request with 3 concurrent workers\n- [ ] Use incremental indexing for real-time updates (< 100 docs)\n- [ ] Switch to bulkindexdocuments for daily full refreshes (> 1K docs)\n- [ ] Cache repeated search queries with 1-min TTL\n- [ ] Set descriptive document titles and full body text for relevance\n- [ ] Keep connector sync schedules staggered to avoid burst load\n- [ ] Monitor P95 search latency and indexing throughput\n- [ ] Enable keep-alive connections with high socket count for parallel ops\n\n## Error Handling\n\n| Issue | Cause | Fix |\n|-------|-------|-----|\n| Slow cross-datasource search | Too many connectors queried in parallel | Prioritize datasources, set query scope |\n| 429 on bulk indexing | Batch size or concurrency too high | Reduce to 100/batch, 3 concurrent, 500ms interval |\n| Stale search results | Index lag after document updates | Use incremental indexing with webhooks on change |\n| Connector sync timeout | Large datasource with no checkpointing | Enable incremental sync with cursor tracking |\n| Missing documents in results | Incomplete metadata during indexing | Include title, body, author, and updated_at fields |\n\n## Resources\n\n- [Glean Developer Portal](https://developers.glean.com/)\n- [Glean Indexing API Guide](https://developers.glean.com/docs/indexing)\n\n## Next Steps\n\nSee `glean-reference-architecture`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "glean-performance-tuning",
-    "description": "Optimize Glean search relevance and indexing throughput with batch sizing,",
-    "Trigger": "glean performance\", \"glean search quality\", \"glean indexing speed\".",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

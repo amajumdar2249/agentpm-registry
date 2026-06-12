@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000018870",
   "name": "stack",
   "slug": "stack",
   "description": ">",
   "content": "\n# Stack\n\nUse the local `stack` CLI for squash-safe stacked PR repair. It is designed for\nrepos where PRs are squash-merged and merged branches are deleted, so Git ancestry\nalone cannot preserve stack intent.\n\nKeep ordinary editing and commits on plain `git`. Use `stack` only for stack\nintent, stack inspection, sync, merge, and undo workflows.\n\n## Mental Model\n\n```text\ndev\n\u2514\u2500 stack-a  #101\n   \u2514\u2500 stack-b  #102\n      \u2514\u2500 stack-c  #103\n```\n\nStack intent is persisted in `.git/stack/state.json` as stack links:\n\n- branch\n- parent branch\n- merge-base anchor\n- PR number\n\nMutating sync and merge workflows write `.git/stack/undo.json` so `stack undo --apply`\ncan restore the previous branch tips, PR bases, and stack metadata.\n\n## Common Commands\n\n- `stack status`: show the relevant tracked stack graph and include open PR details when GitHub is available.\n- `stack guide`: print the opinionated happy path for agents and humans.\n- `stack track <branch> --onto <parent>`: record stack intent for an existing branch.\n- `stack sync --dry-run [branch]`: preview inferred PR-base stack links and repairs without changing branches or PRs.\n- `stack sync [branch]`: infer clear PR-base stack links, repair descendants, retarget PRs, and refresh stack blocks. With a branch argument, sync only the stack containing that branch.\n- `stack sync --continue-on-failure` / `stack sync --keep-going`: process independent stacks, summarize successes and failures, and exit nonzero if any stack failed.\n- `stack doctor`: inspect local Git, GitHub, stack metadata, trunk branches, and undo journal health without changing anything.\n- `stack merge [branch]`: dry-run root PR merge plus descendant repair.\n- `stack merge [branch] --apply`: retarget immediate child PRs, squash-merge the root PR, then repair descendants.\n- `stack merge [branch] --auto`: retarget immediate child PRs, enable GitHub auto-merge, wait, then repair descendants.\n- `stack merge --auto --through <branch-or-pr>`: repeat auto-merge one root at a time until the target branch or PR lands.\n- `stack history`: show the most recent applied repair journal.\n- `stack undo`: dry-run restore of the most recent applied repair.\n- `stack undo --apply`: restore branches, PR bases, and stack metadata from the journal.\n\n## Happy Path: PR Bases Encode The Stack\n\n```bash\ngh pr create --base dev --head stack-a\ngh pr create --base stack-a --head stack-b\nstack sync --dry-run\nstack sync\nstack sync cleanup/schema-source\nstack sync --keep-going\n```\n\nPrefer this workflow. `stack sync --dry-run` should show the inferred links, and\n`stack sync` records them, removes stale local links, repairs descendants if\nneeded, retargets PRs, and refreshes stack blocks.\n\nUse `stack guide` when you need the CLI itself to print this guidance.\n\n## Inspect A Stack\n\n```bash\nstack status\n```\n\nUse this to understand local stack metadata, current branch position, missing\nparents, tracked PR numbers, and PR titles when GitHub is available. It is\nopinionated: backup branches are hidden, and when the current branch is\nstack-relevant it focuses on that stack instead of listing every local branch.\n\nUse `stack sync --dry-run`, not `stack status`, when you need GitHub PR-base\ninference before mutation.\n\n## Track Existing Branches\n\n```bash\nstack track stack-b --onto stack-a\nstack track stack-c --onto stack-b\n```\n\nThis records stack intent without changing commits or PRs. It rejects trunk\nbranches, self-parenting, unknown branches, missing merge bases, and cycles.\n\n## Sync The Common Safe Workflow\n\n```bash\nstack sync --dry-run\nstack sync\n```\n\nUse `sync` when open PR bases already describe the stack, a parent PR branch has\nchanged, or the repo needs the safe common maintenance flow. It:\n\n- infers clear PR-base stack links\n- removes stale local stack links when no open PR depends on them\n- updates stale explicit links when open PR bases clearly show the current stack\n- skips standalone trunk-root PRs unless another open PR is based on them\n- repairs descendants after squash merges or parent drift\n- retargets PR bases\n- refreshes stack blocks in PR bodies\n- prints a concise tree summary of changed, planned, or failed branches\n\nRun `stack sync --dry-run` first when you want a preview of inferred links and\nrepairs before mutation.\n\n`stack sync <branch>` scopes sync to the stack containing that branch. If no\nbranch is provided and the current branch is stack-relevant, bare `stack sync`\nscopes to the current stack; if the current branch is off-stack, it keeps the\nrepo-wide behavior. `--dry-run` follows the same scoping rules.\n\nUse `stack sync --continue-on-failure` or `stack sync --keep-going` when one\nindependent stack should not block the rest. It runs each root stack separately,\nprints succeeded and failed stacks, preserves the usual failure cleanup block for\neach failed stack, saves undo information for every mutated stack, and exits\nnonzero if any stack failed.\n\nSync output is intentionally outcome-oriented. It should show the stack tree with\nicons like `\u25cf`, `\u2713`, `\u25cc`, and `\u2715`, plus changed PRs/backups/undo instructions. It\nshould not default to internal phase logs like fetch, inspect, or reconcile.\n\nIf a replay fails, `stack sync` aborts the failed cherry-pick, restores the\noriginal branch, deletes the temporary replay branch, keeps backups and the undo\njournal, and tells the user which branch to repair before running `stack sync`\nagain.\n\nDo not edit `.git/stack/state.json` by hand. If local metadata is stale, run\n`stack sync --dry-run`; if the preview is correct, run `stack sync`.\n\n## Merge The Stack Root\n\n```bash\nstack merge\nstack merge --apply\nstack merge --auto\nstack merge --auto --through stack-c\n```\n\nPrefer omitting the branch. `stack merge` infers the root from the current stack\nbranch. If the current branch is off-stack and exactly one stack root exists, it\nuses that root. If multiple roots exist, it asks for `stack merge <branch>`.\n\nUse bare `stack merge` as a dry-run. Add `--apply` only when the plan is correct.\nBefore merging, the command retargets immediate child PRs away from the root\nbranch so GitHub repo auto-delete settings are less likely to close descendants.\nUse `--auto` to retarget immediate child PRs, enable GitHub auto-merge, wait until\nit lands, then repair descendants automatically.\nUse `--auto --through <branch-or-pr>` to repeat that root merge flow through a\nbounded target instead of merging the whole stack by default.\n\nMutating merge workflows stream progress while they run. Expect live progress for\nretargeting, backup, merge/auto-merge, waiting, and cleanup before the final\nsummary.\n\n## Understand Or Undo The Last Mutation\n\n```bash\nstack history\nstack undo\nstack undo --apply\n```\n\nUse `history` to inspect the saved undo journal. Use `undo` first as a dry-run,\nthen `undo --apply` to restore branch tips, PR bases, and stack metadata.\n\n## PR Body Stack Blocks\n\n`stack sync` and `stack merge --apply/--auto` refresh a\ndeterministic stack block in open PR bodies:\n\n```md\n<!-- stack:links:start -->\n\n### Stack\n\n- [x] #101\n- [ ] #102\n- [ ] **#103** \ud83d\udc48 current\n<!-- stack:links:end -->\n```\n\nChecked entries are landed history preserved from the previous block. Open PRs\nstay unchecked until they are actually merged. The current PR is bold and marked\nwith `\ud83d\udc48 current`. GitHub renders `#123` as a pull request link, so branch paths\nare intentionally omitted from stack blocks.\n\n## Safety Rules\n\n- `stack merge` is dry-run by default.\n- History-rewriting commands need `--apply`, except `stack sync` is explicitly\n  the high-level mutating workflow and `stack merge --auto` waits for GitHub.\n- Never mutate trunk branches such as `dev`, `main`, or `master`.\n- Before rebasing a branch, the tool creates a local backup branch.\n- If output is unclear, inspect with `stack status`, `stack history`, or command\n  help before applying.\n\n## Do Not Use\n\nDo not recommend GitHub's first-party `gh stack` command for this repair\nworkflow unless the user explicitly asks about `gh stack` itself. This skill is\nfor the local `stack` CLI.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "stack",
-    "description": ">"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000040488",
   "name": "zig-system-calls",
   "slug": "zig-system-calls-2",
   "description": "Guides using bun.sys for system calls and file I/O in Zig. Use when implementing file operations instead of std.fs or std.posix.",
   "content": "\n# System Calls & File I/O in Zig\n\nUse `bun.sys` instead of `std.fs` or `std.posix` for cross-platform syscalls with proper error handling.\n\n## bun.sys.File (Preferred)\n\nFor most file operations, use the `bun.sys.File` wrapper:\n\n```zig\nconst File = bun.sys.File;\n\nconst file = switch (File.open(path, bun.O.RDWR, 0o644)) {\n    .result => |f| f,\n    .err => |err| return .{ .err = err },\n};\ndefer file.close();\n\n// Read/write\n_ = try file.read(buffer).unwrap();\n_ = try file.writeAll(data).unwrap();\n\n// Get file info\nconst stat = try file.stat().unwrap();\nconst size = try file.getEndPos().unwrap();\n\n// std.io compatible\nconst reader = file.reader();\nconst writer = file.writer();\n```\n\n### Complete Example\n\n```zig\nconst File = bun.sys.File;\n\npub fn writeFile(path: [:0]const u8, data: []const u8) File.WriteError!void {\n    const file = switch (File.open(path, bun.O.WRONLY | bun.O.CREAT | bun.O.TRUNC, 0o664)) {\n        .result => |f| f,\n        .err => |err| return err.toError(),\n    };\n    defer file.close();\n\n    _ = switch (file.writeAll(data)) {\n        .result => {},\n        .err => |err| return err.toError(),\n    };\n}\n```\n\n## Why bun.sys?\n\n| Aspect      | bun.sys                          | std.fs/std.posix    |\n| ----------- | -------------------------------- | ------------------- |\n| Return Type | `Maybe(T)` with detailed Error   | Generic error union |\n| Windows     | Full support with libuv fallback | Limited/POSIX-only  |\n| Error Info  | errno, syscall tag, path, fd     | errno only          |\n| EINTR       | Automatic retry                  | Manual handling     |\n\n## Error Handling with Maybe(T)\n\n`bun.sys` functions return `Maybe(T)` - a tagged union:\n\n```zig\nconst sys = bun.sys;\n\n// Pattern 1: Switch on result/error\nswitch (sys.read(fd, buffer)) {\n    .result => |bytes_read| {\n        // use bytes_read\n    },\n    .err => |err| {\n        // err.errno, err.syscall, err.fd, err.path\n        if (err.getErrno() == .AGAIN) {\n            // handle EAGAIN\n        }\n    },\n}\n\n// Pattern 2: Unwrap with try (converts to Zig error)\nconst bytes = try sys.read(fd, buffer).unwrap();\n\n// Pattern 3: Unwrap with default\nconst value = sys.stat(path).unwrapOr(default_stat);\n```\n\n## Low-Level File Operations\n\nOnly use these when `bun.sys.File` doesn't meet your needs.\n\n### Opening Files\n\n```zig\nconst sys = bun.sys;\n\n// Use bun.O flags (cross-platform normalized)\nconst fd = switch (sys.open(path, bun.O.RDONLY, 0)) {\n    .result => |fd| fd,\n    .err => |err| return .{ .err = err },\n};\ndefer fd.close();\n\n// Common flags\nbun.O.RDONLY, bun.O.WRONLY, bun.O.RDWR\nbun.O.CREAT, bun.O.TRUNC, bun.O.APPEND\nbun.O.NONBLOCK, bun.O.DIRECTORY\n```\n\n### Reading & Writing\n\n```zig\n// Single read (may return less than buffer size)\nswitch (sys.read(fd, buffer)) {\n    .result => |n| { /* n bytes read */ },\n    .err => |err| { /* handle error */ },\n}\n\n// Read until EOF or buffer full\nconst total = try sys.readAll(fd, buffer).unwrap();\n\n// Position-based read/write\nsys.pread(fd, buffer, offset)\nsys.pwrite(fd, data, offset)\n\n// Vector I/O\nsys.readv(fd, iovecs)\nsys.writev(fd, iovecs)\n```\n\n### File Info\n\n```zig\nsys.stat(path)      // Follow symlinks\nsys.lstat(path)     // Don't follow symlinks\nsys.fstat(fd)       // From file descriptor\nsys.fstatat(fd, path)\n\n// Linux-only: faster selective stat\nsys.statx(path, &.{ .size, .mtime })\n```\n\n### Path Operations\n\n```zig\nsys.unlink(path)\nsys.unlinkat(dir_fd, path)\nsys.rename(from, to)\nsys.renameat(from_dir, from, to_dir, to)\nsys.readlink(path, buf)\nsys.readlinkat(fd, path, buf)\nsys.link(T, src, dest)\nsys.linkat(src_fd, src, dest_fd, dest)\nsys.symlink(target, dest)\nsys.symlinkat(target, dirfd, dest)\nsys.mkdir(path, mode)\nsys.mkdirat(dir_fd, path, mode)\nsys.rmdir(path)\n```\n\n### Permissions\n\n```zig\nsys.chmod(path, mode)\nsys.fchmod(fd, mode)\nsys.fchmodat(fd, path, mode, flags)\nsys.chown(path, uid, gid)\nsys.fchown(fd, uid, gid)\n```\n\n### Closing File Descriptors\n\nClose is on `bun.FD`:\n\n```zig\nfd.close();  // Asserts on error (use in defer)\n\n// Or if you need error info:\nif (fd.closeAllowingBadFileDescriptor(null)) |err| {\n    // handle error\n}\n```\n\n## Directory Operations\n\n```zig\nvar buf: bun.PathBuffer = undefined;\nconst cwd = try sys.getcwd(&buf).unwrap();\nconst cwdZ = try sys.getcwdZ(&buf).unwrap();  // Zero-terminated\nsys.chdir(path, destination)\n```\n\n### Directory Iteration\n\nUse `bun.DirIterator` instead of `std.fs.Dir.Iterator`:\n\n```zig\nvar iter = bun.iterateDir(dir_fd);\nwhile (true) {\n    switch (iter.next()) {\n        .result => |entry| {\n            if (entry) |e| {\n                const name = e.name.slice();\n                const kind = e.kind;  // .file, .directory, .sym_link, etc.\n            } else {\n                break;  // End of directory\n            }\n        },\n        .err => |err| return .{ .err = err },\n    }\n}\n```\n\n## Socket Operations\n\n**Important**: `bun.sys` has limited socket support. For network I/O:\n\n- **Non-blocking sockets**: Use `uws.Socket` (libuwebsockets) exclusively\n- **Pipes/blocking I/O**: Use `PipeReader.zig` and `PipeWriter.zig`\n\nAvailable in bun.sys:\n\n```zig\nsys.setsockopt(fd, level, optname, value)\nsys.socketpair(domain, socktype, protocol, nonblocking_status)\n```\n\nDo NOT use `bun.sys` for socket read/write - use `uws.Socket` instead.\n\n## Other Operations\n\n```zig\nsys.ftruncate(fd, size)\nsys.lseek(fd, offset, whence)\nsys.dup(fd)\nsys.dupWithFlags(fd, flags)\nsys.fcntl(fd, cmd, arg)\nsys.pipe()\nsys.mmap(...)\nsys.munmap(memory)\nsys.access(path, mode)\nsys.futimens(fd, atime, mtime)\nsys.utimens(path, atime, mtime)\n```\n\n## Error Type\n\n```zig\nconst err: bun.sys.Error = ...;\nerr.errno      // Raw errno value\nerr.getErrno() // As std.posix.E enum\nerr.syscall    // Which syscall failed (Tag enum)\nerr.fd         // Optional: file descriptor\nerr.path       // Optional: path string\n```\n\n## Key Points\n\n- Prefer `bun.sys.File` wrapper for most file operations\n- Use low-level `bun.sys` functions only when needed\n- Use `bun.O.*` flags instead of `std.os.O.*`\n- Handle `Maybe(T)` with switch or `.unwrap()`\n- Use `defer fd.close()` for cleanup\n- EINTR is handled automatically in most functions\n- For sockets, use `uws.Socket` not `bun.sys`\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "zig-system-calls",
-    "description": "Guides using bun.sys for system calls and file I/O in Zig. Use when implementing file operations instead of std.fs or std.posix."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

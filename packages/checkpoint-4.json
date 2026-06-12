@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000021584",
   "name": "checkpoint",
   "slug": "checkpoint-4",
   "description": "Robust workflow checkpoint and resume. Handles session interruption, state recovery, and safe resume across all workflow phases.",
   "content": "\n# Checkpoint & Resume Skill\n\nPattern for saving workflow state and resuming after interruption.\n\n## When to Load This Skill\n\n- Starting a workflow that might be interrupted\n- Resuming after `claude -r`\n- Recovering from crashes or timeouts\n\n## Core Concept\n\nThe dotagent workflow uses **file-based state** that survives session interruption:\n\n```\nSession crash/exit\n        \u2193\nState files persist on disk:\n  - memory/state/phase.json        # Which phase we're in\n  - memory/state/execution.json    # Task-level progress\n  - memory/reports/*.json          # Completed phase outputs\n        \u2193\nclaude -r (resume session)\n        \u2193\nOrchestrator reads state, continues from last checkpoint\n```\n\n## Checkpoint Files\n\n### Phase Checkpoint: `memory/state/phase.json`\n\n```json\n{\"workflow_id\":\"string\",\"started_at\":\"ISO-8601\",\"last_updated\":\"ISO-8601\",\"current_phase\":\"REQUIREMENTS|ARCHITECTURE|IMPLEMENTATION|VERIFICATION|REFLECTION\",\"phase_status\":\"pending|in_progress|complete|failed\",\"completed_phases\":[{\"phase\":\"REQUIREMENTS\",\"completed_at\":\"ISO-8601\",\"output\":\"memory/reports/demand.json\"}],\"user_checkpoints\":[{\"phase\":\"REQUIREMENTS\",\"approved_at\":\"ISO-8601\"}],\"interruption_safe\":true}\n```\n\n### Execution Checkpoint: `memory/state/execution.json`\n\nSee executor agent for detailed schema with:\n- Task status tracking\n- Timestamps (started_at, completed_at)\n- Output file paths for verification\n\n## Resume Protocol\n\n### Step 1: Detect Resume Scenario\n\n```\nON WORKFLOW START:\n  checkpoint = Read(\"memory/state/phase.json\")\n\n  IF checkpoint exists AND checkpoint.phase_status == \"in_progress\":\n    \u2192 This is a RESUME\n    \u2192 Log: \"Detected interrupted workflow: {workflow_id}\"\n    \u2192 Go to Step 2\n  ELSE:\n    \u2192 Fresh start, create new checkpoint\n```\n\n### Step 2: Validate State Integrity\n\n```\nVALIDATE:\n  1. Check all referenced output files exist\n  2. Check timestamps are reasonable (not future, not ancient)\n  3. Check phase progression is valid\n  4. Check for incomplete writes (interruption_safe flag)\n\nIF validation fails:\n  \u2192 Ask user: \"State appears corrupted. Start fresh? [y/N]\"\n  \u2192 Archive corrupted state to memory/state/.archive/\n```\n\n### Step 3: Determine Resume Point\n\n```\nRESUME LOGIC by phase:\n\nREQUIREMENTS (in_progress):\n  - Check if demand.json exists and is valid\n  - If valid: advance to ARCHITECTURE\n  - If not: re-spawn PM agent\n\nARCHITECTURE (in_progress):\n  - Check for design files in memory/reports/designs/\n  - Check for final_design.json\n  - If final exists: advance to IMPLEMENTATION\n  - If designs exist but no final: spawn Roundtable\n  - If no designs: re-spawn Architects\n\nIMPLEMENTATION (in_progress):\n  - Read execution.json\n  - Run executor recovery checks\n  - Continue execution loop\n\nVERIFICATION (in_progress):\n  - Check for verification.json\n  - If exists: advance to REFLECTION\n  - If not: re-spawn QA\n\nREFLECTION (in_progress):\n  - Check for reflection file\n  - If exists: workflow complete\n  - If not: re-spawn Reflector\n```\n\n### Step 4: Inform User and Continue\n\n```\nLOG to user:\n  \"Resuming workflow {id} from {phase} phase\"\n  \"Last activity: {timestamp}\"\n  \"Completed: {list of completed phases}\"\n\nIF current_phase requires user approval (was at checkpoint):\n  \u2192 Re-confirm with user before proceeding\n```\n\n## Safe Checkpoint Writing\n\nAlways update checkpoint atomically:\n\n```\n# BAD: Can leave corrupted state\nWrite(checkpoint_file, new_state)\n\n# GOOD: Atomic update\n1. Set interruption_safe = false\n2. Write to checkpoint_file.tmp\n3. Rename checkpoint_file.tmp \u2192 checkpoint_file\n4. Set interruption_safe = true\n```\n\n## Recovery from Specific Scenarios\n\n### Scenario 1: Ctrl-C During Subagent\n\n```\nState: task-001 status=\"running\", no output file\n\nRecovery:\n- Detect orphaned task\n- Increment attempts\n- Reset to \"pending\"\n- Re-spawn on next loop\n```\n\n### Scenario 2: Crash After Write, Before State Update\n\n```\nState: task-001 status=\"running\", output file EXISTS\n\nRecovery:\n- Detect output file\n- Read status from output\n- Update state to match\n```\n\n### Scenario 3: Interrupted During User Approval\n\n```\nState: phase=ARCHITECTURE, has designs but no final_design\n\nRecovery:\n- Detect we're at approval checkpoint\n- Re-present options to user\n- Don't re-run architects\n```\n\n### Scenario 4: Ancient State File\n\n```\nState: started_at is 7 days ago\n\nRecovery:\n- Warn user about stale state\n- Offer to archive and start fresh\n- If continue: proceed with caution\n```\n\n## Checkpoint Frequency\n\nUpdate checkpoint after:\n- Phase completion\n- User approval\n- Each task status change (in executor)\n- Before spawning expensive agents (opus)\n\n## Archiving Old State\n\nWhen starting fresh or after completion:\n\n```\nArchive pattern:\n  memory/state/.archive/{workflow_id}_{timestamp}/\n    - phase.json\n    - execution.json\n\nKeep last 5 archives, delete older\n```\n\n## Integration with Workflow\n\n### In /develop Command\n\n```markdown\n## Resume Check\n\nBefore starting workflow:\n1. Check for existing phase.json\n2. If exists and in_progress:\n   - Show resume prompt to user\n   - \"Resume workflow from {phase}? [Y/n]\"\n3. If user confirms: load checkpoint, continue\n4. If user declines: archive old state, start fresh\n```\n\n### In Each Phase Agent\n\n```markdown\n## On Completion\n\nBefore returning:\n1. Write output file\n2. Update phase.json:\n   - Add to completed_phases\n   - Advance current_phase\n   - Set phase_status = complete\n3. Log checkpoint saved\n```\n\n## Principles\n\n1. **State on disk** - Never rely on conversation memory alone\n2. **Validate before resume** - Don't blindly trust old state\n3. **Inform the user** - Always tell them what's being resumed\n4. **Atomic writes** - Prevent half-written state\n5. **Archive, don't delete** - Keep old state for debugging\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "checkpoint",
-    "description": "Robust workflow checkpoint and resume. Handles session interruption, state recovery, and safe resume across all workflow phases.",
-    "allowed-tools": "Read, Write, Glob"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

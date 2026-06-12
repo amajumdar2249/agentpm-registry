@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032825",
   "name": "oraclecloud-core-workflow-a",
   "slug": "oraclecloud-core-workflow-a",
   "description": "Launch, manage, and scale OCI compute instances with capacity retry",
   "content": "# OCI Compute \u2014 Launch, Manage & Scale\n\n## Overview\n\nProvision and manage OCI compute instances using the Python SDK. Compute is the entry point for most OCI workloads, but \"out of host capacity\" errors, shape selection confusion (Flex vs Standard, AMD vs ARM vs Intel), and boot volume management make it harder than AWS EC2. This skill covers shape selection, launch with capacity retry across availability domains, instance lifecycle actions, and boot volume management.\n\n**Purpose:** Launch reliable compute instances with retry logic that survives capacity shortages.\n\n## Prerequisites\n\n- **OCI Python SDK** \u2014 `pip install oci`\n- **Config file** at `~/.oci/config` with fields: `user`, `fingerprint`, `tenancy`, `region`, `key_file`\n- **IAM policy** \u2014 `Allow group Developers to manage instances in compartment <name>`\n- **Python 3.8+**\n- A VCN with at least one subnet (see `oraclecloud-core-workflow-b`)\n\n## Instructions\n\n### Step 1: Understand Shape Options\n\n| Shape | Arch | Flex? | OCPUs | Use Case |\n|-------|------|-------|-------|----------|\n| VM.Standard.A1.Flex | ARM (Ampere) | Yes | 1-80 | Always Free eligible, best price/perf |\n| VM.Standard.E5.Flex | AMD | Yes | 1-94 | General purpose, broadest availability |\n| VM.Standard3.Flex | Intel | Yes | 1-32 | Intel-specific workloads |\n| VM.Standard.E4.Flex | AMD | Yes | 1-64 | Previous gen, still available |\n\n**Key rule:** Always use Flex shapes. They let you set exact OCPU and memory. Standard (non-Flex) shapes have fixed sizes and are being phased out.\n\n### Step 2: List Available Shapes and Images\n\n```python\nimport oci\n\nconfig = oci.config.from_file(\"~/.oci/config\")\ncompute = oci.core.ComputeClient(config)\nidentity = oci.identity.IdentityClient(config)\n\n# Get availability domains\nads = identity.list_availability_domains(compartment_id=config[\"tenancy\"]).data\n\n# List shapes in each AD\nfor ad in ads:\n    shapes = compute.list_shapes(\n        compartment_id=config[\"tenancy\"],\n        availability_domain=ad.name\n    ).data\n    flex_shapes = [s for s in shapes if \"Flex\" in s.shape]\n    print(f\"\\n{ad.name}:\")\n    for s in flex_shapes:\n        print(f\"  {s.shape} | OCPUs: {s.ocpu_options.min}-{s.ocpu_options.max}\")\n```\n\n### Step 3: Launch with Capacity Retry\n\nThe most common OCI error is `500 InternalError` with message \"Out of host capacity.\" The fix is to retry across availability domains.\n\n```python\nimport oci\nimport time\n\nconfig = oci.config.from_file(\"~/.oci/config\")\ncompute = oci.core.ComputeClient(config)\nidentity = oci.identity.IdentityClient(config)\n\nads = identity.list_availability_domains(compartment_id=config[\"tenancy\"]).data\n\nlaunch_details = oci.core.models.LaunchInstanceDetails(\n    compartment_id=config[\"tenancy\"],\n    display_name=\"my-app-server\",\n    shape=\"VM.Standard.A1.Flex\",\n    shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(\n        ocpus=2, memory_in_gbs=12\n    ),\n    source_details=oci.core.models.InstanceSourceViaImageDetails(\n        image_id=\"ocid1.image.oc1...\",  # Oracle Linux 8 image OCID\n        boot_volume_size_in_gbs=50\n    ),\n    create_vnic_details=oci.core.models.CreateVnicDetails(\n        subnet_id=\"ocid1.subnet.oc1...\"\n    ),\n    metadata={\"ssh_authorized_keys\": open(\"/home/user/.ssh/id_rsa.pub\").read()},\n)\n\n# Retry across all ADs on capacity errors\nfor ad in ads:\n    launch_details.availability_domain = ad.name\n    try:\n        response = compute.launch_instance(launch_details)\n        print(f\"Launched in {ad.name}: {response.data.id}\")\n        break\n    except oci.exceptions.ServiceError as e:\n        if e.status == 500 and \"capacity\" in str(e.message).lower():\n            print(f\"No capacity in {ad.name}, trying next AD...\")\n            time.sleep(2)\n            continue\n        raise\nelse:\n    print(\"ERROR: No capacity in any AD. Try a different shape or region.\")\n```\n\n### Step 4: Instance Lifecycle Actions\n\n```python\ninstance_id = \"ocid1.instance.oc1...\"\n\n# Stop (SOFTSTOP sends ACPI shutdown, STOP is hard power-off)\ncompute.instance_action(instance_id=instance_id, action=\"SOFTSTOP\")\n\n# Start\ncompute.instance_action(instance_id=instance_id, action=\"START\")\n\n# Reboot\ncompute.instance_action(instance_id=instance_id, action=\"SOFTRESET\")\n\n# Terminate (preserves boot volume by default)\ncompute.terminate_instance(\n    instance_id=instance_id,\n    preserve_boot_volume=True\n)\n```\n\n### Step 5: Get Instance Metadata and Public IP\n\n```python\n# Get instance details\ninstance = compute.get_instance(instance_id=instance_id).data\nprint(f\"State: {instance.lifecycle_state}\")\nprint(f\"Shape: {instance.shape}\")\n\n# Get VNIC attachments to find public IP\nnetwork = oci.core.VirtualNetworkClient(config)\nvnic_attachments = compute.list_vnic_attachments(\n    compartment_id=config[\"tenancy\"],\n    instance_id=instance_id\n).data\n\nfor attachment in vnic_attachments:\n    vnic = network.get_vnic(vnic_id=attachment.vnic_id).data\n    print(f\"Public IP: {vnic.public_ip}\")\n    print(f\"Private IP: {vnic.private_ip}\")\n```\n\n## Output\n\nSuccessful completion produces:\n\n- A running compute instance in the best available AD\n- Capacity retry logic that falls back across availability domains\n- Instance lifecycle management (stop, start, reboot, terminate)\n- Public and private IP addresses retrieved via VNIC attachment\n\n## Error Handling\n\n| Error | Code | Cause | Solution |\n|-------|------|-------|----------|\n| Out of host capacity | 500 InternalError | AD has no available hosts for shape | Retry across ADs (Step 3), try different shape, or different region |\n| Not authenticated | 401 NotAuthenticated | Bad API key or config | Verify `~/.oci/config` key_file path and fingerprint |\n| Not authorized | 404 NotAuthorizedOrNotFound | IAM policy missing or wrong OCID | Add IAM policy: `Allow group X to manage instances in compartment Y` |\n| Shape not found | 400 InvalidParameter | Shape not available in region | List shapes first (Step 2) to confirm availability |\n| Rate limited | 429 TooManyRequests | Too many API calls | Add exponential backoff; OCI does not return Retry-After header |\n| Limit exceeded | 400 LimitExceeded | Service limit for shape reached | Request limit increase in Console > Governance > Limits |\n\n## Examples\n\n**Quick instance list via CLI:**\n\n```bash\n# List all running instances\noci compute instance list \\\n  --compartment-id <OCID> \\\n  --lifecycle-state RUNNING \\\n  --query \"data[*].{Name:\\\"display-name\\\",Shape:shape,State:\\\"lifecycle-state\\\"}\" \\\n  --output table\n```\n\n**Find Oracle Linux images:**\n\n```python\nimages = compute.list_images(\n    compartment_id=config[\"tenancy\"],\n    operating_system=\"Oracle Linux\",\n    shape=\"VM.Standard.A1.Flex\",\n    sort_by=\"TIMECREATED\",\n    sort_order=\"DESC\",\n).data\nlatest = images[0]\nprint(f\"Latest image: {latest.display_name} ({latest.id})\")\n```\n\n## Resources\n\n- [Compute Service Overview](https://docs.oracle.com/en-us/iaas/Content/) \u2014 launching and managing instances\n- [Python SDK Reference](https://docs.oracle.com/en-us/iaas/tools/python/latest/) \u2014 ComputeClient API\n- [CLI Reference](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/cliconcepts.htm) \u2014 `oci compute` commands\n- [Always Free Tier](https://www.oracle.com/cloud/free/) \u2014 ARM A1 Flex instances included\n- [Known Issues](https://docs.oracle.com/en-us/iaas/Content/knownissues.htm) \u2014 current service issues\n\n## Next Steps\n\nAfter launching instances, proceed to `oraclecloud-core-workflow-b` to build the networking layer (VCN, subnets, security rules), or see `oraclecloud-data-handling` for Object Storage operations.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "oraclecloud-core-workflow-a",
-    "description": "Launch, manage, and scale OCI compute instances with capacity retry",
-    "allowed-tools": "Read, Write, Edit, Bash(pip:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

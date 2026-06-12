@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033171",
   "name": "sentry-install-auth",
   "slug": "sentry-install-auth",
   "description": "Install and configure Sentry SDK authentication with DSN setup.",
   "content": "# Sentry Install & Auth\n\n## Overview\n\nInstall the Sentry SDK, configure DSN-based authentication, and verify error tracking is operational. Covers Node.js (`@sentry/node`), browser (`@sentry/browser`), and Python (`sentry-sdk`) with environment-based configuration and auth token setup for CLI/CI workflows.\n\n## Prerequisites\n\n- Node.js 18.19+ or 20.6+ (required for ESM support in Sentry SDK v8)\n- Package manager: npm, pnpm, or pip\n- Sentry account with a project created at https://sentry.io\n- DSN from **Project Settings > Client Keys (DSN)**\n- For CLI/CI: auth token from https://sentry.io/settings/auth-tokens/\n\n## Instructions\n\n### Step 1 \u2014 Install the SDK\n\n**Node.js / TypeScript:**\n\n```bash\nnpm install @sentry/node\n# For profiling support (optional):\nnpm install @sentry/profiling-node\n```\n\n**Browser / Framework-specific:**\n\n```bash\nnpm install @sentry/browser\n# Or pick your framework:\nnpm install @sentry/react    # React\nnpm install @sentry/nextjs   # Next.js\nnpm install @sentry/vue      # Vue\n```\n\n**Python:**\n\n```bash\npip install sentry-sdk\n```\n\n### Step 2 \u2014 Store the DSN securely\n\nThe DSN (Data Source Name) tells the SDK where to send events. It looks like `https://<key>@<org>.ingest.sentry.io/<project-id>`. Never hardcode it \u2014 use environment variables.\n\n```bash\n# .env (add this file to .gitignore)\nSENTRY_DSN=https://examplePublicKey@o0.ingest.sentry.io/0\nSENTRY_ENVIRONMENT=development\nSENTRY_RELEASE=1.0.0\n```\n\nFor production, store the DSN in your secret manager (AWS Secrets Manager, GCP Secret Manager, Vault, etc.) and inject it at deploy time.\n\n### Step 3 \u2014 Initialize the SDK\n\n**Node.js (ESM) \u2014 create `instrument.mjs` at project root:**\n\nThis file MUST be imported before any other modules. The `--import` flag ensures Sentry instruments HTTP, database, and framework integrations via monkey-patching at load time.\n\n```typescript\n// instrument.mjs \u2014 import BEFORE your app code\nimport * as Sentry from '@sentry/node';\n\nSentry.init({\n  dsn: process.env.SENTRY_DSN,\n  environment: process.env.SENTRY_ENVIRONMENT || 'development',\n  release: process.env.SENTRY_RELEASE,\n\n  // Performance: 100% in dev, 10-20% in production\n  tracesSampleRate: process.env.NODE_ENV === 'production' ? 0.1 : 1.0,\n\n  // Debug mode \u2014 disable in production\n  debug: process.env.NODE_ENV !== 'production',\n\n  // Never send PII by default\n  sendDefaultPii: false,\n\n  integrations: [\n    // Built-in integrations (httpIntegration, expressIntegration)\n    // are auto-detected \u2014 no manual registration needed\n  ],\n});\n```\n\n**Start your app with the `--import` flag:**\n\n```bash\nnode --import ./instrument.mjs app.mjs\n```\n\nOr in `package.json`:\n\n```json\n{\n  \"scripts\": {\n    \"start\": \"node --import ./instrument.mjs app.mjs\"\n  }\n}\n```\n\n**Browser:**\n\n```typescript\nimport * as Sentry from '@sentry/browser';\n\nSentry.init({\n  dsn: process.env.SENTRY_DSN, // injected at build time\n  environment: process.env.NODE_ENV,\n  release: process.env.SENTRY_RELEASE,\n  tracesSampleRate: 0.1,\n  replaysSessionSampleRate: 0.1,\n  replaysOnErrorSampleRate: 1.0,\n  integrations: [\n    Sentry.browserTracingIntegration(),\n    Sentry.replayIntegration(),\n  ],\n});\n```\n\n**Python:**\n\n```python\nimport os\nimport sentry_sdk\n\nsentry_sdk.init(\n    dsn=os.environ.get(\"SENTRY_DSN\"),\n    environment=os.environ.get(\"SENTRY_ENVIRONMENT\", \"development\"),\n    release=os.environ.get(\"SENTRY_RELEASE\"),\n    traces_sample_rate=0.1,\n    send_default_pii=False,\n)\n```\n\n### Step 4 \u2014 Verify the installation\n\nSend a test event and confirm it appears in the Sentry dashboard:\n\n**Node.js:**\n\n```typescript\nimport * as Sentry from '@sentry/node';\n\nSentry.captureMessage('Sentry SDK installed successfully', 'info');\n\n// Ensure the event is flushed before process exits\nawait Sentry.flush(2000);\n```\n\n**Python:**\n\n```python\nimport sentry_sdk\n\nsentry_sdk.capture_message(\"Sentry SDK installed successfully\")\n\n# Ensure the event is flushed\nsentry_sdk.flush(timeout=2)\n```\n\nCheck the **Issues** tab in your Sentry project within 30 seconds. If the message appears, authentication is working.\n\n### Step 5 \u2014 Set up auth token for CLI and CI\n\nThe DSN authenticates the SDK for sending events. For the Sentry CLI (source maps, releases, deploys), you need a separate **auth token**.\n\nGenerate one at https://sentry.io/settings/auth-tokens/ with scopes:\n\n- `project:releases` \u2014 create releases and upload source maps\n- `org:read` \u2014 read organization data\n\n```bash\n# Install Sentry CLI\nnpm install -g @sentry/cli\n\n# Set the token\nexport SENTRY_AUTH_TOKEN=sntrys_YOUR_TOKEN_HERE\n\n# Verify auth works\nsentry-cli info\n```\n\nIn CI, store `SENTRY_AUTH_TOKEN` as a secret environment variable.\n\n## Output\n\n- SDK package installed (`@sentry/node`, `@sentry/browser`, or `sentry-sdk`)\n- DSN stored in environment variables (never committed to git)\n- `instrument.mjs` created and loaded before app entry point (Node.js)\n- Sentry initialized with environment, release, and sample rates configured\n- Test event visible in Sentry dashboard confirming DSN auth works\n- Auth token configured for CLI/CI workflows (optional)\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `Invalid Sentry Dsn` | Malformed DSN string | Copy DSN exactly from Project Settings > Client Keys (DSN). Format: `https://<key>@<org>.ingest.sentry.io/<project-id>` |\n| Events not appearing in dashboard | DSN env var not loaded | Verify with `console.log(process.env.SENTRY_DSN)` before `Sentry.init()`. Check `.env` is loaded (use `dotenv` or framework equivalent) |\n| HTTP 401 Unauthorized | Invalid or revoked auth token | Regenerate token at https://sentry.io/settings/auth-tokens/. Verify with `sentry-cli info` |\n| HTTP 429 Too Many Requests | Rate-limited by Sentry | Lower `tracesSampleRate`. Check quota at Settings > Subscription. Events are dropped, not queued |\n| `Express is not instrumented` | SDK initialized after Express import | Move `import './instrument.mjs'` to first line or use `--import` flag. SDK must load before any framework imports |\n| HTTP 403 Forbidden | Auth token missing required scopes | Regenerate token with `project:releases` and `org:read` scopes |\n| `ECONNREFUSED` / network errors | Sentry ingest endpoint unreachable | Check https://status.sentry.io for outages. Verify firewall allows `*.ingest.sentry.io` on port 443 |\n| ESM compatibility error | Node.js < 18.19 or < 20.6 | Upgrade Node.js. SDK v8 requires these minimum versions for ESM `--import` support |\n\n## Examples\n\n**Express.js with full error handler:**\n\n```typescript\n// instrument.mjs\nimport * as Sentry from '@sentry/node';\n\nSentry.init({\n  dsn: process.env.SENTRY_DSN,\n  environment: process.env.SENTRY_ENVIRONMENT || 'development',\n  tracesSampleRate: 0.2,\n});\n```\n\n```typescript\n// app.mjs \u2014 start with: node --import ./instrument.mjs app.mjs\nimport * as Sentry from '@sentry/node';\nimport express from 'express';\n\nconst app = express();\n\napp.get('/api/health', (req, res) => {\n  res.json({ status: 'ok' });\n});\n\napp.get('/api/debug-sentry', (req, res) => {\n  throw new Error('Sentry test error');\n});\n\n// Sentry error handler must be registered after all routes\nSentry.setupExpressErrorHandler(app);\n\n// Fallback error handler\napp.use((err, req, res, next) => {\n  res.status(500).json({ error: 'Internal server error' });\n});\n\napp.listen(3000, () => console.log('Server running on :3000'));\n```\n\n**Python Flask:**\n\n```python\nimport os\nimport sentry_sdk\nfrom flask import Flask\n\nsentry_sdk.init(\n    dsn=os.environ.get(\"SENTRY_DSN\"),\n    environment=os.environ.get(\"SENTRY_ENVIRONMENT\", \"development\"),\n    traces_sample_rate=0.2,\n    send_default_pii=False,\n)\n\napp = Flask(__name__)\n\n@app.route(\"/api/health\")\ndef health():\n    return {\"status\": \"ok\"}\n\n@app.route(\"/api/debug-sentry\")\ndef debug_sentry():\n    raise Exception(\"Sentry test error\")  # Automatically captured\n```\n\n**Graceful shutdown with flush:**\n\n```typescript\nimport * as Sentry from '@sentry/node';\n\nprocess.on('SIGTERM', async () => {\n  console.log('Shutting down gracefully...');\n  await Sentry.flush(5000); // wait up to 5s for pending events\n  process.exit(0);\n});\n```\n\n## Resources\n\n- [Node.js Setup Guide](https://docs.sentry.io/platforms/javascript/guides/node/)\n- [Browser SDK Setup](https://docs.sentry.io/platforms/javascript/)\n- [Python SDK Setup](https://docs.sentry.io/platforms/python/)\n- [Configuration Options](https://docs.sentry.io/platforms/javascript/configuration/options/)\n- [SDK Migration v7 to v8](https://docs.sentry.io/platforms/javascript/migration/v7-to-v8/)\n- [Auth Tokens](https://docs.sentry.io/account/auth-tokens/)\n- [Sentry Status Page](https://status.sentry.io)\n\n## Next Steps\n\nFor configuring alerts and issue management, see `sentry-alerts-config`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "sentry-install-auth",
-    "description": "Install and configure Sentry SDK authentication with DSN setup.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(pip:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

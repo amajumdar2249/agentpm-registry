@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032365",
   "name": "klaviyo-data-handling",
   "slug": "klaviyo-data-handling",
   "description": "Implement Klaviyo data privacy, GDPR/CCPA compliance, and PII handling",
   "content": "# Klaviyo Data Handling\n\n## Overview\n\nHandle profile data, PII, and privacy compliance with Klaviyo's Data Privacy API, GDPR right-to-deletion, CCPA requests, and safe logging patterns.\n\n## Prerequisites\n\n- `klaviyo-api` SDK installed\n- API key with `data-privacy:write` scope (for deletion requests)\n- Understanding of GDPR/CCPA requirements\n- Audit logging infrastructure\n\n## Klaviyo Data Privacy API\n\nKlaviyo provides a dedicated **Data Privacy API** for GDPR/CCPA profile deletion. When you delete a profile via this API, Klaviyo performs a full GDPR erasure -- the profile is permanently removed and cannot be recovered.\n\n## Instructions\n\n### Step 1: GDPR Profile Deletion (Right to Erasure)\n\n```typescript\nimport { ApiKeySession, DataPrivacyApi } from 'klaviyo-api';\n\nconst session = new ApiKeySession(process.env.KLAVIYO_PRIVATE_KEY!);\nconst dataPrivacyApi = new DataPrivacyApi(session);\n\n/**\n * Request profile deletion via Klaviyo's Data Privacy API.\n * Accepts ONE identifier: email, phone_number, or profile ID.\n * Providing multiple identifiers returns an error.\n *\n * WARNING: This is irreversible. Profile is permanently erased.\n */\nasync function requestProfileDeletion(identifier: {\n  email?: string;\n  phoneNumber?: string;\n  profileId?: string;\n}): Promise<void> {\n  // Build the profile identifier (only ONE allowed)\n  const profileData: any = { type: 'profile' };\n\n  if (identifier.email) {\n    profileData.attributes = { email: identifier.email };\n  } else if (identifier.phoneNumber) {\n    profileData.attributes = { phone_number: identifier.phoneNumber };\n  } else if (identifier.profileId) {\n    profileData.id = identifier.profileId;\n  } else {\n    throw new Error('Must provide exactly one identifier: email, phoneNumber, or profileId');\n  }\n\n  await dataPrivacyApi.requestProfileDeletion({\n    data: {\n      type: 'data-privacy-deletion-job',\n      attributes: {\n        profile: { data: profileData },\n      },\n    },\n  });\n\n  // Audit log (required for compliance)\n  await auditLog({\n    action: 'GDPR_DELETION_REQUESTED',\n    identifier: identifier.email || identifier.phoneNumber || identifier.profileId!,\n    service: 'klaviyo',\n    timestamp: new Date().toISOString(),\n  });\n\n  console.log(`Deletion requested for ${JSON.stringify(identifier)}`);\n}\n\n// Usage\nawait requestProfileDeletion({ email: 'user-wants-deletion@example.com' });\n```\n\n### Step 2: Data Subject Access Request (DSAR)\n\n```typescript\nimport { ProfilesApi, EventsApi, ListsApi } from 'klaviyo-api';\n\n/**\n * Export all Klaviyo data for a given profile (GDPR Article 15).\n * Returns all profile attributes, event history, and list memberships.\n */\nasync function exportProfileData(email: string): Promise<{\n  profile: any;\n  events: any[];\n  lists: any[];\n}> {\n  const profilesApi = new ProfilesApi(session);\n  const eventsApi = new EventsApi(session);\n\n  // 1. Get profile\n  const profiles = await profilesApi.getProfiles({\n    filter: `equals(email,\"${email}\")`,\n  });\n  const profile = profiles.body.data[0];\n  if (!profile) throw new Error(`No profile found for ${email}`);\n\n  // 2. Get profile's events\n  const events = await eventsApi.getEvents({\n    filter: `equals(profile_id,\"${profile.id}\")`,\n    sort: '-datetime',\n  });\n\n  // 3. Get profile's list memberships\n  const profileLists = await profilesApi.getProfileLists({ id: profile.id });\n\n  return {\n    profile: {\n      id: profile.id,\n      ...profile.attributes,\n    },\n    events: events.body.data.map(e => ({\n      metric: e.attributes.metricId,\n      datetime: e.attributes.datetime,\n      properties: e.attributes.eventProperties,\n    })),\n    lists: profileLists.body.data.map(l => ({\n      id: l.id,\n      name: l.attributes.name,\n    })),\n  };\n}\n```\n\n### Step 3: PII Detection and Redaction in Logs\n\n```typescript\n// src/klaviyo/pii.ts\n\nconst PII_PATTERNS = [\n  { type: 'email', regex: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/g },\n  { type: 'phone', regex: /\\+?\\d{10,15}/g },\n  { type: 'api_key', regex: /pk_[a-zA-Z0-9]{20,}/g },\n];\n\nexport function redactPII(text: string): string {\n  let redacted = text;\n  for (const pattern of PII_PATTERNS) {\n    redacted = redacted.replace(pattern.regex, `[REDACTED:${pattern.type}]`);\n  }\n  return redacted;\n}\n\nexport function redactObject(data: Record<string, any>): Record<string, any> {\n  const sensitiveFields = ['email', 'phoneNumber', 'phone_number', 'firstName', 'lastName', 'apiKey'];\n  const redacted = { ...data };\n\n  for (const field of sensitiveFields) {\n    if (redacted[field]) {\n      redacted[field] = typeof redacted[field] === 'string'\n        ? `${redacted[field].substring(0, 3)}***`\n        : '[REDACTED]';\n    }\n  }\n\n  return redacted;\n}\n\n// Usage: safe logging of Klaviyo API responses\nconsole.log('Profile data:', redactObject(profile.attributes));\n```\n\n### Step 4: Consent Management\n\n```typescript\n/**\n * Record consent and subscribe to marketing.\n * Always include consent timestamp for GDPR compliance.\n */\nasync function recordConsent(\n  email: string,\n  channels: { email?: boolean; sms?: boolean },\n  listId: string,\n  consentSource: string\n): Promise<void> {\n  const subscriptions: any = {};\n  const now = new Date().toISOString();\n\n  if (channels.email) {\n    subscriptions.email = {\n      marketing: { consent: 'SUBSCRIBED', consentTimestamp: now },\n    };\n  }\n  if (channels.sms) {\n    subscriptions.sms = {\n      marketing: { consent: 'SUBSCRIBED', consentTimestamp: now },\n    };\n  }\n\n  await profilesApi.subscribeProfiles({\n    data: {\n      type: 'profile-subscription-bulk-create-job',\n      attributes: {\n        profiles: {\n          data: [{\n            type: 'profile' as any,\n            attributes: {\n              email,\n              subscriptions,\n            },\n          }],\n        },\n        historicalImport: false,  // Set true for pre-existing consent\n      },\n      relationships: {\n        list: { data: { type: 'list', id: listId } },\n      },\n    },\n  });\n\n  await auditLog({\n    action: 'CONSENT_RECORDED',\n    identifier: email,\n    channels: Object.keys(channels).filter(c => channels[c as keyof typeof channels]),\n    source: consentSource,\n    timestamp: now,\n  });\n}\n```\n\n### Step 5: Audit Logging\n\n```typescript\n// src/klaviyo/audit.ts\n\ninterface AuditEntry {\n  action: string;\n  identifier: string;\n  service: string;\n  timestamp: string;\n  details?: Record<string, any>;\n}\n\nasync function auditLog(entry: AuditEntry): Promise<void> {\n  // Write to your audit database (must be retained per GDPR)\n  await db.auditLog.create({\n    data: {\n      ...entry,\n      retainUntil: new Date(Date.now() + 7 * 365 * 24 * 60 * 60 * 1000), // 7 years\n    },\n  });\n\n  console.log(`[AUDIT] ${entry.action}: ${entry.identifier} at ${entry.timestamp}`);\n}\n```\n\n## Data Classification for Klaviyo\n\n| Data Category | Examples in Klaviyo | Handling |\n|--------------|---------------------|----------|\n| PII | email, phoneNumber, firstName, lastName | Redact in logs, encrypt at rest |\n| Sensitive | API keys, webhook secrets | Never log, rotate quarterly |\n| Behavioral | Events, page views, purchases | Anonymize where possible |\n| Marketing | List memberships, consent status | Audit trail required |\n| Derived | Segments, predictive analytics | No special handling |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Deletion request fails | Missing `data-privacy:write` scope | Update API key scopes |\n| Multiple identifiers error | Providing email AND phone | Use exactly one identifier |\n| Profile not found for DSAR | Wrong email or already deleted | Search by ID or phone instead |\n| PII in error logs | Unredacted API responses | Wrap logger with `redactObject()` |\n\n## Resources\n\n- [Data Privacy API](https://developers.klaviyo.com/en/reference/data_privacy_api_overview)\n- [Request Profile Deletion](https://developers.klaviyo.com/en/reference/request_profile_deletion)\n- [Consent Collection Guide](https://developers.klaviyo.com/en/docs/collect_email_and_sms_consent_via_api)\n- [GDPR Developer Guide](https://gdpr.eu/developers/)\n\n## Next Steps\n\nFor enterprise access control, see `klaviyo-enterprise-rbac`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "klaviyo-data-handling",
-    "description": "Implement Klaviyo data privacy, GDPR/CCPA compliance, and PII handling",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031764",
   "name": "databricks-webhooks-events",
   "slug": "databricks-webhooks-events",
   "description": "Configure Databricks job notifications, webhooks, and event handling.",
   "content": "# Databricks Webhooks & Events\n\n## Overview\n\nConfigure notifications and event-driven workflows for Databricks jobs. Covers notification destinations (Slack, Teams, PagerDuty, email, generic webhooks), job lifecycle events, SQL alerts with automated triggers, and system table queries for event auditing.\n\n## Prerequisites\n\n- Databricks workspace admin access (for notification destinations)\n- Webhook endpoint URL (Slack incoming webhook, Teams connector, etc.)\n- Job permissions for notification configuration\n\n## Instructions\n\n### Step 1: Create Notification Destinations\n\n```python\nfrom databricks.sdk import WorkspaceClient\nfrom databricks.sdk.service.settings import (\n    CreateNotificationDestinationRequest,\n    SlackConfig, EmailConfig, GenericWebhookConfig,\n)\n\nw = WorkspaceClient()\n\n# Slack destination\nslack = w.notification_destinations.create(\n    display_name=\"Engineering Slack\",\n    config=SlackConfig(url=\"https://hooks.slack.com/services/T00/B00/xxxx\"),\n)\n\n# Email destination\nemail = w.notification_destinations.create(\n    display_name=\"Oncall Email\",\n    config=EmailConfig(addresses=[\"oncall@company.com\", \"data-team@company.com\"]),\n)\n\n# Generic webhook (PagerDuty, custom endpoint)\npagerduty = w.notification_destinations.create(\n    display_name=\"PagerDuty\",\n    config=GenericWebhookConfig(\n        url=\"https://events.pagerduty.com/integration/YOUR_KEY/enqueue\",\n    ),\n)\n\nprint(f\"Slack: {slack.id}, Email: {email.id}, PD: {pagerduty.id}\")\n```\n\n### Step 2: Attach Notifications to Jobs\n\n```python\nfrom databricks.sdk.service.jobs import (\n    JobEmailNotifications, WebhookNotifications, Webhook,\n)\n\n# Update existing job with notifications\nw.jobs.update(\n    job_id=123,\n    new_settings={\n        \"email_notifications\": JobEmailNotifications(\n            on_start=[\"team@company.com\"],\n            on_success=[\"team@company.com\"],\n            on_failure=[\"oncall@company.com\", \"team@company.com\"],\n            no_alert_for_skipped_runs=True,\n        ),\n        \"webhook_notifications\": WebhookNotifications(\n            on_start=[Webhook(id=slack.id)],\n            on_success=[Webhook(id=slack.id)],\n            on_failure=[Webhook(id=slack.id), Webhook(id=pagerduty.id)],\n        ),\n    },\n)\n```\n\nOr declaratively in Asset Bundles:\n\n```yaml\n# resources/jobs.yml\nresources:\n  jobs:\n    daily_etl:\n      email_notifications:\n        on_failure: [\"oncall@company.com\"]\n      webhook_notifications:\n        on_failure:\n          - id: \"<notification-destination-id>\"\n```\n\n### Step 3: Build Custom Webhook Handler\n\nReceive Databricks job events at your own endpoint.\n\n```python\n# webhook_handler.py \u2014 FastAPI endpoint\nfrom fastapi import FastAPI, Request\nimport httpx\n\napp = FastAPI()\n\n@app.post(\"/databricks/webhook\")\nasync def handle_event(request: Request):\n    payload = await request.json()\n\n    event_type = payload.get(\"event_type\")        # \"jobs.on_failure\", \"jobs.on_success\"\n    run_id = payload.get(\"run\", {}).get(\"run_id\")\n    job_name = payload.get(\"job\", {}).get(\"name\")\n    result = payload.get(\"run\", {}).get(\"result_state\")  # SUCCESS, FAILED, TIMED_OUT\n    error_msg = payload.get(\"run\", {}).get(\"state_message\", \"\")\n\n    if result == \"FAILED\":\n        # Route to PagerDuty\n        await httpx.AsyncClient().post(\n            \"https://events.pagerduty.com/v2/enqueue\",\n            json={\n                \"routing_key\": \"YOUR_INTEGRATION_KEY\",\n                \"event_action\": \"trigger\",\n                \"payload\": {\n                    \"summary\": f\"Databricks job failed: {job_name}\",\n                    \"severity\": \"critical\",\n                    \"source\": f\"databricks-run-{run_id}\",\n                    \"custom_details\": {\"error\": error_msg, \"run_id\": run_id},\n                },\n            },\n        )\n\n    return {\"status\": \"ok\"}\n```\n\n### Step 4: Monitor Events via System Tables\n\nQuery `system.access.audit` for event monitoring without webhooks.\n\n```sql\n-- Recent job events (last 6 hours)\nSELECT event_time, user_identity.email AS actor,\n       action_name, request_params.job_id, request_params.run_id,\n       response.status_code, response.error_message\nFROM system.access.audit\nWHERE service_name = 'jobs'\n  AND action_name IN ('runNow', 'submitRun', 'cancelRun', 'repairRun')\n  AND event_date >= current_date()\n  AND event_time > current_timestamp() - INTERVAL 6 HOURS\nORDER BY event_time DESC;\n\n-- Permission changes (security audit)\nSELECT event_time, user_identity.email, action_name, request_params\nFROM system.access.audit\nWHERE action_name IN ('changeJobPermissions', 'changeClusterPermissions',\n                       'updatePermissions', 'grantPermission')\n  AND event_date >= current_date() - 7\nORDER BY event_time DESC;\n```\n\n### Step 5: SQL Alerts with Automated Triggers\n\nCreate alerts that fire when query conditions are met.\n\n```sql\n-- Alert query: detect excessive failures\n-- Create in SQL Editor > Alerts > New Alert\n-- Trigger: failure_count > 3\n-- Schedule: every 15 minutes\n-- Destination: Slack notification destination\n\nSELECT COUNT(*) AS failure_count,\n       COLLECT_LIST(DISTINCT job_name) AS failed_jobs\nFROM (\n    SELECT j.name AS job_name\n    FROM system.lakeflow.job_run_timeline r\n    JOIN system.lakeflow.jobs j ON r.job_id = j.job_id\n    WHERE r.result_state = 'FAILED'\n      AND r.start_time > current_timestamp() - INTERVAL 1 HOUR\n);\n```\n\n```python\n# Create alert programmatically\nalert = w.alerts.create(\n    name=\"High Job Failure Rate\",\n    query_id=\"<saved-query-id>\",\n    options={\"column\": \"failure_count\", \"op\": \">\", \"value\": \"3\"},\n    rearm=900,  # Re-alert after 15 min if still triggered\n)\n```\n\n### Step 6: Slack Message Formatter\n\n```python\ndef format_slack_message(payload: dict) -> dict:\n    \"\"\"Format Databricks job event as a rich Slack Block Kit message.\"\"\"\n    run = payload.get(\"run\", {})\n    job = payload.get(\"job\", {})\n    status = run.get(\"result_state\", \"UNKNOWN\")\n    emoji = {\"SUCCESS\": \":white_check_mark:\", \"FAILED\": \":x:\", \"TIMED_OUT\": \":hourglass:\"}.get(status, \":question:\")\n    duration_sec = run.get(\"execution_duration\", 0) // 1000\n\n    return {\n        \"blocks\": [\n            {\"type\": \"header\", \"text\": {\"type\": \"plain_text\", \"text\": f\"{emoji} {job.get('name', 'Unknown')}\"}},\n            {\"type\": \"section\", \"fields\": [\n                {\"type\": \"mrkdwn\", \"text\": f\"*Status:* {status}\"},\n                {\"type\": \"mrkdwn\", \"text\": f\"*Run ID:* {run.get('run_id')}\"},\n                {\"type\": \"mrkdwn\", \"text\": f\"*Duration:* {duration_sec}s\"},\n                {\"type\": \"mrkdwn\", \"text\": f\"*Error:* {run.get('state_message', 'none')[:200]}\"},\n            ]},\n        ]\n    }\n```\n\n## Output\n\n- Notification destinations registered (Slack, email, PagerDuty)\n- Job lifecycle notifications (on_start, on_success, on_failure)\n- Custom webhook handler for advanced routing\n- System table queries for event auditing\n- SQL alerts with automated triggers and destinations\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `RESOURCE_DOES_NOT_EXIST` for destination | Destination deleted or wrong workspace | `w.notification_destinations.list()` to verify |\n| Webhook not triggered | URL unreachable from Databricks network | Check firewall; Databricks needs outbound access to webhook URL |\n| Duplicate notifications | Same destination on job AND task level | Configure at job level only |\n| Alert never fires | Query returns 0 rows or wrong column | Test query in SQL Editor first |\n| System tables empty | Unity Catalog not enabled | Enable system tables in Account Console |\n\n## Examples\n\n### List All Notification Destinations\n\n```bash\ndatabricks notification-destinations list --output json | \\\n  jq '.[] | {name: .display_name, type: .destination_type, id: .id}'\n```\n\n## Resources\n\n- [Job Notifications](https://docs.databricks.com/aws/en/jobs/monitor)\n- [Notification Destinations](https://docs.databricks.com/aws/en/admin/notification-destinations)\n- [System Tables](https://docs.databricks.com/aws/en/admin/system-tables/)\n- [SQL Alerts](https://docs.databricks.com/aws/en/sql/user/alerts/)\n\n## Next Steps\n\nFor performance tuning, see `databricks-performance-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "databricks-webhooks-events",
-    "description": "Configure Databricks job notifications, webhooks, and event handling.",
-    "allowed-tools": "Read, Write, Edit, Bash(databricks:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

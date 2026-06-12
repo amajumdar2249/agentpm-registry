@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032154",
   "name": "grammarly-rate-limits",
   "slug": "grammarly-rate-limits",
   "description": "Implement Grammarly rate limiting, backoff, and idempotency patterns.",
   "content": "# Grammarly Rate Limits\n\n## Overview\n\nGrammarly's Text API enforces plan-dependent rate limits across its writing score, AI detection, and plagiarism endpoints. The plagiarism checker is asynchronous and requires polling, which adds complexity to rate management. Token endpoints are separately throttled at roughly 10 requests per hour, so credential rotation during high-throughput batch processing of documents (e.g., scanning an entire content library) requires careful token lifecycle management to avoid auth-layer 429s on top of API-layer throttling.\n\n## Rate Limit Reference\n\n| Endpoint | Limit | Window | Scope |\n|----------|-------|--------|-------|\n| Writing score | 100 req (Business) | 1 minute | Per API key |\n| AI content detection | 60 req (Business) | 1 minute | Per API key |\n| Plagiarism check (submit) | 30 req | 1 minute | Per API key |\n| Plagiarism check (poll) | 120 req | 1 minute | Per API key |\n| Token refresh | 10 req | 1 hour | Per client credentials |\n\n## Rate Limiter Implementation\n\n```typescript\nclass GrammarlyRateLimiter {\n  private tokens: number;\n  private lastRefill: number;\n  private readonly max: number;\n  private readonly refillRate: number;\n  private queue: Array<{ resolve: () => void }> = [];\n\n  constructor(maxPerMinute: number) {\n    this.max = maxPerMinute;\n    this.tokens = maxPerMinute;\n    this.lastRefill = Date.now();\n    this.refillRate = maxPerMinute / 60_000;\n  }\n\n  async acquire(): Promise<void> {\n    this.refill();\n    if (this.tokens >= 1) { this.tokens -= 1; return; }\n    return new Promise(resolve => this.queue.push({ resolve }));\n  }\n\n  private refill() {\n    const now = Date.now();\n    this.tokens = Math.min(this.max, this.tokens + (now - this.lastRefill) * this.refillRate);\n    this.lastRefill = now;\n    while (this.tokens >= 1 && this.queue.length) {\n      this.tokens -= 1;\n      this.queue.shift()!.resolve();\n    }\n  }\n}\n\nconst scoreLimiter = new GrammarlyRateLimiter(90);\nconst plagiarismLimiter = new GrammarlyRateLimiter(25);\n```\n\n## Retry Strategy\n\n```typescript\nasync function grammarlyRetry<T>(\n  limiter: GrammarlyRateLimiter, fn: () => Promise<Response>, maxRetries = 3\n): Promise<T> {\n  for (let attempt = 0; attempt <= maxRetries; attempt++) {\n    await limiter.acquire();\n    const res = await fn();\n    if (res.ok) return res.json();\n    if (res.status === 429) {\n      const retryAfter = parseInt(res.headers.get(\"Retry-After\") || \"20\", 10);\n      const jitter = Math.random() * 2000;\n      await new Promise(r => setTimeout(r, retryAfter * 1000 + jitter));\n      continue;\n    }\n    if (res.status >= 500 && attempt < maxRetries) {\n      await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 1500));\n      continue;\n    }\n    throw new Error(`Grammarly API ${res.status}: ${await res.text()}`);\n  }\n  throw new Error(\"Max retries exceeded\");\n}\n```\n\n## Batch Processing\n\n```typescript\nasync function batchScoreDocuments(documents: string[], batchSize = 8) {\n  const results: any[] = [];\n  for (let i = 0; i < documents.length; i += batchSize) {\n    const batch = documents.slice(i, i + batchSize);\n    const batchResults = await Promise.all(\n      batch.map(text => grammarlyRetry(scoreLimiter, () =>\n        fetch(\"https://api.grammarly.com/ecosystem/api/v2/scores\", {\n          method: \"POST\", headers,\n          body: JSON.stringify({ text }),\n        })\n      ))\n    );\n    results.push(...batchResults);\n    if (i + batchSize < documents.length) await new Promise(r => setTimeout(r, 5000));\n  }\n  return results;\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Fix |\n|-------|-------|-----|\n| 429 on writing score | Exceeded plan-tier per-minute cap | Reduce concurrency, use Retry-After |\n| 429 on token refresh | More than 10 refreshes/hour | Cache token, refresh only on 401 |\n| Plagiarism poll timeout | Result not ready after 60s | Increase poll interval to 10s, max 5 min |\n| 413 on large document | Text exceeds 100K character limit | Split into sections, score individually |\n| Empty score response | Text too short for analysis | Validate minimum 50 characters before submission |\n\n## Resources\n\n- [Grammarly Developer API](https://developer.grammarly.com/)\n\n## Next Steps\n\nSee `grammarly-performance-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "grammarly-rate-limits",
-    "description": "Implement Grammarly rate limiting, backoff, and idempotency patterns.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

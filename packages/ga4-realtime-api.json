@@ -1,17 +1,47 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032087",
   "name": "ga4-realtime-api",
   "slug": "ga4-realtime-api",
   "description": "|",
   "content": "\n# GA4 Realtime API\n\nThe Realtime API is GA4's \"what's happening right now\" endpoint. Different from `runReport`:\n\n| | `runReport` (Data API) | `runRealtimeReport` (Realtime) |\n|---|---|---|\n| Freshness | ~24-48h lag, stable | Last ~30 min, rolling |\n| Window | Any date range | Implicit \u2014 last 30 min |\n| Metrics | ~50 supported | ~10 supported (subset) |\n| Dimensions | ~150 supported | ~15 supported (subset) |\n| Quota | Per-property daily | Separate Realtime quota |\n| Use case | Reports, dashboards, trend analysis | Live dashboards, monitoring, \"are we down?\" |\n\nDon't try to use `runReport` for now-data \u2014 its freshest data point is yesterday. Use `runRealtimeReport`.\n\n## Minimum viable call\n\n```python\nfrom google.analytics.data_v1beta import BetaAnalyticsDataClient\nfrom google.analytics.data_v1beta.types import (\n    RunRealtimeReportRequest, Metric, Dimension,\n)\n\nclient = BetaAnalyticsDataClient()\nresp = client.run_realtime_report(RunRealtimeReportRequest(\n    property=\"properties/123456789\",\n    metrics=[Metric(name=\"activeUsers\")],\n))\n\n# Single-row response when there are no dimensions\ntotal = int(resp.rows[0].metric_values[0].value) if resp.rows else 0\nprint(f\"Active users right now: {total}\")\n```\n\nNo `date_ranges` block \u2014 the implicit window is the last 30 min. Adding one will error.\n\n## Realtime metrics (the full list)\n\n| Metric | What it counts |\n|---|---|\n| `activeUsers` | Unique users in the last 30 min |\n| `screenPageViews` | Pageviews + screenviews in the last 30 min |\n| `eventCount` | Total events in the last 30 min |\n| `conversions` | Conversion events in the last 30 min |\n| `keyEvents` | Key events (post-2024 rename of conversions) |\n\nCustom-event aggregates (e.g. `purchase_revenue`) are NOT in the Realtime API. If you need realtime revenue, derive it from `eventCount` filtered to `eventName==\"purchase\"` plus your average AOV.\n\n## Realtime dimensions (the full list)\n\n| Dimension | Use |\n|---|---|\n| `country`, `city` | Geo of currently-active users |\n| `deviceCategory` | desktop / mobile / tablet split |\n| `unifiedScreenName` / `unifiedScreenClass` | App screen / web title |\n| `eventName` | Event-type breakdown |\n| `streamId`, `streamName` | When property has multiple data streams (web + iOS + Android) |\n| `platform` | web / ios / android |\n| `appVersion`, `audienceName`, `audienceId` | When defined in the property |\n\nThat's the full list. ~15 dims total. Compare to `runReport`'s ~150.\n\n## Common realtime queries\n\n### \"How many people are on my site right now?\"\n\n```python\nresp = client.run_realtime_report(RunRealtimeReportRequest(\n    property=\"properties/123456789\",\n    metrics=[Metric(name=\"activeUsers\")],\n))\nprint(int(resp.rows[0].metric_values[0].value) if resp.rows else 0)\n```\n\n### \"Active users by country, right now\"\n\n```python\nresp = client.run_realtime_report(RunRealtimeReportRequest(\n    property=\"properties/123456789\",\n    metrics=[Metric(name=\"activeUsers\")],\n    dimensions=[Dimension(name=\"country\")],\n    limit=20,\n))\nfor r in resp.rows:\n    print(f\"{r.dimension_values[0].value:25s} {r.metric_values[0].value}\")\n```\n\n### \"Which events are firing in the last 30 min?\"\n\n```python\nresp = client.run_realtime_report(RunRealtimeReportRequest(\n    property=\"properties/123456789\",\n    metrics=[Metric(name=\"eventCount\")],\n    dimensions=[Dimension(name=\"eventName\")],\n    limit=30,\n))\n```\n\nThis is the live event firehose \u2014 useful to verify a new tracking deployment is actually firing.\n\n### \"Top pages right now\"\n\n```python\nresp = client.run_realtime_report(RunRealtimeReportRequest(\n    property=\"properties/123456789\",\n    metrics=[Metric(name=\"screenPageViews\")],\n    dimensions=[Dimension(name=\"unifiedScreenName\")],   # NOT pagePath \u2014 that's Data-API-only\n    limit=20,\n))\n```\n\nRealtime doesn't expose `pagePath` directly. Use `unifiedScreenName` (the page title) or `unifiedScreenClass`. To get path-level granularity in realtime, push a custom event with the path as a parameter, then query by `eventName` + that custom dimension.\n\n## Filters\n\nSame shape as `runReport` \u2014 `FilterExpression` / `Filter` blocks. Realtime supports `dimension_filter` and `metric_filter` but not the full set of dimensions / metrics; check the [Realtime API schema](https://developers.google.com/analytics/devguides/reporting/data/v1/realtime-api-schema) before writing complex filters.\n\n## Quotas \u2014 different from Data API\n\nRealtime has its own quota bucket. Defaults (2026):\n\n- 5,000 requests per project per day\n- 250 requests per property per day\n- 60 requests per minute per property\n\nFor a live dashboard polling every 10s: that's 6 RPM, well within limits. For a hot incident where you want minute-by-minute data, you can poll up to 60x/min per property.\n\n## Don't poll faster than 30s\n\nThe data window is the last 30 min. Polling faster than ~30s wastes quota without meaningful resolution change. For most \"live\" use cases, 60s polling is plenty.\n\n## Common gotchas\n\n| Issue | Why |\n|---|---|\n| `activeUsers` doesn't match the GA4 web UI's \"Realtime\" overview | The UI uses a slightly different window (~5 min default) and may include in-flight events not yet reportable via API. Web UI > API for instant-incidents. |\n| Empty rows on a busy site | Property may be using a different stream you didn't filter for. Add `Dimension(name=\"streamId\")` to see splits. |\n| `400 INVALID_ARGUMENT: Realtime reports do not support dimension X` | Using a Data-API-only dimension (e.g. `pagePath`, `sessionSource`). Use a Realtime dimension. |\n| Latency between front-end event and Realtime visibility | ~10-30 seconds is normal. If >2 minutes, check the GA4 DebugView for event delivery issues. |\n\n## Related skills\n\n- `ga4-auth-setup` \u2014 prerequisite\n- `ga4-data-api-query` \u2014 for any window longer than 30 min\n- `ga4-common-reports` \u2014 for canonical reports (DAU/MAU/retention) which are NOT realtime-able\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "ga4-realtime-api",
-    "description": "|",
-    "allowed-tools": "Bash(python3:*), Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "[saas, analytics, google-analytics, ga4, realtime]",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "[saas",
+    "analytics",
+    "google-analytics",
+    "ga4",
+    "realtime]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

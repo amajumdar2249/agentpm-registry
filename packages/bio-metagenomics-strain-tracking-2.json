@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000029435",
   "name": "bio-metagenomics-strain-tracking",
   "slug": "bio-metagenomics-strain-tracking-2",
   "description": "Track bacterial strains using MASH, sourmash, fastANI, and inStrain. Compare genomes, detect contamination, and monitor strain-level variation. Use when needing sub-species resolution for outbreak tracking, transmission analysis, or within-host strain dynamics.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: Bowtie2 2.5.3+, MetaPhlAn 4.1+, numpy 1.26+, pandas 2.2+, samtools 1.19+, scipy 1.12+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Strain Tracking\n\n**\"Track bacterial strains across my samples\"** \u2192 Resolve sub-species variation using genome sketching (Mash/sourmash), average nucleotide identity (fastANI), or within-sample strain profiling (inStrain) for outbreak tracking and transmission analysis.\n- CLI: `mash dist`, `sourmash compare`, `fastANI`, `inStrain profile`\n\nIdentify and track bacterial strains at sub-species resolution.\n\n## Tool Comparison\n\n| Tool | Method | Best For |\n|------|--------|----------|\n| MASH | MinHash sketches | Fast distance estimation |\n| sourmash | MinHash + containment | Metagenome comparisons |\n| fastANI | ANI calculation | Accurate species/strain ID |\n| inStrain | SNV profiling | Strain dynamics in metagenomes |\n\n## MASH\n\n### Installation\n\n```bash\nconda install -c bioconda mash\n```\n\n### Create Sketch\n\n```bash\n# Single genome\nmash sketch -o genome.msh genome.fasta\n\n# Multiple genomes\nmash sketch -o reference_db.msh genomes/*.fasta\n\n# From reads (with coverage)\nmash sketch -m 2 -r -o reads.msh reads.fastq.gz\n```\n\n### Calculate Distance\n\n```bash\n# Pairwise distance\nmash dist genome1.fasta genome2.fasta\n\n# Query against database\nmash dist reference_db.msh query.fasta > distances.tsv\n\n# Screen for containment (metagenome)\nmash screen reference_db.msh reads.fastq.gz > screen_results.tsv\n```\n\n### Interpret MASH Distance\n\n| Distance | Interpretation |\n|----------|----------------|\n| < 0.05 | Same species/strain |\n| 0.05-0.15 | Same species |\n| 0.15-0.25 | Same genus |\n| > 0.25 | Different genus |\n\n### Cluster Genomes\n\n```bash\n# All-vs-all distances\nmash triangle genomes/*.fasta > distances.phylip\n\n# Build tree\nmash triangle -E genomes/*.fasta > distances.tsv\n```\n\n## sourmash\n\n### Installation\n\n```bash\nconda install -c bioconda sourmash\n```\n\n### Create Signatures\n\n```bash\n# Genome signature\nsourmash sketch dna -p scaled=1000,k=31 genome.fasta -o genome.sig\n\n# Multiple genomes\nsourmash sketch dna -p scaled=1000,k=31 genomes/*.fasta -o genomes.sig\n\n# Protein signatures\nsourmash sketch protein -p scaled=100,k=10 proteins.faa -o proteins.sig\n```\n\n### Compare Signatures\n\n```bash\n# Pairwise comparison\nsourmash compare *.sig -o comparison.npy --csv comparison.csv\n\n# Search against database\nsourmash search query.sig database.sig --threshold 0.8\n\n# Gather (metagenome decomposition)\nsourmash gather metagenome.sig database.sig -o gather_results.csv\n```\n\n### Taxonomy Assignment\n\n```bash\n# Download taxonomy database\nsourmash database download gtdb-rs214-k31.zip\n\n# Classify\nsourmash lca classify --db gtdb-rs214-k31.lca.json.gz --query query.sig\n\n# Summarize metagenome\nsourmash lca summarize --db gtdb-rs214-k31.lca.json.gz --query metagenome.sig\n```\n\n## fastANI\n\n### Installation\n\n```bash\nconda install -c bioconda fastani\n```\n\n### Calculate ANI\n\n```bash\n# Single pair\nfastANI -q query.fasta -r reference.fasta -o ani_result.txt\n\n# Query vs multiple references\nfastANI -q query.fasta --rl reference_list.txt -o ani_results.txt\n\n# All-vs-all\nfastANI --ql genome_list.txt --rl genome_list.txt -o all_vs_all.txt --matrix\n```\n\n### Interpret ANI\n\n| ANI | Interpretation |\n|-----|----------------|\n| >99% | Same strain |\n| 95-99% | Same species |\n| <95% | Different species |\n\n## inStrain\n\nFor strain-level analysis in metagenomes.\n\n### Installation\n\n```bash\nconda install -c bioconda instrain\n```\n\n### Profile Strains\n\n```bash\n# Map reads to reference\nbowtie2 -x reference -1 reads_1.fq -2 reads_2.fq | \\\n    samtools sort -o mapped.bam\n\n# Profile with inStrain\ninStrain profile mapped.bam reference.fasta -o instrain_output -p 8\n```\n\n### Compare Samples\n\n```bash\n# Profile multiple samples\nfor bam in sample*.bam; do\n    inStrain profile $bam reference.fasta -o ${bam%.bam}_IS -p 8\ndone\n\n# Compare strain populations\ninStrain compare -i sample*_IS -o comparison_IS -p 8\n```\n\n### Key Outputs\n\n```bash\n# SNV table\ncat instrain_output/output/SNVs.tsv\n\n# Gene-level info\ncat instrain_output/output/gene_info.tsv\n\n# Genome info\ncat instrain_output/output/genome_info.tsv\n```\n\n## Complete Workflow: Outbreak Tracking\n\n**Goal:** Identify potential outbreak clusters by computing pairwise genomic distances across isolate genomes using multiple complementary methods.\n\n**Approach:** Sketch genomes with MASH for fast distance estimation, compute ANI with fastANI for accurate species-level resolution, compare sourmash signatures for containment analysis, and cluster close matches to identify transmission pairs.\n\n```bash\n#!/bin/bash\nset -euo pipefail\n\nGENOMES_DIR=$1\nOUTPUT_DIR=$2\n\nmkdir -p $OUTPUT_DIR\n\necho \"=== MASH sketching ===\"\nmash sketch -o $OUTPUT_DIR/genomes.msh $GENOMES_DIR/*.fasta\n\necho \"=== MASH distances ===\"\nmash dist $OUTPUT_DIR/genomes.msh $OUTPUT_DIR/genomes.msh > $OUTPUT_DIR/mash_distances.tsv\n\necho \"=== fastANI ===\"\nls $GENOMES_DIR/*.fasta > $OUTPUT_DIR/genome_list.txt\nfastANI --ql $OUTPUT_DIR/genome_list.txt \\\n        --rl $OUTPUT_DIR/genome_list.txt \\\n        -o $OUTPUT_DIR/fastani_results.txt \\\n        --matrix\n\necho \"=== sourmash signatures ===\"\nsourmash sketch dna -p scaled=1000,k=31 $GENOMES_DIR/*.fasta -o $OUTPUT_DIR/all.sig\nsourmash compare $OUTPUT_DIR/all.sig -o $OUTPUT_DIR/sourmash.npy --csv $OUTPUT_DIR/sourmash.csv\n\necho \"=== Identify clusters ===\"\npython3 << 'EOF'\nimport pandas as pd\nimport numpy as np\n\n# Load MASH distances\nmash = pd.read_csv('${OUTPUT_DIR}/mash_distances.tsv', sep='\\t', header=None,\n                   names=['ref', 'query', 'distance', 'pvalue', 'shared'])\n\n# Filter for close matches (potential outbreak cluster)\nclose = mash[(mash['distance'] < 0.001) & (mash['ref'] != mash['query'])]\nprint(\"Potential outbreak pairs (MASH distance < 0.001):\")\nprint(close[['ref', 'query', 'distance']])\nEOF\n\necho \"=== Complete ===\"\n```\n\n## Python Analysis\n\n```python\nimport pandas as pd\nimport numpy as np\nfrom scipy.cluster.hierarchy import linkage, fcluster\nfrom scipy.spatial.distance import squareform\n\n# Load MASH distances\nmash = pd.read_csv('mash_distances.tsv', sep='\\t', header=None,\n                   names=['ref', 'query', 'dist', 'pval', 'shared'])\n\n# Pivot to matrix\nsamples = sorted(set(mash['ref'].tolist()))\ndist_matrix = mash.pivot(index='ref', columns='query', values='dist').fillna(0)\ndist_matrix = dist_matrix.loc[samples, samples]\n\n# Cluster\ncondensed = squareform(dist_matrix.values)\nZ = linkage(condensed, method='average')\n\n# Cut tree at species level (0.05)\nclusters = fcluster(Z, t=0.05, criterion='distance')\ncluster_df = pd.DataFrame({'sample': samples, 'cluster': clusters})\nprint(cluster_df.groupby('cluster').size())\n```\n\n## Related Skills\n\n- metagenomics/kraken-classification - Taxonomic classification\n- genome-assembly/contamination-detection - Contamination screening\n- phylogenetics/modern-tree-inference - Phylogenetic analysis\n- metagenomics/metaphlan-profiling - Species profiling\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-metagenomics-strain-tracking",
-    "description": "Track bacterial strains using MASH, sourmash, fastANI, and inStrain. Compare genomes, detect contamination, and monitor strain-level variation. Use when needing sub-species resolution for outbreak tracking, transmission analysis, or within-host strain dynamics.",
-    "tool_type": "cli",
-    "primary_tool": "MASH"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

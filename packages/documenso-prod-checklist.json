@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031806",
   "name": "documenso-prod-checklist",
   "slug": "documenso-prod-checklist",
   "description": "Execute Documenso production deployment checklist and rollback procedures.",
   "content": "# Documenso Production Checklist\n\n## Overview\n\nComplete checklist for deploying Documenso integrations to production, covering security, reliability, monitoring, and compliance readiness.\n\n## Prerequisites\n\n- Staging environment tested and verified\n- Production API keys available\n- Deployment pipeline configured (see `documenso-ci-integration`)\n- Monitoring ready (see `documenso-observability`)\n\n## Production Checklist\n\n### 1. Authentication & Secrets\n\n- [ ] Production API key generated (not staging key)\n- [ ] API key stored in secret manager (Vault, AWS Secrets Manager, not `.env`)\n- [ ] Webhook secret configured and verified\n- [ ] Key rotation procedure documented\n- [ ] Old/unused keys revoked\n- [ ] Self-hosted: secrets generated with `openssl rand -hex 32`\n- [ ] Self-hosted: signing certificate from trusted CA mounted\n\n### 2. Error Handling\n\n- [ ] All API calls wrapped in try/catch with typed errors\n- [ ] Exponential backoff for 429/5xx responses\n- [ ] Circuit breaker for Documenso outages\n- [ ] User-friendly error messages (no raw API errors exposed)\n- [ ] Error tracking integration (Sentry, Datadog, etc.)\n\n### 3. Performance\n\n- [ ] Singleton client pattern (not creating new client per request)\n- [ ] Templates used for repetitive document creation\n- [ ] Bulk operations use concurrency control (p-queue)\n- [ ] Background processing for non-critical operations (Bull/BullMQ)\n- [ ] Document metadata cached (completed documents immutable)\n\n### 4. Monitoring & Alerting\n\n- [ ] Health check endpoint: `GET /health/documenso`\n- [ ] API error rate alerting (> 5% for 5 minutes)\n- [ ] Latency monitoring (p95 > 5s)\n- [ ] Webhook delivery success rate tracking\n- [ ] Structured logging with sanitized PII\n\n### 5. Webhooks\n\n- [ ] HTTPS endpoint configured (HTTP rejected by Documenso)\n- [ ] Webhook secret verification using constant-time comparison\n- [ ] Idempotent event processing (handle duplicates)\n- [ ] Async processing (respond 200 immediately, process in background)\n- [ ] Dead letter queue for failed webhook processing\n\n### 6. Data & Compliance\n\n- [ ] PII sanitized in all logs (emails, names)\n- [ ] Data retention policy implemented\n- [ ] GDPR access/erasure request process documented\n- [ ] Signed PDFs archived to durable storage\n- [ ] Self-hosted: document storage strategy defined\n\n### 7. Self-Hosted Production (if applicable)\n\n- [ ] PostgreSQL with automated backups\n- [ ] HTTPS via reverse proxy (nginx, Caddy, Traefik)\n- [ ] Signing certificate from trusted CA (not self-signed)\n- [ ] SMTP configured and tested (emails actually deliver)\n- [ ] Container runs as non-root user (UID 1001)\n- [ ] Resource limits set (CPU, memory)\n- [ ] Automated container restarts (restart: unless-stopped)\n\n## Pre-Deployment Verification Script\n\n```bash\n#!/bin/bash\nset -euo pipefail\necho \"=== Documenso Production Verification ===\"\n\n# Check API key\nif [ -z \"${DOCUMENSO_API_KEY:-}\" ]; then\n  echo \"FAIL: DOCUMENSO_API_KEY not set\"; exit 1\nfi\necho \"OK: API key configured\"\n\n# Test connection\nBASE=\"${DOCUMENSO_BASE_URL:-https://app.documenso.com/api/v1}\"\nSTATUS=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"Authorization: Bearer $DOCUMENSO_API_KEY\" \\\n  \"$BASE/documents?page=1&perPage=1\")\n[ \"$STATUS\" = \"200\" ] && echo \"OK: API connection ($STATUS)\" || echo \"FAIL: API connection ($STATUS)\"\n\n# Test webhook endpoint\nWEBHOOK_URL=\"${DOCUMENSO_WEBHOOK_URL:-}\"\nif [ -n \"$WEBHOOK_URL\" ]; then\n  WH_STATUS=$(curl -s -o /dev/null -w \"%{http_code}\" \"$WEBHOOK_URL\")\n  echo \"Webhook endpoint: $WH_STATUS\"\nfi\n\n# Check health endpoint\nHEALTH_URL=\"${APP_URL:-http://localhost:3000}/health/documenso\"\nHEALTH=$(curl -s \"$HEALTH_URL\" 2>/dev/null | jq -r '.status' 2>/dev/null || echo \"unreachable\")\necho \"Health check: $HEALTH\"\n\necho \"=== Verification Complete ===\"\n```\n\n## Rollback Procedure\n\n```text\nIf issues occur after deployment:\n\n1. Immediate: revert to previous container image / deployment\n   kubectl rollout undo deployment/signing-service\n   # or: vercel rollback\n\n2. Verify rollback:\n   curl -s $APP_URL/health/documenso | jq '.status'\n\n3. Investigate:\n   - Check deployment diff (what changed?)\n   - Review error logs for the deployment window\n   - Test the failed version in staging\n\n4. Fix and re-deploy:\n   - Fix the root cause on a feature branch\n   - Test in staging\n   - Deploy with monitoring active\n```\n\n## Go-Live Day Checklist\n\n- [ ] All checklist items above verified\n- [ ] Staging smoke test passed within last 24 hours\n- [ ] Team notified of deployment window\n- [ ] Monitoring dashboards open during deployment\n- [ ] Rollback procedure documented and accessible\n- [ ] Support contact for Documenso available (Discord or email)\n- [ ] First production document created and verified end-to-end\n\n## Error Handling\n\n| Alert | Condition | Response |\n|-------|-----------|----------|\n| Deploy failed | CI/CD error | Check logs, fix, retry |\n| Health check failed | Documenso unreachable | Verify API key, check status page |\n| Error spike post-deploy | Breaking change | Execute rollback procedure |\n| Webhook delivery stopped | Endpoint misconfigured | Check HTTPS URL, secret, event subscriptions |\n\n## Resources\n\n- [Documenso Status](https://status.documenso.com)\n- [Self-Hosting Tips](https://docs.documenso.com/docs/self-hosting/getting-started/tips)\n- [Documenso Discord](https://documenso.com/discord)\n\n## Next Steps\n\nFor version upgrades, see `documenso-upgrade-migration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "documenso-prod-checklist",
-    "description": "Execute Documenso production deployment checklist and rollback procedures.",
-    "allowed-tools": "Read, Bash(kubectl:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

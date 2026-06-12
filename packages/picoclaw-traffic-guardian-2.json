@@ -1,19 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000041529",
   "name": "picoclaw-traffic-guardian",
   "slug": "picoclaw-traffic-guardian-2",
   "description": "Picoclaw runtime traffic monitoring baseline for lightweight AI gateway proxy inspection, egress detection, and posture integration.",
   "content": "\n# Picoclaw Traffic Guardian\n\nThis is a baseline specification skill. It intentionally does not ship a proxy or runtime implementation yet.\n\n\n## Release Artifact Verification\n\nFor standalone installs, verify the signed release manifest before trusting `SKILL.md`, `skill.json`, or the archive. The `skill.json` file is the package metadata/SBOM source, and the release pipeline signs `checksums.json` with the ClawSec release key.\n\n```bash\nset -euo pipefail\n\nSKILL_NAME=\"picoclaw-traffic-guardian\"\nVERSION=\"0.0.1-beta2\"\nREPO=\"prompt-security/clawsec\"\nTAG=\"${SKILL_NAME}-v${VERSION}\"\nBASE=\"https://github.com/${REPO}/releases/download/${TAG}\"\nZIP_NAME=\"${SKILL_NAME}-v${VERSION}.zip\"\nTMP_DIR=\"$(mktemp -d)\"\ntrap 'rm -rf \"$TMP_DIR\"' EXIT\n\nRELEASE_PUBKEY_SHA256=\"711424e4535f84093fefb024cd1ca4ec87439e53907b305b79a631d5befba9c8\"\n\ncurl -fsSL \"$BASE/checksums.json\" -o \"$TMP_DIR/checksums.json\"\ncurl -fsSL \"$BASE/checksums.sig\" -o \"$TMP_DIR/checksums.sig\"\ncurl -fsSL \"$BASE/signing-public.pem\" -o \"$TMP_DIR/signing-public.pem\"\ncurl -fsSL \"$BASE/$ZIP_NAME\" -o \"$TMP_DIR/$ZIP_NAME\"\ncurl -fsSL \"$BASE/SKILL.md\" -o \"$TMP_DIR/SKILL.md\"\ncurl -fsSL \"$BASE/skill.json\" -o \"$TMP_DIR/skill.json\"\n\nACTUAL_PUBKEY_SHA256=\"$(openssl pkey -pubin -in \"$TMP_DIR/signing-public.pem\" -outform DER | shasum -a 256 | awk '{print $1}')\"\nif [ \"$ACTUAL_PUBKEY_SHA256\" != \"$RELEASE_PUBKEY_SHA256\" ]; then\n  echo \"ERROR: signing-public.pem fingerprint mismatch\" >&2\n  exit 1\nfi\n\nopenssl base64 -d -A -in \"$TMP_DIR/checksums.sig\" -out \"$TMP_DIR/checksums.sig.bin\"\nopenssl pkeyutl -verify -rawin -pubin \\\n  -inkey \"$TMP_DIR/signing-public.pem\" \\\n  -sigfile \"$TMP_DIR/checksums.sig.bin\" \\\n  -in \"$TMP_DIR/checksums.json\" >/dev/null\n\nhash_file() {\n  if command -v shasum >/dev/null 2>&1; then\n    shasum -a 256 \"$1\" | awk '{print $1}'\n  else\n    sha256sum \"$1\" | awk '{print $1}'\n  fi\n}\n\nverify_manifest_file() {\n  asset=\"$1\"\n  path=\"$2\"\n  expected=\"$(jq -r --arg asset \"$asset\" '.files[$asset].sha256 // empty' \"$TMP_DIR/checksums.json\")\"\n  if [ -z \"$expected\" ]; then\n    echo \"ERROR: checksums.json missing $asset\" >&2\n    exit 1\n  fi\n  actual=\"$(hash_file \"$path\")\"\n  if [ \"$actual\" != \"$expected\" ]; then\n    echo \"ERROR: checksum mismatch for $asset\" >&2\n    exit 1\n  fi\n}\n\nexpected_archive=\"$(jq -r '.archive.sha256 // empty' \"$TMP_DIR/checksums.json\")\"\nif [ -z \"$expected_archive\" ]; then\n  echo \"ERROR: checksums.json missing archive.sha256\" >&2\n  exit 1\nfi\nactual_archive=\"$(hash_file \"$TMP_DIR/$ZIP_NAME\")\"\nif [ \"$actual_archive\" != \"$expected_archive\" ]; then\n  echo \"ERROR: archive checksum mismatch\" >&2\n  exit 1\nfi\n\nverify_manifest_file \"SKILL.md\" \"$TMP_DIR/SKILL.md\"\nverify_manifest_file \"skill.json\" \"$TMP_DIR/skill.json\"\n\necho \"Signed release manifest, archive, SKILL.md, and skill.json verified.\"\n```\n\nOnly install or extract the archive after this verification succeeds.\n\n## Scope\n\nBuilders should use this skill as the Picoclaw landing zone for runtime traffic monitoring:\n\n- lightweight AI gateway HTTP proxy inspection\n- optional HTTPS inspection with per-process CA trust\n- outbound exfiltration detection\n- inbound injection detection\n- redacted local threat logs\n- profile export for `picoclaw-security-guardian`\n\nDo not add proxy runtime ownership to `picoclaw-security-guardian` or `picoclaw-self-pen-testing`. Those skills should profile, drift-check, or review this monitor's status, not run it.\n\n## Safety Contract\n\n- Opt-in only.\n- Detect-and-log by default.\n- No automatic system CA installation.\n- No global proxy environment changes.\n- No blocking in the first implementation.\n- Redact secrets before logs, summaries, or profile outputs.\n- Keep all state under `PICOCLAW_TRAFFIC_GUARDIAN_HOME` or `$PICOCLAW_HOME/security/clawsec/traffic-guardian`.\n\n## Builder Entry Points\n\nRead `SPEC.md` before implementing. Use the placeholder folders as follows:\n\n| Path | Intended use |\n|---|---|\n| `lib/` | Detector rules, redaction, profile export, report formatting |\n| `scripts/` | Start, stop, status, config validation, log query, profile export helpers |\n| `test/` | Unit tests, proxy fixture tests, redaction tests, profile integration tests |\n\n## Required First Implementation Behavior\n\n1. Validate config without starting the proxy.\n2. Start monitor in foreground or explicit background mode.\n3. Scope proxy environment variables to the target Picoclaw gateway process.\n4. Inspect HTTP request/response text up to a bounded byte limit.\n5. Support optional HTTPS MITM only when the operator supplies per-process trust configuration.\n6. Emit JSONL findings with redacted snippets.\n7. Export a small profile fragment that `picoclaw-security-guardian` can include in deterministic posture profiles.\n\n## Out of Scope for v0.0.1 Implementation\n\n- automatic system trust-store mutation\n- transparent network interception\n- default blocking\n- sending traffic to external services\n- collecting full request/response bodies\n\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "picoclaw-traffic-guardian",
-    "version": "0.0.1-beta2",
-    "description": "Picoclaw runtime traffic monitoring baseline for lightweight AI gateway proxy inspection, egress detection, and posture integration.",
-    "homepage": "https://clawsec.prompt.security",
-    "author": "prompt-security",
-    "license": "AGPL-3.0-or-later",
-    "picoclaw": "",
-    "emoji": "TG",
-    "requires": "",
-    "bins": "[node, python3]"
+  "author": "prompt-security",
+  "version": "0.0.1-beta2",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "AGPL-3.0-or-later",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

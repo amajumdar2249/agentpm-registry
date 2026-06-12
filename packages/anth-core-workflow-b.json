@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031234",
   "name": "anth-core-workflow-b",
   "slug": "anth-core-workflow-b",
   "description": "Build Claude streaming and Message Batches API workflows.",
   "content": "# Anthropic Core Workflow B \u2014 Streaming & Batches\n\n## Overview\n\nTwo complementary patterns: real-time streaming for interactive UIs (SSE events via `POST /v1/messages` with `stream: true`) and the Message Batches API (`POST /v1/messages/batches`) for processing up to 100,000 requests asynchronously at 50% cost reduction.\n\n## Prerequisites\n\n- Completed `anth-install-auth` setup\n- Familiarity with `anth-core-workflow-a` (Messages API basics)\n- For batches: understanding of async/polling patterns\n\n## Instructions\n\n### Streaming \u2014 Python SDK\n\n```python\nimport anthropic\n\nclient = anthropic.Anthropic()\n\n# Method 1: High-level streaming (recommended)\nwith client.messages.stream(\n    model=\"claude-sonnet-4-20250514\",\n    max_tokens=2048,\n    messages=[{\"role\": \"user\", \"content\": \"Write a short story about a robot.\"}]\n) as stream:\n    for text in stream.text_stream:\n        print(text, end=\"\", flush=True)\n\n    # After stream completes, access full message\n    final_message = stream.get_final_message()\n    print(f\"\\nUsage: {final_message.usage.input_tokens}+{final_message.usage.output_tokens}\")\n\n# Method 2: Event-level streaming (for custom event handling)\nwith client.messages.stream(\n    model=\"claude-sonnet-4-20250514\",\n    max_tokens=2048,\n    messages=[{\"role\": \"user\", \"content\": \"Explain REST APIs.\"}]\n) as stream:\n    for event in stream:\n        if event.type == \"content_block_delta\":\n            if event.delta.type == \"text_delta\":\n                print(event.delta.text, end=\"\")\n        elif event.type == \"message_stop\":\n            print(\"\\n[Stream complete]\")\n```\n\n### Streaming \u2014 TypeScript SDK\n\n```typescript\nimport Anthropic from '@anthropic-ai/sdk';\n\nconst client = new Anthropic();\n\n// High-level streaming\nconst stream = client.messages.stream({\n  model: 'claude-sonnet-4-20250514',\n  max_tokens: 2048,\n  messages: [{ role: 'user', content: 'Write a haiku about code.' }],\n});\n\nstream.on('text', (text) => process.stdout.write(text));\nstream.on('finalMessage', (msg) => {\n  console.log(`\\nTokens: ${msg.usage.input_tokens}+${msg.usage.output_tokens}`);\n});\n\nawait stream.finalMessage();\n```\n\n### Streaming with Tool Use\n\n```python\nwith client.messages.stream(\n    model=\"claude-sonnet-4-20250514\",\n    max_tokens=1024,\n    tools=tools,  # Same tools array from core-workflow-a\n    messages=[{\"role\": \"user\", \"content\": \"What's the weather?\"}]\n) as stream:\n    for event in stream:\n        if event.type == \"content_block_start\":\n            if event.content_block.type == \"tool_use\":\n                print(f\"Tool call: {event.content_block.name}\")\n        elif event.type == \"content_block_delta\":\n            if event.delta.type == \"input_json_delta\":\n                print(event.delta.partial_json, end=\"\")  # Tool input arrives incrementally\n```\n\n### Message Batches API \u2014 Bulk Processing\n\n```python\n# Create a batch of up to 100,000 requests (50% cost savings)\nbatch = client.messages.batches.create(\n    requests=[\n        {\n            \"custom_id\": \"req-001\",\n            \"params\": {\n                \"model\": \"claude-sonnet-4-20250514\",\n                \"max_tokens\": 1024,\n                \"messages\": [{\"role\": \"user\", \"content\": \"Summarize: ...article1...\"}]\n            }\n        },\n        {\n            \"custom_id\": \"req-002\",\n            \"params\": {\n                \"model\": \"claude-sonnet-4-20250514\",\n                \"max_tokens\": 1024,\n                \"messages\": [{\"role\": \"user\", \"content\": \"Summarize: ...article2...\"}]\n            }\n        },\n        # ... up to 100,000 requests\n    ]\n)\n\nprint(f\"Batch ID: {batch.id}\")          # msgbatch_01HBMt...\nprint(f\"Status: {batch.processing_status}\")  # in_progress\nprint(f\"Counts: {batch.request_counts}\")     # {processing: 2, succeeded: 0, ...}\n```\n\n### Poll for Batch Completion\n\n```python\nimport time\n\nwhile True:\n    batch_status = client.messages.batches.retrieve(batch.id)\n    if batch_status.processing_status == \"ended\":\n        break\n    print(f\"Processing... {batch_status.request_counts}\")\n    time.sleep(30)\n\n# Stream results (returns JSONL)\nfor result in client.messages.batches.results(batch.id):\n    if result.result.type == \"succeeded\":\n        text = result.result.message.content[0].text\n        print(f\"[{result.custom_id}]: {text[:100]}...\")\n    elif result.result.type == \"errored\":\n        print(f\"[{result.custom_id}] ERROR: {result.result.error}\")\n```\n\n## SSE Event Types Reference\n\n| Event | Description | Key Fields |\n|-------|-------------|------------|\n| `message_start` | Stream begins | `message.id`, `message.model`, `message.usage` |\n| `content_block_start` | New content block | `content_block.type` (text/tool_use) |\n| `content_block_delta` | Incremental content | `delta.text` or `delta.partial_json` |\n| `content_block_stop` | Block complete | `index` |\n| `message_delta` | Message-level update | `delta.stop_reason`, `usage.output_tokens` |\n| `message_stop` | Stream complete | (empty) |\n| `ping` | Keepalive | (empty) |\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Stream disconnects mid-response | Network timeout | Implement reconnection with partial content |\n| Batch `expired` status | Not processed within 24h | Resubmit batch |\n| `errored` results in batch | Individual request invalid | Check `result.error` for each failed request |\n| 429 on batch creation | Too many concurrent batches | Wait; limit is ~100 concurrent batches |\n\n## Resources\n\n- [Streaming Messages](https://docs.anthropic.com/en/api/messages-streaming)\n- [Message Batches API](https://docs.anthropic.com/en/api/creating-message-batches)\n- [Batch Results](https://docs.anthropic.com/en/api/retrieving-message-batch-results)\n\n## Next Steps\n\nFor common errors, see `anth-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "anth-core-workflow-b",
-    "description": "Build Claude streaming and Message Batches API workflows.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

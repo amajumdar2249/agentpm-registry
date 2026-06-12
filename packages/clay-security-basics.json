@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031540",
   "name": "clay-security-basics",
   "slug": "clay-security-basics",
   "description": "Apply Clay security best practices for API keys, webhook secrets, and",
   "content": "# Clay Security Basics\n\n## Overview\n\nSecurity best practices for Clay integrations covering API key management, webhook endpoint security, provider credential isolation, and lead data protection. Clay handles sensitive PII (emails, phone numbers, LinkedIn profiles) at scale, making security critical.\n\n## Prerequisites\n\n- Clay account with admin access\n- Understanding of environment variables and secrets management\n- Access to deployment platform's secrets manager\n\n## Instructions\n\n### Step 1: Secure API Key Storage\n\n```bash\n# .env (NEVER commit to git)\nCLAY_API_KEY=clay_ent_your_api_key_here\nCLAY_WEBHOOK_URL=https://app.clay.com/api/v1/webhooks/your-id\n\n# .gitignore \u2014 add these patterns\n.env\n.env.local\n.env.*.local\n*.key\n```\n\nFor production, use your platform's secrets manager:\n\n```bash\n# GitHub Actions\ngh secret set CLAY_API_KEY --body \"clay_ent_your_key\"\n\n# Google Cloud Secret Manager\necho -n \"clay_ent_your_key\" | gcloud secrets create clay-api-key --data-file=-\n\n# AWS Secrets Manager\naws secretsmanager create-secret \\\n  --name clay/api-key \\\n  --secret-string \"clay_ent_your_key\"\n```\n\n### Step 2: Authenticate Incoming Webhook Callbacks\n\nWhen Clay's HTTP API columns call your endpoint, validate the request origin:\n\n```typescript\n// src/middleware/clay-auth.ts\nimport crypto from 'crypto';\n\nconst CLAY_WEBHOOK_SECRET = process.env.CLAY_WEBHOOK_SECRET!;\n\nfunction verifyClayCallback(\n  payload: string,\n  signature: string | undefined\n): boolean {\n  if (!signature || !CLAY_WEBHOOK_SECRET) return false;\n\n  const expected = crypto\n    .createHmac('sha256', CLAY_WEBHOOK_SECRET)\n    .update(payload)\n    .digest('hex');\n\n  return crypto.timingSafeEqual(\n    Buffer.from(signature, 'hex'),\n    Buffer.from(expected, 'hex')\n  );\n}\n\n// Express middleware\nfunction clayAuthMiddleware(req: any, res: any, next: any) {\n  const signature = req.headers['x-clay-signature'] as string;\n  const rawBody = JSON.stringify(req.body);\n\n  if (!verifyClayCallback(rawBody, signature)) {\n    console.warn('Rejected unauthorized Clay callback from', req.ip);\n    return res.status(401).json({ error: 'Invalid signature' });\n  }\n  next();\n}\n```\n\n### Step 3: Isolate Provider API Keys\n\nConnect provider keys directly in Clay (Settings > Connections) rather than passing them through your application. This keeps provider credentials out of your codebase:\n\n| Provider | Where to Store Key | Why |\n|----------|-------------------|-----|\n| Apollo | Clay Settings > Connections | 0 credits when using own key |\n| Clearbit | Clay Settings > Connections | 0 credits when using own key |\n| Hunter.io | Clay Settings > Connections | 0 credits when using own key |\n| HubSpot | Clay Settings > Connections | CRM sync uses Clay's OAuth |\n| Salesforce | Clay Settings > Connections | CRM sync uses Clay's OAuth |\n\n### Step 4: API Key Rotation Procedure\n\n```bash\n# 1. Generate new key in Clay Settings > API\n# 2. Update all integrations with new key\n# 3. Test connectivity\ncurl -s -X POST \"https://api.clay.com/v1/people/enrich\" \\\n  -H \"Authorization: Bearer $NEW_CLAY_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"email\": \"test@example.com\"}' | jq .status\n\n# 4. Once confirmed working, revoke old key in Clay dashboard\n# 5. Update deployment secrets\ngh secret set CLAY_API_KEY --body \"$NEW_CLAY_API_KEY\"\n```\n\n### Step 5: Protect Enriched Lead Data\n\n```typescript\n// src/clay/data-protection.ts\nconst PII_FIELDS = ['email', 'phone', 'personal_email', 'home_address', 'linkedin_url'];\n\n/** Strip PII from enriched data before logging or analytics */\nfunction redactPII(row: Record<string, unknown>): Record<string, unknown> {\n  const redacted = { ...row };\n  for (const field of PII_FIELDS) {\n    if (field in redacted) {\n      redacted[field] = '[REDACTED]';\n    }\n  }\n  return redacted;\n}\n\n/** Hash email for deduplication without storing plaintext */\nfunction hashEmail(email: string): string {\n  return crypto.createHash('sha256').update(email.toLowerCase().trim()).digest('hex');\n}\n\n// Usage: log enriched data safely\nconsole.log('Enriched:', redactPII(enrichedRow));\n```\n\n### Step 6: Security Checklist\n\n- [ ] API keys stored in environment variables or secrets manager\n- [ ] `.env` files in `.gitignore`\n- [ ] Webhook callback endpoints validate request signatures\n- [ ] Provider API keys connected in Clay UI (not in application code)\n- [ ] API key rotation procedure documented and tested\n- [ ] Enriched PII data redacted in application logs\n- [ ] Clay workspace uses separate API keys per integration\n- [ ] Least privilege: viewers can't run enrichments or export data\n- [ ] No hardcoded Clay URLs or keys in source code\n- [ ] git-secrets or similar scanning enabled in CI\n\n## Error Handling\n\n| Security Issue | Detection | Mitigation |\n|----------------|-----------|------------|\n| API key in git history | `git log -p --all -S 'clay_ent_'` | Rotate key immediately, use BFG to scrub |\n| Unauthorized webhook calls | Missing signature validation | Add HMAC verification middleware |\n| Over-permissioned users | Viewers running enrichments | Audit roles in Settings > Members |\n| PII in application logs | grep logs for email patterns | Add PII redaction to log pipeline |\n\n## Resources\n\n- [Clay Plans & Billing](https://university.clay.com/docs/plans-and-billing)\n- [OWASP API Security Top 10](https://owasp.org/www-project-api-security/)\n\n## Next Steps\n\nFor production deployment, see `clay-prod-checklist`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clay-security-basics",
-    "description": "Apply Clay security best practices for API keys, webhook secrets, and",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

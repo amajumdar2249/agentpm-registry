@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031610",
   "name": "clickup-reference-architecture",
   "slug": "clickup-reference-architecture",
   "description": "Production architecture for ClickUp API v2 integrations with layered",
   "content": "# ClickUp Reference Architecture\n\n## Overview\n\nProduction-ready architecture for ClickUp API v2 integrations covering custom fields, time tracking, goals, and two-way sync with external systems.\n\n## Architecture Layers\n\n```\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2502          Application Layer               \u2502\n\u2502   (Routes, Controllers, Webhooks)        \u2502\n\u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524\n\u2502          Service Layer                   \u2502\n\u2502   (Business Logic, Orchestration)        \u2502\n\u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524\n\u2502          ClickUp Client Layer            \u2502\n\u2502   (API Wrapper, Types, Cache, Retry)     \u2502\n\u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524\n\u2502          Infrastructure                  \u2502\n\u2502   (Queue, Cache, Monitoring, Secrets)    \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n          \u2502\n          \u25bc\n  api.clickup.com/api/v2/\n```\n\n## Custom Fields API\n\nCustom fields let you extend tasks beyond built-in fields. Each field has a UUID and a type.\n\n```\nGET  /api/v2/list/{list_id}/field          Get accessible custom fields\nPOST /api/v2/task/{task_id}/field/{field_id}  Set custom field value\nDELETE /api/v2/task/{task_id}/field/{field_id}  Remove custom field value\n```\n\n### Custom Field Types and Value Formats\n\n| Type | `value` Format | Example |\n|------|---------------|---------|\n| `text` | string | `\"Release v2.1\"` |\n| `number` | number | `42` |\n| `money` / `currency` | number (in smallest unit) | `9999` (= $99.99) |\n| `date` | Unix ms timestamp | `1695000000000` |\n| `drop_down` | option UUID from `type_config.options` | `\"opt_uuid_123\"` |\n| `labels` | array of label UUIDs | `[\"lbl_uuid_1\", \"lbl_uuid_2\"]` |\n| `checkbox` | boolean | `true` |\n| `email` | string | `\"user@example.com\"` |\n| `phone` | string | `\"+1-555-0100\"` |\n| `url` | string | `\"https://example.com\"` |\n| `rating` | number (0-5) | `4` |\n| `location` | object | `{ \"lat\": 33.749, \"lng\": -84.388 }` |\n\n```typescript\n// Get custom fields for a list\nconst fields = await clickupRequest(`/list/${listId}/field`);\n// Response: { fields: [{ id: \"uuid\", name: \"Sprint\", type: \"drop_down\", type_config: { options: [...] } }] }\n\n// Set a dropdown custom field\nconst sprintField = fields.fields.find((f: any) => f.name === 'Sprint');\nconst nextSprint = sprintField.type_config.options.find((o: any) => o.name === 'Sprint 24');\n\nawait clickupRequest(`/task/${taskId}/field/${sprintField.id}`, {\n  method: 'POST',\n  body: JSON.stringify({ value: nextSprint.orderindex }),\n});\n\n// Set a date custom field\nawait clickupRequest(`/task/${taskId}/field/${dateFieldId}`, {\n  method: 'POST',\n  body: JSON.stringify({ value: Date.now() + 604800000 }), // 1 week from now\n});\n```\n\n## Time Tracking API\n\n```\nPOST   /api/v2/team/{team_id}/time_entries     Create time entry\nGET    /api/v2/team/{team_id}/time_entries     Get time entries (date range)\nGET    /api/v2/team/{team_id}/time_entries/current  Get running timer\nGET    /api/v2/task/{task_id}/time             Get tracked time on task\nPUT    /api/v2/team/{team_id}/time_entries/{timer_id}  Update entry\nDELETE /api/v2/team/{team_id}/time_entries/{timer_id}  Delete entry\n```\n\n```typescript\n// Create a time entry (logged time)\nawait clickupRequest(`/team/${teamId}/time_entries`, {\n  method: 'POST',\n  body: JSON.stringify({\n    task_id: 'abc123',\n    description: 'Worked on auth module',\n    start: Date.now() - 3600000, // 1 hour ago\n    duration: 3600000,           // 1 hour in ms\n    assignee: 183,               // user ID\n    billable: true,\n  }),\n});\n\n// Get entries for a date range (default: last 30 days)\nconst entries = await clickupRequest(\n  `/team/${teamId}/time_entries?start_date=${startMs}&end_date=${endMs}`\n);\n// Note: negative duration means timer is currently running\n```\n\n## Goals API\n\n```\nPOST   /api/v2/team/{team_id}/goal         Create goal\nGET    /api/v2/team/{team_id}/goal         Get goals\nGET    /api/v2/goal/{goal_id}              Get goal\nPUT    /api/v2/goal/{goal_id}              Update goal\nDELETE /api/v2/goal/{goal_id}              Delete goal\nPOST   /api/v2/goal/{goal_id}/key_result   Create key result\nPUT    /api/v2/key_result/{key_result_id}  Update key result\nDELETE /api/v2/key_result/{key_result_id}  Delete key result\n```\n\n```typescript\n// Create a goal with key results\nconst goal = await clickupRequest(`/team/${teamId}/goal`, {\n  method: 'POST',\n  body: JSON.stringify({\n    name: 'Q1 2026 Engineering OKRs',\n    due_date: 1711929600000,\n    description: 'Engineering team quarterly objectives',\n    multiple_owners: true,\n    owners: [183, 456],\n    color: '#05a1f5',\n  }),\n});\n\n// Add a key result (target)\nawait clickupRequest(`/goal/${goal.goal.id}/key_result`, {\n  method: 'POST',\n  body: JSON.stringify({\n    name: 'Reduce P95 latency to <200ms',\n    type: 'number',\n    steps_start: 500,\n    steps_end: 200,\n    unit: 'ms',\n    owners: [183],\n  }),\n});\n```\n\n## Two-Way Sync Pattern\n\n```typescript\n// Sync ClickUp tasks to external system and vice versa\nclass ClickUpSyncService {\n  async syncToExternal(listId: string) {\n    const { tasks } = await clickupRequest(`/list/${listId}/task?archived=false`);\n\n    for (const task of tasks) {\n      await externalSystem.upsert({\n        externalId: task.id,\n        title: task.name,\n        status: this.mapStatus(task.status.status),\n        assignee: task.assignees[0]?.email,\n        updatedAt: parseInt(task.date_updated),\n      });\n    }\n  }\n\n  async syncFromExternal(externalItem: ExternalItem) {\n    if (externalItem.clickupTaskId) {\n      await clickupRequest(`/task/${externalItem.clickupTaskId}`, {\n        method: 'PUT',\n        body: JSON.stringify({\n          name: externalItem.title,\n          status: this.reverseMapStatus(externalItem.status),\n        }),\n      });\n    }\n  }\n\n  private mapStatus(clickupStatus: string): string {\n    const map: Record<string, string> = {\n      'to do': 'backlog', 'in progress': 'active',\n      'review': 'in_review', 'complete': 'done',\n    };\n    return map[clickupStatus] ?? 'backlog';\n  }\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Custom field UUID not found | Field removed or renamed | Re-fetch fields via `/list/{id}/field` |\n| Time entry negative duration | Timer still running | Stop timer before reading duration |\n| Goal permission denied | User not goal owner | Add user to goal owners |\n| Sync conflict | Both sides updated | Last-write-wins or manual merge |\n\n## Resources\n\n- [Custom Fields Docs](https://developer.clickup.com/docs/customfields)\n- [Set Custom Field Value](https://developer.clickup.com/reference/setcustomfieldvalue)\n- [Time Tracking Endpoints](https://developer.clickup.com/reference/createatimeentry)\n- [ClickUp Developer Portal](https://developer.clickup.com/)\n\n## Next Steps\n\nFor multi-environment setup, see `clickup-multi-env-setup`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clickup-reference-architecture",
-    "description": "Production architecture for ClickUp API v2 integrations with layered",
-    "Trigger": "clickup architecture\", \"clickup design\", \"clickup project structure\",",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

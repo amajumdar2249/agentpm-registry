@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032617",
   "name": "mindtickle-sdk-patterns",
   "slug": "mindtickle-sdk-patterns",
   "description": "Sdk Patterns for MindTickle.",
   "content": "# MindTickle SDK Patterns\n\n## Overview\n\nMindTickle's REST API serves sales enablement workflows including course management, quiz administration, user progress tracking, SCIM user provisioning, and coaching analytics. A structured SDK client is critical because MindTickle uses compound API keys with org-scoped tokens, returns progress data as nested completion trees with module-level granularity, and enforces strict SCIM schema compliance for user sync. These patterns provide org-aware authentication, typed models for training content hierarchies, progress query builders, and mock factories for sales readiness test scenarios.\n\n## Prerequisites\n\n- Node.js 18+, TypeScript 5+\n- `MINDTICKLE_API_KEY` environment variable (generated in Admin > Integrations > API Keys)\n- `MINDTICKLE_ORG_ID` for multi-org deployments\n- `axios` or `node-fetch` for HTTP transport\n\n## Singleton Client\n\n```typescript\ninterface MindTickleConfig {\n  apiKey: string;\n  orgId: string;\n  baseUrl?: string;\n  timeout?: number;\n}\n\nlet client: MindTickleClient | null = null;\n\nexport function getMindTickleClient(overrides?: Partial<MindTickleConfig>): MindTickleClient {\n  if (!client) {\n    const config: MindTickleConfig = {\n      apiKey: process.env.MINDTICKLE_API_KEY ?? '',\n      orgId: process.env.MINDTICKLE_ORG_ID ?? '',\n      baseUrl: 'https://api.mindtickle.com/v2',\n      timeout: 15_000,\n      ...overrides,\n    };\n    if (!config.apiKey || !config.orgId) throw new Error('MINDTICKLE_API_KEY and MINDTICKLE_ORG_ID are required');\n    client = new MindTickleClient(config);\n  }\n  return client;\n}\n```\n\n## Error Wrapper\n\n```typescript\ninterface MindTickleError { statusCode: number; errorType: string; description: string; requestId: string; }\n\nasync function safeMindTickle<T>(fn: () => Promise<T>): Promise<T> {\n  try { return await fn(); }\n  catch (err: any) {\n    const parsed: MindTickleError = {\n      statusCode: err.response?.status ?? 500,\n      errorType: err.response?.data?.error?.type ?? 'INTERNAL_ERROR',\n      description: err.response?.data?.error?.description ?? err.message,\n      requestId: err.response?.headers?.['x-request-id'] ?? 'unknown',\n    };\n    if (parsed.statusCode === 429) {\n      const retryMs = parseInt(err.response?.headers?.['retry-after-ms'] ?? '3000', 10);\n      await new Promise(r => setTimeout(r, retryMs));\n      return fn();\n    }\n    if (parsed.errorType === 'SCIM_CONFLICT') throw new Error(`User already provisioned (req: ${parsed.requestId})`);\n    if (parsed.statusCode === 403) throw new Error(`Org ${process.env.MINDTICKLE_ORG_ID} lacks permission: ${parsed.description}`);\n    throw new Error(`MindTickle ${parsed.errorType} (${parsed.statusCode}): ${parsed.description} [${parsed.requestId}]`);\n  }\n}\n```\n\n## Request Builder\n\n```typescript\nclass ProgressQueryBuilder {\n  private params: Record<string, string> = {};\n  forUser(userId: string) { this.params.user_id = userId; return this; }\n  inCourse(courseId: string) { this.params.series_id = courseId; return this; }\n  completedAfter(date: string) { this.params.completed_after = date; return this; }\n  status(s: 'not_started' | 'in_progress' | 'completed') { this.params.status = s; return this; }\n  page(n: number) { this.params.page = String(n); return this; }\n  pageSize(n: number) { this.params.page_size = String(Math.min(n, 50)); return this; }\n  build(): URLSearchParams { return new URLSearchParams(this.params); }\n}\n```\n\n## Response Types\n\n```typescript\ninterface Course { id: string; title: string; moduleCount: number; status: 'draft' | 'published' | 'archived'; createdAt: string; }\ninterface QuizResult { quizId: string; userId: string; score: number; passingScore: number; passed: boolean; attemptNumber: number; completedAt: string; }\ninterface UserProgress { userId: string; courseId: string; completedModules: number; totalModules: number; percentComplete: number; lastActivityAt: string; }\ninterface ScimUser { id: string; userName: string; displayName: string; emails: { value: string; primary: boolean }[]; active: boolean; groups: string[]; }\n```\n\n## Middleware Pattern\n\n```typescript\ntype Middleware = (req: RequestInit, next: () => Promise<Response>) => Promise<Response>;\n\nconst orgScopeMiddleware = (orgId: string): Middleware => (req, next) => {\n  req.headers = { ...req.headers as Record<string, string>, 'X-MindTickle-Org': orgId, Authorization: `Bearer ${process.env.MINDTICKLE_API_KEY}` };\n  return next();\n};\nconst metricsMiddleware: Middleware = async (req, next) => {\n  const start = Date.now();\n  const res = await next();\n  const endpoint = new URL(req.url as string).pathname;\n  console.log(`[mindtickle] ${req.method} ${endpoint} ${res.status} ${Date.now() - start}ms`);\n  return res;\n};\n```\n\n## Testing Utilities\n\n```typescript\nfunction mockCourse(overrides?: Partial<Course>): Course {\n  return { id: 'series_abc', title: 'Q3 Product Training', moduleCount: 8, status: 'published', createdAt: '2025-07-01T00:00:00Z', ...overrides };\n}\nfunction mockProgress(userId: string, courseId: string): UserProgress {\n  return { userId, courseId, completedModules: 5, totalModules: 8, percentComplete: 62.5, lastActivityAt: '2025-07-15T14:30:00Z' };\n}\nfunction mockScimUser(overrides?: Partial<ScimUser>): ScimUser {\n  return { id: 'usr_test_001', userName: 'jsmith@acme.com', displayName: 'Jane Smith', emails: [{ value: 'jsmith@acme.com', primary: true }], active: true, groups: ['sales-east'], ...overrides };\n}\n```\n\n## Error Handling\n\n| Pattern | When to Use | Example |\n|---------|-------------|---------|\n| Retry with header delay | 429 on progress or analytics endpoints | Parse `Retry-After-Ms` header, wait exact duration, retry once |\n| SCIM conflict resolution | 409 when provisioning existing user | Fetch existing user by email, update instead of create |\n| Org scope validation | 403 on cross-org resource access | Verify `MINDTICKLE_ORG_ID` matches target course owner |\n| Completion tree unwrap | Nested module progress with null leaves | Flatten tree, filter nulls, compute rollup percentage |\n| Bulk operation chunking | Enrolling 500+ users in a course | Batch into groups of 50, sequential with rate limit pauses |\n\n## Resources\n\n- [MindTickle API Reference](https://www.mindtickle.com/platform/integrations/)\n\n## Next Steps\n\nApply in `mindtickle-core-workflow-a`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "mindtickle-sdk-patterns",
-    "description": "Sdk Patterns for MindTickle.",
-    "Trigger": "mindtickle sdk patterns\".",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

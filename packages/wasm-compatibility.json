@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000011972",
   "name": "wasm-compatibility",
   "slug": "wasm-compatibility",
   "description": "Check if a marimo notebook is compatible with WebAssembly (WASM) and report any issues.",
   "content": "\n# WASM Compatibility Checker for marimo Notebooks\n\nCheck whether a marimo notebook can run in a WebAssembly (WASM) environment \u2014 the marimo playground, community cloud, or exported WASM HTML.\n\n## Instructions\n\n### 1. Read the notebook\n\nRead the target notebook file. If the user doesn't specify one, ask which notebook to check.\n\n### 2. Extract dependencies\n\nCollect every package the notebook depends on from **both** sources:\n\n- **PEP 723 metadata** \u2014 the `# /// script` block at the top:\n  ```python\n  # /// script\n  # dependencies = [\n  #     \"marimo\",\n  #     \"torch>=2.0.0\",\n  # ]\n  # ///\n  ```\n- **Import statements** \u2014 scan all cells for `import foo` and `from foo import bar`. Map import names to their PyPI distribution name using this table:\n\n  | Import name | Distribution name |\n  |---|---|\n  | `sklearn` | `scikit-learn` |\n  | `skimage` | `scikit-image` |\n  | `cv2` | `opencv-python` |\n  | `PIL` | `Pillow` |\n  | `bs4` | `beautifulsoup4` |\n  | `yaml` | `pyyaml` |\n  | `dateutil` | `python-dateutil` |\n  | `attr` / `attrs` | `attrs` |\n  | `gi` | `PyGObject` |\n  | `serial` | `pyserial` |\n  | `usb` | `pyusb` |\n  | `wx` | `wxPython` |\n\n  For most other packages, the import name matches the distribution name.\n\n### 3. Check each package against Pyodide\n\nFor each dependency, determine if it can run in WASM:\n\n1. **Is it in the Python standard library?** Most stdlib modules work, but these do **not**:\n   - `multiprocessing` \u2014 browser sandbox has no process spawning\n   - `subprocess` \u2014 same reason\n   - `threading` \u2014 emulated, no real parallelism (WARN, not a hard fail)\n   - `sqlite3` \u2014 use `apsw` instead (available in Pyodide)\n   - `pdb` \u2014 not supported\n   - `tkinter` \u2014 no GUI toolkit in browser\n   - `readline` \u2014 no terminal in browser\n\n2. **Is it a Pyodide built-in package?** See [pyodide-packages.md](references/pyodide-packages.md) for the full list. These work out of the box.\n\n3. **Is it a pure-Python package?** Packages with only `.py` files (no compiled C/Rust extensions) can be installed at runtime via `micropip` and will work. To check: look for a `py3-none-any.whl` wheel on PyPI (e.g. visit `https://pypi.org/project/<package>/#files`). If the only wheels are platform-specific (e.g. `cp312-cp312-manylinux`), the package has native extensions and likely won't work.\n\n   Common pure-Python packages that work (not in Pyodide built-ins but installable via micropip):\n   - `plotly`, `seaborn`, `humanize`, `pendulum`, `arrow`, `tabulate`\n   - `dataclasses-json`, `marshmallow`, `cattrs`, `pydantic` (built-in)\n   - `httpx` (built-in), `tenacity`, `backoff`, `wrapt` (built-in)\n\n4. **Does it have C/native extensions not built for Pyodide?** These will **not** work. Common culprits:\n   - `torch` / `pytorch`\n   - `tensorflow`\n   - `jax` / `jaxlib`\n   - `psycopg2` (suggest `psycopg` with pure-Python mode)\n   - `mysqlclient` (suggest `pymysql`)\n   - `uvloop`\n   - `grpcio`\n   - `psutil`\n\n### 4. Check for WASM-incompatible patterns\n\nScan the notebook code for patterns that won't work in WASM:\n\n| Pattern | Why it fails | Suggestion |\n|---|---|---|\n| `subprocess.run(...)`, `os.system(...)`, `os.popen(...)` | No process spawning in browser | Remove or gate behind a non-WASM check |\n| `multiprocessing.Pool(...)`, `ProcessPoolExecutor` | No process forking | Use single-threaded approach |\n| `threading.Thread(...)`, `ThreadPoolExecutor` | Emulated threads, no real parallelism | WARN only \u2014 works but no speedup; use `asyncio` for I/O |\n| `open(\"/absolute/path/...\")`, hard-coded local file paths | No real filesystem; only in-memory fs | Fetch data via URL (`httpx`, `urllib`) or embed in notebook |\n| `sqlite3.connect(...)` | stdlib sqlite3 unavailable | Use `apsw` or `duckdb` |\n| `pdb.set_trace()`, `breakpoint()` | No debugger in WASM | Remove breakpoints |\n| Reading env vars (`os.environ[...]`, `os.getenv(...)`) | Environment variables not available in browser | Use `mo.ui.text` for user input or hardcode defaults |\n| `Path.home()`, `Path.cwd()` with real file expectations | Virtual filesystem only | Use URLs or embedded data |\n| Large dataset loads (>100 MB) | 2 GB total memory cap | Use smaller samples or remote APIs |\n\n### 5. Check PEP 723 metadata\n\nWASM notebooks should list all dependencies in the PEP 723 `# /// script` block so they are automatically installed when the notebook starts. Check for these issues:\n\n- **Missing metadata:** If the notebook has no `# /// script` block, emit a WARN recommending one. Listing dependencies ensures they are auto-installed when the notebook starts in WASM \u2014 without it, users may see import errors.\n- **Missing packages:** If a package is imported but not listed in the dependencies, emit a WARN suggesting it be added.\nNote: version pins and lower bounds in PEP 723 metadata are fine \u2014 marimo strips version constraints when running in WASM.\n\n### 6. Produce the report\n\nOutput a clear, actionable report with these sections:\n\n**Compatibility: PASS / FAIL / WARN**\n\nUse these verdicts:\n- **PASS** \u2014 all packages and patterns are WASM-compatible\n- **WARN** \u2014 likely compatible, but some packages could not be verified as pure-Python (list them so the user can check)\n- **FAIL** \u2014 one or more packages or patterns are definitely incompatible\n\n**Package Report** \u2014 table with columns: Package, Status (OK / WARN / FAIL), Notes\n\nExample:\n| Package | Status | Notes |\n|---|---|---|\n| marimo | OK | Available in WASM runtime |\n| numpy | OK | Pyodide built-in |\n| pandas | OK | Pyodide built-in |\n| torch | FAIL | No WASM build \u2014 requires native C++/CUDA extensions |\n| my-niche-lib | WARN | Not in Pyodide; verify it is pure-Python |\n\n**Code Issues** \u2014 list each problematic code pattern found, with the cell or line and a suggested fix.\n\n**Recommendations** \u2014 if the notebook fails, suggest concrete fixes:\n- Replace incompatible packages with WASM-friendly alternatives\n- Rewrite incompatible code patterns\n- Suggest moving heavy computation to a hosted API and fetching results\n\n## Additional context\n\n- WASM notebooks run via [Pyodide](https://pyodide.org) in the browser\n- Memory is capped at 2 GB\n- Network requests work but may need CORS-compatible endpoints\n- Chrome has the best WASM performance; Firefox, Edge, Safari also supported\n- `micropip` can install any pure-Python wheel from PyPI at runtime\n- For the full Pyodide built-in package list, see [pyodide-packages.md](references/pyodide-packages.md)\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "wasm-compatibility",
-    "description": "Check if a marimo notebook is compatible with WebAssembly (WASM) and report any issues."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

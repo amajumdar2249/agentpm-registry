@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031156",
   "name": "adobe-migration-deep-dive",
   "slug": "adobe-migration-deep-dive",
   "description": "Execute major Adobe re-architecture: migrating from legacy Adobe APIs",
   "content": "# Adobe Migration Deep Dive\n\n## Overview\n\nComprehensive guide for three major migration scenarios: (1) legacy Adobe API consolidation into Firefly Services, (2) migrating from competitor document/image APIs to Adobe, and (3) JWT credential migration to OAuth Server-to-Server.\n\n## Prerequisites\n\n- Current system documentation with API inventory\n- Adobe Developer Console project with target APIs\n- Feature flag infrastructure\n- Rollback strategy tested in staging\n\n## Instructions\n\n### Migration Type Assessment\n\n| Type | From | To | Complexity | Duration |\n|------|------|----|-----------|----------|\n| Auth migration | JWT credentials | OAuth Server-to-Server | Low | 1-2 days |\n| API consolidation | Separate PS/LR endpoints | Firefly Services SDK | Medium | 1-2 weeks |\n| Competitor replacement | Cloudinary/imgix/PDFTron | Adobe APIs | High | 4-8 weeks |\n| Full replatform | Custom pipeline | Adobe App Builder | High | 2-3 months |\n\n### Scenario 1: Consolidate to Firefly Services SDK\n\nThe Photoshop and Lightroom APIs were previously separate. They are now part of Firefly Services with a unified SDK:\n\n```typescript\n// BEFORE: Separate clients for each API\nimport { PhotoshopAPI } from 'some-old-photoshop-client';\nimport { LightroomAPI } from 'some-old-lightroom-client';\n\n// AFTER: Unified Firefly Services SDK\nimport { PhotoshopClient } from '@adobe/photoshop-apis';\nimport { LightroomClient } from '@adobe/lightroom-apis';\nimport { FireflyClient } from '@adobe/firefly-apis';\n\n// All use the same OAuth credentials\nconst config = {\n  clientId: process.env.ADOBE_CLIENT_ID!,\n  accessToken: await getAccessToken(),\n};\n\nconst photoshop = new PhotoshopClient(config);\nconst lightroom = new LightroomClient(config);\nconst firefly = new FireflyClient(config);\n```\n\n### Scenario 2: Migrate from Competitor to Adobe PDF Services\n\n```typescript\n// src/adapters/document-adapter.ts\n// Adapter pattern for gradual migration from PDFTron/other to Adobe\n\ninterface DocumentAdapter {\n  extractText(pdfPath: string): Promise<string>;\n  createPdf(htmlContent: string): Promise<Buffer>;\n  mergePdfs(pdfPaths: string[]): Promise<Buffer>;\n}\n\n// Old implementation\nclass PdfTronAdapter implements DocumentAdapter {\n  async extractText(pdfPath: string): Promise<string> {\n    // ... existing PDFTron code\n  }\n  // ...\n}\n\n// New Adobe implementation\nclass AdobePdfAdapter implements DocumentAdapter {\n  private pdfServices: PDFServices;\n\n  constructor() {\n    const credentials = new ServicePrincipalCredentials({\n      clientId: process.env.ADOBE_CLIENT_ID!,\n      clientSecret: process.env.ADOBE_CLIENT_SECRET!,\n    });\n    this.pdfServices = new PDFServices({ credentials });\n  }\n\n  async extractText(pdfPath: string): Promise<string> {\n    const inputStream = fs.createReadStream(pdfPath);\n    const inputAsset = await this.pdfServices.upload({\n      readStream: inputStream,\n      mimeType: MimeType.PDF,\n    });\n\n    const params = new ExtractPDFParams({\n      elementsToExtract: [ExtractElementType.TEXT],\n    });\n\n    const job = new ExtractPDFJob({ inputAsset, params });\n    const pollingURL = await this.pdfServices.submit({ job });\n    const result = await this.pdfServices.getJobResult({\n      pollingURL,\n      resultType: ExtractPDFResult,\n    });\n\n    // Parse structuredData.json from result ZIP\n    const streamAsset = await this.pdfServices.getContent({\n      asset: result.result!.resource,\n    });\n    // ... extract text from ZIP\n    return extractedText;\n  }\n\n  // ... implement createPdf, mergePdfs\n}\n\n// Feature-flag controlled routing\nfunction getDocumentAdapter(): DocumentAdapter {\n  const adobePercentage = getFeatureFlag('adobe_pdf_migration_pct');\n\n  if (Math.random() * 100 < adobePercentage) {\n    return new AdobePdfAdapter();\n  }\n  return new PdfTronAdapter();\n}\n```\n\n### Scenario 3: Image API Migration (Cloudinary to Firefly/Photoshop)\n\n```typescript\n// src/adapters/image-adapter.ts\ninterface ImageAdapter {\n  removeBackground(inputUrl: string): Promise<string>;\n  resize(inputUrl: string, width: number, height: number): Promise<string>;\n  generateImage(prompt: string): Promise<string>;\n}\n\nclass CloudinaryAdapter implements ImageAdapter {\n  async removeBackground(inputUrl: string): Promise<string> {\n    // ... existing Cloudinary code\n    return cloudinary.url(publicId, { effect: 'background_removal' });\n  }\n  // ...\n}\n\nclass AdobeImageAdapter implements ImageAdapter {\n  async removeBackground(inputUrl: string): Promise<string> {\n    const token = await getAccessToken();\n    const outputUrl = await generatePresignedUploadUrl();\n\n    const response = await fetch('https://image.adobe.io/v2/remove-background', {\n      method: 'POST',\n      headers: {\n        'Authorization': `Bearer ${token}`,\n        'x-api-key': process.env.ADOBE_CLIENT_ID!,\n        'Content-Type': 'application/json',\n      },\n      body: JSON.stringify({\n        input: { href: inputUrl, storage: 'external' },\n        output: { href: outputUrl, storage: 'external', type: 'image/png' },\n      }),\n    });\n\n    const job = await response.json();\n    const result = await pollAdobeJob(job._links.self.href);\n    return outputUrl;\n  }\n\n  async generateImage(prompt: string): Promise<string> {\n    const token = await getAccessToken();\n    const response = await fetch('https://firefly-api.adobe.io/v3/images/generate', {\n      method: 'POST',\n      headers: {\n        'Authorization': `Bearer ${token}`,\n        'x-api-key': process.env.ADOBE_CLIENT_ID!,\n        'Content-Type': 'application/json',\n      },\n      body: JSON.stringify({ prompt, n: 1, size: { width: 1024, height: 1024 } }),\n    });\n    const result = await response.json();\n    return result.outputs[0].image.url;\n  }\n  // ...\n}\n```\n\n### Phase-Based Migration Plan\n\n```\nWeek 1-2: Setup\n\u251c\u2500\u2500 Create Adobe Developer Console project\n\u251c\u2500\u2500 Install SDKs and implement adapter layer\n\u251c\u2500\u2500 Write integration tests for both old and new\n\u2514\u2500\u2500 Deploy adapter with 0% traffic to Adobe\n\nWeek 3-4: Validation\n\u251c\u2500\u2500 Route 5% traffic to Adobe adapter\n\u251c\u2500\u2500 Compare results (output quality, latency, error rate)\n\u251c\u2500\u2500 Fix edge cases discovered in production traffic\n\u2514\u2500\u2500 Increase to 25% if metrics are acceptable\n\nWeek 5-6: Gradual Migration\n\u251c\u2500\u2500 Increase to 50% traffic\n\u251c\u2500\u2500 Monitor cost impact (Adobe vs old provider)\n\u251c\u2500\u2500 Address any performance regressions\n\u2514\u2500\u2500 Increase to 100% if all metrics pass\n\nWeek 7-8: Cleanup\n\u251c\u2500\u2500 Remove old adapter code\n\u251c\u2500\u2500 Delete old provider credentials\n\u251c\u2500\u2500 Update documentation\n\u2514\u2500\u2500 Run postmortem on migration\n```\n\n### Post-Migration Validation\n\n```typescript\nasync function validateMigration(): Promise<{ passed: boolean; checks: any[] }> {\n  const checks = [\n    { name: 'Auth working', fn: async () => !!(await getAccessToken()) },\n    { name: 'PDF extract works', fn: async () => {\n      const result = await adobeAdapter.extractText('./test/fixture.pdf');\n      return result.length > 0;\n    }},\n    { name: 'Image generation works', fn: async () => {\n      const url = await adobeAdapter.generateImage('test blue square');\n      return url.startsWith('https://');\n    }},\n    { name: 'Error rate < 1%', fn: async () => {\n      const metrics = await getErrorRate('adobe', '1h');\n      return metrics < 0.01;\n    }},\n  ];\n\n  const results = await Promise.all(\n    checks.map(async c => ({ name: c.name, passed: await c.fn() }))\n  );\n\n  return { passed: results.every(r => r.passed), checks: results };\n}\n```\n\n## Output\n\n- Adapter layer abstracting old and new implementations\n- Feature-flag controlled traffic split\n- Phase-based migration with rollback at each stage\n- Validation suite confirming migration success\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Quality difference | Different rendering engines | Compare side-by-side; tune parameters |\n| Higher latency | Adobe async APIs | Use parallel job submission |\n| Cost increase | Different pricing model | Implement caching; optimize batch sizes |\n| Missing features | Not all features map 1:1 | Document gaps; find Adobe alternatives |\n\n## Resources\n\n- [Firefly Services SDK](https://developer.adobe.com/firefly-services/docs/guides/sdks/)\n- [PDF Services Node SDK](https://www.npmjs.com/package/@adobe/pdfservices-node-sdk)\n- [Photoshop API Reference](https://developer.adobe.com/firefly-services/docs/photoshop/api/)\n- [Strangler Fig Pattern](https://martinfowler.com/bliki/StranglerFigApplication.html)\n\n## Next Steps\n\nFor advanced troubleshooting, see `adobe-advanced-troubleshooting`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "adobe-migration-deep-dive",
-    "description": "Execute major Adobe re-architecture: migrating from legacy Adobe APIs",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(node:*), Bash(kubectl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

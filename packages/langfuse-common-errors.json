@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032448",
   "name": "langfuse-common-errors",
   "slug": "langfuse-common-errors",
   "description": "Diagnose and fix common Langfuse errors and exceptions.",
   "content": "# Langfuse Common Errors\n\n## Overview\n\nDiagnostic reference for the 10 most common Langfuse integration errors, with real error messages, root causes, and tested solutions.\n\n## Prerequisites\n\n- Langfuse SDK installed\n- API credentials configured\n- Access to application logs or console output\n\n## Error Reference\n\n### 1. Authentication Failed (401)\n\n**Error:**\n\n```\nLangfuse: Unauthorized - Invalid API key\nError: 401 Unauthorized\n```\n\n**Cause:** API key missing, expired, revoked, or keys from wrong project.\n\n**Fix:**\n\n```bash\nset -euo pipefail\n# Verify env vars are set\necho \"Public: ${LANGFUSE_PUBLIC_KEY:0:15}...\"\necho \"Secret: ${LANGFUSE_SECRET_KEY:0:10}...\"\n\n# Test auth against API\nHOST=\"${LANGFUSE_BASE_URL:-https://cloud.langfuse.com}\"\ncurl -s -o /dev/null -w \"HTTP %{http_code}\" \\\n  \"$HOST/api/public/health\"\n\n# Auth test\ncurl -s -o /dev/null -w \"HTTP %{http_code}\" \\\n  -H \"Authorization: Basic $(echo -n \"$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY\" | base64)\" \\\n  \"$HOST/api/public/traces?limit=1\"\n```\n\n### 2. Traces Not Appearing in Dashboard\n\n**Symptom:** Code runs without errors but no traces show in UI.\n\n**Root causes (in order of likelihood):**\n\n1. Data not flushed before process exits\n2. Wrong project keys (traces going to different project)\n3. Dashboard filter hiding traces\n\n**Fix:**\n\n```typescript\n// v4+: Ensure OTel SDK is shut down properly\nconst sdk = new NodeSDK({ spanProcessors: [new LangfuseSpanProcessor()] });\nsdk.start();\n// ... your code ...\nawait sdk.shutdown(); // MUST call this before process exits\n\n// v3: Always flush\nawait langfuse.flushAsync();\n\n// v3: Register shutdown handler for long-running processes\nprocess.on(\"beforeExit\", async () => {\n  await langfuse.shutdownAsync();\n});\n```\n\n### 3. Network / Connection Errors\n\n**Error:**\n\n```\nFetchError: request to https://cloud.langfuse.com failed\nECONNREFUSED / ETIMEDOUT\n```\n\n**Fix:**\n\n```bash\nset -euo pipefail\n# Test connectivity\ncurl -v https://cloud.langfuse.com/api/public/health\n\n# Check DNS\nnslookup cloud.langfuse.com\n\n# For self-hosted\ncurl -v $LANGFUSE_BASE_URL/api/public/health\n```\n\n```typescript\n// Increase timeout for slow networks\n// v4+: Configure via OTel span processor options\n// v3:\nconst langfuse = new Langfuse({ requestTimeout: 30000 });\n```\n\n### 4. Missing Token Usage\n\n**Symptom:** Generations appear but token counts show zero.\n\n**Fix:**\n\n```typescript\n// For OpenAI streaming -- enable usage reporting\nconst stream = await openai.chat.completions.create({\n  model: \"gpt-4o\",\n  messages,\n  stream: true,\n  stream_options: { include_usage: true }, // Required!\n});\n\n// For manual tracing -- always include usage on generation end\ngeneration.end({\n  output: content,\n  usage: {\n    promptTokens: response.usage?.prompt_tokens ?? 0,\n    completionTokens: response.usage?.completion_tokens ?? 0,\n  },\n});\n\n// v4+: updateActiveObservation with usage\nupdateActiveObservation({\n  output: content,\n  usage: { promptTokens: 100, completionTokens: 50 },\n});\n```\n\n### 5. Spans Stuck \"In Progress\" (v3)\n\n**Symptom:** Spans show as in-progress indefinitely in the dashboard.\n\n**Fix:**\n\n```typescript\n// Always end spans in try/finally\nconst span = trace.span({ name: \"operation\" });\ntry {\n  const result = await doWork();\n  span.end({ output: result });\n  return result;\n} catch (error) {\n  span.end({ level: \"ERROR\", statusMessage: String(error) });\n  throw error;\n}\n\n// v4+ avoids this entirely -- startActiveObservation auto-ends\nawait startActiveObservation(\"operation\", async () => {\n  // Span automatically ends when callback completes or throws\n  return await doWork();\n});\n```\n\n### 6. Duplicate Traces\n\n**Symptom:** Same operation creates multiple traces.\n\n**Fix:**\n\n```typescript\n// Use singleton pattern -- NEVER create Langfuse per request\n// BAD:\napp.get(\"/api\", async (req, res) => {\n  const langfuse = new Langfuse(); // Creates new client per request\n});\n\n// GOOD:\nconst langfuse = new Langfuse(); // Single instance\napp.get(\"/api\", async (req, res) => {\n  const trace = langfuse.trace({ name: \"api-request\" });\n});\n```\n\n### 7. SDK Import Errors\n\n**Error:**\n\n```\nTypeError: langfuse.trace is not a function\nCannot find module '@langfuse/tracing'\n```\n\n**Fix:**\n\n```bash\nset -euo pipefail\n# Check installed version\nnpm list langfuse @langfuse/client @langfuse/tracing\n\n# v3 import\n# import { Langfuse } from \"langfuse\";\n\n# v4+ imports\n# import { LangfuseClient } from \"@langfuse/client\";\n# import { startActiveObservation, observe } from \"@langfuse/tracing\";\n\n# Update to latest\nnpm install @langfuse/client@latest @langfuse/tracing@latest @langfuse/otel@latest\n```\n\n### 8. Environment Variable Not Loaded\n\n**Error:**\n\n```\nLangfuse: Missing required configuration - publicKey\n```\n\n**Fix:**\n\n```typescript\n// Load .env at the very top of your entry file\nimport \"dotenv/config\";\n\n// Or use specific path\nimport { config } from \"dotenv\";\nconfig({ path: \".env.local\" });\n\n// Validate on startup\nif (!process.env.LANGFUSE_PUBLIC_KEY) {\n  throw new Error(\"LANGFUSE_PUBLIC_KEY not set\");\n}\n```\n\n### 9. Self-Hosted Connection Issues\n\n**Error:**\n\n```\nFailed to connect to localhost:3000\nCertificate verification failed\n```\n\n**Fix:**\n\n```bash\nset -euo pipefail\n# Check if Langfuse container is running\ndocker ps | grep langfuse\n\n# Health check\ncurl http://localhost:3000/api/public/health\n\n# Common issue: trailing slash in URL\n# BAD:  LANGFUSE_BASE_URL=http://localhost:3000/\n# GOOD: LANGFUSE_BASE_URL=http://localhost:3000\n```\n\n### 10. Rate Limiting (429)\n\n**Error:**\n\n```\nError: 429 Too Many Requests\nRetry-After: 60\n```\n\n**Fix:**\n\n```typescript\n// v3: Increase batch size to reduce API calls\nconst langfuse = new Langfuse({\n  flushAt: 50,         // Batch more events\n  flushInterval: 30000, // Flush less often (30s)\n});\n\n// For sustained high volume, see langfuse-rate-limits skill\n```\n\n## Quick Diagnostic Script\n\n```bash\n#!/bin/bash\nset -euo pipefail\n\necho \"=== Langfuse Diagnostics ===\"\necho \"Node: $(node --version 2>/dev/null || echo 'N/A')\"\necho \"Python: $(python3 --version 2>/dev/null || echo 'N/A')\"\necho \"\"\n\n# SDK versions\necho \"--- Installed SDK ---\"\nnpm list langfuse @langfuse/client @langfuse/tracing 2>/dev/null || echo \"npm: not found\"\npip show langfuse 2>/dev/null | grep Version || echo \"pip: not found\"\necho \"\"\n\n# Config check\necho \"--- Config ---\"\necho \"Public Key: ${LANGFUSE_PUBLIC_KEY:+SET (${LANGFUSE_PUBLIC_KEY:0:10}...)}\"\necho \"Secret Key: ${LANGFUSE_SECRET_KEY:+SET}\"\necho \"Base URL: ${LANGFUSE_BASE_URL:-${LANGFUSE_HOST:-default cloud}}\"\necho \"\"\n\n# Connectivity\nHOST=\"${LANGFUSE_BASE_URL:-${LANGFUSE_HOST:-https://cloud.langfuse.com}}\"\necho \"--- Connectivity ---\"\necho \"Health: $(curl -s -o /dev/null -w '%{http_code}' $HOST/api/public/health)\"\n```\n\n## Escalation Path\n\n1. Run diagnostic script above\n2. Collect debug bundle with `langfuse-debug-bundle` skill\n3. Check [Langfuse Status](https://status.langfuse.com)\n4. Search [GitHub Issues](https://github.com/langfuse/langfuse/issues)\n5. Ask in [Discord](https://langfuse.com/discord)\n\n## Resources\n\n- [Langfuse Troubleshooting](https://langfuse.com/docs/observability/get-started)\n- [GitHub Issues](https://github.com/langfuse/langfuse/issues)\n- [Langfuse Discord](https://langfuse.com/discord)\n- [Status Page](https://status.langfuse.com)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "langfuse-common-errors",
-    "description": "Diagnose and fix common Langfuse errors and exceptions.",
-    "allowed-tools": "Read, Grep, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

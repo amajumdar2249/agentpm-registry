@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000042846",
   "name": "twill-cloud-coding-agent",
   "slug": "twill-cloud-coding-agent-2",
   "description": "Use Twill Cloud Coding Agent to manage Twill's public v1 API workflows. Create/list/update tasks, stream and cancel jobs, manage scheduled tasks, list repositories, and export Claude teleport sessions.",
   "content": "\n# Twill Cloud Coding Agent\n\nUse this skill to run Twill workflows through the public `v1` API.\n\n## Setup\n\nSet API key and optional base URL:\n\n```bash\nexport TWILL_API_KEY=\"your_api_key\"\nexport TWILL_BASE_URL=\"${TWILL_BASE_URL:-https://twill.ai}\"\n```\n\nAll API calls use:\n\n`Authorization: Bearer $TWILL_API_KEY`\n\nUse this helper to reduce repetition:\n\n```bash\napi() {\n  curl -sS \"$@\" -H \"Authorization: Bearer $TWILL_API_KEY\" -H \"Content-Type: application/json\"\n}\n```\n\n## Endpoint Coverage (Public v1)\n\n- `GET /api/v1/auth/me`\n- `GET /api/v1/repositories`\n- `POST /api/v1/tasks`\n- `GET /api/v1/tasks`\n- `GET /api/v1/tasks/:taskIdOrSlug`\n- `POST /api/v1/tasks/:taskIdOrSlug/messages`\n- `GET /api/v1/tasks/:taskIdOrSlug/jobs`\n- `POST /api/v1/tasks/:taskIdOrSlug/approve-plan`\n- `POST /api/v1/tasks/:taskIdOrSlug/cancel`\n- `POST /api/v1/tasks/:taskIdOrSlug/archive`\n- `GET /api/v1/tasks/:taskIdOrSlug/teleport/claude`\n- `GET /api/v1/jobs/:jobId/logs/stream`\n- `POST /api/v1/jobs/:jobId/cancel`\n- `GET /api/v1/scheduled-tasks`\n- `POST /api/v1/scheduled-tasks`\n- `GET /api/v1/scheduled-tasks/:scheduledTaskId`\n- `PATCH /api/v1/scheduled-tasks/:scheduledTaskId`\n- `DELETE /api/v1/scheduled-tasks/:scheduledTaskId`\n- `POST /api/v1/scheduled-tasks/:scheduledTaskId/pause`\n- `POST /api/v1/scheduled-tasks/:scheduledTaskId/resume`\n\n## Auth and Discovery\n\nValidate key and workspace context:\n\n```bash\ncurl -sS \"$TWILL_BASE_URL/api/v1/auth/me\" -H \"Authorization: Bearer $TWILL_API_KEY\"\n```\n\nList available GitHub repositories for the workspace:\n\n```bash\ncurl -sS \"$TWILL_BASE_URL/api/v1/repositories\" -H \"Authorization: Bearer $TWILL_API_KEY\"\n```\n\n## Tasks\n\n### Create Task\n\n```bash\napi -X POST \"$TWILL_BASE_URL/api/v1/tasks\" -d '{\"command\":\"Fix flaky tests in CI\",\"userIntent\":\"SWE\"}'\n```\n\nRepository and branch are no longer accepted in the request body \u2014 the task runs against the workspace's connected repos as resolved by the agent at runtime.\n\nRequired fields:\n\n- `command`\n\nOptional fields:\n\n- `agent` (provider or provider/model, for example `codex` or `codex/gpt-5.4`; provider shorthands accepted: `claude-code`, `codex`, `open-code`)\n- `userIntent` (`SWE`, `PLAN`, `ASK`, `DEV_ENVIRONMENT`) \u2014 defaults to `SWE`\n- `reasoningEffort` (`low`, `medium`, `high`, `xhigh`)\n- `parentId` (id of an existing task to spawn this one from)\n- `title`\n- `files` (array of `{ filename, mediaType, url }`)\n\nResponse is `{ task: { id, slug, title, url }, job: { id, status } }`. Always report `task.url` back to the user.\n\n### List Tasks\n\n```bash\ncurl -sS \"$TWILL_BASE_URL/api/v1/tasks?limit=20&cursor=BASE64_CURSOR\" -H \"Authorization: Bearer $TWILL_API_KEY\"\n```\n\nSupports cursor pagination via `limit` (default 20, max 100) and `cursor`. Response is `{ tasks, nextCursor }`; each task includes `id`, `slug`, `title`, `url`, `createdAt`, `latestJobStatus`, and `pr`.\n\n### Get Task Details\n\n```bash\ncurl -sS \"$TWILL_BASE_URL/api/v1/tasks/TASK_ID_OR_SLUG\" -H \"Authorization: Bearer $TWILL_API_KEY\"\n```\n\nReturns task metadata plus `latestJob` including `id`, `status`, `type`, `agentProvider`, `startedAt`, `completedAt`, `plan`, `planOutcome`, `finalAnswer` (useful for `ASK` jobs), and `pr` when available.\n\n### Send Follow-Up Message\n\n```bash\napi -X POST \"$TWILL_BASE_URL/api/v1/tasks/TASK_ID_OR_SLUG/messages\" -d '{\"message\":\"Please prioritize login flow first\",\"userIntent\":\"PLAN\"}'\n```\n\nSending a message cancels any in-flight job for the task and starts a fresh run with this message (API/CLI bypass the UI queueing flow).\n\nOptional fields: `userIntent`, `reasoningEffort` (`low`, `medium`, `high`, `xhigh`), `files`.\n\n### List Task Jobs\n\n```bash\ncurl -sS \"$TWILL_BASE_URL/api/v1/tasks/TASK_ID_OR_SLUG/jobs?limit=30&cursor=BASE64_CURSOR\" -H \"Authorization: Bearer $TWILL_API_KEY\"\n```\n\nSupports cursor pagination:\n- `limit` defaults to `30` (max `100`)\n- `cursor` fetches older pages\n- response includes `jobs` and `nextCursor`\n\n### Approve Plan\n\nUse when the latest plan job is completed and ready for approval.\n\n```bash\napi -X POST \"$TWILL_BASE_URL/api/v1/tasks/TASK_ID_OR_SLUG/approve-plan\" -d '{}'\n```\n\n### Cancel Task\n\n```bash\napi -X POST \"$TWILL_BASE_URL/api/v1/tasks/TASK_ID_OR_SLUG/cancel\" -d '{}'\n```\n\n### Archive Task\n\n```bash\napi -X POST \"$TWILL_BASE_URL/api/v1/tasks/TASK_ID_OR_SLUG/archive\" -d '{}'\n```\n\n## Jobs\n\n### Stream Job Logs (SSE)\n\n```bash\ncurl -N \"$TWILL_BASE_URL/api/v1/jobs/JOB_ID/logs/stream\" -H \"Authorization: Bearer $TWILL_API_KEY\" -H \"Accept: text/event-stream\"\n```\n\nStream emits JSON payloads in `data:` lines and terminates with a `complete` event.\n\n### Cancel Job\n\n```bash\napi -X POST \"$TWILL_BASE_URL/api/v1/jobs/JOB_ID/cancel\" -d '{}'\n```\n\n## Scheduled Tasks\n\n### List and Create\n\n```bash\ncurl -sS \"$TWILL_BASE_URL/api/v1/scheduled-tasks\" -H \"Authorization: Bearer $TWILL_API_KEY\"\n\napi -X POST \"$TWILL_BASE_URL/api/v1/scheduled-tasks\" -d '{\n  \"title\":\"Daily triage\",\n  \"message\":\"Review urgent issues and open tasks\",\n  \"cronExpression\":\"0 9 * * 1-5\",\n  \"timezone\":\"America/New_York\",\n  \"agentProviderId\":\"claude-code/sonnet\"\n}'\n```\n\nRequired: `title` (max 200 chars), `message`, `cronExpression`.\n\nOptional: `timezone` (IANA name, defaults to `\"UTC\"`), `agentProviderId` (provider/model override, e.g. `claude-code/sonnet`, `codex/gpt-5.4`).\n\nRepository / branch are no longer part of the scheduled-task payload \u2014 each run resolves repos at agent dispatch time, the same way one-shot tasks do.\n\nResponse is `{ scheduledTask: { id, workspaceId, createdById, title, message, cronExpression, timezone, nextRunAt, lastRunAt, enabled, agentProviderId, createdAt, updatedAt } }`.\n\n### Read, Update, Delete\n\n```bash\ncurl -sS \"$TWILL_BASE_URL/api/v1/scheduled-tasks/SCHEDULED_TASK_ID\" -H \"Authorization: Bearer $TWILL_API_KEY\"\n\napi -X PATCH \"$TWILL_BASE_URL/api/v1/scheduled-tasks/SCHEDULED_TASK_ID\" -d '{\n  \"message\":\"Updated instructions\",\n  \"cronExpression\":\"0 10 * * 1-5\",\n  \"agentProviderId\":\"codex/gpt-5.4\"\n}'\n\ncurl -sS -X DELETE \"$TWILL_BASE_URL/api/v1/scheduled-tasks/SCHEDULED_TASK_ID\" -H \"Authorization: Bearer $TWILL_API_KEY\"\n```\n\nPATCH accepts any subset of `title`, `message`, `cronExpression`, `timezone`, `agentProviderId` (pass `null` to clear the override). DELETE returns `{ \"success\": true }`.\n\n### Pause and Resume\n\n```bash\napi -X POST \"$TWILL_BASE_URL/api/v1/scheduled-tasks/SCHEDULED_TASK_ID/pause\" -d '{}'\napi -X POST \"$TWILL_BASE_URL/api/v1/scheduled-tasks/SCHEDULED_TASK_ID/resume\" -d '{}'\n```\n\n## Behavior\n\n- Use `userIntent` (`SWE`, `PLAN`, `ASK`, `DEV_ENVIRONMENT`) when calling API endpoints directly.\n- Do **not** send `repository` / `branch` on tasks or `repositoryUrl` / `baseBranch` on scheduled tasks \u2014 these fields were removed; repo/branch is resolved by the agent at run time from workspace context.\n- Create task, report `task.url`, and only poll/stream logs when requested.\n- Ask for `TWILL_API_KEY` if missing.\n- Do not print API keys or other secrets.\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "twill-cloud-coding-agent",
-    "description": "Use Twill Cloud Coding Agent to manage Twill's public v1 API workflows. Create/list/update tasks, stream and cancel jobs, manage scheduled tasks, list repositories, and export Claude teleport sessions.",
-    "compatibility": "Requires access to https://twill.ai/api/v1, curl, and a TWILL_API_KEY environment variable.",
-    "metadata": "",
-    "author": "TwillAI",
-    "version": "1.3.0",
-    "category": "coding",
-    "homepage": "https://twill.ai",
-    "api_base": "https://twill.ai/api/v1"
+  "author": "TwillAI",
+  "version": "1.3.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "coding",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

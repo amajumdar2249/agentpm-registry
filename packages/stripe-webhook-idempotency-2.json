@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000034473",
   "name": "stripe-webhook-idempotency",
   "slug": "stripe-webhook-idempotency-2",
   "description": "|",
   "content": "\n## Quick Reference\n\n| Concept | Source of truth | Default |\n|--|--|--|\n| Signature verification | `stripe.webhooks.constructEventAsync(rawBody, sig, secret, tolerance)` | tolerance = 300s |\n| Event dedup (short-term) | `stripe_processed_events` (30d retention) | primary key: `event_id` |\n| Balance-change dedup (durable) | `credit_transactions.idempotency_key` UNIQUE partial index | retention = forever |\n| Idempotency key priority | `Idempotency-Key` header > body.`idempotency_key` > `crypto.randomUUID()` | validate `len<=128, [A-Za-z0-9_-]` |\n| Checkpoint ordering | Checkpoint INSERT -> user UPDATE | never reverse |\n| Row lock | `.for(\"update\")` on the snapshot row | required when UPDATE depends on prior SELECT |\n\n## When to Use This Skill\n\nUse for every Stripe webhook handler and every client-retry-safe mutation endpoint (any POST route that creates a billable entity, e.g., `/api/v1/orders`, `/api/v1/jobs`, or your project's equivalent).\n\n**Related skills:**\n- For refund/dispute state: `stripe-billing-master:stripe-refund-dispute-lifecycle`\n- For the audit-row invariant: `stripe-billing-master:stripe-credit-audit-trail`\n- For post-signature invoice-line / refund pagination in the handler body: `stripe-billing-master:stripe-list-pagination-previous-attributes`\n\n## Core Rules\n\n### G1: Durable checkpoint BEFORE state mutation\n\n```ts\nawait db.transaction(async (tx) => {\n  // 1. Durable checkpoint FIRST\n  const [inserted] = await tx.insert(creditTransactions).values({ /* ... idempotencyKey: \"dispute_hold:<id>\" */ })\n    .onConflictDoNothing({ target: creditTransactions.idempotencyKey })\n    .returning({ id: creditTransactions.id });\n  // 2. Dedup\n  if (!inserted) return;\n  // 3. Mutate\n  await tx.update(users).set({ /* ... */ }).where(/* ... */);\n});\n```\n\n### Idempotency-Key header priority + validation\n\n```ts\nconst MAX_LEN = 128;\nconst VALID = /^[A-Za-z0-9_-]+$/;\n\nexport function validateIdempotencyKey(key: string | null): { valid: true; key: string | null } | { valid: false; error: string } {\n  if (!key || key.trim() === \"\") return { valid: true, key: null }; // caller falls back to randomUUID\n  if (key.length > MAX_LEN) return { valid: false, error: \"Idempotency-Key too long\" };\n  if (!VALID.test(key)) return { valid: false, error: \"Idempotency-Key invalid charset\" };\n  return { valid: true, key };\n}\n\n// In the handler:\nconst headerKey = req.headers.get(\"Idempotency-Key\");\nconst bodyKey = body.idempotency_key;\nconst raw = headerKey ?? bodyKey ?? null;\nconst v = validateIdempotencyKey(raw);\nif (!v.valid) return apiError(400, \"VALIDATION_ERROR\", v.error);\nconst key = v.key ?? crypto.randomUUID();\n```\n\n### Signature verification\n\nUse `constructEventAsync` \u2014 synchronous `constructEvent` blocks the worker on large payloads.\n```ts\nconst event = await stripe.webhooks.constructEventAsync(\n  rawBody,        // raw bytes; Next.js: await req.text() BEFORE any json()\n  sigHeader,\n  env.STRIPE_WEBHOOK_SECRET,\n  300,            // 5min tolerance\n);\n```\n\n### Complete webhook handler skeleton\n\n```ts\nexport async function POST(req: Request) {\n  const rawBody = await req.text();\n  const signature = req.headers.get(\"stripe-signature\");\n  if (!signature) return apiError(400, \"VALIDATION_ERROR\", \"Missing stripe-signature\");\n\n  let event: Stripe.Event;\n  try {\n    event = await stripe.webhooks.constructEventAsync(\n      rawBody,\n      signature,\n      env.STRIPE_WEBHOOK_SECRET,\n      300, // 5min tolerance\n    );\n  } catch (err) {\n    logEvent(\"stripe_webhook_bad_signature\", { err: String(err) });\n    return apiError(400, \"INVALID_SIGNATURE\", \"Signature verification failed\");\n  }\n\n  // Transactional dedup: G1 + G9 pattern\n  const dedup = await db.insert(stripeProcessedEvents)\n    .values({ eventId: event.id, type: event.type })\n    .onConflictDoNothing({ target: stripeProcessedEvents.eventId })\n    .returning({ id: stripeProcessedEvents.id });\n  if (dedup.length === 0) return apiSuccess({ deduped: true });\n\n  await dispatchEvent(event); // handlers apply G1-G9 per rules above\n  return apiSuccess({ ok: true });\n}\n```\n\n### FOR UPDATE on prior-read snapshot\n\n```ts\nconst [user] = await tx.select(/* ... */).from(users).where(eq(users.id, userId)).for(\"update\");\n// snapshot is safe from concurrent invoice/dispute writes\nconst prev = user.stripeSubscriptionStatus;\nawait tx.insert(creditTransactions).values({ /* ... */ metadata: { previousStatus: prev } });\nawait tx.update(users).set({ stripeSubscriptionStatus: \"past_due\" });\n```\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "stripe-webhook-idempotency",
-    "description": "|",
-    "PROACTIVELY activate for": "(1) Stripe webhook handler design, (2) Transactional dedup via stripe_processed_events, (3) credit_transactions.idempotency_key UNIQUE partial indexes, (4) Idempotency-Key header priority (header > body > server UUID), (5) Idempotency key format/charset/length validation at the handler edge, (6) FOR UPDATE row locking when a UPDATE depends on a prior SELECT, (7) Webhook signature verification (stripe.webhooks.constructEventAsync, tolerance, raw-body reading), (8) Retry-safe endpoints with randomUUID fallback, (9) Durable checkpoint row ordering (checkpoint FIRST, mutation SECOND).",
-    "Provides": "complete webhook handler skeleton, Idempotency-Key validator, dedup SQL, FOR UPDATE pattern, signature verification example."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

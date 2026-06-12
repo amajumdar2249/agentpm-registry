@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032893",
   "name": "perplexity-performance-tuning",
   "slug": "perplexity-performance-tuning",
   "description": "Optimize Perplexity Sonar API performance with caching, streaming, model",
   "content": "# Perplexity Performance Tuning\n\n## Overview\n\nOptimize Perplexity Sonar API for latency, throughput, and cost. Key insight: every Perplexity call performs a live web search, so response times are inherently variable. Typical latencies: sonar 1-3s, sonar-pro 3-8s, sonar-deep-research 10-60s.\n\n## Latency Benchmarks\n\n| Model | Typical Latency | Max Tokens | Best For |\n|-------|----------------|------------|----------|\n| `sonar` | 1-3s | 4096 | Quick answers, simple facts |\n| `sonar-pro` | 3-8s | 8192 | Deep research, many citations |\n| `sonar-reasoning-pro` | 5-15s | 8192 | Multi-step analysis |\n| `sonar-deep-research` | 10-60s | 8192 | Comprehensive reports |\n\n## Prerequisites\n\n- Perplexity API key configured\n- Understanding of search-augmented generation latency patterns\n- Cache infrastructure (Redis or in-memory LRU)\n\n## Instructions\n\n### Step 1: Smart Model Routing\n\n```typescript\nimport OpenAI from \"openai\";\n\nconst perplexity = new OpenAI({\n  apiKey: process.env.PERPLEXITY_API_KEY,\n  baseURL: \"https://api.perplexity.ai\",\n});\n\ntype QueryComplexity = \"simple\" | \"standard\" | \"deep\";\n\nfunction classifyQuery(query: string): QueryComplexity {\n  const words = query.split(/\\s+/).length;\n  const simplePatterns = [/^what is/i, /^who is/i, /^when did/i, /^define/i, /^how many/i];\n  const deepPatterns = [/compare.*vs/i, /analysis of/i, /comprehensive/i, /pros and cons/i, /in-depth/i];\n\n  if (simplePatterns.some((p) => p.test(query)) && words < 15) return \"simple\";\n  if (deepPatterns.some((p) => p.test(query)) || words > 30) return \"deep\";\n  return \"standard\";\n}\n\nfunction selectModel(complexity: QueryComplexity): { model: string; maxTokens: number } {\n  switch (complexity) {\n    case \"simple\":  return { model: \"sonar\",     maxTokens: 256 };\n    case \"standard\": return { model: \"sonar\",     maxTokens: 1024 };\n    case \"deep\":    return { model: \"sonar-pro\", maxTokens: 4096 };\n  }\n}\n\nasync function smartSearch(query: string) {\n  const complexity = classifyQuery(query);\n  const { model, maxTokens } = selectModel(complexity);\n\n  return perplexity.chat.completions.create({\n    model,\n    messages: [{ role: \"user\", content: query }],\n    max_tokens: maxTokens,\n  });\n}\n```\n\n### Step 2: Query Hash Caching\n\n```typescript\nimport { LRUCache } from \"lru-cache\";\nimport { createHash } from \"crypto\";\n\nconst CACHE_TTL = {\n  news: 30 * 60 * 1000,      // 30 min for current events\n  research: 4 * 60 * 60 * 1000,  // 4 hours for research\n  factual: 24 * 60 * 60 * 1000,  // 24 hours for stable facts\n};\n\nconst searchCache = new LRUCache<string, any>({\n  max: 1000,\n  ttl: CACHE_TTL.research,  // default TTL\n});\n\nfunction cacheKey(query: string, model: string): string {\n  return createHash(\"sha256\")\n    .update(`${model}:${query.toLowerCase().trim()}`)\n    .digest(\"hex\");\n}\n\nfunction detectTTL(query: string): number {\n  if (/\\b(latest|today|breaking|current price|this week)\\b/i.test(query))\n    return CACHE_TTL.news;\n  if (/\\b(what is|define|how does|who is)\\b/i.test(query))\n    return CACHE_TTL.factual;\n  return CACHE_TTL.research;\n}\n\nasync function cachedSearch(query: string, model = \"sonar\") {\n  const key = cacheKey(query, model);\n  const cached = searchCache.get(key);\n  if (cached) return { ...cached, cached: true };\n\n  const result = await perplexity.chat.completions.create({\n    model,\n    messages: [{ role: \"user\", content: query }],\n  });\n\n  searchCache.set(key, result, { ttl: detectTTL(query) });\n  return { ...result, cached: false };\n}\n```\n\n### Step 3: Streaming for Perceived Performance\n\n```typescript\nasync function streamSearch(\n  query: string,\n  onChunk: (text: string) => void,\n  onCitations: (urls: string[]) => void\n) {\n  const stream = await perplexity.chat.completions.create({\n    model: \"sonar-pro\",\n    messages: [{ role: \"user\", content: query }],\n    stream: true,\n    max_tokens: 4096,\n  });\n\n  let fullText = \"\";\n  for await (const chunk of stream) {\n    const text = chunk.choices[0]?.delta?.content || \"\";\n    fullText += text;\n    onChunk(text);\n\n    if ((chunk as any).citations) {\n      onCitations((chunk as any).citations);\n    }\n  }\n  return fullText;\n}\n```\n\n### Step 4: Parallel Research with Rate Limiting\n\n```typescript\nimport PQueue from \"p-queue\";\n\nconst queue = new PQueue({ concurrency: 3, interval: 1500, intervalCap: 1 });\n\nasync function parallelResearch(queries: string[]): Promise<Map<string, any>> {\n  const results = new Map<string, any>();\n\n  await Promise.all(\n    queries.map((q) =>\n      queue.add(async () => {\n        const result = await cachedSearch(q, \"sonar\");\n        results.set(q, result);\n      })\n    )\n  );\n\n  return results;\n}\n```\n\n### Step 5: Response Size Optimization\n\n```typescript\n// Limit tokens to what you actually need\nasync function optimizedSearch(query: string, detail: \"brief\" | \"full\" = \"brief\") {\n  return perplexity.chat.completions.create({\n    model: \"sonar\",\n    messages: [\n      {\n        role: \"system\",\n        content: detail === \"brief\"\n          ? \"Answer in 2-3 sentences maximum.\"\n          : \"Provide a thorough answer with examples.\",\n      },\n      { role: \"user\", content: query },\n    ],\n    max_tokens: detail === \"brief\" ? 150 : 2048,\n  });\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Latency >10s on sonar | Complex query triggering deep search | Add `max_tokens: 512` to limit response |\n| Cache hit rate <20% | Queries too unique | Normalize queries (lowercase, trim) |\n| Burst 429 errors | Parallel requests too aggressive | Use PQueue with intervalCap |\n| Stale cached results | TTL too long for news | Use query-type-aware TTL |\n\n## Output\n\n- Smart model routing by query complexity\n- Query-aware caching with appropriate TTLs\n- Streaming for reduced perceived latency\n- Rate-limited parallel research\n\n## Resources\n\n- [Perplexity Model Cards](https://docs.perplexity.ai/getting-started/models)\n- [Perplexity Pricing](https://docs.perplexity.ai/docs/getting-started/pricing)\n\n## Next Steps\n\nFor cost optimization, see `perplexity-cost-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "perplexity-performance-tuning",
-    "description": "Optimize Perplexity Sonar API performance with caching, streaming, model",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

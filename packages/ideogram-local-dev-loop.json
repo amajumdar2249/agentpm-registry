@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032276",
   "name": "ideogram-local-dev-loop",
   "slug": "ideogram-local-dev-loop",
   "description": "Configure Ideogram local development with mock responses and testing.",
   "content": "# Ideogram Local Dev Loop\n\n## Overview\n\nSet up a fast local development workflow for Ideogram integrations. Includes a typed client wrapper, mock server for offline development (avoids burning credits), and vitest integration for automated testing.\n\n## Prerequisites\n\n- Completed `ideogram-install-auth` setup\n- Node.js 18+ with npm/pnpm\n- `IDEOGRAM_API_KEY` environment variable set\n\n## Instructions\n\n### Step 1: Create Project Structure\n\n```\nmy-ideogram-project/\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 ideogram/\n\u2502   \u2502   \u251c\u2500\u2500 client.ts       # Typed Ideogram client wrapper\n\u2502   \u2502   \u251c\u2500\u2500 types.ts         # Request/response type definitions\n\u2502   \u2502   \u2514\u2500\u2500 mock-server.ts   # Local mock for offline dev\n\u2502   \u2514\u2500\u2500 index.ts\n\u251c\u2500\u2500 tests/\n\u2502   \u2514\u2500\u2500 ideogram.test.ts\n\u251c\u2500\u2500 .env.local              # Local secrets (git-ignored)\n\u251c\u2500\u2500 .env.example            # Template for team\n\u251c\u2500\u2500 tsconfig.json\n\u2514\u2500\u2500 package.json\n```\n\n### Step 2: Install Dependencies\n\n```bash\nset -euo pipefail\nnpm install dotenv\nnpm install -D typescript tsx vitest @types/node\n```\n\n### Step 3: Type Definitions\n\n```typescript\n// src/ideogram/types.ts\nexport type StyleType = \"AUTO\" | \"GENERAL\" | \"REALISTIC\" | \"DESIGN\" | \"RENDER_3D\" | \"ANIME\";\nexport type AspectRatio = \"ASPECT_1_1\" | \"ASPECT_16_9\" | \"ASPECT_9_16\" | \"ASPECT_3_2\" | \"ASPECT_2_3\"\n  | \"ASPECT_4_3\" | \"ASPECT_3_4\" | \"ASPECT_10_16\" | \"ASPECT_16_10\" | \"ASPECT_1_3\" | \"ASPECT_3_1\";\nexport type Model = \"V_1\" | \"V_1_TURBO\" | \"V_2\" | \"V_2_TURBO\" | \"V_2A\" | \"V_2A_TURBO\";\nexport type MagicPrompt = \"AUTO\" | \"ON\" | \"OFF\";\n\nexport interface GenerateRequest {\n  prompt: string;\n  model?: Model;\n  style_type?: StyleType;\n  aspect_ratio?: AspectRatio;\n  magic_prompt_option?: MagicPrompt;\n  negative_prompt?: string;\n  num_images?: number;\n  seed?: number;\n}\n\nexport interface ImageResult {\n  url: string;\n  prompt: string;\n  resolution: string;\n  is_image_safe: boolean;\n  seed: number;\n  style_type: StyleType;\n}\n\nexport interface GenerateResponse {\n  created: string;\n  data: ImageResult[];\n}\n```\n\n### Step 4: Client Wrapper\n\n```typescript\n// src/ideogram/client.ts\nimport type { GenerateRequest, GenerateResponse } from \"./types\";\n\nconst IDEOGRAM_API = \"https://api.ideogram.ai\";\n\nexport class IdeogramClient {\n  constructor(private apiKey: string) {\n    if (!apiKey) throw new Error(\"IDEOGRAM_API_KEY is required\");\n  }\n\n  async generate(request: GenerateRequest): Promise<GenerateResponse> {\n    const response = await fetch(`${IDEOGRAM_API}/generate`, {\n      method: \"POST\",\n      headers: {\n        \"Api-Key\": this.apiKey,\n        \"Content-Type\": \"application/json\",\n      },\n      body: JSON.stringify({ image_request: request }),\n    });\n\n    if (!response.ok) {\n      const body = await response.text();\n      throw new IdeogramError(response.status, body);\n    }\n    return response.json();\n  }\n}\n\nexport class IdeogramError extends Error {\n  constructor(public status: number, public body: string) {\n    super(`Ideogram API error ${status}: ${body}`);\n    this.name = \"IdeogramError\";\n  }\n}\n```\n\n### Step 5: Mock Server for Offline Development\n\n```typescript\n// src/ideogram/mock-server.ts\nimport type { GenerateResponse } from \"./types\";\n\n// Use this in development to avoid burning real credits\nexport function mockGenerate(prompt: string): GenerateResponse {\n  return {\n    created: new Date().toISOString(),\n    data: [{\n      url: `https://placehold.co/1024x1024/333/fff?text=${encodeURIComponent(prompt.slice(0, 30))}`,\n      prompt,\n      resolution: \"1024x1024\",\n      is_image_safe: true,\n      seed: Math.floor(Math.random() * 100000),\n      style_type: \"GENERAL\",\n    }],\n  };\n}\n```\n\n### Step 6: Vitest Tests\n\n```typescript\n// tests/ideogram.test.ts\nimport { describe, it, expect, vi } from \"vitest\";\nimport { IdeogramClient, IdeogramError } from \"../src/ideogram/client\";\nimport { mockGenerate } from \"../src/ideogram/mock-server\";\n\ndescribe(\"IdeogramClient\", () => {\n  it(\"should reject missing API key\", () => {\n    expect(() => new IdeogramClient(\"\")).toThrow(\"IDEOGRAM_API_KEY is required\");\n  });\n\n  it(\"should construct generate request correctly\", async () => {\n    const fetchSpy = vi.spyOn(globalThis, \"fetch\").mockResolvedValue(\n      new Response(JSON.stringify(mockGenerate(\"test\")), { status: 200 })\n    );\n\n    const client = new IdeogramClient(\"test-key\");\n    const result = await client.generate({ prompt: \"test\", model: \"V_2\" });\n\n    expect(fetchSpy).toHaveBeenCalledWith(\n      \"https://api.ideogram.ai/generate\",\n      expect.objectContaining({\n        method: \"POST\",\n        headers: expect.objectContaining({ \"Api-Key\": \"test-key\" }),\n      })\n    );\n    expect(result.data[0].prompt).toBe(\"test\");\n    fetchSpy.mockRestore();\n  });\n\n  it(\"should throw IdeogramError on 401\", async () => {\n    vi.spyOn(globalThis, \"fetch\").mockResolvedValue(\n      new Response(\"Unauthorized\", { status: 401 })\n    );\n\n    const client = new IdeogramClient(\"bad-key\");\n    await expect(client.generate({ prompt: \"test\" })).rejects.toThrow(IdeogramError);\n  });\n});\n\ndescribe(\"mockGenerate\", () => {\n  it(\"should return valid response shape\", () => {\n    const result = mockGenerate(\"hello world\");\n    expect(result.data).toHaveLength(1);\n    expect(result.data[0].is_image_safe).toBe(true);\n    expect(result.data[0].seed).toBeGreaterThan(0);\n  });\n});\n```\n\n### Step 7: Development Scripts\n\n```json\n{\n  \"scripts\": {\n    \"dev\": \"tsx watch src/index.ts\",\n    \"test\": \"vitest run\",\n    \"test:watch\": \"vitest --watch\",\n    \"generate\": \"tsx src/index.ts\"\n  }\n}\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Module not found | Missing dependency | Run `npm install` |\n| Env not loaded | Missing `.env.local` | Copy from `.env.example` |\n| Test timeout | Mocking not set up | Use `mockGenerate` in tests |\n| Credits burned in tests | Using real API in CI | Mock `fetch` in test files |\n\n## Output\n\n- Typed client wrapper for Ideogram API\n- Mock server for offline development\n- Vitest test suite with fetch mocking\n- Fast iteration cycle without spending credits\n\n## Resources\n\n- [Ideogram API Reference](https://developer.ideogram.ai/api-reference)\n- [Vitest Documentation](https://vitest.dev/)\n- [tsx Runner](https://github.com/privatenumber/tsx)\n\n## Next Steps\n\nSee `ideogram-sdk-patterns` for production-ready code patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "ideogram-local-dev-loop",
-    "description": "Configure Ideogram local development with mock responses and testing.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(pnpm:*), Bash(npx:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032094",
   "name": "gamma-debug-bundle",
   "slug": "gamma-debug-bundle",
   "description": "Comprehensive debugging toolkit for Gamma integration issues.",
   "content": "# Gamma Debug Bundle\n\n## Current State\n\n!`node --version 2>/dev/null || echo 'N/A'`\n!`python3 --version 2>/dev/null || echo 'N/A'`\n!`uname -a`\n\n## Overview\n\nDebugging toolkit for Gamma API integration issues. Includes connectivity tests, request tracing, diagnostic scripts, and support ticket templates. Gamma uses a REST API at `https://public-api.gamma.app/v1.0/` with `X-API-KEY` header authentication.\n\n## Prerequisites\n\n- Active Gamma integration\n- Node.js 18+ or Python 3.10+\n- `curl` and `jq` available\n\n## Instructions\n\n### Step 1: Quick Connectivity Test (curl)\n\n```bash\n#!/bin/bash\nset -euo pipefail\necho \"=== Gamma API Diagnostic ===\"\n\n# 1. Check API key\nif [ -z \"${GAMMA_API_KEY:-}\" ]; then\n  echo \"FAIL: GAMMA_API_KEY not set\"; exit 1\nfi\necho \"OK: API key set (${#GAMMA_API_KEY} chars, prefix: ${GAMMA_API_KEY:0:4}...)\"\n\n# 2. Test authentication via /themes endpoint\nSTATUS=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"X-API-KEY: $GAMMA_API_KEY\" \\\n  \"https://public-api.gamma.app/v1.0/themes\")\nif [ \"$STATUS\" = \"200\" ]; then\n  echo \"OK: Authentication successful\"\nelif [ \"$STATUS\" = \"401\" ]; then\n  echo \"FAIL: Invalid API key (401)\"\nelif [ \"$STATUS\" = \"403\" ]; then\n  echo \"FAIL: Account not on Pro+ plan (403)\"\nelse\n  echo \"WARN: Unexpected status $STATUS\"\nfi\n\n# 3. Check latency\necho \"--- Latency (3 samples) ---\"\nfor i in 1 2 3; do\n  LATENCY=$(curl -s -o /dev/null -w \"%{time_total}\" \\\n    -H \"X-API-KEY: $GAMMA_API_KEY\" \\\n    \"https://public-api.gamma.app/v1.0/themes\")\n  echo \"  Request $i: ${LATENCY}s\"\ndone\n\n# 4. List themes (verify API access)\necho \"--- Workspace Themes ---\"\ncurl -s -H \"X-API-KEY: $GAMMA_API_KEY\" \\\n  \"https://public-api.gamma.app/v1.0/themes\" | jq '.[].name' 2>/dev/null || echo \"Could not parse themes\"\n```\n\n### Step 2: TypeScript Diagnostic Script\n\n```typescript\n// scripts/gamma-diagnose.ts\nconst BASE = \"https://public-api.gamma.app/v1.0\";\nconst headers = {\n  \"X-API-KEY\": process.env.GAMMA_API_KEY!,\n  \"Content-Type\": \"application/json\",\n};\n\ninterface TestResult {\n  test: string;\n  status: \"PASS\" | \"FAIL\";\n  detail: string;\n  latencyMs?: number;\n}\n\nasync function diagnose(): Promise<TestResult[]> {\n  const results: TestResult[] = [];\n\n  // Test 1: API key set\n  if (!process.env.GAMMA_API_KEY) {\n    results.push({ test: \"API Key\", status: \"FAIL\", detail: \"GAMMA_API_KEY not set\" });\n    return results;\n  }\n  results.push({\n    test: \"API Key\",\n    status: \"PASS\",\n    detail: `Set (${process.env.GAMMA_API_KEY.length} chars)`,\n  });\n\n  // Test 2: Authentication\n  try {\n    const start = Date.now();\n    const res = await fetch(`${BASE}/themes`, { headers });\n    const latency = Date.now() - start;\n    if (res.ok) {\n      const themes = await res.json();\n      results.push({\n        test: \"Authentication\",\n        status: \"PASS\",\n        detail: `OK, ${themes.length} themes available`,\n        latencyMs: latency,\n      });\n    } else {\n      results.push({\n        test: \"Authentication\",\n        status: \"FAIL\",\n        detail: `HTTP ${res.status}: ${await res.text()}`,\n      });\n    }\n  } catch (err: any) {\n    results.push({ test: \"Authentication\", status: \"FAIL\", detail: err.message });\n  }\n\n  // Test 3: Folders endpoint\n  try {\n    const start = Date.now();\n    const res = await fetch(`${BASE}/folders`, { headers });\n    results.push({\n      test: \"Folders API\",\n      status: res.ok ? \"PASS\" : \"FAIL\",\n      detail: res.ok ? `${(await res.json()).length} folders` : `HTTP ${res.status}`,\n      latencyMs: Date.now() - start,\n    });\n  } catch (err: any) {\n    results.push({ test: \"Folders API\", status: \"FAIL\", detail: err.message });\n  }\n\n  // Test 4: Generation (dry-run style \u2014 creates a minimal generation)\n  try {\n    const start = Date.now();\n    const res = await fetch(`${BASE}/generations`, {\n      method: \"POST\",\n      headers,\n      body: JSON.stringify({\n        content: \"Diagnostic test: one card about testing\",\n        outputFormat: \"presentation\",\n      }),\n    });\n    if (res.ok) {\n      const { generationId } = await res.json();\n      results.push({\n        test: \"Generation API\",\n        status: \"PASS\",\n        detail: `Started: ${generationId}`,\n        latencyMs: Date.now() - start,\n      });\n      // Note: this consumes credits \u2014 skip in automated tests\n    } else {\n      results.push({\n        test: \"Generation API\",\n        status: \"FAIL\",\n        detail: `HTTP ${res.status}: ${await res.text()}`,\n      });\n    }\n  } catch (err: any) {\n    results.push({ test: \"Generation API\", status: \"FAIL\", detail: err.message });\n  }\n\n  // Print report\n  console.log(\"\\n=== Gamma Diagnostic Report ===\");\n  for (const r of results) {\n    const latency = r.latencyMs ? ` (${r.latencyMs}ms)` : \"\";\n    console.log(`  [${r.status}] ${r.test}: ${r.detail}${latency}`);\n  }\n  const failures = results.filter((r) => r.status === \"FAIL\").length;\n  console.log(`\\n${results.length} tests, ${failures} failures\\n`);\n\n  return results;\n}\n\ndiagnose();\n```\n\nRun: `npx tsx scripts/gamma-diagnose.ts`\n\n### Step 3: Debug Client with Request Logging\n\n```typescript\n// src/gamma/debug-client.ts\nexport function createDebugGammaClient(apiKey: string) {\n  const base = \"https://public-api.gamma.app/v1.0\";\n  const headers = { \"X-API-KEY\": apiKey, \"Content-Type\": \"application/json\" };\n\n  async function debugRequest(method: string, path: string, body?: unknown) {\n    const start = Date.now();\n    const url = `${base}${path}`;\n    console.log(`[GAMMA] ${method} ${path}`, body ? JSON.stringify(body).slice(0, 200) : \"\");\n\n    const res = await fetch(url, {\n      method,\n      headers,\n      body: body ? JSON.stringify(body) : undefined,\n    });\n\n    const duration = Date.now() - start;\n    const responseText = await res.text();\n    const status = res.ok ? \"OK\" : \"ERROR\";\n\n    console.log(`[GAMMA] ${status} ${res.status} in ${duration}ms`);\n    if (!res.ok) {\n      console.log(`[GAMMA] Response: ${responseText.slice(0, 500)}`);\n    }\n\n    if (!res.ok) throw new Error(`Gamma ${res.status}: ${responseText}`);\n    return JSON.parse(responseText);\n  }\n\n  return {\n    generate: (body: any) => debugRequest(\"POST\", \"/generations\", body),\n    poll: (id: string) => debugRequest(\"GET\", `/generations/${id}`),\n    listThemes: () => debugRequest(\"GET\", \"/themes\"),\n    listFolders: () => debugRequest(\"GET\", \"/folders\"),\n  };\n}\n```\n\n### Step 4: Support Ticket Template\n\n```markdown\n## Environment\n- Node.js: [version]\n- OS: [os]\n- API version: v1.0\n\n## Issue Description\n[What you expected vs what happened]\n\n## API Request\n- Endpoint: POST /v1.0/generations\n- Status: [HTTP status]\n- Response: [error body, sanitized]\n\n## Steps to Reproduce\n1. [Step 1]\n2. [Step 2]\n\n## Diagnostic Output\n[Paste output from gamma-diagnose.ts]\n\n## Additional Context\n- Account plan: [Pro/Ultra/Teams/Business]\n- Credit balance: [approximate]\n```\n\n## Common Issues Quick Reference\n\n| Symptom | Likely Cause | Fix |\n|---------|-------------|-----|\n| 401 on all requests | Bad API key | Verify key at gamma.app/settings |\n| 403 Forbidden | Not on Pro+ plan | Upgrade at gamma.app/pricing |\n| 429 Too Many Requests | Rate limit | Add backoff; contact Gamma support for higher limits |\n| Generation `status: \"failed\"` | Content too complex | Simplify content, reduce card count |\n| Empty `exportUrl` | No `exportAs` in request | Add `exportAs: \"pdf\"` to generation |\n| Timeout on poll | Very complex generation | Increase poll timeout beyond 3 min |\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `GAMMA_API_KEY required` | Missing env var | Set `GAMMA_API_KEY` in `.env` |\n| Diagnostic generation fails | No credits | Check credit balance at gamma.app |\n| Network timeout | Connectivity issue | Check DNS resolution for `public-api.gamma.app` |\n\n## Resources\n\n- [Gamma Developer Docs](https://developers.gamma.app/)\n- [Gamma Support](https://gamma.app/support)\n- [API Changelog](https://developers.gamma.app/changelog)\n\n## Next Steps\n\nProceed to `gamma-rate-limits` for rate limit management.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "gamma-debug-bundle",
-    "description": "Comprehensive debugging toolkit for Gamma integration issues.",
-    "allowed-tools": "Read, Write, Edit, Bash(node:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

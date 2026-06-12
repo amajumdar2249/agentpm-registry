@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031194",
   "name": "algolia-deploy-integration",
   "slug": "algolia-deploy-integration",
   "description": "Deploy Algolia-powered apps to Vercel, Fly.io, and Cloud Run with proper",
   "content": "# Algolia Deploy Integration\n\n## Overview\n\nDeploy Algolia-powered applications to production platforms with proper API key separation (Admin on backend, Search-Only on frontend) and InstantSearch widget integration.\n\n## Prerequisites\n\n- Algolia App ID + Admin key (backend) + Search-Only key (frontend)\n- Platform CLI installed (vercel, fly, or gcloud)\n- `algoliasearch` v5 for backend, `react-instantsearch` or `instantsearch.js` for frontend\n\n## Instructions\n\n### Step 1: Backend API Key Configuration\n\n#### Vercel\n\n```bash\n# Environment variables in Vercel\nvercel env add ALGOLIA_APP_ID production       # Your Application ID\nvercel env add ALGOLIA_ADMIN_KEY production     # Admin key (server-side only)\nvercel env add ALGOLIA_SEARCH_KEY production    # Search-only key (can be public)\n\n# For client-side access (Next.js convention)\nvercel env add NEXT_PUBLIC_ALGOLIA_APP_ID production\nvercel env add NEXT_PUBLIC_ALGOLIA_SEARCH_KEY production\n```\n\n#### Fly.io\n\n```bash\nfly secrets set \\\n  ALGOLIA_APP_ID=YourApplicationID \\\n  ALGOLIA_ADMIN_KEY=your_admin_key \\\n  ALGOLIA_SEARCH_KEY=your_search_key\n```\n\n#### Google Cloud Run\n\n```bash\n# Store in Secret Manager\necho -n \"your_admin_key\" | gcloud secrets create algolia-admin-key --data-file=-\necho -n \"your_search_key\" | gcloud secrets create algolia-search-key --data-file=-\n\n# Deploy with secrets mounted as env vars\ngcloud run deploy search-service \\\n  --image gcr.io/$PROJECT_ID/search-service \\\n  --set-secrets=ALGOLIA_ADMIN_KEY=algolia-admin-key:latest,ALGOLIA_SEARCH_KEY=algolia-search-key:latest \\\n  --region us-central1\n```\n\n### Step 2: Backend Search API (Next.js API Route)\n\n```typescript\n// app/api/search/route.ts\nimport { algoliasearch } from 'algoliasearch';\nimport { NextRequest, NextResponse } from 'next/server';\n\nconst client = algoliasearch(\n  process.env.ALGOLIA_APP_ID!,\n  process.env.ALGOLIA_ADMIN_KEY!\n);\n\nexport async function GET(request: NextRequest) {\n  const query = request.nextUrl.searchParams.get('q') || '';\n  const page = parseInt(request.nextUrl.searchParams.get('page') || '0');\n\n  const { hits, nbHits, nbPages } = await client.searchSingleIndex({\n    indexName: 'products',\n    searchParams: {\n      query,\n      hitsPerPage: 20,\n      page,\n      attributesToRetrieve: ['name', 'price', 'image_url', 'category'],\n      attributesToHighlight: ['name'],\n    },\n  });\n\n  return NextResponse.json({ hits, totalHits: nbHits, totalPages: nbPages, page });\n}\n```\n\n### Step 3: Frontend with InstantSearch (React)\n\n```bash\nnpm install react-instantsearch algoliasearch\n```\n\n```tsx\n// components/AlgoliaSearch.tsx\nimport { liteClient } from 'algoliasearch/lite';\nimport {\n  InstantSearch,\n  SearchBox,\n  Hits,\n  RefinementList,\n  Pagination,\n  Highlight,\n} from 'react-instantsearch';\n\nconst searchClient = liteClient(\n  process.env.NEXT_PUBLIC_ALGOLIA_APP_ID!,\n  process.env.NEXT_PUBLIC_ALGOLIA_SEARCH_KEY!\n);\n\nfunction Hit({ hit }: { hit: any }) {\n  return (\n    <article>\n      <h3><Highlight attribute=\"name\" hit={hit} /></h3>\n      <p>${hit.price}</p>\n      <p>{hit.category}</p>\n    </article>\n  );\n}\n\nexport default function AlgoliaSearch() {\n  return (\n    <InstantSearch searchClient={searchClient} indexName=\"products\">\n      <SearchBox placeholder=\"Search products...\" />\n      <div style={{ display: 'flex', gap: '2rem' }}>\n        <aside>\n          <h4>Category</h4>\n          <RefinementList attribute=\"category\" />\n          <h4>Brand</h4>\n          <RefinementList attribute=\"brand\" searchable />\n        </aside>\n        <main>\n          <Hits hitComponent={Hit} />\n          <Pagination />\n        </main>\n      </div>\n    </InstantSearch>\n  );\n}\n```\n\n### Step 4: Frontend with Vanilla InstantSearch.js\n\n```bash\nnpm install instantsearch.js algoliasearch\n```\n\n```typescript\nimport instantsearch from 'instantsearch.js';\nimport { searchBox, hits, refinementList, pagination } from 'instantsearch.js/es/widgets';\nimport { liteClient } from 'algoliasearch/lite';\n\nconst searchClient = liteClient('YourAppID', 'YourSearchOnlyKey');\n\nconst search = instantsearch({\n  indexName: 'products',\n  searchClient,\n});\n\nsearch.addWidgets([\n  searchBox({ container: '#searchbox' }),\n  hits({\n    container: '#hits',\n    templates: {\n      item: (hit, { html, components }) => html`\n        <article>\n          <h3>${components.Highlight({ hit, attribute: 'name' })}</h3>\n          <p>$${hit.price}</p>\n        </article>\n      `,\n    },\n  }),\n  refinementList({ container: '#category-filter', attribute: 'category' }),\n  pagination({ container: '#pagination' }),\n]);\n\nsearch.start();\n```\n\n### Step 5: Health Check Endpoint\n\n```typescript\n// app/api/health/route.ts\nimport { algoliasearch } from 'algoliasearch';\n\nconst client = algoliasearch(process.env.ALGOLIA_APP_ID!, process.env.ALGOLIA_ADMIN_KEY!);\n\nexport async function GET() {\n  const start = Date.now();\n  try {\n    const { items } = await client.listIndices();\n    return Response.json({\n      status: 'healthy',\n      algolia: {\n        connected: true,\n        latencyMs: Date.now() - start,\n        indexCount: items.length,\n      },\n    });\n  } catch (error) {\n    return Response.json({\n      status: 'degraded',\n      algolia: { connected: false, error: String(error) },\n    }, { status: 503 });\n  }\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `NEXT_PUBLIC_` var undefined | Not set in Vercel env | Add with `vercel env add` |\n| InstantSearch shows no results | Wrong Search-Only key | Verify key ACL includes `search` |\n| Backend write fails on Vercel | Using search key for indexing | Use `ALGOLIA_ADMIN_KEY` (non-public) |\n| Cold start timeout | Large client init | Use lite client where possible |\n\n## Resources\n\n- [InstantSearch.js](https://www.algolia.com/doc/guides/building-search-ui/what-is-instantsearch/js/)\n- [React InstantSearch](https://www.algolia.com/doc/guides/building-search-ui/what-is-instantsearch/react/)\n- [Vercel Environment Variables](https://vercel.com/docs/environment-variables)\n\n## Next Steps\n\nFor event tracking and analytics, see `algolia-webhooks-events`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "algolia-deploy-integration",
-    "description": "Deploy Algolia-powered apps to Vercel, Fly.io, and Cloud Run with proper",
-    "Trigger": "deploy algolia\", \"algolia Vercel\", \"algolia production deploy\",",
-    "allowed-tools": "Read, Write, Edit, Bash(vercel:*), Bash(fly:*), Bash(gcloud:*), Bash(npm:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

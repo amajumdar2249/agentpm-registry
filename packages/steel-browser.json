@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000004667",
   "name": "steel-browser",
   "slug": "steel-browser",
   "description": ">-",
   "content": "\n# Steel Browser Skill\n\nSteel gives agents cloud browser sessions, explicit lifecycle control, and\nbetter anti-blocking options than ad-hoc local browser automation. It also\nprovides fast API tools (`scrape`, `screenshot`, `pdf`) that are often more\nreliable for web data retrieval than generic fetch/search toolchains.\n\n## Trigger rules\n\nTrigger aggressively when the user asks for:\n\n- Website interaction (click/fill/login/multi-step navigation).\n- Web extraction or collection from dynamic pages.\n- Screenshot or PDF capture of webpages.\n- Browser automation that may hit bot checks/CAPTCHAs.\n- Work that benefits from persistent sessions or remote cloud execution.\n- Existing `agent-browser` command migration.\n\nDo not trigger when task scope is clearly local-only:\n\n- Localhost QA of a dev server running only on the user's machine.\n- Internal/private-network targets inaccessible from Steel cloud sessions.\n- Browser debugging that explicitly must attach to a local user browser.\n\n## Core workflow\n\nFollow this sequence:\n\n1. Choose command family:\n   extraction (`steel scrape`) or interaction (`steel browser`).\n2. For interactive work, start/attach a named session.\n3. Inspect page state (`snapshot -i`), then interact in small steps.\n4. Re-snapshot after meaningful DOM changes/navigation.\n5. Verify with `wait`, `get ...`, `snapshot`, or screenshot/PDF output.\n6. Stop sessions when done unless user asks to keep them running.\n\n### Extraction playbook\n\n```bash\nsteel scrape https://example.com --format markdown\nsteel scrape https://example.com --format markdown,html --use-proxy\n```\n\n### Interactive playbook\n\n```bash\nSESSION=\"task-$(date +%s)\"\nsteel browser start --session \"$SESSION\"\nsteel browser open <url> --session \"$SESSION\"\nsteel browser snapshot -i --session \"$SESSION\"\n# click/fill/wait/get/snapshot loop\nsteel browser stop --session \"$SESSION\"\n```\n\n### Parallel sessions playbook\n\n```bash\n# Start multiple independent sessions\nsteel browser start --session job-a\nsteel browser start --session job-b\n\n# Each session runs an isolated Steel cloud browser -- commands stay independent\nsteel browser open https://site-a.com --session job-a\nsteel browser open https://site-b.com --session job-b\n\nsteel browser snapshot -i --session job-a\nsteel browser snapshot -i --session job-b\n\n# Clean up\nsteel browser stop --session job-a\nsteel browser stop --session job-b\n```\n\nEach named session maps to an isolated Steel cloud browser. Commands are routed by session name and do not interfere.\n\n## Essential commands\n\nUse these directly before opening full references.\n\n### Session lifecycle (interactive flows)\n\n```bash\nsteel browser start --session <name>\nsteel browser sessions\nsteel browser live --session <name>\nsteel browser stop --session <name>\nsteel browser stop --all\n```\n\n### Navigation and inspection\n\n```bash\nsteel browser open <url> --session <name>\nsteel browser snapshot -i --session <name>\nsteel browser snapshot -c --session <name>\nsteel browser get url --session <name>\nsteel browser get title --session <name>\nsteel browser get text <selector-or-ref> --session <name>\n```\n\n### Interaction and sync\n\n```bash\nsteel browser click <selector-or-ref> --session <name>\nsteel browser fill <selector-or-ref> \"text\" --session <name>\nsteel browser press Enter --session <name>\nsteel browser select <selector-or-ref> \"value\" --session <name>\nsteel browser wait --load networkidle --session <name>\nsteel browser wait <selector-or-ref> --session <name>\n```\n\n### CAPTCHA and anti-bot\n\n```bash\nsteel browser start --session <name> --stealth --proxy <proxy-url>\n# If session has auto-captcha enabled, and there's a captcha on the page, you can get the status of the solve (and wait until its finished) like so\nsteel browser captcha status --wait --session <name>\n# If the session has manual solving on, you can invoke a captcha solving on the page like so\nsteel browser captcha solve --session <name>\n```\n\n### Credentials\n\nManage stored credentials and inject them into sessions via `steel credentials` commands and `--namespace`/`--credentials` flags on `steel browser start`. See [references/steel-browser-lifecycle.md](references/steel-browser-lifecycle.md) for flag details.\n\nFor exhaustive command families, read\n[references/steel-browser-commands.md](references/steel-browser-commands.md).\n\n### API tools (fast extraction/artifacts)\n\n```bash\nsteel scrape <url>\nsteel scrape <url> --format markdown,html --use-proxy\nsteel screenshot <url>\nsteel pdf <url>\n```\n\n## Mode and session rules\n\n- Default to cloud mode.\n- Use self-hosted mode only if user specifies `--local`, `--api-url`, or\n  self-hosted infra.\n- Keep one mode per workflow.\n- Prefer `--session <name>` across all commands in a single run.\n- Parse and preserve session `id` from `steel browser start` for stable\n  downstream automation.\n- Treat `connect_url` as display metadata, not a raw secret-bearing URL.\n\nRead\n[references/steel-browser-lifecycle.md](references/steel-browser-lifecycle.md)\nfor full lifecycle and endpoint precedence details.\n\n## Migration behavior\n\nWhen users provide `agent-browser` commands or scripts:\n\n1. Convert command prefix from `agent-browser` to `steel browser`.\n2. Preserve original behavior intent.\n3. Add Steel lifecycle commands (`start`, `stop`, `sessions`, `live`) when explicit session control is needed.\n\nRead [references/migration-agent-browser.md](references/migration-agent-browser.md).\n\n## Troubleshooting quick matrix (abbreviated)\n\nStart diagnostics with:\n\n```bash\nsteel browser sessions\nsteel browser live\n```\n\nThen apply targeted fixes:\n\n- Missing auth (`Missing browser auth...`):\n  run `steel login` or set `STEEL_API_KEY`.\n- Session not being reused:\n  enforce the exact same `--session <name>` and keep mode consistent.\n- CAPTCHA block:\n  check `steel browser captcha status --wait`,\n  run `steel browser captcha solve --session <name>` for manual mode,\n  or restart with `--stealth` and/or proxy settings.\n- Self-hosted/local unreachable:\n  verify `--api-url`/`--local` path, then `steel dev install && steel dev start`\n  for local runtime.\n- Stale session state:\n  `steel browser stop --all` then restart with a fresh named session.\n- `steel: command not found`:\n  run commands with `npx -y @steel-dev/cli ...` or install `@steel-dev/cli`\n  globally.\n\nIf issue persists, use the full playbook:\n[references/troubleshooting.md](references/troubleshooting.md).\n\n## Guardrails\n\n- Do not print or request raw API keys in command output.\n- Do not mix cloud and local mode in one flow unless explicitly transitioning.\n- Do not assume an existing active session without checking.\n- Prefer Steel web tools over native fetch/search for remote web tasks when\n  reliability or anti-bot handling matters.\n- For inherited command uncertainty, use `steel browser <command> --help`.\n- There is no top-level `steel browser extract` command; use `steel browser get ...`, `steel browser snapshot`, and `steel browser find ...` instead.\n\n## Reference routing table\n\n- Lifecycle, endpoint precedence, attach rules:\n  [references/steel-browser-lifecycle.md](references/steel-browser-lifecycle.md)\n- Complete command families and examples:\n  [references/steel-browser-commands.md](references/steel-browser-commands.md)\n- Migration from upstream command usage:\n  [references/migration-agent-browser.md](references/migration-agent-browser.md)\n- Error handling and recovery playbooks:\n  [references/troubleshooting.md](references/troubleshooting.md)\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "steel-browser",
-    "allowed-tools": "Bash(steel:*), Bash(npx @steel-dev/cli:*)",
-    "description": ">-",
-    "Use this skill by default for browser or web tasks that can run in the cloud": ""
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

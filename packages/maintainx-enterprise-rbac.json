@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032587",
   "name": "maintainx-enterprise-rbac",
   "slug": "maintainx-enterprise-rbac",
   "description": "Configure enterprise role-based access control for MaintainX integrations.",
   "content": "# MaintainX Enterprise RBAC\n\n## Overview\n\nConfigure enterprise role-based access control for MaintainX integrations with role definitions, location-scoped permissions, and audit logging.\n\n## Prerequisites\n\n- MaintainX Enterprise plan\n- Understanding of RBAC concepts\n- Node.js 18+\n\n## MaintainX Role Hierarchy\n\n```\nOrganization Admin\n\u251c\u2500\u2500 can manage all locations, users, teams, and settings\n\u251c\u2500\u2500 Full API access\n\u2502\nLocation Manager\n\u251c\u2500\u2500 can manage work orders, assets at assigned locations\n\u251c\u2500\u2500 API: filtered by locationId\n\u2502\nTechnician\n\u251c\u2500\u2500 can view/update assigned work orders\n\u251c\u2500\u2500 API: filtered by assigneeId\n\u2502\nViewer (Read-Only)\n\u2514\u2500\u2500 can view work orders, assets, locations\n    \u2514\u2500\u2500 API: GET endpoints only\n```\n\n## Instructions\n\n### Step 1: Role Definitions\n\n```typescript\n// src/rbac/roles.ts\n\nexport type Role = 'admin' | 'manager' | 'technician' | 'viewer';\n\ninterface Permission {\n  resource: string;\n  actions: Array<'create' | 'read' | 'update' | 'delete'>;\n  scope?: 'all' | 'location' | 'assigned';\n}\n\nexport const ROLE_PERMISSIONS: Record<Role, Permission[]> = {\n  admin: [\n    { resource: 'workorders', actions: ['create', 'read', 'update', 'delete'], scope: 'all' },\n    { resource: 'assets', actions: ['create', 'read', 'update', 'delete'], scope: 'all' },\n    { resource: 'locations', actions: ['create', 'read', 'update', 'delete'], scope: 'all' },\n    { resource: 'users', actions: ['create', 'read', 'update', 'delete'], scope: 'all' },\n    { resource: 'teams', actions: ['create', 'read', 'update', 'delete'], scope: 'all' },\n  ],\n  manager: [\n    { resource: 'workorders', actions: ['create', 'read', 'update'], scope: 'location' },\n    { resource: 'assets', actions: ['create', 'read', 'update'], scope: 'location' },\n    { resource: 'locations', actions: ['read'], scope: 'location' },\n    { resource: 'users', actions: ['read'], scope: 'all' },\n    { resource: 'teams', actions: ['read'], scope: 'all' },\n  ],\n  technician: [\n    { resource: 'workorders', actions: ['read', 'update'], scope: 'assigned' },\n    { resource: 'assets', actions: ['read'], scope: 'location' },\n    { resource: 'locations', actions: ['read'], scope: 'location' },\n  ],\n  viewer: [\n    { resource: 'workorders', actions: ['read'], scope: 'all' },\n    { resource: 'assets', actions: ['read'], scope: 'all' },\n    { resource: 'locations', actions: ['read'], scope: 'all' },\n  ],\n};\n```\n\n### Step 2: Permission Middleware\n\n```typescript\n// src/rbac/middleware.ts\nimport express from 'express';\n\ninterface AuthContext {\n  userId: number;\n  role: Role;\n  locationIds: number[];  // Locations this user can access\n}\n\nfunction authorize(resource: string, action: 'create' | 'read' | 'update' | 'delete') {\n  return (req: express.Request, res: express.Response, next: express.NextFunction) => {\n    const auth = req.user as AuthContext;\n    if (!auth) return res.status(401).json({ error: 'Not authenticated' });\n\n    const perms = ROLE_PERMISSIONS[auth.role];\n    const match = perms.find(\n      (p) => p.resource === resource && p.actions.includes(action),\n    );\n\n    if (!match) {\n      return res.status(403).json({\n        error: 'Insufficient permissions',\n        required: { resource, action },\n        role: auth.role,\n      });\n    }\n\n    // Apply scope filtering\n    if (match.scope === 'location') {\n      req.query.locationId = auth.locationIds.join(',');\n    } else if (match.scope === 'assigned') {\n      req.query.assigneeId = String(auth.userId);\n    }\n\n    next();\n  };\n}\n\n// Usage in routes\nconst router = express.Router();\n\nrouter.get('/api/workorders', authorize('workorders', 'read'), async (req, res) => {\n  const client = new MaintainXClient();\n  const { data } = await client.getWorkOrders(req.query as any);\n  res.json(data);\n});\n\nrouter.post('/api/workorders', authorize('workorders', 'create'), async (req, res) => {\n  const client = new MaintainXClient();\n  const { data } = await client.createWorkOrder(req.body);\n  res.json(data);\n});\n```\n\n### Step 3: Scoped API Keys\n\nCreate separate API keys per role to enforce server-side access control:\n\n```typescript\n// src/rbac/scoped-clients.ts\n\nconst scopedClients: Record<Role, MaintainXClient> = {\n  admin: new MaintainXClient(process.env.MAINTAINX_API_KEY_ADMIN),\n  manager: new MaintainXClient(process.env.MAINTAINX_API_KEY_MANAGER),\n  technician: new MaintainXClient(process.env.MAINTAINX_API_KEY_TECH),\n  viewer: new MaintainXClient(process.env.MAINTAINX_API_KEY_VIEWER),\n};\n\nfunction getClientForRole(role: Role): MaintainXClient {\n  const client = scopedClients[role];\n  if (!client) throw new Error(`No client configured for role: ${role}`);\n  return client;\n}\n```\n\n### Step 4: User and Team Management\n\n```typescript\n// Fetch all users and their roles\nasync function listUsersWithRoles(client: MaintainXClient) {\n  const { data } = await client.getUsers({ limit: 100 });\n  const { data: teams } = await client.request('GET', '/teams');\n\n  const userTeams = new Map<number, string[]>();\n  for (const team of teams.teams) {\n    for (const member of team.members || []) {\n      const existing = userTeams.get(member.id) || [];\n      existing.push(team.name);\n      userTeams.set(member.id, existing);\n    }\n  }\n\n  for (const user of data.users) {\n    const teamList = userTeams.get(user.id) || [];\n    console.log(`  ${user.firstName} ${user.lastName} (${user.email})`);\n    console.log(`    Role: ${user.role || 'N/A'} | Teams: ${teamList.join(', ') || 'None'}`);\n  }\n}\n```\n\n### Step 5: Audit Logging\n\n```typescript\n// src/rbac/audit.ts\nfunction logAccess(auth: AuthContext, resource: string, action: string, result: 'allow' | 'deny') {\n  const entry = {\n    timestamp: new Date().toISOString(),\n    type: 'access_control',\n    userId: auth.userId,\n    role: auth.role,\n    resource,\n    action,\n    result,\n    locationScope: auth.locationIds,\n  };\n  // Send to your log aggregation (CloudWatch, Datadog, etc.)\n  console.log(JSON.stringify(entry));\n}\n```\n\n## Output\n\n- Role definitions mapping roles to resource permissions and scopes\n- Express middleware enforcing RBAC on all API proxy routes\n- Location-scoped and assignee-scoped query filtering\n- Scoped API keys per role for defense in depth\n- Audit logging for all access control decisions\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| 403 on valid user | Missing permission for action | Check `ROLE_PERMISSIONS` mapping |\n| Empty results for manager | Location scope filter too narrow | Verify `locationIds` in auth context |\n| Scoped key missing | Environment variable not set | Add `MAINTAINX_API_KEY_{ROLE}` to env |\n| Audit log gaps | Middleware not applied to route | Ensure `authorize()` is on all routes |\n\n## Resources\n\n- [MaintainX Enterprise](https://www.getmaintainx.com/enterprise)\n- [OWASP Access Control Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Access_Control_Cheat_Sheet.html)\n- [MaintainX API Reference](https://developer.maintainx.com/reference)\n\n## Next Steps\n\nFor complete platform migration, see `maintainx-migration-deep-dive`.\n\n## Examples\n\n**Check if a user can perform an action**:\n\n```typescript\nfunction canPerform(role: Role, resource: string, action: string): boolean {\n  const perms = ROLE_PERMISSIONS[role];\n  return perms.some((p) => p.resource === resource && p.actions.includes(action as any));\n}\n\nconsole.log(canPerform('technician', 'workorders', 'update'));  // true\nconsole.log(canPerform('technician', 'workorders', 'delete'));  // false\nconsole.log(canPerform('viewer', 'workorders', 'read'));        // true\n```\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "maintainx-enterprise-rbac",
-    "description": "Configure enterprise role-based access control for MaintainX integrations.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

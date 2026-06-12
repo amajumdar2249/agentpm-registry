@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031625",
   "name": "coderabbit-incident-runbook",
   "slug": "coderabbit-incident-runbook",
   "description": "Execute CodeRabbit incident response procedures when reviews stop working",
   "content": "# CodeRabbit Incident Runbook\n\n## Overview\n\nRapid incident response procedures when CodeRabbit stops reviewing PRs, blocks merges, or behaves incorrectly. Since CodeRabbit is a managed SaaS service, incidents fall into two categories: (1) CodeRabbit service outage (check their status page), or (2) local configuration/permission issues (fix on your side).\n\n## Severity Levels\n\n| Level | Symptom | Response Time | Action |\n|-------|---------|---------------|--------|\n| P1 | PRs blocked, cannot merge | Immediate | Bypass check, notify team |\n| P2 | Reviews not posting | < 1 hour | Diagnose installation |\n| P3 | Reviews delayed (> 15 min) | < 4 hours | Check service status |\n| P4 | Incorrect reviews | Next business day | Tune configuration |\n\n## Instructions\n\n### Step 1: Quick Triage (2 Minutes)\n\n```bash\nset -euo pipefail\necho \"=== CodeRabbit Quick Triage ===\"\n\n# 1. Check CodeRabbit status page\necho \"--- Service Status ---\"\nSTATUS=$(curl -sf https://status.coderabbit.ai 2>/dev/null && echo \"REACHABLE\" || echo \"UNREACHABLE\")\necho \"Status page: $STATUS\"\necho \"Check manually: https://status.coderabbit.ai\"\n\necho \"\"\necho \"--- Decision ---\"\necho \"If status.coderabbit.ai shows an incident:\"\necho \"  \u2192 CodeRabbit-side issue. Wait for resolution. Use bypass if blocking.\"\necho \"\"\necho \"If status page is green:\"\necho \"  \u2192 Local issue. Check installation, config, permissions.\"\n```\n\n### Step 2: P1 Emergency -- PRs Blocked\n\n```bash\nset -euo pipefail\nOWNER=\"${1:-your-org}\"\nREPO=\"${2:-your-repo}\"\n\necho \"=== P1: EMERGENCY BYPASS ===\"\n\n# Option A: Remove CodeRabbit from required checks (temporary)\necho \"--- Option A: Remove Required Check ---\"\necho \"gh api repos/$OWNER/$REPO/branches/main/protection --method DELETE\"\necho \"(This removes ALL branch protection. Re-apply after incident.)\"\n\necho \"\"\necho \"--- Option B: Admin Merge ---\"\necho \"Org admins can merge even when checks fail.\"\necho \"Settings > Branches > Branch protection > uncheck 'Include administrators'\"\n\necho \"\"\necho \"--- Option C: Force Re-Review ---\"\necho \"On the blocked PR, post:\"\necho \"  @coderabbitai full review\"\necho \"\"\necho \"Wait 5 minutes. If no response, use Option A or B.\"\n```\n\n### Step 3: P2 -- Reviews Not Posting\n\n```bash\nset -euo pipefail\nOWNER=\"${1:-your-org}\"\nREPO=\"${2:-your-repo}\"\n\necho \"=== P2: Reviews Not Posting ===\"\n\n# Check installation\necho \"--- Installation Check ---\"\nINSTALLED=$(gh api \"repos/$OWNER/$REPO/installation\" --jq '.app_slug' 2>/dev/null || echo \"NOT_FOUND\")\necho \"CodeRabbit App: $INSTALLED\"\n\nif [ \"$INSTALLED\" != \"coderabbitai\" ]; then\n  echo \"FIX: Reinstall CodeRabbit at https://github.com/apps/coderabbitai\"\n  exit 1\nfi\n\n# Check recent PRs for reviews\necho \"\"\necho \"--- Recent PR Reviews ---\"\nfor PR_NUM in $(gh api \"repos/$OWNER/$REPO/pulls?state=open&per_page=5\" --jq '.[].number'); do\n  TITLE=$(gh api \"repos/$OWNER/$REPO/pulls/$PR_NUM\" --jq '.title' 2>/dev/null)\n  CR=$(gh api \"repos/$OWNER/$REPO/pulls/$PR_NUM/reviews\" \\\n    --jq '[.[] | select(.user.login==\"coderabbitai[bot]\")] | length' 2>/dev/null || echo \"0\")\n  echo \"PR #$PR_NUM ($TITLE): $CR CodeRabbit reviews\"\ndone\n\necho \"\"\necho \"--- Config Check ---\"\nif [ -f .coderabbit.yaml ]; then\n  python3 -c \"\nimport yaml\nconfig = yaml.safe_load(open('.coderabbit.yaml'))\nreviews = config.get('reviews', {})\nauto = reviews.get('auto_review', {})\nprint(f'auto_review.enabled: {auto.get(\\\"enabled\\\", \\\"not set\\\")}')\nprint(f'auto_review.drafts: {auto.get(\\\"drafts\\\", \\\"not set\\\")}')\nprint(f'base_branches: {auto.get(\\\"base_branches\\\", \\\"all branches\\\")}')\nprint(f'ignore_title_keywords: {auto.get(\\\"ignore_title_keywords\\\", \\\"none\\\")}')\n\" 2>&1\nelse\n  echo \".coderabbit.yaml: NOT FOUND (CodeRabbit uses defaults)\"\nfi\n```\n\n### Step 4: P3 -- Reviews Delayed\n\n```markdown\n# Reviews typically take:\n# - Small PRs (< 200 lines): 2-3 minutes\n# - Medium PRs (200-500 lines): 3-7 minutes\n# - Large PRs (500-1000 lines): 7-12 minutes\n# - Very large PRs (1000+ lines): 12-15+ minutes\n\n# If reviews are delayed beyond expected time:\n1. Check status.coderabbit.ai for service degradation\n2. Try forcing a re-review: @coderabbitai full review\n3. Check if the PR has an unusual number of files (> 100)\n4. Check if the PR is a draft (drafts may be skipped)\n5. Verify the PR targets a configured base branch\n\n# If consistently slow:\n# - Split PRs to under 500 lines\n# - Add path_filters to exclude large generated files\n```\n\n### Step 5: P4 -- Incorrect or Noisy Reviews\n\n```yaml\n# If CodeRabbit is posting irrelevant or incorrect reviews:\n\n# 1. Reply to the incorrect comment explaining why it's wrong:\n# \"We intentionally do this because [reason]. Don't flag this pattern.\"\n# CodeRabbit creates a learning from your feedback.\n\n# 2. Adjust the review profile:\nreviews:\n  profile: \"chill\"      # Reduce comment volume\n\n# 3. Add contextual instructions to prevent misguided comments:\n  path_instructions:\n    - path: \"src/legacy/**\"\n      instructions: |\n        Legacy code. ONLY flag security issues and bugs.\n        Do NOT comment on style, naming, or refactoring.\n```\n\n### Step 6: Communication Template\n\n```markdown\n# Internal Slack/Teams message:\n\n## CodeRabbit Incident\n\n**Status**: [INVESTIGATING | MITIGATING | RESOLVED]\n**Impact**: [CodeRabbit reviews are not posting / PRs are blocked / Reviews are delayed]\n**Service status**: [status.coderabbit.ai shows {status}]\n\n**Current action**: [Checking installation / Applied bypass / Waiting for service recovery]\n\n**Workaround**: [Admin merge available / Required check temporarily removed]\n\n**Next update**: [time]\n```\n\n### Step 7: Post-Incident Recovery\n\n```bash\nset -euo pipefail\nOWNER=\"${1:-your-org}\"\nREPO=\"${2:-your-repo}\"\n\necho \"=== Post-Incident Recovery ===\"\n\n# 1. Re-enable branch protection if it was removed\necho \"--- Re-enabling Branch Protection ---\"\ngh api \"repos/$OWNER/$REPO/branches/main/protection\" \\\n  --method PUT \\\n  --field 'required_status_checks={\"strict\":true,\"contexts\":[\"coderabbitai\"]}' \\\n  --field 'required_pull_request_reviews={\"required_approving_review_count\":1}' \\\n  --field 'enforce_admins=false' \\\n  --field 'restrictions=null'\n\necho \"Branch protection restored.\"\n\n# 2. Trigger re-review on any PRs that were merged without review\necho \"\"\necho \"--- PRs Merged During Incident ---\"\necho \"Review these PRs manually for any issues:\"\ngh api \"repos/$OWNER/$REPO/pulls?state=closed&per_page=10\" \\\n  --jq '.[] | select(.merged_at != null) | \"#\\(.number) \\(.title) (merged \\(.merged_at))\"'\n\n# 3. Verify CodeRabbit is working again\necho \"\"\necho \"--- Verification ---\"\necho \"Create a test PR or post '@coderabbitai full review' on an open PR.\"\n```\n\n## Output\n\n- Incident severity classified and appropriate response executed\n- Emergency bypass applied if PRs are blocked\n- Root cause identified (service outage vs local issue)\n- Communication sent to stakeholders\n- Branch protection restored after incident\n- Post-incident review of PRs merged without review\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Cannot remove branch protection | Not an org admin | Escalate to org admin |\n| Status page unreachable | Network issue | Try from phone or VPN |\n| Re-review command ignored | CodeRabbit outage | Use admin bypass |\n| Branch protection restore fails | API permissions | Use GitHub UI instead |\n\n## Resources\n\n- [CodeRabbit Status Page](https://status.coderabbit.ai)\n- [CodeRabbit Discord](https://discord.gg/coderabbit)\n- [CodeRabbit Support](mailto:support@coderabbit.ai)\n- [GitHub Branch Protection API](https://docs.github.com/en/rest/branches/branch-protection)\n\n## Next Steps\n\nFor data handling, see `coderabbit-data-handling`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "coderabbit-incident-runbook",
-    "description": "Execute CodeRabbit incident response procedures when reviews stop working",
-    "allowed-tools": "Read, Grep, Bash(gh:*), Bash(curl:*), Bash(git:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

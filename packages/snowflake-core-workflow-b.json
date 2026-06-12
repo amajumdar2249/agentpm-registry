@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033280",
   "name": "snowflake-core-workflow-b",
   "slug": "snowflake-core-workflow-b",
   "description": "Execute Snowflake data transformation with streams, tasks, and dynamic",
   "content": "# Snowflake Core Workflow B \u2014 Data Transformation\n\n## Overview\n\nBuild ELT pipelines using streams (change data capture), tasks (scheduling), and dynamic tables (declarative transforms).\n\n## Prerequisites\n\n- Data loaded into Snowflake (via `snowflake-core-workflow-a`)\n- Understanding of ELT vs ETL patterns\n- Role with `CREATE TASK`, `CREATE STREAM` privileges\n\n## Instructions\n\n### Step 1: Create a Stream for Change Data Capture\n\n```sql\n-- Track changes on the raw orders table\nCREATE OR REPLACE STREAM orders_stream ON TABLE raw_orders\n  APPEND_ONLY = FALSE;\n\n-- Append-only stream (lighter weight, inserts only)\nCREATE OR REPLACE STREAM events_stream ON TABLE raw_events\n  APPEND_ONLY = TRUE;\n\n-- Check what's changed since last consumption\nSELECT * FROM orders_stream;\n-- METADATA$ACTION = 'INSERT' | 'DELETE'\n-- METADATA$ISUPDATE = TRUE if row is part of an UPDATE\n-- METADATA$ROW_ID = unique row identifier\n```\n\n### Step 2: Create a Task to Process Stream Data\n\n```sql\n-- Transform task runs when stream has data\nCREATE OR REPLACE TASK transform_orders\n  WAREHOUSE = TRANSFORM_WH\n  SCHEDULE = '5 MINUTE'\n  WHEN SYSTEM$STREAM_HAS_DATA('orders_stream')\nAS\n  MERGE INTO dim_orders AS target\n  USING (\n    SELECT\n      order_id,\n      customer_id,\n      amount::DECIMAL(12,2) AS amount,\n      order_date::TIMESTAMP_NTZ AS order_date,\n      CASE\n        WHEN amount >= 1000 THEN 'high_value'\n        WHEN amount >= 100 THEN 'medium_value'\n        ELSE 'standard'\n      END AS order_tier,\n      CURRENT_TIMESTAMP() AS processed_at\n    FROM orders_stream\n    WHERE METADATA$ACTION = 'INSERT'\n  ) AS source\n  ON target.order_id = source.order_id\n  WHEN MATCHED THEN UPDATE SET\n    target.amount = source.amount,\n    target.order_tier = source.order_tier,\n    target.processed_at = source.processed_at\n  WHEN NOT MATCHED THEN INSERT\n    (order_id, customer_id, amount, order_date, order_tier, processed_at)\n  VALUES\n    (source.order_id, source.customer_id, source.amount,\n     source.order_date, source.order_tier, source.processed_at);\n\n-- Enable the task\nALTER TASK transform_orders RESUME;\n```\n\n### Step 3: Build a Task DAG (Directed Acyclic Graph)\n\n```sql\n-- Root task: aggregate daily metrics\nCREATE OR REPLACE TASK daily_metrics_root\n  WAREHOUSE = TRANSFORM_WH\n  SCHEDULE = 'USING CRON 0 6 * * * America/New_York'\nAS\n  INSERT INTO daily_order_metrics\n  SELECT\n    CURRENT_DATE() - 1 AS metric_date,\n    COUNT(*) AS total_orders,\n    SUM(amount) AS total_revenue,\n    AVG(amount) AS avg_order_value,\n    COUNT(DISTINCT customer_id) AS unique_customers\n  FROM dim_orders\n  WHERE order_date >= CURRENT_DATE() - 1\n    AND order_date < CURRENT_DATE();\n\n-- Child task: runs after root completes\nCREATE OR REPLACE TASK update_customer_segments\n  WAREHOUSE = TRANSFORM_WH\n  AFTER daily_metrics_root\nAS\n  MERGE INTO customer_segments AS target\n  USING (\n    SELECT customer_id,\n      COUNT(*) AS order_count,\n      SUM(amount) AS lifetime_value,\n      CASE\n        WHEN SUM(amount) >= 10000 THEN 'platinum'\n        WHEN SUM(amount) >= 5000 THEN 'gold'\n        WHEN SUM(amount) >= 1000 THEN 'silver'\n        ELSE 'bronze'\n      END AS segment\n    FROM dim_orders GROUP BY customer_id\n  ) AS source\n  ON target.customer_id = source.customer_id\n  WHEN MATCHED THEN UPDATE SET\n    target.order_count = source.order_count,\n    target.lifetime_value = source.lifetime_value,\n    target.segment = source.segment\n  WHEN NOT MATCHED THEN INSERT VALUES\n    (source.customer_id, source.order_count, source.lifetime_value, source.segment);\n\n-- Resume tasks (children first, then root)\nALTER TASK update_customer_segments RESUME;\nALTER TASK daily_metrics_root RESUME;\n```\n\n### Step 4: Dynamic Tables (Declarative Alternative)\n\n```sql\n-- Auto-refreshes based on target freshness \u2014 no streams/tasks needed\nCREATE OR REPLACE DYNAMIC TABLE customer_360\n  TARGET_LAG = '10 minutes'\n  WAREHOUSE = TRANSFORM_WH\nAS\n  SELECT\n    c.customer_id, c.name, c.email,\n    COUNT(o.order_id) AS total_orders,\n    COALESCE(SUM(o.amount), 0) AS lifetime_value,\n    MAX(o.order_date) AS last_order_date,\n    DATEDIFF('day', MAX(o.order_date), CURRENT_DATE()) AS days_since_last_order\n  FROM customers c\n  LEFT JOIN dim_orders o ON c.customer_id = o.customer_id\n  GROUP BY c.customer_id, c.name, c.email;\n\n-- Monitor refresh status\nSELECT name, target_lag, refresh_mode, scheduling_state\nFROM TABLE(INFORMATION_SCHEMA.DYNAMIC_TABLES())\nWHERE name = 'CUSTOMER_360';\n```\n\n### Step 5: Monitor Pipelines\n\n```sql\n-- Task run history\nSELECT name, state, error_message, scheduled_time\nFROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(\n  SCHEDULED_TIME_RANGE_START => DATEADD(hours, -24, CURRENT_TIMESTAMP())\n))\nORDER BY scheduled_time DESC;\n\n-- Find failed runs\nSELECT name, state, error_message, scheduled_time\nFROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY())\nWHERE state = 'FAILED'\n  AND scheduled_time >= DATEADD(hours, -24, CURRENT_TIMESTAMP());\n\n-- Stream lag check \u2014 if STALE = TRUE, data may be lost\nSHOW STREAMS LIKE 'orders_stream';\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `Task is suspended` | Not resumed after creation | `ALTER TASK x RESUME` |\n| `Stream is stale` | Data retention exceeded | Recreate stream; increase `DATA_RETENTION_TIME_IN_DAYS` |\n| `Warehouse does not exist` | Wrong warehouse in task | Verify warehouse name |\n| `MERGE: duplicate rows` | Non-unique join key | Add dedup CTE before MERGE |\n| `Dynamic table refresh failed` | Source schema changed | Check upstream table definitions |\n\n## Resources\n\n- [Streams and Tasks](https://docs.snowflake.com/en/user-guide/data-pipelines-intro)\n- [Dynamic Tables](https://docs.snowflake.com/en/user-guide/dynamic-tables-about)\n- [CREATE TASK](https://docs.snowflake.com/en/sql-reference/sql/create-task)\n\n## Next Steps\n\nFor common errors and troubleshooting, see `snowflake-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "snowflake-core-workflow-b",
-    "description": "Execute Snowflake data transformation with streams, tasks, and dynamic",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

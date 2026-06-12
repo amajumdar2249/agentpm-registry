@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031530",
   "name": "clay-migration-deep-dive",
   "slug": "clay-migration-deep-dive",
   "description": "Migrate to Clay from other enrichment tools or consolidate multiple",
   "content": "# Clay Migration Deep Dive\n\n## Overview\n\nComprehensive guide for migrating from standalone enrichment tools (ZoomInfo, Apollo, Clearbit, Lusha) to Clay, or consolidating multiple tools into a single Clay-based pipeline. Clay replaces the need for individual provider subscriptions by aggregating 150+ providers into waterfall enrichment workflows.\n\n## Prerequisites\n\n- Current enrichment tool subscription(s) with data export capability\n- Clay account on Growth or Enterprise plan\n- Understanding of current enrichment volume and costs\n- CRM with existing enriched data\n\n## Migration Types\n\n| Migration | Complexity | Duration | Risk |\n|-----------|-----------|----------|------|\n| Single provider -> Clay | Low | 1-2 weeks | Low |\n| Multiple providers -> Clay | Medium | 2-4 weeks | Medium |\n| Custom scripts -> Clay | Medium | 2-4 weeks | Medium |\n| Full GTM stack migration | High | 1-2 months | High |\n\n## Instructions\n\n### Step 1: Audit Current Enrichment Stack (Week 1)\n\n```typescript\n// migration/audit.ts \u2014 document your current enrichment setup\ninterface EnrichmentAudit {\n  provider: string;\n  monthlyVolume: number;\n  monthlyCoost: number;\n  dataFields: string[];\n  hitRate: number;           // % of lookups that return data\n  integrationMethod: string; // API, CSV, Zapier, native CRM\n  canExportHistory: boolean;\n}\n\nconst currentStack: EnrichmentAudit[] = [\n  {\n    provider: 'ZoomInfo',\n    monthlyVolume: 5000,\n    monthlyCoost: 15000,  // ZoomInfo is expensive\n    dataFields: ['email', 'phone', 'title', 'company', 'revenue'],\n    hitRate: 75,\n    integrationMethod: 'API + Salesforce native',\n    canExportHistory: true,\n  },\n  {\n    provider: 'Apollo.io',\n    monthlyVolume: 3000,\n    monthlyCoost: 400,\n    dataFields: ['email', 'title', 'company', 'linkedin'],\n    hitRate: 65,\n    integrationMethod: 'API',\n    canExportHistory: true,\n  },\n  {\n    provider: 'Custom Python scripts',\n    monthlyVolume: 1000,\n    monthlyCoost: 0,  // Just developer time\n    dataFields: ['email', 'company_data'],\n    hitRate: 40,\n    integrationMethod: 'Cron job + DB',\n    canExportHistory: true,\n  },\n];\n\nfunction generateMigrationReport(stack: EnrichmentAudit[]): void {\n  const totalCost = stack.reduce((s, p) => s + p.monthlyCoost, 0);\n  const totalVolume = stack.reduce((s, p) => s + p.monthlyVolume, 0);\n  console.log(`Current stack: ${stack.length} providers`);\n  console.log(`Total monthly cost: $${totalCost}`);\n  console.log(`Total monthly volume: ${totalVolume} lookups`);\n  console.log(`Average hit rate: ${(stack.reduce((s, p) => s + p.hitRate, 0) / stack.length).toFixed(0)}%`);\n  console.log(`\\nClay equivalent (Growth plan): $495/mo + provider API keys`);\n}\n```\n\n### Step 2: Map Fields to Clay Columns (Week 1)\n\n```yaml\n# migration/field-mapping.yaml\nfield_mapping:\n  # Your current field -> Clay enrichment column\n  email: \"Work Email (Waterfall: Apollo > Hunter)\"\n  phone: \"Phone Number (Apollo)\"\n  job_title: \"Job Title (Apollo/PDL)\"\n  company_name: \"Company Name (Clearbit)\"\n  company_revenue: \"Revenue (Clearbit)\"\n  employee_count: \"Employee Count (Clearbit)\"\n  industry: \"Industry (Clearbit)\"\n  tech_stack: \"Technologies (BuiltWith via Claygent)\"\n  linkedin: \"LinkedIn URL (Apollo)\"\n\n  # Fields that don't have direct Clay equivalents:\n  intent_signals: \"Use Clay's Web Intent feature (Growth plan)\"\n  custom_research: \"Claygent AI research column\"\n```\n\n### Step 3: Parallel Run (Week 2-3)\n\nRun Clay alongside your existing tools to validate data quality:\n\n```typescript\n// migration/parallel-run.ts\ninterface ComparisonResult {\n  field: string;\n  oldValue: string | null;\n  clayValue: string | null;\n  match: boolean;\n}\n\nasync function compareEnrichment(\n  email: string,\n  oldData: Record<string, unknown>,\n  clayData: Record<string, unknown>,\n): Promise<ComparisonResult[]> {\n  const fieldsToCompare = ['company_name', 'job_title', 'employee_count', 'industry'];\n\n  return fieldsToCompare.map(field => ({\n    field,\n    oldValue: (oldData[field] as string) || null,\n    clayValue: (clayData[field] as string) || null,\n    match: String(oldData[field]).toLowerCase() === String(clayData[field]).toLowerCase(),\n  }));\n}\n\n// Run on a sample of 500 contacts from your CRM\n// Compare Clay's enrichment with your current provider's data\n// Target: Clay should match or exceed current hit rates\n```\n\n### Step 4: Configure Clay Table to Replace Current Stack (Week 3)\n\n```yaml\n# Clay table configuration to replace multi-provider stack\nreplacement_table:\n  name: \"Outbound Leads (Migrated)\"\n  sources:\n    - webhook (replaces API calls to ZoomInfo/Apollo)\n    - CRM import (replaces native CRM enrichment)\n    - CSV upload (replaces manual processes)\n\n  enrichment_columns:\n    1_company_lookup:\n      provider: clearbit\n      replaces: \"ZoomInfo company data\"\n      own_api_key: true  # 0 Clay credits\n\n    2_email_waterfall:\n      providers: [apollo, hunter]\n      replaces: \"ZoomInfo email + Apollo email\"\n      own_api_keys: true\n\n    3_person_enrichment:\n      provider: apollo\n      replaces: \"Apollo person data\"\n      own_api_key: true\n\n    4_ai_research:\n      type: claygent\n      replaces: \"Custom Python research scripts\"\n      prompt: \"Research {{Company Name}} for recent news and tech stack\"\n\n    5_icp_scoring:\n      type: formula\n      replaces: \"Custom scoring in Python/SQL\"\n```\n\n### Step 5: Gradual Traffic Migration (Week 4)\n\n```typescript\n// migration/traffic-shift.ts\ninterface MigrationConfig {\n  clayPercentage: number;   // 0-100, gradually increase\n  legacyEnabled: boolean;\n}\n\nclass MigrationRouter {\n  constructor(private config: MigrationConfig) {}\n\n  shouldUseClay(): boolean {\n    return Math.random() * 100 < this.config.clayPercentage;\n  }\n\n  async enrichLead(lead: Record<string, unknown>): Promise<Record<string, unknown>> {\n    if (this.shouldUseClay()) {\n      return this.enrichViaClay(lead);\n    }\n    return this.enrichViaLegacy(lead);\n  }\n}\n\n// Migration schedule:\n// Week 4, Day 1: 10% to Clay, 90% legacy\n// Week 4, Day 3: 25% to Clay, 75% legacy\n// Week 4, Day 5: 50% to Clay, 50% legacy\n// Week 5, Day 1: 100% to Clay, legacy disabled\n```\n\n### Step 6: Cancel Legacy Subscriptions\n\nAfter full migration and 2-week monitoring:\n\n- [ ] Verify Clay hit rates match or exceed legacy providers\n- [ ] Confirm CRM sync working correctly\n- [ ] Export final data from legacy tools as backup\n- [ ] Cancel ZoomInfo/Apollo/Clearbit subscriptions\n- [ ] Remove legacy API keys from application code\n- [ ] Document Clay configuration for team\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Lower hit rate on Clay | Different provider coverage | Adjust waterfall order, add providers |\n| Missing fields | Clay uses different field names | Update field mapping |\n| Data format mismatch | Different date/number formats | Add transformation in webhook handler |\n| CRM duplicates during parallel | Both systems writing | Deduplicate on email in CRM |\n\n## Resources\n\n- [Clay Integrations Directory](https://www.clay.com/integrations)\n- [Clay University -- Sources](https://university.clay.com/docs/sources)\n- [Clay University -- CSV Import](https://university.clay.com/docs/csv-import-overview)\n\n## Next Steps\n\nFor advanced troubleshooting, see `clay-advanced-troubleshooting`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clay-migration-deep-dive",
-    "description": "Migrate to Clay from other enrichment tools or consolidate multiple",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Bash(npm:*), Bash(node:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

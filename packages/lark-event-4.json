@@ -1,16 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000034816",
   "name": "lark-event",
   "slug": "lark-event-4",
   "description": "Lark/Feishu real-time event listening / subscribing / consuming: stream events as NDJSON via `lark-cli event consume <EventKey>` (covers IM message receive, reactions, chat member changes, etc.). Use for Lark bots, real-time message processing, long-running subscribers, streaming webhook/push handlers. Supports `--max-events` / `--timeout` bounded runs and a stderr ready-marker contract \u2014 designed for AI agents running as subprocesses.",
   "content": "\n# Lark Events\n\n> **Prerequisite:** Read [`../lark-shared/SKILL.md`](../lark-shared/SKILL.md) first for authentication, `--as user/bot` switching, `Permission denied` handling, and safety rules.\n\n## Core commands\n\n| Command | Purpose |\n|------|------|\n| `lark-cli event list [--json]` | List all subscribable EventKeys |\n| `lark-cli event schema <EventKey> [--json]` | Show an EventKey's params and output schema |\n| `lark-cli event consume <EventKey> [flags]` | Blocking consume; events \u2192 stdout NDJSON |\n| `lark-cli event status [--json] [--fail-on-orphan]` | Inspect the local bus daemon status |\n| `lark-cli event stop [--all] [--force]` | Stop the bus daemon |\n\n\n## Common flags\n\n| Flag | Description |\n|---|---|\n| `--param key=value` / `-p` | Business params (repeatable; comma-separated for multi-value). Unknown keys fail with valid names listed inline |\n| `--jq <expr>` | jq expression to filter / transform each event; empty output skips the event |\n| `--max-events N` | Exit after N events. Default 0 = unlimited |\n| `--timeout D` | Exit after duration D (e.g. `30s`, `2m`). Default 0 = no timeout. Whichever of `--max-events` / `--timeout` fires first wins |\n| `--output-dir <dir>` | Write each event as a file (relative paths only; prevents traversal) |\n| `--quiet` | Suppress stderr diagnostics. **AI should not use this** \u2014 it silences the ready marker |\n| `--as user\\|bot\\|auto` | Identity for the session (see lark-shared) |\n\n\n## Examples\n\n```bash\n# Default: stream every event for the key (no filter, no projection)\nlark-cli event consume im.message.receive_v1 --as bot\n\n# Grab one sample event to inspect payload shape\nlark-cli event consume im.message.receive_v1 --max-events 1 --timeout 30s --as bot\n\n# Run for 10 minutes then auto-exit\nlark-cli event consume im.message.receive_v1 --timeout 10m --as bot\n\n# Consume multiple EventKeys concurrently (one shape per process, no dispatcher)\nlark-cli event consume im.message.receive_v1          --as bot > receive.ndjson &\nlark-cli event consume im.message.reaction.created_v1 --as bot > reaction.ndjson &\nwait\n\n```\n\n## Call flow\n\n1. `lark-cli event list --json` \u2192 pick a legal key\n2. `lark-cli event schema <key> --json` \u2192 read `resolved_output_schema` + `jq_root_path` to determine field paths\n3. `lark-cli event consume <key> [--jq '<expr>']` \u2192 consume\n\n## Subprocess contract\n\n### Ready marker\n\n`event consume`'s stderr emits a fixed line `[event] ready event_key=<key>`. **Parent processes should block on stderr until this line appears, then start reading stdout.** Do not fall back to `sleep`.\n\n### stdin EOF = graceful exit\n\n`event consume` treats stdin close as a shutdown signal (wired for AI subprocess callers). `< /dev/null` / `nohup` / systemd's default `StandardInput=null` will cause an immediate graceful exit (stderr `reason: signal`). To keep running:\n\n- Feed stdin a source that never EOFs: `< <(tail -f /dev/null)`\n- Or run bounded: `--max-events N` / `--timeout D`\n\n### Exit codes & reason\n\nOn exit, the last stderr line is `[event] exited \u2014 received N event(s) in Xs (reason: ...)`.\n\n| exit code | reason | Trigger |\n|---|---|---|\n| 0 | `reason: limit` | `--max-events` reached |\n| 0 | `reason: timeout` | `--timeout` reached |\n| 0 | `reason: signal` | Ctrl+C / SIGTERM / stdin EOF |\n| non-0 | `Error: ...` (no `exited` line) | Startup / runtime failure (permissions, network, params, config) |\n\nOrchestrators should treat `reason: limit/timeout/signal` (all exit 0) as \"business completion\" and non-zero as \"failure\".\n\n### Never `kill -9`\n\n**Avoid `kill -9` on consume processes**: for EventKeys with a **PreConsume hook** (those that register server-side subscriptions via OAPI), `kill -9` skips the OAPI unsubscribe and leaks server-side subscriptions (symptoms: \"subscription already exists\" on restart, duplicate event delivery). Prefer SIGTERM or closing stdin.\n\n### One consume, one EventKey (multi-key = multi-shell)\n\nThe command takes exactly one positional argument; `k1,k2` and wildcards are unsupported. Listening to N keys means N subprocesses \u2014 this is **intentional**:\n\n- One shape per process stdout; no dispatcher logic required in the AI\n- Fault isolation (one key failing doesn't affect others)\n- Independent `--as` / `--jq` / `--max-events` / `--timeout` per key\n\nAll N consumers share a single bus daemon (UDS local IPC), so the overhead is small\n\n## Writing jq via schema\n\n`event schema <key> --json` is the source of truth for writing `--jq`. Four things to look at:\n\n**(1) Where fields start** \u2014 see `jq_root_path`\n\n- Value `\".\"` \u2192 fields are at the top level, write `.chat_id`\n- Value `\".event\"` \u2192 fields are inside a V2 envelope, write `.event.chat_id`\n\n**(2) Field list and types** \u2014 see `resolved_output_schema.properties.<name>`\n\nEach field carries `type` / `description`, and some also have `format`. Snippet (from `event schema im.message.receive_v1 --json`):\n\n```json\n{\n  \"chat_id\":     {\"type\":\"string\", \"format\":\"chat_id\",      \"description\":\"Chat ID, prefixed with oc_\"},\n  \"sender_id\":   {\"type\":\"string\", \"format\":\"open_id\",      \"description\":\"Sender open_id, prefixed with ou_\"},\n  \"create_time\": {\"type\":\"string\", \"format\":\"timestamp_ms\", \"description\":\"Send time as ms-epoch string\"}\n}\n```\n\n**(3) Field semantics** \u2014 see the `format` tag\n\nLark-defined semantic tags (**not** JSON Schema's standard `format`). Common values: `open_id` / `chat_id` / `message_id` / `timestamp_ms` / `email`. Purpose: distinguish \"same string type, different meanings\" fields so you can reverse-lookup via API or convert formats.\n\n**(4) Decoded state** \u2014 read the field's `description`\n\n`event consume` runs Process hooks that may pre-decode some payload fields (flattening V2 envelopes, rendering `.content` to plain text, etc.) \u2014 behavior differs from raw OAPI. **Always read the field's `description` before writing jq**, especially for generic field names like `content` / `data` / `body` / `payload`.\n\n**Why it matters**: blindly applying `fromjson` to an already-decoded text field makes jq error on every event and silently drop it \u2014 the consumer looks alive but emits nothing, with only a single `WARN` line buried on stderr. (This is the general behavior: any jq runtime error skips the event with a one-line WARN; the loop does not abort.)\n\n**Don't shortcut the schema**: when projecting `event schema --json` with jq, do not strip `.description` from `properties` \u2014 that's the field that tells you whether a field is already decoded. Dump the full property objects, not just keys.\n\n---\n\n**Aside**: `--param`'s valid parameters also live in the schema \u2014 the `params` section lists `name` / `type` / `required` / `enum` / `default` / `description`; **section missing = this key accepts no `--param`**.\n\n## Topic index\n\n| Topic | Reference | Coverage |\n|---|---|---|\n| IM | [`references/lark-event-im.md`](references/lark-event-im.md) | Catalog of 11 IM EventKeys + shape notes (flat vs V2 envelope) + `im.message.receive_v1` field gotchas (`sender_id` is open_id only; `.content` is plain text except for `interactive` cards) + common jq recipes (filter by chat_type / message_type / sender) |\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "lark-event",
-    "version": "1.0.0",
-    "description": "Lark/Feishu real-time event listening / subscribing / consuming: stream events as NDJSON via `lark-cli event consume <EventKey>` (covers IM message receive, reactions, chat member changes, etc.). Use for Lark bots, real-time message processing, long-running subscribers, streaming webhook/push handlers. Supports `--max-events` / `--timeout` bounded runs and a stderr ready-marker contract \u2014 designed for AI agents running as subprocesses.",
-    "metadata": "",
-    "requires": "",
-    "bins": "[\"lark-cli\"]",
-    "cliHelp": "lark-cli event --help"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

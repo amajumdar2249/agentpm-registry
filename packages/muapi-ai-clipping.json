@@ -1,14 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000018400",
   "name": "muapi-ai-clipping",
   "slug": "muapi-ai-clipping",
   "description": "Turn a long video into N viral-ready short clips with a single managed API call. Wraps muapi.ai's `/ai-clipping` endpoint, which handles transcription, highlight ranking through a virality framework (hook / emotional peak / opinion bomb / revelation / conflict / quotable / story peak / practical value), overlap dedupe, and vertical face-tracking auto-crop server-side. No local Whisper, no local LLM, no GPU.",
   "content": "\n# AI Clipping\n\n**One API call: long video in \u2192 ranked vertical short clips out.**\n\nEach clip ships with a viral score (0\u2013100), an opening hook line, a one-sentence \"why it works\" reason, and a hosted mp4 URL.\n\nUnderlying API: https://muapi.ai/playground/ai-clipping\nReference implementation (open source): https://github.com/SamurAIGPT/AI-Youtube-Shorts-Generator\n\n---\n\n## When to Use\n\n- Auto-clip a podcast, interview, lecture, vlog, or stream into TikTok / Reels / Shorts.\n- Extract the best 30\u201375s moments from any hosted video URL.\n- Get face-tracked vertical (9:16), square (1:1), or portrait (4:5) crops without running ffmpeg locally.\n\nIf you only need raw timestamps for your own renderer, set `--coords-only` to skip cropping and just get the highlight ranges.\n\n---\n\n## Agent Execution Protocol\n\n### Step 1 \u2014 Collect Inputs\n\n| Input | Required | Default | Notes |\n|:---|:---|:---|:---|\n| `--video` | yes | \u2014 | Hosted mp4 URL, or local file path (auto-uploaded), or YouTube URL (if backend supports it) |\n| `--num-clips` | no | `3` | Number of highlights to extract |\n| `--aspect-ratio` | no | `9:16` | `9:16` \\| `1:1` \\| `4:5` |\n| `--coords-only` | no | off | Return just the highlight time ranges, skip cropping |\n\nIf the user gave only a video URL, run with defaults \u2014 don't block on questions.\n\n---\n\n### Step 2 \u2014 Verify Prerequisites\n\n- `muapi-cli` installed and authed (`muapi auth configure`)\n- `MUAPI_API_KEY` available (env var or `muapi auth status` passes)\n\nThat's it. No `ffmpeg`, no Python, no Whisper install, no LLM keys. Everything runs server-side.\n\n---\n\n### Step 3 \u2014 Run the Skill\n\n```bash\nbash library/edit/ai-clipping/scripts/run-ai-clipping.sh \\\n  --video \"https://example.com/podcast.mp4\" \\\n  --num-clips 5 \\\n  --aspect-ratio 9:16 \\\n  --view\n```\n\nThe script:\n1. Resolves `--video` to a hosted URL (uploads local files via `muapi upload file` if needed).\n2. Calls `muapi edit clipping` with the supported parameters.\n3. Polls until the job is done (or returns the `request_id` immediately under `--async`).\n4. Prints a ranked summary and, if `--output-json` is set, writes the full result.\n\n---\n\n## What Happens Server-Side\n\nThe `/ai-clipping` endpoint internally runs the full pipeline so the agent doesn't have to:\n\n- **Transcribe** with Whisper.\n- **Classify content type** (podcast / interview / tutorial / vlog / lecture / monologue).\n- **Rank highlights** through the virality framework:\n  - **Hook moments** \u2014 strong opening line that stops the scroll\n  - **Emotional peaks** \u2014 laughter, anger, vulnerability, awe\n  - **Opinion bombs** \u2014 spicy, contrarian, debate-bait takes\n  - **Revelation moments** \u2014 \"wait, what?\" reframes\n  - **Conflict** \u2014 disagreement, tension, callouts\n  - **Quotable lines** \u2014 tight, screenshot-worthy phrasing\n  - **Story peaks** \u2014 climax of a narrative arc\n  - **Practical value** \u2014 actionable insight a viewer will save\n- **Dedupe** overlapping candidates by score.\n- **Top-N select** and **face-track auto-crop** to the requested aspect ratio.\n\nThis is why the skill is small: the heavy lifting is on the API.\n\n---\n\n## Quick Invocation Patterns\n\n**Defaults \u2014 three 9:16 clips:**\n```bash\nbash run-ai-clipping.sh --video \"https://example.com/long.mp4\"\n```\n\n**Podcast \u2014 more clips, view in player:**\n```bash\nbash run-ai-clipping.sh --video \"<URL>\" --num-clips 8 --view\n```\n\n**Square clips for Instagram feed:**\n```bash\nbash run-ai-clipping.sh --video \"<URL>\" --aspect-ratio 1:1 --num-clips 3\n```\n\n**Just the timestamps (build your own renderer):**\n```bash\nbash run-ai-clipping.sh --video \"<URL>\" --coords-only --output-json result.json\n```\n\n**Async submit (returns request_id, poll later):**\n```bash\nREQUEST_ID=$(bash run-ai-clipping.sh --video \"<URL>\" --async --output-json - | jq -r '.request_id')\nmuapi predict wait \"$REQUEST_ID\" --download ./outputs\n```\n\n**Local file:**\n```bash\nbash run-ai-clipping.sh --video ./recording.mp4 --num-clips 5 --view\n```\n\n**Batch \u2014 `urls.txt` with one URL per line:**\n```bash\nxargs -a urls.txt -I{} bash run-ai-clipping.sh --video \"{}\"\n```\n\n---\n\n## Aspect Ratio Picker\n\n| Platform | Ratio | Sweet-spot duration |\n|:---|:---|:---|\n| TikTok / Reels / YouTube Shorts | `9:16` | 30\u201375s |\n| Instagram Feed | `1:1` | 15\u201345s |\n| Pinterest / portrait | `4:5` | 30\u201360s |\n\nDefault to `9:16` unless the platform is specified.\n\n---\n\n## Output Schema\n\n```json\n{\n  \"source_video_url\": \"...\",\n  \"shorts\": [\n    {\n      \"title\": \"The one mistake that cost me $50K\",\n      \"start_time\": 124.3,\n      \"end_time\": 187.6,\n      \"score\": 92,\n      \"hook_sentence\": \"Nobody talks about this, but it killed my first startup...\",\n      \"virality_reason\": \"Opens with a number + regret, peaks on a contrarian lesson\",\n      \"clip_url\": \"https://.../short_1.mp4\"\n    }\n  ]\n}\n```\n\nWhen `--coords-only` is set, each entry has `start_time`/`end_time` but no `clip_url` \u2014 render locally with ffmpeg.\n\nWhen reporting back to the user, surface for each clip: rank, score, time range, title, hook, and clip URL.\n\n---\n\n## Common Mistakes to Avoid\n\n1. **Wrong aspect ratio for the platform** \u2014 Shorts / TikTok / Reels are `9:16`. Default to that.\n2. **Padding to hit `num_clips`** \u2014 if the API returns fewer survivors than requested, return what you have. Don't pretend.\n3. **Re-running on a 404'd clip URL** \u2014 the same `request_id` can be re-fetched with `muapi predict wait <id>` rather than re-clipping.\n4. **Trying to tune Whisper / chunk size / LLM prompts** \u2014 those knobs aren't exposed; the endpoint handles them.\n\n---\n\n## Failure Modes\n\n- **API key missing or rejected** \u2014 surface the exact error; never fabricate a key.\n- **Job timed out** \u2014 bump poll timeout (`--poll-timeout`) and retry.\n- **Source URL not reachable from the backend** \u2014 upload locally with `muapi upload file <path>` first, then pass the returned URL.\n- **Fewer clips returned than requested** \u2014 the source had fewer rankable highlights. Return what came back with a note.\n\n---\n\n## Done Criteria\n\nThe skill is done when:\n1. `result.shorts` has up to `num_clips` entries, each with a working `clip_url` (or `start_time`/`end_time` under `--coords-only`).\n2. The user has been shown the ranked list (score, time range, title, hook, URL).\n3. If `--output-json` was set, the file exists and parses.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "slug": "muapi-ai-clipping",
-    "name": "muapi-ai-clipping",
-    "version": "1.0.0",
-    "description": "Turn a long video into N viral-ready short clips with a single managed API call. Wraps muapi.ai's `/ai-clipping` endpoint, which handles transcription, highlight ranking through a virality framework (hook / emotional peak / opinion bomb / revelation / conflict / quotable / story peak / practical value), overlap dedupe, and vertical face-tracking auto-crop server-side. No local Whisper, no local LLM, no GPU.",
-    "acceptLicenseTerms": "true"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

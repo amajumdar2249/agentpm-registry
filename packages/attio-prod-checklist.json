@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031372",
   "name": "attio-prod-checklist",
   "slug": "attio-prod-checklist",
   "description": "Production readiness checklist for Attio API integrations -- auth,",
   "content": "# Attio Production Checklist\n\n## Overview\n\nSystematic checklist for launching Attio API integrations in production. Covers the real failure modes observed in Attio integrations.\n\n## Prerequisites\n\n- Staging environment tested\n- Production API token created with minimal scopes\n- Monitoring infrastructure available\n\n## Instructions\n\n### Phase 1: Authentication & Secrets\n\n```\n[ ] Production token created with minimal scopes (see attio-security-basics)\n[ ] Token stored in platform secrets manager (not env file on disk)\n[ ] Separate tokens for dev/staging/prod environments\n[ ] .env files in .gitignore\n[ ] No tokens in logs, error messages, or client-side bundles\n[ ] Token rotation procedure documented\n```\n\n**Verify:**\n\n```bash\n# Confirm production token works\ncurl -s -o /dev/null -w \"%{http_code}\" \\\n  https://api.attio.com/v2/objects \\\n  -H \"Authorization: Bearer ${ATTIO_API_KEY_PROD}\"\n# Must return 200\n```\n\n### Phase 2: Error Handling\n\n```\n[ ] All API calls wrapped in try/catch\n[ ] AttioApiError class distinguishes retryable (429, 5xx) from fatal errors\n[ ] Exponential backoff with jitter on 429 responses\n[ ] Retry-After header honored (Attio sends a date, not seconds)\n[ ] 5xx errors retried (Attio may have transient issues)\n[ ] 400/422 validation errors logged with request body for debugging\n[ ] 403 scope errors produce actionable log messages\n[ ] 404 errors handled gracefully (records can be deleted/merged)\n```\n\n### Phase 3: Rate Limiting\n\n```\n[ ] Queue-based throttling implemented (p-queue or similar)\n[ ] Concurrency limited to 5-10 parallel requests\n[ ] Bulk operations use query endpoint (1 POST) instead of N GETs\n[ ] Batch imports use offset-based pagination, not individual fetches\n[ ] Rate limit monitor logs approaching-limit warnings\n```\n\n**Key fact:** Attio uses a 10-second sliding window. Rate limit scores are summed across all tokens in the workspace.\n\n### Phase 4: Data Integrity\n\n```\n[ ] Record creation uses PUT (assert) for idempotent upserts where possible\n[ ] Email/domain values validated before sending to API\n[ ] Phone numbers formatted in E.164 (\"+14155551234\")\n[ ] Record-reference attributes use verified target_record_ids\n[ ] Pagination handles all pages (check data.length === limit to know if more)\n[ ] Webhook events processed idempotently (deduplicate by event ID)\n```\n\n### Phase 5: Health Check Endpoint\n\n```typescript\n// api/health.ts -- include Attio in your health check\nexport async function GET() {\n  const start = Date.now();\n  let attioStatus: \"healthy\" | \"degraded\" | \"down\" = \"down\";\n  let attioLatency = 0;\n\n  try {\n    const res = await fetch(\"https://api.attio.com/v2/objects\", {\n      headers: { Authorization: `Bearer ${process.env.ATTIO_API_KEY}` },\n      signal: AbortSignal.timeout(5000),\n    });\n    attioLatency = Date.now() - start;\n    attioStatus = res.ok ? \"healthy\" : \"degraded\";\n  } catch {\n    attioLatency = Date.now() - start;\n  }\n\n  return Response.json({\n    status: attioStatus === \"healthy\" ? \"healthy\" : \"degraded\",\n    services: {\n      attio: { status: attioStatus, latencyMs: attioLatency },\n    },\n    timestamp: new Date().toISOString(),\n  });\n}\n```\n\n### Phase 6: Monitoring & Alerting\n\n```\n[ ] Health check endpoint hits Attio every 60s\n[ ] Alert on: 5xx errors > 3/min (P1)\n[ ] Alert on: 429 errors > 5/min (P2)\n[ ] Alert on: 401/403 errors > 0 (P1 -- token may be revoked)\n[ ] Alert on: Health check latency > 3000ms (P2)\n[ ] Alert on: Health check failure 3 consecutive times (P1)\n[ ] Log all Attio API calls with: method, path, status, duration_ms\n```\n\n**Structured logging example:**\n\n```typescript\nfunction logAttioCall(\n  method: string,\n  path: string,\n  status: number,\n  durationMs: number,\n  error?: string\n): void {\n  console.log(JSON.stringify({\n    service: \"attio\",\n    method,\n    path,\n    status,\n    durationMs,\n    error,\n    timestamp: new Date().toISOString(),\n  }));\n}\n```\n\n### Phase 7: Graceful Degradation\n\n```typescript\n// Circuit breaker: stop calling Attio if consistently failing\nclass AttioCircuitBreaker {\n  private consecutiveFailures = 0;\n  private openUntil = 0;\n\n  async call<T>(operation: () => Promise<T>, fallback: T): Promise<T> {\n    if (Date.now() < this.openUntil) {\n      console.warn(\"Attio circuit open, using fallback\");\n      return fallback;\n    }\n\n    try {\n      const result = await operation();\n      this.consecutiveFailures = 0;\n      return result;\n    } catch (err) {\n      this.consecutiveFailures++;\n      if (this.consecutiveFailures >= 5) {\n        this.openUntil = Date.now() + 30_000; // 30s cooldown\n        console.error(\"Attio circuit opened after 5 failures\");\n      }\n      return fallback;\n    }\n  }\n}\n```\n\n### Phase 8: Webhook Production Config\n\n```\n[ ] Webhook endpoint uses HTTPS (required)\n[ ] Signature verification implemented (see attio-security-basics)\n[ ] Replay attack protection: reject timestamps > 5 minutes old\n[ ] Idempotency: deduplicate events by event ID\n[ ] Webhook handler returns 200 quickly, processes async\n[ ] Failed processing triggers retry (return 5xx to Attio)\n[ ] Webhook secret stored in secrets manager\n```\n\n### Phase 9: Rollback Plan\n\n```\n[ ] Previous deployment artifact available\n[ ] Database migrations are backwards-compatible\n[ ] Feature flag to disable Attio integration without deploy\n[ ] Documented: how to roll back, who to notify, what to monitor\n```\n\n```typescript\n// Feature flag example\nconst ATTIO_ENABLED = process.env.ATTIO_ENABLED !== \"false\";\n\nasync function syncToAttio(data: any): Promise<void> {\n  if (!ATTIO_ENABLED) {\n    console.log(\"Attio sync disabled via feature flag\");\n    return;\n  }\n  await client.post(\"/objects/people/records\", { data });\n}\n```\n\n## Error Handling\n\n| Pre-launch check | Risk if skipped |\n|-----------------|----------------|\n| Token scoping | Data breach via over-permissioned token |\n| Rate limit handling | Cascading failures during bulk operations |\n| Retry-After parsing | Infinite retry loops or dropped requests |\n| Health check | Silent failures go undetected |\n| Webhook verification | Attacker can inject fake events |\n| Circuit breaker | Attio outage takes down your entire app |\n\n## Resources\n\n- [Attio REST API Overview](https://docs.attio.com/rest-api/overview)\n- [Attio Rate Limiting](https://docs.attio.com/rest-api/guides/rate-limiting)\n- [Attio Status Page](https://status.attio.com)\n- [Attio Webhooks Guide](https://docs.attio.com/rest-api/guides/webhooks)\n\n## Next Steps\n\nFor version upgrades, see `attio-upgrade-migration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "attio-prod-checklist",
-    "description": "Production readiness checklist for Attio API integrations -- auth,",
-    "Trigger": "attio production\", \"deploy attio\", \"attio go-live\",",
-    "allowed-tools": "Read, Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

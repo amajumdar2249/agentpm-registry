@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031955",
   "name": "firecrawl-core-workflow-a",
   "slug": "firecrawl-core-workflow-a",
   "description": "Execute Firecrawl primary workflow: scrape and crawl websites into LLM-ready",
   "content": "# Firecrawl Core Workflow A \u2014 Scrape & Crawl\n\n## Overview\n\nPrimary workflow for Firecrawl: convert websites into clean LLM-ready markdown. Covers single-page scraping with `scrapeUrl`, multi-page crawling with `crawlUrl`, async crawl jobs with polling, and content processing pipelines.\n\n## Prerequisites\n\n- `@mendable/firecrawl-js` installed\n- `FIRECRAWL_API_KEY` environment variable set\n- Target URL(s) identified\n\n## Instructions\n\n### Step 1: Single-Page Scrape\n\n```typescript\nimport FirecrawlApp from \"@mendable/firecrawl-js\";\n\nconst firecrawl = new FirecrawlApp({\n  apiKey: process.env.FIRECRAWL_API_KEY!,\n});\n\n// Scrape a single page to clean markdown\nconst result = await firecrawl.scrapeUrl(\"https://docs.example.com/api\", {\n  formats: [\"markdown\"],\n  onlyMainContent: true,  // strips nav, footer, sidebars\n  waitFor: 2000,           // wait 2s for JS to render\n});\n\nif (result.success) {\n  console.log(\"Title:\", result.metadata?.title);\n  console.log(\"Source:\", result.metadata?.sourceURL);\n  console.log(\"Markdown:\", result.markdown?.substring(0, 200));\n}\n```\n\n### Step 2: Multi-Page Synchronous Crawl\n\n```typescript\n// Crawl a site \u2014 Firecrawl follows links, renders JS, returns all pages\nconst crawlResult = await firecrawl.crawlUrl(\"https://docs.example.com\", {\n  limit: 50,                   // max pages to crawl\n  maxDepth: 3,                 // link depth from start URL\n  includePaths: [\"/docs/*\", \"/api/*\"],   // only these paths\n  excludePaths: [\"/blog/*\", \"/changelog/*\"],\n  allowBackwardLinks: false,   // only crawl child paths\n  scrapeOptions: {\n    formats: [\"markdown\"],\n    onlyMainContent: true,\n  },\n});\n\nconsole.log(`Crawled ${crawlResult.data?.length} pages`);\nfor (const page of crawlResult.data || []) {\n  console.log(`  ${page.metadata?.sourceURL}: ${page.markdown?.length} chars`);\n}\n```\n\n### Step 3: Async Crawl for Large Sites\n\n```typescript\n// Start an async crawl job \u2014 returns immediately with job ID\nconst job = await firecrawl.asyncCrawlUrl(\"https://docs.example.com\", {\n  limit: 500,\n  scrapeOptions: { formats: [\"markdown\"] },\n});\n\nconsole.log(`Crawl started: ${job.id}`);\n\n// Poll for completion with backoff\nlet pollInterval = 2000;\nlet status = await firecrawl.checkCrawlStatus(job.id);\n\nwhile (status.status === \"scraping\") {\n  console.log(`Progress: ${status.completed}/${status.total} pages`);\n  await new Promise(r => setTimeout(r, pollInterval));\n  pollInterval = Math.min(pollInterval * 1.5, 30000);\n  status = await firecrawl.checkCrawlStatus(job.id);\n}\n\nif (status.status === \"completed\") {\n  console.log(`Done: ${status.data?.length} pages scraped`);\n} else {\n  console.error(\"Crawl failed:\", status.error);\n}\n```\n\n### Step 4: Process and Store Results\n\n```typescript\nimport { writeFileSync, mkdirSync } from \"fs\";\n\nfunction processResults(pages: any[], outputDir: string) {\n  mkdirSync(outputDir, { recursive: true });\n\n  const manifest = pages.map((page, i) => {\n    const url = page.metadata?.sourceURL || `page-${i}`;\n    const slug = new URL(url).pathname\n      .replace(/\\//g, \"_\")\n      .replace(/^_|_$/g, \"\") || \"index\";\n    const filename = `${slug}.md`;\n\n    // Clean markdown: collapse whitespace, remove JS links\n    const content = (page.markdown || \"\")\n      .replace(/\\n{3,}/g, \"\\n\\n\")\n      .replace(/\\[.*?\\]\\(javascript:.*?\\)/g, \"\")\n      .trim();\n\n    writeFileSync(`${outputDir}/${filename}`, content);\n\n    return { url, filename, chars: content.length };\n  });\n\n  writeFileSync(`${outputDir}/manifest.json`, JSON.stringify(manifest, null, 2));\n  return manifest;\n}\n```\n\n## Output\n\n- Clean markdown files per crawled page\n- `manifest.json` with URL-to-file mapping\n- Crawl summary with page count and failures\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Empty `markdown` | JS content not rendered | Increase `waitFor` to 5000ms |\n| `429 Too Many Requests` | Rate limit hit | Back off, reduce concurrency |\n| Crawl returns few pages | URL filters too strict | Widen `includePaths` patterns |\n| `402 Payment Required` | Credits exhausted | Check balance, reduce `limit` |\n| Partial crawl results | Site blocks bot on some pages | Use `scrapeUrl` for failed URLs individually |\n\n## Examples\n\n### Scrape with Multiple Formats\n\n```typescript\nconst result = await firecrawl.scrapeUrl(\"https://example.com\", {\n  formats: [\"markdown\", \"html\", \"links\"],\n  onlyMainContent: true,\n});\n\nconsole.log(\"Markdown:\", result.markdown?.length);\nconsole.log(\"HTML:\", result.html?.length);\nconsole.log(\"Links:\", result.links?.length);\n```\n\n### Crawl with Webhook (No Polling)\n\n```typescript\nconst job = await firecrawl.asyncCrawlUrl(\"https://docs.example.com\", {\n  limit: 100,\n  scrapeOptions: { formats: [\"markdown\"] },\n  webhook: {\n    url: \"https://api.yourapp.com/webhooks/firecrawl\",\n    events: [\"completed\", \"page\"],\n  },\n});\nconsole.log(`Crawl ${job.id} started \u2014 webhook will fire on completion`);\n```\n\n## Resources\n\n- [Scrape Endpoint](https://docs.firecrawl.dev/features/scrape)\n- [Crawl Endpoint](https://docs.firecrawl.dev/features/crawl)\n- [Advanced Scraping Guide](https://docs.firecrawl.dev/advanced-scraping-guide)\n\n## Next Steps\n\nFor structured data extraction, see `firecrawl-core-workflow-b`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "firecrawl-core-workflow-a",
-    "description": "Execute Firecrawl primary workflow: scrape and crawl websites into LLM-ready",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000039910",
   "name": "building-mcp-server-on-cloudflare",
   "slug": "building-mcp-server-on-cloudflare-2",
   "description": "|",
   "content": "\n# Building MCP Servers on Cloudflare\n\nCreates production-ready Model Context Protocol servers on Cloudflare Workers with tools, authentication, and deployment.\n\n## When to Use\n\n- User wants to build a remote MCP server\n- User needs to expose tools via MCP\n- User asks about MCP authentication or OAuth\n- User wants to deploy MCP to Cloudflare Workers\n\n## Prerequisites\n\n- Cloudflare account with Workers enabled\n- Node.js 18+ and npm/pnpm/yarn\n- Wrangler CLI (`npm install -g wrangler`)\n\n## Quick Start\n\n### Option 1: Public Server (No Auth)\n\n```bash\nnpm create cloudflare@latest -- my-mcp-server \\\n  --template=cloudflare/ai/demos/remote-mcp-authless\ncd my-mcp-server\nnpm start\n```\n\nServer runs at `http://localhost:8788/mcp`\n\n### Option 2: Authenticated Server (OAuth)\n\n```bash\nnpm create cloudflare@latest -- my-mcp-server \\\n  --template=cloudflare/ai/demos/remote-mcp-github-oauth\ncd my-mcp-server\n```\n\nRequires OAuth app setup. See [references/oauth-setup.md](references/oauth-setup.md).\n\n## Core Workflow\n\n### Step 1: Define Tools\n\nTools are functions MCP clients can call. Define them using `server.tool()`:\n\n```typescript\nimport { McpAgent } from \"agents/mcp\";\nimport { z } from \"zod\";\n\nexport class MyMCP extends McpAgent {\n  server = new Server({ name: \"my-mcp\", version: \"1.0.0\" });\n\n  async init() {\n    // Simple tool with parameters\n    this.server.tool(\n      \"add\",\n      { a: z.number(), b: z.number() },\n      async ({ a, b }) => ({\n        content: [{ type: \"text\", text: String(a + b) }],\n      })\n    );\n\n    // Tool that calls external API\n    this.server.tool(\n      \"get_weather\",\n      { city: z.string() },\n      async ({ city }) => {\n        const response = await fetch(`https://api.weather.com/${city}`);\n        const data = await response.json();\n        return {\n          content: [{ type: \"text\", text: JSON.stringify(data) }],\n        };\n      }\n    );\n  }\n}\n```\n\n### Step 2: Configure Entry Point\n\n**Public server** (`src/index.ts`):\n\n```typescript\nimport { MyMCP } from \"./mcp\";\n\nexport default {\n  fetch(request: Request, env: Env, ctx: ExecutionContext) {\n    const url = new URL(request.url);\n    if (url.pathname === \"/mcp\") {\n      return MyMCP.serveSSE(\"/mcp\").fetch(request, env, ctx);\n    }\n    return new Response(\"MCP Server\", { status: 200 });\n  },\n};\n\nexport { MyMCP };\n```\n\n**Authenticated server** \u2014 See [references/oauth-setup.md](references/oauth-setup.md).\n\n### Step 3: Test Locally\n\n```bash\n# Start server\nnpm start\n\n# In another terminal, test with MCP Inspector\nnpx @modelcontextprotocol/inspector@latest\n# Open http://localhost:5173, enter http://localhost:8788/mcp\n```\n\n### Step 4: Deploy\n\n```bash\nnpx wrangler deploy\n```\n\nServer accessible at `https://[worker-name].[account].workers.dev/mcp`\n\n### Step 5: Connect Clients\n\n**Claude Desktop** (`claude_desktop_config.json`):\n\n```json\n{\n  \"mcpServers\": {\n    \"my-server\": {\n      \"command\": \"npx\",\n      \"args\": [\"mcp-remote\", \"https://my-mcp.workers.dev/mcp\"]\n    }\n  }\n}\n```\n\nRestart Claude Desktop after updating config.\n\n## Tool Patterns\n\n### Return Types\n\n```typescript\n// Text response\nreturn { content: [{ type: \"text\", text: \"result\" }] };\n\n// Multiple content items\nreturn {\n  content: [\n    { type: \"text\", text: \"Here's the data:\" },\n    { type: \"text\", text: JSON.stringify(data, null, 2) },\n  ],\n};\n```\n\n### Input Validation with Zod\n\n```typescript\nthis.server.tool(\n  \"create_user\",\n  {\n    email: z.string().email(),\n    name: z.string().min(1).max(100),\n    role: z.enum([\"admin\", \"user\", \"guest\"]),\n    age: z.number().int().min(0).optional(),\n  },\n  async (params) => {\n    // params are fully typed and validated\n  }\n);\n```\n\n### Accessing Environment/Bindings\n\n```typescript\nexport class MyMCP extends McpAgent<Env> {\n  async init() {\n    this.server.tool(\"query_db\", { sql: z.string() }, async ({ sql }) => {\n      // Access D1 binding\n      const result = await this.env.DB.prepare(sql).all();\n      return { content: [{ type: \"text\", text: JSON.stringify(result) }] };\n    });\n  }\n}\n```\n\n## Authentication\n\nFor OAuth-protected servers, see [references/oauth-setup.md](references/oauth-setup.md).\n\nSupported providers:\n- GitHub\n- Google\n- Auth0\n- Stytch\n- WorkOS\n- Any OAuth 2.0 compliant provider\n\n## Wrangler Configuration\n\nMinimal `wrangler.toml`:\n\n```toml\nname = \"my-mcp-server\"\nmain = \"src/index.ts\"\ncompatibility_date = \"2024-12-01\"\n\n[durable_objects]\nbindings = [{ name = \"MCP\", class_name = \"MyMCP\" }]\n\n[[migrations]]\ntag = \"v1\"\nnew_classes = [\"MyMCP\"]\n```\n\nWith bindings (D1, KV, etc.):\n\n```toml\n[[d1_databases]]\nbinding = \"DB\"\ndatabase_name = \"my-db\"\ndatabase_id = \"xxx\"\n\n[[kv_namespaces]]\nbinding = \"KV\"\nid = \"xxx\"\n```\n\n## Common Issues\n\n### \"Tool not found\" in Client\n\n1. Verify tool name matches exactly (case-sensitive)\n2. Ensure `init()` registers tools before connections\n3. Check server logs: `wrangler tail`\n\n### Connection Fails\n\n1. Confirm endpoint path is `/mcp`\n2. Check CORS if browser-based client\n3. Verify Worker is deployed: `wrangler deployments list`\n\n### OAuth Redirect Errors\n\n1. Callback URL must match OAuth app config exactly\n2. Check `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` are set\n3. For local dev, use `http://localhost:8788/callback`\n\n## References\n\n- [references/examples.md](references/examples.md) \u2014 Official templates and production examples\n- [references/oauth-setup.md](references/oauth-setup.md) \u2014 OAuth provider configuration\n- [references/tool-patterns.md](references/tool-patterns.md) \u2014 Advanced tool examples\n- [references/troubleshooting.md](references/troubleshooting.md) \u2014 Error codes and fixes\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "building-mcp-server-on-cloudflare",
-    "description": "|",
-    "Use when": "user wants to \"build MCP server\", \"create MCP tools\", \"remote"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

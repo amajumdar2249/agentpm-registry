@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032189",
   "name": "groq-data-handling",
   "slug": "groq-data-handling",
   "description": "Implement prompt sanitization, PII redaction, response filtering, and",
   "content": "# Groq Data Handling\n\n## Overview\n\nManage data flowing through Groq's inference API. Covers prompt sanitization before sending to Groq, response filtering after receiving, PII redaction, conversation audit logging, and token usage tracking. Key fact: Groq does not use API data for model training ([Groq Privacy Policy](https://groq.com/privacy-policy/)).\n\n## Groq Data Policy\n\n- Groq does **not** train on API request/response data\n- Prompts and completions are processed and discarded\n- Groq may temporarily log requests for abuse prevention\n- For enterprise: contact Groq for DPA and SOC 2 compliance details\n\n## Instructions\n\n### Step 1: Prompt Sanitization Layer\n\n```typescript\nimport Groq from \"groq-sdk\";\n\nconst groq = new Groq();\n\ninterface RedactionRule {\n  name: string;\n  pattern: RegExp;\n  replacement: string;\n}\n\nconst PII_RULES: RedactionRule[] = [\n  { name: \"email\", pattern: /\\b[\\w.+-]+@[\\w-]+\\.[\\w.]+\\b/g, replacement: \"[EMAIL]\" },\n  { name: \"phone\", pattern: /\\b\\d{3}[-.]?\\d{3}[-.]?\\d{4}\\b/g, replacement: \"[PHONE]\" },\n  { name: \"ssn\", pattern: /\\b\\d{3}-\\d{2}-\\d{4}\\b/g, replacement: \"[SSN]\" },\n  { name: \"credit_card\", pattern: /\\b\\d{4}[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}\\b/g, replacement: \"[CARD]\" },\n  { name: \"ip_address\", pattern: /\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b/g, replacement: \"[IP]\" },\n];\n\nfunction sanitizeText(text: string): { sanitized: string; redactedTypes: string[] } {\n  let sanitized = text;\n  const redactedTypes: string[] = [];\n\n  for (const rule of PII_RULES) {\n    if (rule.pattern.test(sanitized)) {\n      redactedTypes.push(rule.name);\n      sanitized = sanitized.replace(rule.pattern, rule.replacement);\n    }\n  }\n\n  return { sanitized, redactedTypes };\n}\n\nfunction sanitizeMessages(messages: any[]): { messages: any[]; hadPII: boolean } {\n  let hadPII = false;\n  const sanitized = messages.map((m) => {\n    if (typeof m.content !== \"string\") return m;\n    const { sanitized: text, redactedTypes } = sanitizeText(m.content);\n    if (redactedTypes.length > 0) hadPII = true;\n    return { ...m, content: text };\n  });\n\n  return { messages: sanitized, hadPII };\n}\n```\n\n### Step 2: Safe Completion Wrapper\n\n```typescript\nasync function safeCompletion(\n  messages: any[],\n  model = \"llama-3.3-70b-versatile\",\n  options?: { maxTokens?: number }\n) {\n  // Sanitize input\n  const { messages: sanitized, hadPII } = sanitizeMessages(messages);\n  if (hadPII) {\n    console.warn(\"[groq-data] PII detected and redacted before sending to Groq API\");\n  }\n\n  // Call Groq\n  const completion = await groq.chat.completions.create({\n    model,\n    messages: sanitized,\n    max_tokens: options?.maxTokens ?? 1024,\n  });\n\n  // Filter response\n  const responseContent = completion.choices[0].message.content || \"\";\n  const { sanitized: filteredContent, redactedTypes } = sanitizeText(responseContent);\n\n  if (redactedTypes.length > 0) {\n    console.warn(`[groq-data] Response contained PII: ${redactedTypes.join(\", \")}`);\n  }\n\n  return {\n    ...completion,\n    choices: [{\n      ...completion.choices[0],\n      message: {\n        ...completion.choices[0].message,\n        content: filteredContent,\n      },\n    }],\n  };\n}\n```\n\n### Step 3: Token Usage Tracking\n\n```typescript\ninterface UsageRecord {\n  timestamp: string;\n  model: string;\n  promptTokens: number;\n  completionTokens: number;\n  totalTokens: number;\n  estimatedCostUsd: number;\n  sessionId?: string;\n}\n\nconst COST_PER_1M: Record<string, { input: number; output: number }> = {\n  \"llama-3.1-8b-instant\": { input: 0.05, output: 0.08 },\n  \"llama-3.3-70b-versatile\": { input: 0.59, output: 0.79 },\n  \"llama-3.3-70b-specdec\": { input: 0.59, output: 0.99 },\n  \"meta-llama/llama-4-scout-17b-16e-instruct\": { input: 0.11, output: 0.34 },\n};\n\nfunction calculateCost(model: string, usage: any): number {\n  const pricing = COST_PER_1M[model] || { input: 0.10, output: 0.10 };\n  return (\n    (usage.prompt_tokens / 1_000_000) * pricing.input +\n    (usage.completion_tokens / 1_000_000) * pricing.output\n  );\n}\n\nfunction trackUsage(model: string, usage: any, sessionId?: string): UsageRecord {\n  const record: UsageRecord = {\n    timestamp: new Date().toISOString(),\n    model,\n    promptTokens: usage.prompt_tokens,\n    completionTokens: usage.completion_tokens,\n    totalTokens: usage.total_tokens,\n    estimatedCostUsd: calculateCost(model, usage),\n    sessionId,\n  };\n\n  // Store in your preferred backend\n  console.log(JSON.stringify({ type: \"groq_usage\", ...record }));\n  return record;\n}\n```\n\n### Step 4: Audit-Logged Completion\n\n```typescript\ninterface AuditLog {\n  timestamp: string;\n  sessionId: string;\n  model: string;\n  promptHash: string;        // Hash of input (not the input itself)\n  piiDetected: boolean;\n  responseFiltered: boolean;\n  usage: UsageRecord;\n}\n\nasync function auditedCompletion(\n  sessionId: string,\n  messages: any[],\n  model = \"llama-3.3-70b-versatile\"\n): Promise<{ content: string; audit: AuditLog }> {\n  const { messages: sanitized, hadPII } = sanitizeMessages(messages);\n\n  const completion = await groq.chat.completions.create({\n    model,\n    messages: sanitized,\n  });\n\n  const responseContent = completion.choices[0].message.content || \"\";\n  const { sanitized: filtered, redactedTypes } = sanitizeText(responseContent);\n  const usage = trackUsage(model, completion.usage, sessionId);\n\n  const audit: AuditLog = {\n    timestamp: new Date().toISOString(),\n    sessionId,\n    model,\n    promptHash: createHash(\"sha256\")\n      .update(sanitized.map((m: any) => m.content).join(\"|\"))\n      .digest(\"hex\"),\n    piiDetected: hadPII,\n    responseFiltered: redactedTypes.length > 0,\n    usage,\n  };\n\n  // Log audit entry (don't log prompt content, only hash)\n  console.log(JSON.stringify({ type: \"groq_audit\", ...audit }));\n\n  return { content: filtered, audit };\n}\n```\n\n### Step 5: Content Safety Check\n\n```typescript\n// Use Groq's Llama Guard for content moderation\nasync function moderateContent(text: string): Promise<{\n  safe: boolean;\n  categories: string[];\n}> {\n  const completion = await groq.chat.completions.create({\n    model: \"meta-llama/llama-guard-4-12b\",\n    messages: [{ role: \"user\", content: text }],\n    max_tokens: 100,\n  });\n\n  const response = completion.choices[0].message.content || \"\";\n  const safe = response.trim().toLowerCase().startsWith(\"safe\");\n\n  return {\n    safe,\n    categories: safe ? [] : response.split(\"\\n\").slice(1).map((l) => l.trim()).filter(Boolean),\n  };\n}\n```\n\n### Step 6: Daily Cost Report\n\n```typescript\nfunction generateCostReport(records: UsageRecord[]) {\n  const totalCost = records.reduce((sum, r) => sum + r.estimatedCostUsd, 0);\n  const totalTokens = records.reduce((sum, r) => sum + r.totalTokens, 0);\n\n  const byModel: Record<string, { cost: number; tokens: number; calls: number }> = {};\n  for (const r of records) {\n    if (!byModel[r.model]) byModel[r.model] = { cost: 0, tokens: 0, calls: 0 };\n    byModel[r.model].cost += r.estimatedCostUsd;\n    byModel[r.model].tokens += r.totalTokens;\n    byModel[r.model].calls++;\n  }\n\n  return {\n    totalCost: `$${totalCost.toFixed(4)}`,\n    totalTokens,\n    totalCalls: records.length,\n    byModel: Object.fromEntries(\n      Object.entries(byModel).map(([model, data]) => [\n        model,\n        { cost: `$${data.cost.toFixed(4)}`, tokens: data.tokens, calls: data.calls },\n      ])\n    ),\n  };\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| PII leaks in response | Model echoes sensitive input | Apply response filtering on all completions |\n| Cost spike | 70B model for all requests | Route simple tasks to 8B |\n| Missing usage data | Streaming mode | Use non-streaming for tracked requests, or estimate |\n| Audit gaps | Not all code paths use wrapper | Lint rule: ban direct `groq.chat.completions.create` |\n\n## Resources\n\n- [Groq Privacy Policy](https://groq.com/privacy-policy/)\n- [Groq Pricing](https://groq.com/pricing)\n- [Llama Guard (content moderation)](https://console.groq.com/docs/model/meta-llama/llama-guard-4-12b)\n\n## Next Steps\n\nFor enterprise access controls, see `groq-enterprise-rbac`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "groq-data-handling",
-    "description": "Implement prompt sanitization, PII redaction, response filtering, and",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

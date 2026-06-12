@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031553",
   "name": "clerk-incident-runbook",
   "slug": "clerk-incident-runbook",
   "description": "Manage incident response for Clerk authentication issues.",
   "content": "# Clerk Incident Runbook\n\n## Overview\n\nProcedures for responding to Clerk-related incidents in production. Covers triage, emergency auth bypass, recovery scripts, and post-incident review.\n\n## Prerequisites\n\n- Access to Clerk Dashboard (dashboard.clerk.com)\n- Access to application logs and monitoring\n- Emergency contact list for on-call team\n- Rollback procedures documented\n\n## Instructions\n\n### Step 1: Triage \u2014 Identify Incident Category\n\n| Category | Symptoms | Severity |\n|----------|----------|----------|\n| Clerk outage | status.clerk.com shows incident, all auth fails | Critical |\n| Key compromise | Unauthorized access detected | Critical |\n| Middleware failure | All routes return 500 | High |\n| Session issues | Users randomly logged out | Medium |\n| Webhook backlog | User sync falling behind | Low |\n\nQuick diagnostic:\n\n```bash\n#!/bin/bash\n# scripts/clerk-triage.sh\nset -euo pipefail\n\necho \"=== Clerk Incident Triage ===\"\necho \"Time: $(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n\n# 1. Check Clerk status\necho -e \"\\n--- Clerk Status ---\"\ncurl -s https://status.clerk.com/api/v2/status.json | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin)\nprint(f\\\"Status: {d['status']['description']}\\\")\" 2>/dev/null || echo \"Cannot reach status API\"\n\n# 2. Check API connectivity\necho -e \"\\n--- API Connectivity ---\"\nHTTP_CODE=$(curl -s -o /dev/null -w \"%{http_code}\" -H \"Authorization: Bearer ${CLERK_SECRET_KEY}\" \\\n  https://api.clerk.com/v1/users?limit=1 2>/dev/null)\necho \"API response: HTTP $HTTP_CODE\"\n\n# 3. Check app health\necho -e \"\\n--- App Health ---\"\ncurl -s http://localhost:3000/api/clerk-health 2>/dev/null | python3 -m json.tool || echo \"App not reachable\"\n```\n\n### Step 2: Emergency Auth Bypass (Clerk Outage Only)\n\n```typescript\n// middleware.ts \u2014 emergency bypass mode\nimport { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server'\nimport { NextResponse } from 'next/server'\n\nconst EMERGENCY_BYPASS = process.env.CLERK_EMERGENCY_BYPASS === 'true'\n\nconst isPublicRoute = createRouteMatcher(['/', '/sign-in(.*)', '/sign-up(.*)'])\n\nexport default clerkMiddleware(async (auth, req) => {\n  // Emergency bypass: allow all requests when Clerk is down\n  if (EMERGENCY_BYPASS) {\n    console.warn('[EMERGENCY] Auth bypass active \u2014 all requests allowed')\n    const response = NextResponse.next()\n    response.headers.set('X-Auth-Bypass', 'true')\n    return response\n  }\n\n  if (!isPublicRoute(req)) {\n    await auth.protect()\n  }\n})\n```\n\nActivate bypass:\n\n```bash\n# Vercel: set env var and redeploy\nvercel env add CLERK_EMERGENCY_BYPASS production  # Set to \"true\"\nvercel deploy --prod\n\n# After Clerk recovers: remove bypass\nvercel env rm CLERK_EMERGENCY_BYPASS production\nvercel deploy --prod\n```\n\n### Step 3: Key Rotation (Compromised Secret Key)\n\n```bash\n#!/bin/bash\n# scripts/rotate-clerk-keys.sh\nset -euo pipefail\n\necho \"=== Clerk Key Rotation ===\"\necho \"1. Go to dashboard.clerk.com > API Keys\"\necho \"2. Generate new Secret Key\"\necho \"3. Update all environments:\"\n\n# Update production\necho \"Updating production...\"\n# vercel env rm CLERK_SECRET_KEY production\n# vercel env add CLERK_SECRET_KEY production  # Paste new key\n# vercel deploy --prod\n\necho \"4. Verify all endpoints still work\"\necho \"5. Monitor for unauthorized access attempts\"\necho \"6. File incident report\"\n```\n\n### Step 4: Session Recovery (Mass Logout Fix)\n\n```typescript\n// app/api/admin/refresh-sessions/route.ts\nimport { auth, clerkClient } from '@clerk/nextjs/server'\n\nexport async function POST() {\n  const { has } = await auth()\n  if (!has({ role: 'org:admin' })) {\n    return Response.json({ error: 'Admin only' }, { status: 403 })\n  }\n\n  // Force-revoke all sessions (users will need to re-authenticate)\n  const client = await clerkClient()\n  const users = await client.users.getUserList({ limit: 500 })\n  let revoked = 0\n\n  for (const user of users.data) {\n    const sessions = await client.sessions.getSessionList({ userId: user.id })\n    for (const session of sessions.data) {\n      if (session.status === 'active') {\n        await client.sessions.revokeSession(session.id)\n        revoked++\n      }\n    }\n  }\n\n  return Response.json({ revoked, message: `Revoked ${revoked} sessions` })\n}\n```\n\n### Step 5: Webhook Replay (Missed Events)\n\n```bash\n# Check for missed webhooks in Clerk Dashboard:\n# Dashboard > Webhooks > Select endpoint > Message Logs\n# Click \"Retry\" on failed messages\n\n# Or replay from your audit log:\necho \"Check database for missing user records:\"\necho \"SELECT clerk_id FROM users WHERE created_at > NOW() - INTERVAL '1 hour'\"\n```\n\n### Step 6: Post-Incident Review Template\n\n```markdown\n## Incident Report\n\n**Date:** YYYY-MM-DD HH:MM UTC\n**Duration:** X hours Y minutes\n**Severity:** Critical / High / Medium / Low\n**Category:** Clerk Outage / Key Compromise / Config Error / Middleware Failure\n\n### Timeline\n- HH:MM \u2014 Incident detected (how: monitoring alert / user report / manual)\n- HH:MM \u2014 Triage started, category identified\n- HH:MM \u2014 Mitigation applied (emergency bypass / key rotation / rollback)\n- HH:MM \u2014 Service restored\n- HH:MM \u2014 Post-incident review completed\n\n### Root Cause\n[Description of what caused the incident]\n\n### Impact\n- Users affected: X\n- Duration of auth downtime: Y minutes\n- Data loss: None / Partial / Details\n\n### Action Items\n- [ ] Add monitoring for [specific check]\n- [ ] Update runbook with [new procedure]\n- [ ] Implement [preventive measure]\n```\n\n## Output\n\n- Triage script identifying incident category and severity\n- Emergency auth bypass middleware (activate via env var)\n- Key rotation procedure for compromised credentials\n- Session revocation endpoint for mass-logout recovery\n- Post-incident review template\n\n## Error Handling\n\n| Scenario | Response |\n|----------|----------|\n| Clerk API completely down | Activate emergency bypass, monitor status.clerk.com |\n| Secret key compromised | Rotate keys immediately, revoke all sessions, audit logs |\n| Middleware 500 errors | Check middleware.ts syntax, verify Clerk SDK version |\n| Webhook delivery failures | Retry from Dashboard, check endpoint accessibility |\n| Users randomly logged out | Check session lifetime settings, verify domain config |\n\n## Examples\n\n### Quick Status Check One-Liner\n\n```bash\ncurl -s https://status.clerk.com/api/v2/status.json | python3 -c \"import json,sys; print(json.load(sys.stdin)['status']['description'])\"\n```\n\n## Resources\n\n- [Clerk Status Page](https://status.clerk.com)\n- [Clerk Support](https://clerk.com/support)\n- [Clerk Discord](https://clerk.com/discord)\n\n## Next Steps\n\nAfter resolving incident, review `clerk-observability` for improved monitoring.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clerk-incident-runbook",
-    "description": "Manage incident response for Clerk authentication issues.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

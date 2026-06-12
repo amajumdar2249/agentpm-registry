@@ -1,19 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031261",
   "name": "apify-core-workflow-a",
   "slug": "apify-core-workflow-a",
   "description": "Build a complete web scraping Actor with Crawlee and deploy to Apify.",
   "content": "# Apify Core Workflow A \u2014 Build & Deploy a Scraper\n\n## Overview\n\nEnd-to-end workflow: define input schema, build a Crawlee-based Actor, extract structured data, store results in datasets, test locally, and deploy to Apify platform. This is the primary money-path workflow for Apify.\n\n## Prerequisites\n\n- `npm install apify crawlee` in your project\n- `npm install -g apify-cli` and `apify login` completed\n- Familiarity with `apify-sdk-patterns`\n\n## Instructions\n\n### Step 1: Define Input Schema\n\nCreate `.actor/INPUT_SCHEMA.json`:\n\n```json\n{\n  \"title\": \"E-Commerce Scraper\",\n  \"type\": \"object\",\n  \"schemaVersion\": 1,\n  \"properties\": {\n    \"startUrls\": {\n      \"title\": \"Start URLs\",\n      \"type\": \"array\",\n      \"description\": \"Product listing page URLs to scrape\",\n      \"editor\": \"requestListSources\",\n      \"prefill\": [{ \"url\": \"https://example-store.com/products\" }]\n    },\n    \"maxItems\": {\n      \"title\": \"Max items\",\n      \"type\": \"integer\",\n      \"description\": \"Maximum number of products to scrape\",\n      \"default\": 100,\n      \"minimum\": 1,\n      \"maximum\": 10000\n    },\n    \"proxyConfig\": {\n      \"title\": \"Proxy configuration\",\n      \"type\": \"object\",\n      \"description\": \"Select proxy to use\",\n      \"editor\": \"proxy\",\n      \"default\": { \"useApifyProxy\": true }\n    }\n  },\n  \"required\": [\"startUrls\"]\n}\n```\n\n### Step 2: Build the Actor with Router Pattern\n\n```typescript\n// src/main.ts\nimport { Actor } from 'apify';\nimport { CheerioCrawler, createCheerioRouter, Dataset, log } from 'crawlee';\n\ninterface ProductInput {\n  startUrls: { url: string }[];\n  maxItems?: number;\n  proxyConfig?: { useApifyProxy: boolean; groups?: string[] };\n}\n\ninterface Product {\n  url: string;\n  name: string;\n  price: number | null;\n  currency: string;\n  description: string;\n  imageUrl: string | null;\n  inStock: boolean;\n  scrapedAt: string;\n}\n\nconst router = createCheerioRouter();\n\n// LISTING pages \u2014 extract product links\nrouter.addDefaultHandler(async ({ request, $, enqueueLinks, log }) => {\n  log.info(`Listing page: ${request.url}`);\n\n  await enqueueLinks({\n    selector: 'a.product-card',\n    label: 'PRODUCT',\n  });\n\n  // Handle pagination\n  await enqueueLinks({\n    selector: 'a.next-page',\n    label: 'LISTING',\n  });\n});\n\n// PRODUCT detail pages \u2014 extract structured data\nrouter.addHandler('PRODUCT', async ({ request, $, log }) => {\n  log.info(`Product page: ${request.url}`);\n\n  const product: Product = {\n    url: request.url,\n    name: $('h1.product-title').text().trim(),\n    price: parseFloat($('.price').text().replace(/[^0-9.]/g, '')) || null,\n    currency: $('.currency').text().trim() || 'USD',\n    description: $('div.description').text().trim(),\n    imageUrl: $('img.product-image').attr('src') || null,\n    inStock: !$('.out-of-stock').length,\n    scrapedAt: new Date().toISOString(),\n  };\n\n  await Actor.pushData(product);\n});\n\n// Entry point\nawait Actor.main(async () => {\n  const input = await Actor.getInput<ProductInput>();\n  if (!input?.startUrls?.length) throw new Error('startUrls required');\n\n  const proxyConfiguration = input.proxyConfig?.useApifyProxy\n    ? await Actor.createProxyConfiguration({\n        groups: input.proxyConfig.groups,\n      })\n    : undefined;\n\n  const crawler = new CheerioCrawler({\n    requestHandler: router,\n    proxyConfiguration,\n    maxRequestsPerCrawl: input.maxItems ?? 100,\n    maxConcurrency: 10,\n    requestHandlerTimeoutSecs: 60,\n\n    async failedRequestHandler({ request }, error) {\n      log.error(`Failed: ${request.url} \u2014 ${error.message}`);\n      await Actor.pushData({\n        url: request.url,\n        error: error.message,\n        '#isFailed': true,\n      });\n    },\n  });\n\n  await crawler.run(input.startUrls.map(s => s.url));\n\n  // Save run summary to key-value store\n  const dataset = await Dataset.open();\n  const info = await dataset.getInfo();\n  await Actor.setValue('SUMMARY', {\n    itemCount: info?.itemCount ?? 0,\n    finishedAt: new Date().toISOString(),\n    startUrls: input.startUrls.map(s => s.url),\n  });\n\n  log.info(`Done. Scraped ${info?.itemCount ?? 0} products.`);\n});\n```\n\n### Step 3: Configure Dockerfile\n\n```dockerfile\n# .actor/Dockerfile\nFROM apify/actor-node:20 AS builder\nCOPY package*.json ./\nRUN npm ci --include=dev --audit=false\nCOPY . .\nRUN npm run build\n\nFROM apify/actor-node:20\nCOPY package*.json ./\nRUN npm ci --omit=dev --audit=false\nCOPY --from=builder /usr/src/app/dist ./dist\nCOPY .actor .actor\nCMD [\"npm\", \"start\"]\n```\n\n### Step 4: Test Locally\n\n```bash\n# Create test input\nmkdir -p storage/key_value_stores/default\necho '{\"startUrls\":[{\"url\":\"https://example.com\"}],\"maxItems\":5}' \\\n  > storage/key_value_stores/default/INPUT.json\n\n# Run locally\napify run\n\n# Check results\nls storage/datasets/default/\ncat storage/key_value_stores/default/SUMMARY.json\n```\n\n### Step 5: Deploy to Apify Platform\n\n```bash\n# Push to Apify (creates Actor if it doesn't exist)\napify push\n\n# Or push to a specific Actor\napify push username/my-actor\n\n# Run on platform\napify actors call username/my-actor\n```\n\n### Step 6: Retrieve Results Programmatically\n\n```typescript\nimport { ApifyClient } from 'apify-client';\n\nconst client = new ApifyClient({ token: process.env.APIFY_TOKEN });\n\n// Run the deployed Actor\nconst run = await client.actor('username/my-actor').call({\n  startUrls: [{ url: 'https://target-store.com/products' }],\n  maxItems: 500,\n});\n\n// Get results\nconst { items } = await client.dataset(run.defaultDatasetId).listItems();\nconsole.log(`Scraped ${items.length} products`);\n\n// Download as CSV\nconst csv = await client.dataset(run.defaultDatasetId).downloadItems('csv');\n```\n\n## Output\n\n- Deployable Actor with typed input schema\n- Router-based crawler handling listing + detail pages\n- Structured product data in default dataset\n- Run summary in default key-value store\n- Failed requests tracked with error messages\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `Actor build failed` | Dockerfile/deps issue | Check build logs on platform |\n| Selector returns empty | Page structure changed | Update CSS selectors |\n| `maxRequestsPerCrawl` hit | Too many pages enqueued | Increase limit or filter URLs |\n| Proxy errors | Anti-bot blocking | Switch to residential proxy |\n| `TIMED-OUT` status | Actor exceeded timeout | Increase timeout or reduce scope |\n\n## Resources\n\n- [Crawlee Quick Start](https://crawlee.dev/js/docs/quick-start)\n- [Actor Deployment](https://docs.apify.com/platform/actors/development/deployment)\n- [Input Schema Spec](https://docs.apify.com/platform/actors/development/actor-definition/input-schema)\n\n## Next Steps\n\nFor dataset/KV store management, see `apify-core-workflow-b`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "apify-core-workflow-a",
-    "description": "Build a complete web scraping Actor with Crawlee and deploy to Apify.",
-    "Use when implementing end-to-end scraping": "input schema, crawler,",
-    "Trigger": "apify scrape website\", \"build apify actor\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(npx:*), Bash(apify:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

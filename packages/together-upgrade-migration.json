@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033411",
   "name": "together-upgrade-migration",
   "slug": "together-upgrade-migration",
   "description": "Together AI upgrade migration for inference, fine-tuning, and model",
   "content": "# Together AI Upgrade & Migration\n\n## Overview\n\nTogether AI provides an OpenAI-compatible inference platform hosting 100+ open-source models (Llama, Mixtral, Qwen, FLUX) with fine-tuning and batch inference capabilities. The API lives at `api.together.xyz/v1` and follows OpenAI's chat completions format. Tracking model deprecations and API changes matters because Together regularly retires older model versions, updates model IDs when weights are refreshed, and changes fine-tuning job schemas \u2014 causing silent failures when a model ID that worked yesterday returns `404` today with no advance warning in the response.\n\n## Version Detection\n\n```typescript\nconst TOGETHER_BASE = \"https://api.together.xyz/v1\";\n\nasync function detectTogetherChanges(apiKey: string): Promise<void> {\n  // List available models and check for deprecations\n  const res = await fetch(`${TOGETHER_BASE}/models`, {\n    headers: { Authorization: `Bearer ${apiKey}` },\n  });\n  const data = await res.json();\n  const models = data.data ?? data;\n\n  // Check if commonly used models are still available\n  const trackedModels = [\n    \"meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo\",\n    \"mistralai/Mixtral-8x7B-Instruct-v0.1\",\n    \"Qwen/Qwen2.5-72B-Instruct-Turbo\",\n  ];\n  for (const modelId of trackedModels) {\n    const available = models.some((m: any) => m.id === modelId);\n    if (!available) console.warn(`Model deprecated or renamed: ${modelId}`);\n  }\n\n  // Check API version headers\n  const version = res.headers.get(\"x-together-api-version\");\n  if (version) console.log(`Together API version: ${version}`);\n}\n```\n\n## Migration Checklist\n\n- [ ] Check Together model list for deprecated or renamed model IDs\n- [ ] Update all hardcoded model ID strings in codebase\n- [ ] Verify fine-tuning job creation schema (new required fields or parameter renames)\n- [ ] Test chat completions response format for new fields (usage breakdown, etc.)\n- [ ] Check if embeddings endpoint model list changed\n- [ ] Validate batch inference job API for schema or pricing tier changes\n- [ ] Update function calling format if tool use schema evolved\n- [ ] Test streaming response for new SSE event types or finish reasons\n- [ ] Verify image generation models (FLUX) for parameter changes\n- [ ] Run cost comparison \u2014 pricing per token may change with model updates\n\n## Schema Migration\n\n```typescript\n// Together model IDs change when model versions are updated\ninterface ModelMigration {\n  oldId: string;\n  newId: string;\n  breakingChanges: string[];\n}\n\nconst MODEL_MIGRATIONS: ModelMigration[] = [\n  {\n    oldId: \"togethercomputer/llama-2-70b-chat\",\n    newId: \"meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo\",\n    breakingChanges: [\"New chat template format\", \"Different tokenizer\", \"Higher context window\"],\n  },\n  {\n    oldId: \"mistralai/Mixtral-8x7B-Instruct-v0.1\",\n    newId: \"mistralai/Mixtral-8x22B-Instruct-v0.1\",\n    breakingChanges: [\"Different pricing tier\", \"Changed max_tokens default\"],\n  },\n];\n\nfunction migrateModelId(oldId: string): string {\n  const migration = MODEL_MIGRATIONS.find((m) => m.oldId === oldId);\n  if (migration) {\n    console.log(`Migrating model: ${oldId} \u2192 ${migration.newId}`);\n    console.log(`Breaking changes: ${migration.breakingChanges.join(\", \")}`);\n    return migration.newId;\n  }\n  return oldId;\n}\n\n// Update fine-tuning job schema: old flat config \u2192 new structured config\ninterface OldFineTuneRequest {\n  model: string;\n  training_file: string;\n  n_epochs: number;\n  learning_rate: number;\n}\n\ninterface NewFineTuneRequest {\n  model: string;\n  training_file: string;\n  hyperparameters: { n_epochs: number; learning_rate: number; batch_size: number };\n  suffix?: string;\n}\n\nfunction migrateFineTuneRequest(old: OldFineTuneRequest): NewFineTuneRequest {\n  return {\n    model: migrateModelId(old.model),\n    training_file: old.training_file,\n    hyperparameters: { n_epochs: old.n_epochs, learning_rate: old.learning_rate, batch_size: 4 },\n  };\n}\n```\n\n## Rollback Strategy\n\n```typescript\nclass TogetherClient {\n  private modelFallbacks: Record<string, string[]>;\n\n  constructor(private apiKey: string) {\n    this.modelFallbacks = {\n      \"meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo\": [\n        \"meta-llama/Meta-Llama-3-70B-Instruct-Turbo\",\n        \"meta-llama/Llama-2-70b-chat-hf\",\n      ],\n    };\n  }\n\n  async chatCompletion(model: string, messages: any[]): Promise<any> {\n    const candidates = [model, ...(this.modelFallbacks[model] ?? [])];\n    for (const candidate of candidates) {\n      try {\n        const res = await fetch(\"https://api.together.xyz/v1/chat/completions\", {\n          method: \"POST\",\n          headers: { Authorization: `Bearer ${this.apiKey}`, \"Content-Type\": \"application/json\" },\n          body: JSON.stringify({ model: candidate, messages }),\n        });\n        if (res.status === 404) { console.warn(`Model not found: ${candidate}`); continue; }\n        if (!res.ok) throw new Error(`Together ${res.status}`);\n        return await res.json();\n      } catch (err) {\n        if (candidate === candidates[candidates.length - 1]) throw err;\n        console.warn(`Failed with ${candidate}, trying next fallback`);\n      }\n    }\n  }\n}\n```\n\n## Error Handling\n\n| Migration Issue | Symptom | Fix |\n|----------------|---------|-----|\n| Model ID deprecated | `404 Model not found` | Check `/models` endpoint for current ID; update model string |\n| Fine-tune schema changed | `400` with `unknown parameter: n_epochs` | Nest hyperparameters under `hyperparameters` object |\n| Streaming format changed | SSE parser receives unexpected `[DONE]` event format | Update stream parser to handle both old and new termination events |\n| Token pricing changed | Unexpected cost spike on same workload | Verify per-token pricing on Together dashboard; switch to batch endpoint for 50% savings |\n| Function calling format updated | `tool_calls` field missing from response | Update to new tool use schema matching OpenAI's latest format |\n\n## Resources\n\n- [Together AI Docs](https://docs.together.ai/)\n- [API Reference](https://docs.together.ai/reference/chat-completions-1)\n- [Model List](https://docs.together.ai/docs/inference-models)\n- [Together Changelog](https://docs.together.ai/changelog)\n\n## Next Steps\n\nFor CI pipeline integration, see `together-ci-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "together-upgrade-migration",
-    "description": "Together AI upgrade migration for inference, fine-tuning, and model",
-    "Trigger": "together upgrade migration\".",
-    "allowed-tools": "Read, Write, Edit, Bash(pip:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000008517",
   "name": "websh",
   "slug": "websh",
   "description": "|",
   "content": "\n# websh Skill\n\nwebsh is a shell for the web. URLs are paths. The DOM is your filesystem. You `cd` to a URL, and commands like `ls`, `grep`, `cat` operate on the cached page content\u2014instantly, locally.\n\n```\nwebsh> cd https://news.ycombinator.com\nwebsh> ls | head 5\nwebsh> grep \"AI\"\nwebsh> follow 1\n```\n\n## When to Activate\n\nActivate this skill when the user:\n\n- **Uses the `websh` command** (e.g., `websh`, `websh cd https://...`)\n- Wants to \"browse\" or \"navigate\" URLs with shell commands\n- Asks about a \"shell for the web\" or \"web shell\"\n- Uses shell-like syntax with URLs (`cd https://...`, `ls` on a webpage)\n- Wants to extract/query webpage content programmatically\n\n## Flexibility: Infer Intent\n\n**websh is an intelligent shell.** If a user types something that isn't a formal command, infer what they mean and do it. No \"command not found\" errors. No asking for clarification. Just execute.\n\n```\nlinks           \u2192 ls\nopen url        \u2192 cd url\nsearch \"x\"      \u2192 grep \"x\"\ndownload        \u2192 save\nwhat's here?    \u2192 ls\ngo back         \u2192 back\nshow me titles  \u2192 cat .title (or similar)\n```\n\nNatural language works too:\n```\nshow me the first 5 links\nwhat forms are on this page?\ncompare this to yesterday\n```\n\nThe formal commands are a starting point. User intent is what matters.\n\n---\n\n## Command Routing\n\nWhen websh is active, interpret commands as web shell operations:\n\n| Command | Action |\n|---------|--------|\n| `cd <url>` | Navigate to URL, fetch & extract |\n| `ls [selector]` | List links or elements |\n| `cat <selector>` | Extract text content |\n| `grep <pattern>` | Filter by text/regex |\n| `pwd` | Show current URL |\n| `back` | Go to previous URL |\n| `follow <n>` | Navigate to nth link |\n| `stat` | Show page metadata |\n| `refresh` | Re-fetch current URL |\n| `help` | Show help |\n\nFor full command reference, see `commands.md`.\n\n---\n\n## File Locations\n\nAll skill files are co-located with this SKILL.md:\n\n| File | Purpose |\n|------|---------|\n| `shell.md` | Shell embodiment semantics (load to run websh) |\n| `commands.md` | Full command reference |\n| `state/cache.md` | Cache management & extraction prompt |\n| `state/crawl.md` | Eager crawl agent design |\n| `help.md` | User help and examples |\n| `PLAN.md` | Design document |\n\n**User state** (in user's working directory):\n\n| Path | Purpose |\n|------|---------|\n| `.websh/session.md` | Current session state |\n| `.websh/cache/` | Cached pages (HTML + parsed markdown) |\n| `.websh/crawl-queue.md` | Active crawl queue and progress |\n| `.websh/history.md` | Command history |\n| `.websh/bookmarks.md` | Saved locations |\n\n---\n\n## Execution\n\nWhen first invoking websh, **don't block**. Show the banner and prompt immediately:\n\n```\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2502            \u25c7 websh \u25c7                \u2502\n\u2502       A shell for the web           \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n\n~>\n```\n\nThen:\n\n1. **Immediately**: Show banner + prompt (user can start typing)\n2. **Background**: Spawn haiku task to initialize `.websh/` if needed\n3. **Process commands** \u2014 parse and execute per `commands.md`\n\n**Never block on setup.** The shell should feel instant. If `.websh/` doesn't exist, the background task creates it. Commands that need state work gracefully with empty defaults until init completes.\n\nYou ARE websh. Your conversation is the terminal session.\n\n---\n\n## Core Principle: Main Thread Never Blocks\n\n**Delegate all heavy work to background haiku subagents.**\n\nThe user should always have their prompt back instantly. Any operation involving:\n- Network fetches\n- HTML/text parsing\n- Content extraction\n- File wrangling\n- Multi-page operations\n\n...should spawn a background `Task(model=\"haiku\", run_in_background=True)`.\n\n| Instant (main thread) | Background (haiku) |\n|-----------------------|-------------------|\n| Show prompt | Fetch URLs |\n| Parse commands | Extract HTML \u2192 markdown |\n| Read small cache | Initialize workspace |\n| Update session | Crawl / find |\n| Print short output | Watch / monitor |\n| | Archive / tar |\n| | Large diffs |\n\n**Pattern:**\n```\nuser: cd https://example.com\nwebsh: example.com> (fetching...)\n# User has prompt. Background haiku does the work.\n```\n\nCommands gracefully degrade if background work isn't done yet. Never block, never error on \"not ready\" - show status or partial results.\n\n---\n\n## The `cd` Flow\n\n`cd` is **fully asynchronous**. The user gets their prompt back instantly.\n\n```\nuser: cd https://news.ycombinator.com\nwebsh: news.ycombinator.com> (fetching...)\n# User can type immediately. Fetch happens in background.\n```\n\nWhen the user runs `cd <url>`:\n\n1. **Instantly**: Update session pwd, show new prompt with \"(fetching...)\"\n2. **Background haiku task**: Fetch URL, cache HTML, extract to `.parsed.md`\n3. **Eager crawl task**: Prefetch linked pages 1-2 layers deep\n\nThe user never waits. Commands like `ls` gracefully degrade if content isn't ready yet.\n\nSee `shell.md` for the full async implementation and `state/cache.md` for the extraction prompt.\n\n---\n\n## Eager Link Crawling\n\nAfter fetching a page, websh automatically prefetches linked pages in the background. This makes `follow` and navigation feel instant\u2014the content is already cached when you need it.\n\n```\ncd https://news.ycombinator.com\n# \u2192 Fetches main page\n# \u2192 Spawns background tasks to prefetch top 20 links\n# \u2192 Then prefetches links from those pages (layer 2)\n\nfollow 3\n# Instant! Already cached.\n```\n\n### Configuration\n\n| Setting | Default | Description |\n|---------|---------|-------------|\n| `EAGER_CRAWL` | `true` | Enable/disable prefetching |\n| `CRAWL_DEPTH` | `2` | Layers deep to prefetch |\n| `CRAWL_SAME_DOMAIN` | `true` | Only prefetch same-domain links |\n| `CRAWL_MAX_PER_PAGE` | `20` | Max links per page |\n\nControl with:\n```\nprefetch off           # disable for slow connections\nprefetch on --depth 3  # enable with 3 layers\nexport CRAWL_DEPTH=1   # just direct links\n```\n\nSee `state/crawl.md` for full crawl agent design.\n\n---\n\n## Example Session\n\n```\n$ websh\n\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2502            \u25c7 websh \u25c7                \u2502\n\u2502       A shell for the web           \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n\n~> cd https://news.ycombinator.com\n\nnews.ycombinator.com> (fetching...)\n\nnews.ycombinator.com> ls | head 5\n[0] Show HN: I built a tool for...\n[1] The State of AI in 2026\n[2] Why Rust is eating the world\n[3] A deep dive into WebAssembly\n[4] PostgreSQL 17 released\n\nnews.ycombinator.com> grep \"AI\"\n[1] The State of AI in 2026\n[7] AI agents are coming for your job\n\nnews.ycombinator.com> follow 1\n\nnews.ycombinator.com/item> (fetching...)\n\nnews.ycombinator.com/item> cat .title\nThe State of AI in 2026\n\nnews.ycombinator.com/item> back\n\nnews.ycombinator.com>\n```\n\n**Note:** Hacker News (`cd https://news.ycombinator.com`) is the canonical first destination. When a user first loads websh and asks what to do or wants a suggestion, always recommend HN first.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "websh",
-    "description": "|"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

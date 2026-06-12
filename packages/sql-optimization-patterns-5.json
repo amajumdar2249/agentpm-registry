@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000019635",
   "name": "sql-optimization-patterns",
   "slug": "sql-optimization-patterns-5",
   "description": "Master SQL query optimization, indexing strategies, and EXPLAIN analysis to dramatically improve database performance and eliminate slow queries. Use when debugging slow queries, designing database schemas, or optimizing application performance.",
   "content": "\n# SQL Optimization Patterns\n\nTransform slow database queries into lightning-fast operations through systematic optimization, proper indexing, and query plan analysis.\n\n## When to Use This Skill\n\n- Debugging slow-running queries\n- Designing performant database schemas\n- Optimizing application response times\n- Reducing database load and costs\n- Improving scalability for growing datasets\n- Analyzing EXPLAIN query plans\n- Implementing efficient indexes\n- Resolving N+1 query problems\n\n## Core Concepts\n\n### 1. Query Execution Plans (EXPLAIN)\n\nUnderstanding EXPLAIN output is fundamental to optimization.\n\n**PostgreSQL EXPLAIN:**\n\n```sql\n-- Basic explain\nEXPLAIN SELECT * FROM users WHERE email = 'user@example.com';\n\n-- With actual execution stats\nEXPLAIN ANALYZE\nSELECT * FROM users WHERE email = 'user@example.com';\n\n-- Verbose output with more details\nEXPLAIN (ANALYZE, BUFFERS, VERBOSE)\nSELECT u.*, o.order_total\nFROM users u\nJOIN orders o ON u.id = o.user_id\nWHERE u.created_at > NOW() - INTERVAL '30 days';\n```\n\n**Key Metrics to Watch:**\n\n- **Seq Scan**: Full table scan (usually slow for large tables)\n- **Index Scan**: Using index (good)\n- **Index Only Scan**: Using index without touching table (best)\n- **Nested Loop**: Join method (okay for small datasets)\n- **Hash Join**: Join method (good for larger datasets)\n- **Merge Join**: Join method (good for sorted data)\n- **Cost**: Estimated query cost (lower is better)\n- **Rows**: Estimated rows returned\n- **Actual Time**: Real execution time\n\n### 2. Index Strategies\n\nIndexes are the most powerful optimization tool.\n\n**Index Types:**\n\n- **B-Tree**: Default, good for equality and range queries\n- **Hash**: Only for equality (=) comparisons\n- **GIN**: Full-text search, array queries, JSONB\n- **GiST**: Geometric data, full-text search\n- **BRIN**: Block Range INdex for very large tables with correlation\n\n```sql\n-- Standard B-Tree index\nCREATE INDEX idx_users_email ON users(email);\n\n-- Composite index (order matters!)\nCREATE INDEX idx_orders_user_status ON orders(user_id, status);\n\n-- Partial index (index subset of rows)\nCREATE INDEX idx_active_users ON users(email)\nWHERE status = 'active';\n\n-- Expression index\nCREATE INDEX idx_users_lower_email ON users(LOWER(email));\n\n-- Covering index (include additional columns)\nCREATE INDEX idx_users_email_covering ON users(email)\nINCLUDE (name, created_at);\n\n-- Full-text search index\nCREATE INDEX idx_posts_search ON posts\nUSING GIN(to_tsvector('english', title || ' ' || body));\n\n-- JSONB index\nCREATE INDEX idx_metadata ON events USING GIN(metadata);\n```\n\n### 3. Query Optimization Patterns\n\n**Avoid SELECT \\*:**\n\n```sql\n-- Bad: Fetches unnecessary columns\nSELECT * FROM users WHERE id = 123;\n\n-- Good: Fetch only what you need\nSELECT id, email, name FROM users WHERE id = 123;\n```\n\n**Use WHERE Clause Efficiently:**\n\n```sql\n-- Bad: Function prevents index usage\nSELECT * FROM users WHERE LOWER(email) = 'user@example.com';\n\n-- Good: Create functional index or use exact match\nCREATE INDEX idx_users_email_lower ON users(LOWER(email));\n-- Then:\nSELECT * FROM users WHERE LOWER(email) = 'user@example.com';\n\n-- Or store normalized data\nSELECT * FROM users WHERE email = 'user@example.com';\n```\n\n**Optimize JOINs:**\n\n```sql\n-- Bad: Cartesian product then filter\nSELECT u.name, o.total\nFROM users u, orders o\nWHERE u.id = o.user_id AND u.created_at > '2024-01-01';\n\n-- Good: Filter before join\nSELECT u.name, o.total\nFROM users u\nJOIN orders o ON u.id = o.user_id\nWHERE u.created_at > '2024-01-01';\n\n-- Better: Filter both tables\nSELECT u.name, o.total\nFROM (SELECT * FROM users WHERE created_at > '2024-01-01') u\nJOIN orders o ON u.id = o.user_id;\n```\n\n## Detailed patterns and worked examples\n\nDetailed pattern documentation lives in `references/details.md`. Read that file when the navigation tier above is insufficient.\n\n## Best Practices\n\n1. **Index Selectively**: Too many indexes slow down writes\n2. **Monitor Query Performance**: Use slow query logs\n3. **Keep Statistics Updated**: Run ANALYZE regularly\n4. **Use Appropriate Data Types**: Smaller types = better performance\n5. **Normalize Thoughtfully**: Balance normalization vs performance\n6. **Cache Frequently Accessed Data**: Use application-level caching\n7. **Connection Pooling**: Reuse database connections\n8. **Regular Maintenance**: VACUUM, ANALYZE, rebuild indexes\n\n```sql\n-- Update statistics\nANALYZE users;\nANALYZE VERBOSE orders;\n\n-- Vacuum (PostgreSQL)\nVACUUM ANALYZE users;\nVACUUM FULL users;  -- Reclaim space (locks table)\n\n-- Reindex\nREINDEX INDEX idx_users_email;\nREINDEX TABLE users;\n```\n\n## Common Pitfalls\n\n- **Over-Indexing**: Each index slows down INSERT/UPDATE/DELETE\n- **Unused Indexes**: Waste space and slow writes\n- **Missing Indexes**: Slow queries, full table scans\n- **Implicit Type Conversion**: Prevents index usage\n- **OR Conditions**: Can't use indexes efficiently\n- **LIKE with Leading Wildcard**: `LIKE '%abc'` can't use index\n- **Function in WHERE**: Prevents index usage unless functional index exists\n\n## Monitoring Queries\n\n```sql\n-- Find slow queries (PostgreSQL)\nSELECT query, calls, total_time, mean_time\nFROM pg_stat_statements\nORDER BY mean_time DESC\nLIMIT 10;\n\n-- Find missing indexes (PostgreSQL)\nSELECT\n    schemaname,\n    tablename,\n    seq_scan,\n    seq_tup_read,\n    idx_scan,\n    seq_tup_read / seq_scan AS avg_seq_tup_read\nFROM pg_stat_user_tables\nWHERE seq_scan > 0\nORDER BY seq_tup_read DESC\nLIMIT 10;\n\n-- Find unused indexes (PostgreSQL)\nSELECT\n    schemaname,\n    tablename,\n    indexname,\n    idx_scan,\n    idx_tup_read,\n    idx_tup_fetch\nFROM pg_stat_user_indexes\nWHERE idx_scan = 0\nORDER BY pg_relation_size(indexrelid) DESC;\n```\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "sql-optimization-patterns",
-    "description": "Master SQL query optimization, indexing strategies, and EXPLAIN analysis to dramatically improve database performance and eliminate slow queries. Use when debugging slow queries, designing database schemas, or optimizing application performance."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

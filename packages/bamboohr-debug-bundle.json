@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031384",
   "name": "bamboohr-debug-bundle",
   "slug": "bamboohr-debug-bundle",
   "description": "Collect BambooHR debug evidence for support tickets and troubleshooting.",
   "content": "# BambooHR Debug Bundle\n\n## Overview\n\nCollect all diagnostic information for BambooHR API troubleshooting or support tickets. Captures connectivity tests, API response details, environment info, and redacted configuration.\n\n## Prerequisites\n\n- BambooHR environment variables set\n- `curl` available for API tests\n- Permission to collect environment info\n\n## Instructions\n\n### Step 1: Complete Debug Bundle Script\n\n```bash\n#!/bin/bash\n# bamboohr-debug-bundle.sh \u2014 Run this, then send the .tar.gz to support\n\nset -euo pipefail\n\nBUNDLE_DIR=\"bamboohr-debug-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE_DIR\"\n\nDOMAIN=\"${BAMBOOHR_COMPANY_DOMAIN:?Set BAMBOOHR_COMPANY_DOMAIN}\"\nAPI_KEY=\"${BAMBOOHR_API_KEY:?Set BAMBOOHR_API_KEY}\"\nBASE=\"https://api.bamboohr.com/api/gateway.php/${DOMAIN}/v1\"\n\nexec > >(tee \"$BUNDLE_DIR/summary.txt\") 2>&1\n\necho \"=== BambooHR Debug Bundle ===\"\necho \"Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)\"\necho \"Company Domain: ${DOMAIN}\"\necho \"API Key: ${API_KEY:0:4}****${API_KEY: -4}\"\necho \"\"\n\n# \u2500\u2500 Environment \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\necho \"--- Runtime Environment ---\"\necho \"Node.js: $(node --version 2>/dev/null || echo 'not installed')\"\necho \"npm: $(npm --version 2>/dev/null || echo 'not installed')\"\necho \"Python: $(python3 --version 2>/dev/null || echo 'not installed')\"\necho \"curl: $(curl --version 2>/dev/null | head -1)\"\necho \"OS: $(uname -a)\"\necho \"\"\n\n# \u2500\u2500 API Connectivity Test \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\necho \"--- API Connectivity ---\"\necho -n \"Directory endpoint: \"\ncurl -s -o \"$BUNDLE_DIR/directory-response.json\" \\\n  -w \"HTTP %{http_code} | %{time_total}s | %{size_download} bytes\\n\" \\\n  -u \"${API_KEY}:x\" \\\n  -H \"Accept: application/json\" \\\n  \"${BASE}/employees/directory\"\n\necho -n \"Employee endpoint: \"\ncurl -s -o \"$BUNDLE_DIR/employee-response.json\" \\\n  -w \"HTTP %{http_code} | %{time_total}s | %{size_download} bytes\\n\" \\\n  -u \"${API_KEY}:x\" \\\n  -H \"Accept: application/json\" \\\n  \"${BASE}/employees/0/?fields=firstName\"\n\necho -n \"Time off types: \"\ncurl -s -o \"$BUNDLE_DIR/timeoff-types-response.json\" \\\n  -w \"HTTP %{http_code} | %{time_total}s\\n\" \\\n  -u \"${API_KEY}:x\" \\\n  -H \"Accept: application/json\" \\\n  \"${BASE}/meta/time_off/types\"\n\necho \"\"\n\n# \u2500\u2500 Response Headers (verbose for one endpoint) \u2500\u2500\u2500\u2500\u2500\necho \"--- Response Headers (directory) ---\"\ncurl -s -I -u \"${API_KEY}:x\" \\\n  -H \"Accept: application/json\" \\\n  \"${BASE}/employees/directory\" \\\n  | grep -iE \"^(x-bamboohr|content-type|retry-after|date|server)\" \\\n  > \"$BUNDLE_DIR/response-headers.txt\"\ncat \"$BUNDLE_DIR/response-headers.txt\"\necho \"\"\n\n# \u2500\u2500 Project Dependencies \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\necho \"--- Project Dependencies ---\"\nif [ -f package.json ]; then\n  node -e \"\n    const pkg = require('./package.json');\n    const deps = {...pkg.dependencies, ...pkg.devDependencies};\n    const bamboo = Object.entries(deps).filter(([k]) => k.includes('bamboo'));\n    const http = Object.entries(deps).filter(([k]) => ['axios','node-fetch','got','ky'].includes(k));\n    console.log('BambooHR packages:', bamboo.length ? bamboo.map(([k,v]) => k+'@'+v).join(', ') : 'none (using fetch)');\n    console.log('HTTP clients:', http.length ? http.map(([k,v]) => k+'@'+v).join(', ') : 'native fetch');\n  \" 2>/dev/null || echo \"Could not parse package.json\"\nfi\necho \"\"\n\n# \u2500\u2500 Configuration (redacted) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\necho \"--- Configuration (redacted) ---\"\nif [ -f .env ]; then\n  sed 's/=.*/=***REDACTED***/' .env > \"$BUNDLE_DIR/config-redacted.txt\"\n  echo \"Found .env with $(wc -l < .env) lines\"\nelse\n  echo \"No .env file found\"\nfi\n\n# \u2500\u2500 Redact sensitive data from API responses \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\nfor f in \"$BUNDLE_DIR\"/*-response.json; do\n  if [ -f \"$f\" ]; then\n    # Remove email addresses and phone numbers from responses\n    sed -i 's/[a-zA-Z0-9._%+-]*@[a-zA-Z0-9.-]*/***@redacted/g' \"$f\"\n    sed -i 's/[0-9]\\{3\\}[-. ][0-9]\\{3\\}[-. ][0-9]\\{4\\}/***-***-****/g' \"$f\"\n  fi\ndone\n\necho \"\"\necho \"--- Bundle Complete ---\"\n\n# \u2500\u2500 Package \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\ntar -czf \"$BUNDLE_DIR.tar.gz\" \"$BUNDLE_DIR\"\necho \"Created: $BUNDLE_DIR.tar.gz ($(du -h \"$BUNDLE_DIR.tar.gz\" | cut -f1))\"\necho \"\"\necho \"BEFORE SHARING: Review $BUNDLE_DIR/ for any remaining PII\"\n```\n\n### Step 2: Programmatic Debug Info (TypeScript)\n\n```typescript\nimport { BambooHRClient, BambooHRApiError } from './bamboohr/client';\n\ninterface DiagnosticResult {\n  timestamp: string;\n  environment: Record<string, string>;\n  connectivity: {\n    endpoint: string;\n    status: number;\n    latencyMs: number;\n    error?: string;\n  }[];\n}\n\nasync function collectDiagnostics(client: BambooHRClient): Promise<DiagnosticResult> {\n  const endpoints = [\n    '/employees/directory',\n    '/meta/time_off/types',\n    '/meta/lists/',\n  ];\n\n  const connectivity = await Promise.all(\n    endpoints.map(async (endpoint) => {\n      const start = Date.now();\n      try {\n        await client.request('GET', endpoint);\n        return { endpoint, status: 200, latencyMs: Date.now() - start };\n      } catch (err) {\n        const status = err instanceof BambooHRApiError ? err.status : 0;\n        return {\n          endpoint, status, latencyMs: Date.now() - start,\n          error: (err as Error).message,\n        };\n      }\n    }),\n  );\n\n  return {\n    timestamp: new Date().toISOString(),\n    environment: {\n      nodeVersion: process.version,\n      platform: process.platform,\n      companyDomain: process.env.BAMBOOHR_COMPANY_DOMAIN || 'NOT SET',\n      apiKeySet: process.env.BAMBOOHR_API_KEY ? 'yes' : 'NO',\n    },\n    connectivity,\n  };\n}\n```\n\n## Output\n\n- `bamboohr-debug-YYYYMMDD-HHMMSS.tar.gz` archive containing:\n  - `summary.txt` \u2014 Environment, connectivity, and dependency info\n  - `directory-response.json` \u2014 Redacted API response sample\n  - `response-headers.txt` \u2014 BambooHR-specific headers\n  - `config-redacted.txt` \u2014 Environment config with secrets removed\n\n## Sensitive Data Handling\n\n**Always redact before sharing:**\n\n- API keys and tokens\n- Employee emails, phone numbers, SSNs\n- Home addresses and personal info\n- Salary and compensation data\n\n**Safe to include:**\n\n- HTTP status codes and error messages\n- Response latencies and sizes\n- `X-BambooHR-Error-Message` header values\n- SDK/runtime versions\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| curl not found | Not installed | Install curl or use Node.js version |\n| Permission denied | Script not executable | `chmod +x bamboohr-debug-bundle.sh` |\n| Empty response files | Auth failure | Check API key before running |\n| Large bundle size | Too many response files | Reduce to key endpoints only |\n\n## Resources\n\n- [BambooHR Support](https://www.bamboohr.com/contact-support/)\n- [BambooHR Status Page](https://status.bamboohr.com)\n\n## Next Steps\n\nFor rate limit issues, see `bamboohr-rate-limits`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bamboohr-debug-bundle",
-    "description": "Collect BambooHR debug evidence for support tickets and troubleshooting.",
-    "allowed-tools": "Read, Bash(curl:*), Bash(tar:*), Bash(node:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

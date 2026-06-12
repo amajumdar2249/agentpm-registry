@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032329",
   "name": "intercom-prod-checklist",
   "slug": "intercom-prod-checklist",
   "description": "Execute Intercom production readiness checklist and rollback procedures.",
   "content": "# Intercom Production Checklist\n\n## Overview\n\nComplete checklist for deploying Intercom integrations to production, covering authentication, error handling, rate limits, webhooks, and monitoring.\n\n## Pre-Deployment Checklist\n\n### Authentication and Secrets\n\n- [ ] Production access token stored in secret manager (not env files)\n- [ ] Token has minimal required OAuth scopes\n- [ ] Token rotation procedure documented and tested\n- [ ] Separate tokens for dev/staging/production workspaces\n- [ ] No hardcoded tokens in source code (verified with `grep -r \"dG9r\" .`)\n\n### API Integration Quality\n\n- [ ] All API calls wrapped in error handling (`try/catch` with `IntercomError`)\n- [ ] 429 rate limit retry with exponential backoff implemented\n- [ ] 5xx server error retry implemented\n- [ ] Request timeouts configured (recommended: 30s)\n- [ ] Pagination handles cursor-based iteration correctly\n- [ ] Contact search uses compound queries efficiently\n\n### Webhook Endpoints\n\n- [ ] Webhook URL uses HTTPS (Intercom requires it)\n- [ ] `X-Hub-Signature` verification implemented (HMAC-SHA1)\n- [ ] Webhook handler responds within 5 seconds (Intercom timeout)\n- [ ] Idempotency: duplicate webhooks handled gracefully\n- [ ] Failed webhook retry handled (Intercom retries once after 1 min)\n\n### Data Handling\n\n- [ ] PII redacted from logs (emails, names, phone numbers)\n- [ ] Contact data cached with appropriate TTL\n- [ ] GDPR deletion handler implemented for contact data\n- [ ] Custom attributes validated before sending to API\n\n### Monitoring and Alerting\n\n- [ ] Health check endpoint includes Intercom connectivity test\n- [ ] Error rate alerting configured (threshold: 5% over 5 min)\n- [ ] Rate limit usage tracked (alert at 80% of limit)\n- [ ] Latency monitoring (alert if P95 > 2 seconds)\n- [ ] Intercom status page monitored (https://status.intercom.com)\n\n## Production Health Check\n\n```typescript\nimport { IntercomClient, IntercomError } from \"intercom-client\";\n\ninterface IntercomHealthStatus {\n  status: \"healthy\" | \"degraded\" | \"unhealthy\";\n  latencyMs: number;\n  authenticated: boolean;\n  rateLimitRemaining?: number;\n  error?: string;\n}\n\nasync function checkIntercomHealth(\n  client: IntercomClient\n): Promise<IntercomHealthStatus> {\n  const start = Date.now();\n  try {\n    const admins = await client.admins.list();\n    return {\n      status: \"healthy\",\n      latencyMs: Date.now() - start,\n      authenticated: true,\n      rateLimitRemaining: undefined, // Parsed from response headers\n    };\n  } catch (err) {\n    const latencyMs = Date.now() - start;\n    if (err instanceof IntercomError) {\n      return {\n        status: err.statusCode === 429 ? \"degraded\" : \"unhealthy\",\n        latencyMs,\n        authenticated: err.statusCode !== 401,\n        error: `${err.statusCode}: ${err.message}`,\n      };\n    }\n    return {\n      status: \"unhealthy\",\n      latencyMs,\n      authenticated: false,\n      error: (err as Error).message,\n    };\n  }\n}\n\n// Express health endpoint\napp.get(\"/health\", async (req, res) => {\n  const intercom = await checkIntercomHealth(client);\n  const overall = intercom.status === \"healthy\" ? 200 : 503;\n  res.status(overall).json({\n    status: intercom.status,\n    services: { intercom },\n    timestamp: new Date().toISOString(),\n  });\n});\n```\n\n## Pre-Flight Verification Script\n\n```bash\n#!/bin/bash\nset -euo pipefail\n\necho \"=== Intercom Production Pre-Flight ===\"\n\n# 1. Auth check\necho -n \"Auth: \"\nSTATUS=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"Authorization: Bearer $INTERCOM_ACCESS_TOKEN\" \\\n  https://api.intercom.io/me)\n[ \"$STATUS\" = \"200\" ] && echo \"PASS\" || { echo \"FAIL ($STATUS)\"; exit 1; }\n\n# 2. Rate limit headroom\necho -n \"Rate limit remaining: \"\nREMAINING=$(curl -s -D - -o /dev/null \\\n  -H \"Authorization: Bearer $INTERCOM_ACCESS_TOKEN\" \\\n  https://api.intercom.io/me 2>/dev/null | grep -i x-ratelimit-remaining | awk '{print $2}')\necho \"$REMAINING\"\n\n# 3. Intercom platform status\necho -n \"Intercom status: \"\ncurl -s https://status.intercom.com/api/v2/status.json | jq -r '.status.indicator'\n\n# 4. Webhook endpoint reachable (if configured)\nif [ -n \"${WEBHOOK_URL:-}\" ]; then\n  echo -n \"Webhook endpoint: \"\n  WH_STATUS=$(curl -s -o /dev/null -w \"%{http_code}\" \"$WEBHOOK_URL\")\n  echo \"$WH_STATUS\"\nfi\n\necho \"=== Pre-flight complete ===\"\n```\n\n## Rollback Procedure\n\n```bash\n# 1. Disable Intercom integration via feature flag\ncurl -X PATCH https://your-config-service/flags/intercom_enabled \\\n  -d '{\"value\": false}'\n\n# 2. If using k8s, rollback deployment\nkubectl rollout undo deployment/intercom-service\nkubectl rollout status deployment/intercom-service\n\n# 3. Verify rollback\ncurl -s https://your-app.com/health | jq '.services.intercom'\n\n# 4. Disable webhooks in Intercom Developer Hub\n# (prevents queued webhook deliveries to unhealthy endpoint)\n```\n\n## Error Handling\n\n| Alert | Condition | Severity | Action |\n|-------|-----------|----------|--------|\n| API unreachable | 5xx > 10/min | P1 | Enable fallback, check status page |\n| Auth failure | Any 401 | P1 | Rotate token, verify in Developer Hub |\n| Rate limited | 429 > 5/min | P2 | Reduce request volume, add queuing |\n| High latency | P95 > 3s | P2 | Check Intercom status, enable caching |\n| Webhook failures | Delivery errors | P3 | Check endpoint health, verify signature |\n\n## Resources\n\n- [Intercom Status](https://status.intercom.com)\n- [Rate Limiting](https://developers.intercom.com/docs/references/rest-api/errors/rate-limiting)\n- [Webhook Setup](https://developers.intercom.com/docs/webhooks/setting-up-webhooks)\n\n## Next Steps\n\nFor version upgrades, see `intercom-upgrade-migration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "intercom-prod-checklist",
-    "description": "Execute Intercom production readiness checklist and rollback procedures.",
-    "allowed-tools": "Read, Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

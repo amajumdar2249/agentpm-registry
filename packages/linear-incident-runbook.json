@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032505",
   "name": "linear-incident-runbook",
   "slug": "linear-incident-runbook",
   "description": "Production incident response procedures for Linear integrations.",
   "content": "# Linear Incident Runbook\n\n## Overview\n\nStep-by-step runbooks for handling production incidents with Linear integrations. Covers API authentication failures, rate limiting, webhook issues, and Linear platform outages.\n\n## Incident Classification\n\n| Severity | Impact | Response | Examples |\n|----------|--------|----------|----------|\n| SEV1 | Complete integration outage | < 15 min | Auth broken, API unreachable |\n| SEV2 | Major degradation | < 30 min | High error rate, rate limited |\n| SEV3 | Minor issues | < 2 hours | Some features affected |\n| SEV4 | Low impact | < 24 hours | Warnings, non-critical |\n\n## Immediate Actions (All Incidents)\n\n### Step 1: Confirm the Issue\n\n```bash\nset -euo pipefail\n\n# 1. Check Linear platform status\ncurl -s https://status.linear.app/api/v2/status.json | jq '.status'\n\n# 2. Test your API key\ncurl -s -X POST https://api.linear.app/graphql \\\n  -H \"Authorization: $LINEAR_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"query\": \"{ viewer { name email } }\"}' | jq .\n\n# 3. Check rate limit status\ncurl -s -I -X POST https://api.linear.app/graphql \\\n  -H \"Authorization: $LINEAR_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"query\": \"{ viewer { id } }\"}' 2>&1 | grep -i ratelimit\n\n# 4. Check your app health endpoint\ncurl -s https://yourapp.com/health/linear | jq .\n```\n\n### Step 2: Gather Diagnostic Info\n\n```typescript\n// scripts/incident-diagnostic.ts\nimport { LinearClient } from \"@linear/sdk\";\n\nasync function diagnose() {\n  console.log(\"=== Linear Incident Diagnostic ===\\n\");\n\n  // 1. Auth check\n  console.log(\"1. Authentication:\");\n  try {\n    const client = new LinearClient({ apiKey: process.env.LINEAR_API_KEY! });\n    const viewer = await client.viewer;\n    console.log(`   OK: ${viewer.name} (${viewer.email})`);\n  } catch (error: any) {\n    console.log(`   FAILED: ${error.message}`);\n  }\n\n  // 2. Team access\n  console.log(\"\\n2. Team Access:\");\n  try {\n    const client = new LinearClient({ apiKey: process.env.LINEAR_API_KEY! });\n    const teams = await client.teams();\n    console.log(`   OK: ${teams.nodes.length} teams accessible`);\n    teams.nodes.forEach(t => console.log(`     ${t.key}: ${t.name}`));\n  } catch (error: any) {\n    console.log(`   FAILED: ${error.message}`);\n  }\n\n  // 3. Write test\n  console.log(\"\\n3. Write Capability:\");\n  try {\n    const client = new LinearClient({ apiKey: process.env.LINEAR_API_KEY! });\n    const teams = await client.teams();\n    const result = await client.createIssue({\n      teamId: teams.nodes[0].id,\n      title: \"[INCIDENT-DIAG] Safe to delete\",\n    });\n    if (result.success) {\n      const issue = await result.issue;\n      await issue?.delete();\n      console.log(\"   OK: Created and deleted test issue\");\n    }\n  } catch (error: any) {\n    console.log(`   FAILED: ${error.message}`);\n  }\n\n  // 4. Rate limit check\n  console.log(\"\\n4. Rate Limits:\");\n  try {\n    const resp = await fetch(\"https://api.linear.app/graphql\", {\n      method: \"POST\",\n      headers: {\n        Authorization: process.env.LINEAR_API_KEY!,\n        \"Content-Type\": \"application/json\",\n      },\n      body: JSON.stringify({ query: \"{ viewer { id } }\" }),\n    });\n    const remaining = resp.headers.get(\"x-ratelimit-requests-remaining\");\n    const limit = resp.headers.get(\"x-ratelimit-requests-limit\");\n    console.log(`   Requests: ${remaining}/${limit}`);\n  } catch (error: any) {\n    console.log(`   FAILED: ${error.message}`);\n  }\n\n  console.log(\"\\n=== End Diagnostic ===\");\n}\n\ndiagnose();\n```\n\n## Runbook: API Authentication Failure\n\n**Symptoms:** All API calls returning 401/403, \"Authentication required\" errors\n\n**Diagnosis:**\n\n```bash\nset -euo pipefail\n# Verify API key format\necho $LINEAR_API_KEY | head -c 8\n# Should output: lin_api_\n\n# Test directly\ncurl -s -X POST https://api.linear.app/graphql \\\n  -H \"Authorization: $LINEAR_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"query\": \"{ viewer { id } }\"}' | jq .errors\n```\n\n**Resolution:**\n\n1. Verify key is loaded: `[ -n \"$LINEAR_API_KEY\" ] && echo \"Set\" || echo \"NOT set\"`\n2. Check if rotated: Linear Settings > Account > API > Personal API keys\n3. Generate new key if needed, update secret manager\n4. Restart affected services\n5. If recent deploy caused it: `git revert HEAD && npm run deploy`\n\n## Runbook: Rate Limiting (HTTP 429)\n\n**Symptoms:** HTTP 429 responses, \"Rate limit exceeded\", degraded performance\n\n**Diagnosis:**\n\n```bash\nset -euo pipefail\ncurl -s -I -X POST https://api.linear.app/graphql \\\n  -H \"Authorization: $LINEAR_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"query\": \"{ viewer { id } }\"}' 2>&1 | grep -i ratelimit\n```\n\n**Resolution:**\n\n1. **Emergency throttle** -- add 5s delay between all requests:\n\n   ```typescript\n   const EMERGENCY_DELAY_MS = 5000;\n   async function emergencyThrottle<T>(fn: () => Promise<T>): Promise<T> {\n     await new Promise(r => setTimeout(r, EMERGENCY_DELAY_MS));\n     return fn();\n   }\n   ```\n\n2. Stop non-critical background jobs (polling, sync)\n3. Disable bulk operations\n4. Wait for bucket refill (Linear uses leaky bucket, refills continuously)\n5. Post-incident: implement proper request queue and caching\n\n## Runbook: Webhook Failures\n\n**Symptoms:** Events not received, signature validation errors, processing timeouts\n\n**Diagnosis:**\n\n```bash\nset -euo pipefail\n# Check endpoint is reachable\ncurl -s -o /dev/null -w \"%{http_code}\" https://yourapp.com/webhooks/linear\n\n# Verify secret length\necho -n \"$LINEAR_WEBHOOK_SECRET\" | wc -c\n# Should be > 20 characters\n```\n\n**Resolution:**\n\n1. **Endpoint unreachable:** Check DNS, SSL cert, firewall, load balancer health\n2. **Signature mismatch:** Verify `LINEAR_WEBHOOK_SECRET` matches webhook config in Linear Settings > API > Webhooks\n3. **Body parsing issue:** Ensure using `express.raw()` not `express.json()`\n4. **Processing timeout:** Respond 200 immediately, process async\n5. **Recreate webhook:** Linear Settings > API > Webhooks > delete + recreate\n\n## Runbook: Linear Platform Outage\n\n**Symptoms:** All API calls failing, status.linear.app reports issues\n\n**Resolution:**\n\n1. Confirm at https://status.linear.app\n2. Enable graceful degradation in your app\n3. Queue write operations for replay when API recovers\n4. Serve cached data for read operations\n5. Monitor status page for resolution\n6. After recovery: run consistency check to detect missed webhook events\n\n## Communication Templates\n\n### Initial Announcement\n\n```\nINCIDENT: Linear Integration Issue\nSeverity: SEVX\nStatus: Investigating\nImpact: [description]\nStart: [UTC timestamp]\n\nInvestigating issues with Linear integration. Updates to follow.\n```\n\n### Resolution\n\n```\nRESOLVED: Linear Integration Issue\nDuration: X hours Y minutes\nRoot Cause: [brief]\nImpact: [what was affected]\n\nPost-mortem within 48 hours.\n```\n\n## Post-Incident Checklist\n\n```\n[ ] All systems verified healthy\n[ ] Stuck/queued jobs cleared\n[ ] Data consistency validated\n[ ] Stakeholders notified of resolution\n[ ] Timeline documented\n[ ] Root cause identified\n[ ] Action items assigned\n[ ] Monitoring gaps addressed\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Auth failure | Expired/rotated key | Regenerate and update secret manager |\n| Rate limit | Budget exceeded | Emergency throttle, stop background jobs |\n| Webhook failure | Secret mismatch or endpoint down | Verify secret, check endpoint health |\n| Platform outage | Linear infrastructure issue | Graceful degradation, serve cached data |\n\n## Resources\n\n- [Linear Status Page](https://status.linear.app)\n- [Linear API Documentation](https://linear.app/developers)\n- [Rate Limiting](https://linear.app/developers/rate-limiting)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "linear-incident-runbook",
-    "description": "Production incident response procedures for Linear integrations.",
-    "Trigger": "linear incident\", \"linear outage\", \"linear production issue\",",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

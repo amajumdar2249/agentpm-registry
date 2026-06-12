@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033051",
   "name": "replit-multi-env-setup",
   "slug": "replit-multi-env-setup",
   "description": "Configure Replit dev/staging/production environments with separate databases,",
   "content": "# Replit Multi-Environment Setup\n\n## Overview\n\nConfigure development, staging, and production environments on Replit. Leverages Replit's built-in dev/prod database separation, environment-specific secrets, and deployment types. Covers the Replit-native approach (single Repl, dual databases) and the multi-Repl approach (separate Repls per environment).\n\n## Prerequisites\n\n- Replit Core or Teams plan (deployment access)\n- PostgreSQL provisioned in Database pane\n- Understanding of Replit Secrets\n\n## Environment Strategy\n\n### Approach 1: Single Repl, Dual Databases (Recommended)\n\nReplit natively provides separate development and production databases:\n\n```markdown\nWorkspace \"Run\" button \u2192 Development database\nDeployed app (.replit.app) \u2192 Production database\n\nBoth use the same DATABASE_URL env var \u2014 Replit routes automatically.\nNo code changes needed between environments.\n```\n\n### Approach 2: Multi-Repl (Staging + Production)\n\nFor teams that need a staging environment:\n\n```markdown\nRepl 1: my-app-staging \u2192 Autoscale deployment \u2192 staging.replit.app\nRepl 2: my-app-prod   \u2192 Reserved VM deployment \u2192 app.example.com\n\nEach Repl has its own:\n- Secrets (different API keys per environment)\n- PostgreSQL database (separate data)\n- Deployment configuration\n- GitHub branch (staging \u2192 staging, main \u2192 production)\n```\n\n## Instructions\n\n### Step 1: Environment Detection\n\n```typescript\n// src/config/environment.ts\ntype Environment = 'development' | 'staging' | 'production';\n\nexport function detectEnvironment(): Environment {\n  // Replit deployment context\n  if (process.env.REPL_DEPLOYMENT) {\n    // Check if this is the staging Repl\n    if (process.env.REPL_SLUG?.includes('staging')) return 'staging';\n    return 'production';\n  }\n\n  // Workspace \"Run\" context\n  if (process.env.REPL_SLUG) return 'development';\n\n  // Fallback to NODE_ENV\n  const env = process.env.NODE_ENV || 'development';\n  if (env === 'production') return 'production';\n  if (env === 'staging') return 'staging';\n  return 'development';\n}\n\nexport const ENV = detectEnvironment();\nexport const IS_PROD = ENV === 'production';\n```\n\n### Step 2: Environment-Specific Configuration\n\n```typescript\n// src/config/index.ts\nimport { ENV, IS_PROD } from './environment';\n\nconst configs = {\n  development: {\n    logLevel: 'debug',\n    corsOrigins: ['*'],\n    rateLimit: { windowMs: 60000, max: 1000 },\n    cache: { ttlMs: 5000 },\n    features: { debugEndpoints: true },\n  },\n  staging: {\n    logLevel: 'info',\n    corsOrigins: ['https://staging.example.com'],\n    rateLimit: { windowMs: 60000, max: 200 },\n    cache: { ttlMs: 30000 },\n    features: { debugEndpoints: true },\n  },\n  production: {\n    logLevel: 'warn',\n    corsOrigins: ['https://app.example.com'],\n    rateLimit: { windowMs: 60000, max: 100 },\n    cache: { ttlMs: 300000 },\n    features: { debugEndpoints: false },\n  },\n};\n\nexport const config = {\n  env: ENV,\n  port: parseInt(process.env.PORT || '3000'),\n  ...configs[ENV],\n  db: {\n    // DATABASE_URL auto-switches between dev and prod on Replit\n    url: process.env.DATABASE_URL,\n  },\n};\n\n// Validate production secrets\nif (IS_PROD) {\n  const required = ['DATABASE_URL', 'JWT_SECRET'];\n  const missing = required.filter(k => !process.env[k]);\n  if (missing.length) {\n    console.error(`FATAL: Missing production secrets: ${missing.join(', ')}`);\n    process.exit(1);\n  }\n}\n```\n\n### Step 3: Separate Secrets Per Environment\n\n```markdown\nFor Single Repl (dev/prod separation):\n- All secrets set once in Secrets tab\n- DATABASE_URL auto-switches (Replit manages)\n- Same JWT_SECRET for both (or use REPL_IDENTITY for dev)\n\nFor Multi-Repl (staging + prod):\n- Each Repl has its own Secrets tab\n- staging Repl: JWT_SECRET=staging-secret, API_KEY=test-key\n- production Repl: JWT_SECRET=prod-secret, API_KEY=live-key\n\nAccount-level secrets (shared across all Repls):\n- Settings > Secrets > Account secrets\n- Useful for: monitoring tokens, shared infrastructure keys\n```\n\n### Step 4: GitHub Branch Strategy (Multi-Repl)\n\n```markdown\nRepository setup:\n- main branch \u2192 connected to production Repl\n- staging branch \u2192 connected to staging Repl\n- feature branches \u2192 PR to staging first\n\nWorkflow:\n1. Feature branch \u2192 PR to staging\n2. Tests pass + review \u2192 merge to staging\n3. Staging Repl auto-deploys \u2192 verify staging\n4. Staging \u2192 PR to main\n5. Merge \u2192 production Repl auto-deploys\n```\n\n```yaml\n# .github/workflows/deploy.yml\nname: Deploy Pipeline\n\non:\n  push:\n    branches: [staging, main]\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm ci && npm test\n\n  verify-staging:\n    if: github.ref == 'refs/heads/staging'\n    needs: test\n    runs-on: ubuntu-latest\n    steps:\n      - name: Wait for Replit deploy\n        run: sleep 60\n      - name: Health check staging\n        run: curl -sf ${{ secrets.STAGING_URL }}/health\n\n  verify-production:\n    if: github.ref == 'refs/heads/main'\n    needs: test\n    runs-on: ubuntu-latest\n    steps:\n      - name: Wait for Replit deploy\n        run: sleep 60\n      - name: Health check production\n        run: curl -sf ${{ secrets.PRODUCTION_URL }}/health\n```\n\n### Step 5: Database Migration Between Environments\n\n```typescript\n// scripts/promote-data.ts \u2014 Copy staging data to production (carefully!)\nimport { Pool } from 'pg';\n\nconst staging = new Pool({ connectionString: process.env.STAGING_DATABASE_URL });\nconst production = new Pool({ connectionString: process.env.PRODUCTION_DATABASE_URL });\n\nasync function promoteConfig() {\n  // Only promote configuration/reference data, never user data\n  const { rows: configs } = await staging.query('SELECT * FROM feature_flags');\n\n  for (const config of configs) {\n    await production.query(\n      `INSERT INTO feature_flags (key, value, updated_at)\n       VALUES ($1, $2, NOW())\n       ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()`,\n      [config.key, config.value]\n    );\n  }\n\n  console.log(`Promoted ${configs.length} feature flags to production`);\n}\n```\n\n### Step 6: Environment Indicator in UI\n\n```typescript\n// Show environment badge in development/staging\napp.use((req, res, next) => {\n  if (!IS_PROD) {\n    res.setHeader('X-Environment', ENV);\n  }\n  next();\n});\n\napp.get('/api/status', (req, res) => {\n  res.json({\n    environment: ENV,\n    version: process.env.npm_package_version,\n    repl: process.env.REPL_SLUG,\n  });\n});\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Wrong database in prod | Manual DATABASE_URL override | Let Replit manage DB routing |\n| Staging secrets in prod | Copied secrets incorrectly | Each Repl has independent Secrets |\n| GitHub sync conflict | Both Repls on same branch | Use separate branches per Repl |\n| Config validation fails | Missing env-specific secret | Add secret to correct Repl's Secrets tab |\n\n## Resources\n\n- [Replit Deployments](https://docs.replit.com/hosting/deployments)\n- [Replit Secrets](https://docs.replit.com/replit-workspace/workspace-features/secrets)\n- [Deploying from GitHub](https://docs.replit.com/hosting/deployments/deploying-a-github-repository)\n- [PostgreSQL Dev/Prod Databases](https://docs.replit.com/cloud-services/storage-and-databases/postgresql-on-replit)\n\n## Next Steps\n\nFor monitoring, see `replit-observability`. For deployment, see `replit-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "replit-multi-env-setup",
-    "description": "Configure Replit dev/staging/production environments with separate databases,",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

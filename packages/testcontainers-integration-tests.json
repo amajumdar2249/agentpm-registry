@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000000072",
   "name": "testcontainers-integration-tests",
   "slug": "testcontainers-integration-tests",
   "description": "Write integration tests using TestContainers for .NET with xUnit. Covers infrastructure testing with real databases, message queues, and caches in Docker containers instead of mocks.",
   "content": "\n# Integration Testing with TestContainers\n\n## When to Use This Skill\n\nUse this skill when:\n- Writing integration tests that need real infrastructure (databases, caches, message queues)\n- Testing data access layers against actual databases\n- Verifying message queue integrations\n- Testing Redis caching behavior\n- Avoiding mocks for infrastructure components\n- Ensuring tests work against production-like environments\n- Testing database migrations and schema changes\n\n## Reference Files\n\n- [database-patterns.md](database-patterns.md): SQL Server, PostgreSQL, and migration testing examples\n- [infrastructure-patterns.md](infrastructure-patterns.md): Redis, RabbitMQ, multi-container networks, container reuse, and Respawn\n\n## Core Principles\n\n1. **Real Infrastructure Over Mocks** - Use actual databases/services in containers, not mocks\n2. **Test Isolation** - Each test gets fresh containers or fresh data\n3. **Automatic Cleanup** - TestContainers handles container lifecycle and cleanup\n4. **Fast Startup** - Reuse containers across tests in the same class when appropriate\n5. **CI/CD Compatible** - Works seamlessly in Docker-enabled CI environments\n6. **Port Randomization** - Containers use random ports to avoid conflicts\n\n## Why TestContainers Over Mocks?\n\n### The Problem with Mocking Infrastructure\n\n```csharp\n// BAD: Mocking a database\npublic class OrderRepositoryTests\n{\n    private readonly Mock<IDbConnection> _mockDb = new();\n\n    [Fact]\n    public async Task GetOrder_ReturnsOrder()\n    {\n        // This doesn't test real SQL behavior, constraints, or performance\n        _mockDb.Setup(db => db.QueryAsync<Order>(It.IsAny<string>()))\n            .ReturnsAsync(new[] { new Order { Id = 1 } });\n\n        var repo = new OrderRepository(_mockDb.Object);\n        var order = await repo.GetOrderAsync(1);\n\n        Assert.NotNull(order);\n    }\n}\n```\n\nProblems: doesn't test actual SQL queries, misses constraints/indexes, gives false confidence, doesn't catch SQL syntax errors.\n\n### Better: TestContainers with Real Database\n\n```csharp\n// GOOD: Testing against a real database\npublic class OrderRepositoryTests : IAsyncLifetime\n{\n    private readonly TestcontainersContainer _dbContainer;\n    private IDbConnection _connection;\n\n    public OrderRepositoryTests()\n    {\n        _dbContainer = new TestcontainersBuilder<TestcontainersContainer>()\n            .WithImage(\"mcr.microsoft.com/mssql/server:2022-latest\")\n            .WithEnvironment(\"ACCEPT_EULA\", \"Y\")\n            .WithEnvironment(\"SA_PASSWORD\", \"Your_password123\")\n            .WithPortBinding(1433, true)\n            .Build();\n    }\n\n    public async Task InitializeAsync()\n    {\n        await _dbContainer.StartAsync();\n        var port = _dbContainer.GetMappedPublicPort(1433);\n        var connectionString = $\"Server=localhost,{port};Database=TestDb;User Id=sa;Password=Your_password123;TrustServerCertificate=true\";\n        _connection = new SqlConnection(connectionString);\n        await _connection.OpenAsync();\n        await RunMigrationsAsync(_connection);\n    }\n\n    public async Task DisposeAsync()\n    {\n        await _connection.DisposeAsync();\n        await _dbContainer.DisposeAsync();\n    }\n\n    [Fact]\n    public async Task GetOrder_WithRealDatabase_ReturnsOrder()\n    {\n        await _connection.ExecuteAsync(\n            \"INSERT INTO Orders (Id, CustomerId, Total) VALUES (1, 'CUST1', 100.00)\");\n\n        var repo = new OrderRepository(_connection);\n        var order = await repo.GetOrderAsync(1);\n\n        Assert.NotNull(order);\n        Assert.Equal(\"CUST1\", order.CustomerId);\n        Assert.Equal(100.00m, order.Total);\n    }\n}\n```\n\nSee [database-patterns.md](database-patterns.md) for complete SQL Server, PostgreSQL, and migration testing examples.\n\nSee [infrastructure-patterns.md](infrastructure-patterns.md) for Redis, RabbitMQ, multi-container networks, container reuse, and Respawn database reset patterns.\n\n## Required NuGet Packages\n\n```xml\n<ItemGroup>\n  <PackageReference Include=\"Testcontainers\" Version=\"*\" />\n  <PackageReference Include=\"xunit\" Version=\"*\" />\n  <PackageReference Include=\"xunit.runner.visualstudio\" Version=\"*\" />\n\n  <!-- Database-specific packages -->\n  <PackageReference Include=\"Microsoft.Data.SqlClient\" Version=\"*\" />\n  <PackageReference Include=\"Npgsql\" Version=\"*\" /> <!-- For PostgreSQL -->\n  <PackageReference Include=\"MySqlConnector\" Version=\"*\" /> <!-- For MySQL -->\n\n  <!-- Other infrastructure -->\n  <PackageReference Include=\"StackExchange.Redis\" Version=\"*\" /> <!-- For Redis -->\n  <PackageReference Include=\"RabbitMQ.Client\" Version=\"*\" /> <!-- For RabbitMQ -->\n</ItemGroup>\n```\n\n## Best Practices\n\n1. **Always Use IAsyncLifetime** - Proper async setup and teardown\n2. **Wait for Port Availability** - Use `WaitStrategy` to ensure containers are ready\n3. **Use Random Ports** - Let TestContainers assign ports automatically\n4. **Clean Data Between Tests** - Either use fresh containers or truncate tables\n5. **Reuse Containers When Possible** - Faster than creating new ones for each test\n6. **Test Real Queries** - Don't just test mocks; verify actual SQL behavior\n7. **Verify Constraints** - Test foreign keys, unique constraints, indexes\n8. **Test Transactions** - Verify rollback and commit behavior\n9. **Use Realistic Data** - Test with production-like data volumes\n10. **Handle Cleanup** - Always dispose containers in `DisposeAsync`\n\n## Common Issues and Solutions\n\n### Container Startup Timeout\n\n```csharp\n_container = new TestcontainersBuilder<TestcontainersContainer>()\n    .WithImage(\"postgres:latest\")\n    .WithWaitStrategy(Wait.ForUnixContainer()\n        .UntilPortIsAvailable(5432)\n        .WithTimeout(TimeSpan.FromMinutes(2)))\n    .Build();\n```\n\n### Port Already in Use\n\nAlways use random port mapping:\n```csharp\n.WithPortBinding(5432, true) // true = assign random public port\n```\n\n### Containers Not Cleaning Up\n\nEnsure proper disposal:\n```csharp\npublic async Task DisposeAsync()\n{\n    await _connection?.DisposeAsync();\n    await _container?.DisposeAsync();\n}\n```\n\n### Tests Fail in CI But Pass Locally\n\nEnsure CI has Docker support:\n```yaml\n# GitHub Actions\nruns-on: ubuntu-latest # Has Docker pre-installed\n```\n\n## CI/CD Integration\n\n### GitHub Actions\n\n```yaml\nname: Integration Tests\n\non: [push, pull_request]\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n\n    steps:\n    - uses: actions/checkout@v3\n\n    - name: Setup .NET\n      uses: actions/setup-dotnet@v3\n      with:\n        dotnet-version: 9.0.x\n\n    - name: Run Integration Tests\n      run: |\n        dotnet test tests/YourApp.IntegrationTests \\\n          --filter Category=Integration \\\n          --logger trx\n\n    - name: Cleanup Containers\n      if: always()\n      run: docker container prune -f\n```\n\n## Performance Tips\n\n1. **Reuse containers** - Share fixtures across tests in a collection\n2. **Use Respawn** - Reset data without recreating containers\n3. **Parallel execution** - TestContainers handles port conflicts automatically\n4. **Use lightweight images** - Alpine versions are smaller and faster\n5. **Cache images** - Docker will cache pulled images locally\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "testcontainers-integration-tests",
-    "description": "Write integration tests using TestContainers for .NET with xUnit. Covers infrastructure testing with real databases, message queues, and caches in Docker containers instead of mocks.",
-    "invocable": "false"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

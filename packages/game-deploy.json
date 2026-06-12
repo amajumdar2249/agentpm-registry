@@ -1,18 +1,47 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000016414",
   "name": "game-deploy",
   "slug": "game-deploy",
   "description": "Deploy browser games to here.now (default), GitHub Pages, or other hosting. Use when deploying a game, setting up hosting, or publishing a game build. Do NOT use for local development servers (use npm run dev).",
   "content": "\n# Game Deployment\n\nDeploy your browser game for public access. **here.now is the default** \u2014 instant static hosting with zero configuration. GitHub Pages is available as an alternative when you need git-based deploys.\n\n## here.now Deployment (Default)\n\n### Prerequisites\n\n- The `here-now` skill installed (`npx skills add heredotnow/skill --skill here-now -g`)\n- Optional: `$HERENOW_API_KEY` or `~/.herenow/credentials` for permanent hosting\n\n### Quick Deploy\n\n```bash\nnpm run build\n~/.agents/skills/here-now/scripts/publish.sh dist/\n```\n\nThe script outputs a live URL like `https://<slug>.here.now/`.\n\n### Why here.now is the default\n\n- **Zero config** \u2014 no `base` path, no git repo, no GitHub CLI required\n- **Instant** \u2014 site is live immediately (no waiting for propagation)\n- **No base path issues** \u2014 content served from subdomain root (`base: '/'` or default)\n- **Works everywhere** \u2014 only needs `curl`, `file`, and `jq`\n\n### Vite base path\n\nhere.now serves from the subdomain root, so use the default base path:\n\n```js\nexport default defineConfig({\n  base: '/',\n  // ... rest of config\n});\n```\n\n### IMPORTANT: Claim your site within 24 hours\n\nWithout an API key, publishes are **anonymous and expire in 24 hours**. The publish script returns a **claim URL** \u2014 the user MUST visit this URL and create a free here.now account to keep the site permanently. **The claim token is only shown once and cannot be recovered.** If they don't claim it, the site disappears.\n\n**You MUST always tell the user about the 24-hour window and the claim URL after every anonymous publish.** This is not optional.\n\n| Feature | Anonymous | Authenticated |\n|---------|-----------|---------------|\n| Expiry | **24 hours (then deleted!)** | Permanent |\n| Max file size | 250 MB | 5 GB |\n| Rate limit | 5/hour/IP | 60/hour/account |\n\nTo set up an API key for permanent hosting (skip the 24h window entirely):\n\nFirst check if the key already exists:\n`test -f .env && grep -q '^HERENOW_API_KEY=.' .env && echo \"found\"`\nIf found, export it with `set -a; . .env; set +a` and skip the prompt.\n\nOtherwise:\n1. Ask the user for their email\n2. Send a magic link: `curl -sS https://here.now/api/auth/login -H \"content-type: application/json\" -d '{\"email\": \"user@example.com\"}'`\n3. User clicks the link, copies their API key from the dashboard\n4. User pastes the key like: `HERENOW_API_KEY=their-key-here` (saved to .env and redacted automatically)\n5. Also save to credentials file: `mkdir -p ~/.herenow && grep '^HERENOW_API_KEY=' .env | cut -d= -f2- > ~/.herenow/credentials && chmod 600 ~/.herenow/credentials`\n\n### Updating a deploy\n\n```bash\nnpm run build\n~/.agents/skills/here-now/scripts/publish.sh dist/ --slug <slug>\n```\n\nThe slug is saved in `.herenow/state.json` after each publish \u2014 the script auto-loads it for updates.\n\n### Deploy script\n\nAdd to `package.json`:\n\n```json\n{\n  \"scripts\": {\n    \"deploy\": \"npm run build && ~/.agents/skills/here-now/scripts/publish.sh dist/\"\n  }\n}\n```\n\nFor updates to an existing slug:\n\n```json\n{\n  \"scripts\": {\n    \"deploy\": \"npm run build && ~/.agents/skills/here-now/scripts/publish.sh dist/ --slug <slug>\"\n  }\n}\n```\n\n## GitHub Pages Deployment (Alternative)\n\nUse GitHub Pages when you need git-based deployment or already have a GitHub repo set up.\n\n### Prerequisites\n\n- GitHub CLI installed (`gh`)\n- Git repository initialized and pushed to GitHub\n\n### Quick Deploy\n\n```bash\nnpm run build && npx gh-pages -d dist\n```\n\n### Full Setup\n\n1. **Build the game**:\n\n```bash\nnpm run build\n```\n\n2. **Ensure `vite.config.js` has the correct base path** if deploying to a subdirectory:\n\n```js\nexport default defineConfig({\n  base: '/<repo-name>/',\n  // ... rest of config\n});\n```\n\n3. **Deploy with GitHub CLI**:\n\n```bash\ngh repo create <game-name> --public --source=. --push\nnpm install -D gh-pages\nnpx gh-pages -d dist\n```\n\n4. **Enable GitHub Pages** in repo settings (should auto-detect the `gh-pages` branch).\n\nYour game is live at: `https://<username>.github.io/<repo-name>/`\n\n### Automated Deploys\n\nAdd to `package.json`:\n\n```json\n{\n  \"scripts\": {\n    \"deploy\": \"npm run build && npx gh-pages -d dist\"\n  }\n}\n```\n\n## Play.fun Registration\n\nAfter deploying, register your game on Play.fun for monetization. Use the `/game-creator:playdotfun` skill for integration details.\n\nThe deployed URL becomes your `gameUrl` when registering:\n\n```typescript\nawait client.games.register({\n  name: 'Your Game Name',\n  gameUrl: 'https://<slug>.here.now/',  // or GitHub Pages URL\n  maxScorePerSession: 500,\n  maxSessionsPerDay: 20,\n  maxCumulativePointsPerDay: 5000\n});\n```\n\n## Other Hosting Options\n\n- **Vercel**: `npx vercel --prod` (auto-detects Vite)\n- **Netlify**: Connect repo, set build command to `npm run build`, publish dir to `dist`\n- **Railway**: Use the Railway skill for deployment\n- **itch.io**: Upload the `dist/` folder as an HTML5 game\n\n## Example Usage\n\n### Default (here.now)\n```\n/game-deploy\n```\nResult: Builds `dist/` \u2192 publishes via here.now \u2192 game live at `https://<slug>.here.now/` in seconds. Adds `npm run deploy` script for future one-command deploys.\n\n### GitHub Pages\n```\n/game-deploy github-pages\n```\nResult: Builds with correct base path \u2192 pushes to `gh-pages` branch \u2192 game live at `https://<user>.github.io/<game>/` in 1-2 minutes.\n\n## Troubleshooting\n\n### here.now 429 rate limit\n**Cause:** Too many deployments in a short period. here.now has rate limiting on anonymous deployments.\n**Fix:** Wait a few minutes and retry. For frequent deployments, consider using GitHub Pages or Vercel instead.\n\n### Anonymous here.now site expired\n**Cause:** Anonymous here.now deployments are temporary and expire after a period of inactivity.\n**Fix:** Redeploy with `npx here.now`. For persistent hosting, use GitHub Pages (`gh-pages` branch) or Vercel, which don't expire.\n\n### GitHub Pages 404 after deployment\n**Cause:** Vite's base path doesn't match the GitHub Pages URL structure (`/<repo-name>/`).\n**Fix:** Set `base: '/<repo-name>/'` in `vite.config.js`. Ensure the `gh-pages` branch is selected as the source in the repository's Pages settings. Wait 1-2 minutes for GitHub's CDN to propagate.\n\n### Blank page after deployment (asset paths)\n**Cause:** Asset paths use absolute URLs (`/assets/...`) that don't resolve correctly on the deployment host.\n**Fix:** Use relative paths (`./assets/...`) or configure Vite's `base` option to match the deployment URL. Run `npm run build` locally and test the `dist/` folder with a local server before deploying.\n\n### gh-pages push rejected\n**Cause:** The remote `gh-pages` branch has diverged or the force push was blocked by branch protection rules.\n**Fix:** Use `git push origin gh-pages --force` if you own the repo and there's no branch protection. If protected, delete the remote `gh-pages` branch first: `git push origin --delete gh-pages`, then redeploy.\n\n## Pre-Deploy Checklist\n\n- [ ] `npm run build` succeeds with no errors\n- [ ] Test the production build with `npm run preview`\n- [ ] Remove any `console.log` debug statements\n- [ ] Verify all assets are included in the build\n- [ ] Check mobile/responsive behavior if applicable\n- [ ] Set appropriate `<title>` and meta tags in `index.html`\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "game-deploy",
-    "description": "Deploy browser games to here.now (default), GitHub Pages, or other hosting. Use when deploying a game, setting up hosting, or publishing a game build. Do NOT use for local development servers (use npm run dev).",
-    "argument-hint": "[platform]",
-    "license": "MIT",
-    "compatibility": "Requires internet access. Uses npx (here.now) or gh CLI (GitHub Pages) for deployment.",
-    "metadata": "",
-    "author": "OpusGameLabs",
-    "version": "1.3.0",
-    "tags": "[game, deploy, hosting, here-now, github-pages]"
+  "author": "OpusGameLabs",
+  "version": "1.3.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "[game",
+    "deploy",
+    "hosting",
+    "here-now",
+    "github-pages]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

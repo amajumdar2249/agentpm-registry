@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032663",
   "name": "mistral-rate-limits",
   "slug": "mistral-rate-limits",
   "description": "Implement Mistral AI rate limiting, backoff, and request management.",
   "content": "# Mistral Rate Limits\n\n## Overview\n\nRate limit management for Mistral AI API. Mistral enforces per-workspace RPM (requests/minute) and TPM (tokens/minute) limits that vary by usage tier (Experiment free tier vs Scale pay-as-you-go). View your workspace limits at [admin.mistral.ai/plateforme/limits](https://admin.mistral.ai/plateforme/limits).\n\n## Prerequisites\n\n- Mistral API key configured\n- Understanding of workspace tier (Experiment vs Scale)\n- Application with retry infrastructure\n\n## Mistral Rate Limit Architecture\n\nLimits are set at the **workspace** level, not per key. All API keys in a workspace share the same RPM/TPM budget.\n\n| Endpoint | What's limited |\n|----------|---------------|\n| `/v1/chat/completions` | RPM + TPM (input + output) |\n| `/v1/embeddings` | RPM + TPM (input only) |\n| `/v1/fim/completions` | RPM + TPM |\n| `/v1/moderations` | RPM |\n\n**Headers returned on every response:**\n\n- `x-ratelimit-limit-requests` \u2014 your RPM cap\n- `x-ratelimit-remaining-requests` \u2014 remaining RPM\n- `x-ratelimit-limit-tokens` \u2014 your TPM cap\n- `x-ratelimit-remaining-tokens` \u2014 remaining TPM\n- `Retry-After` \u2014 seconds to wait (on 429 only)\n\n## Instructions\n\n### Step 1: Token-Aware Rate Limiter\n\n```typescript\nclass MistralRateLimiter {\n  private requestTimes: number[] = [];\n  private tokenBuckets: Array<{ time: number; tokens: number }> = [];\n  private readonly rpm: number;\n  private readonly tpm: number;\n\n  constructor(rpm: number, tpm: number) {\n    this.rpm = rpm;\n    this.tpm = tpm;\n  }\n\n  async waitIfNeeded(estimatedTokens: number): Promise<void> {\n    const now = Date.now();\n    const windowStart = now - 60_000;\n\n    // Prune old entries\n    this.requestTimes = this.requestTimes.filter(t => t > windowStart);\n    this.tokenBuckets = this.tokenBuckets.filter(b => b.time > windowStart);\n\n    // Check RPM\n    if (this.requestTimes.length >= this.rpm) {\n      const waitMs = this.requestTimes[0] - windowStart + 100;\n      console.warn(`RPM limit (${this.rpm}), waiting ${waitMs}ms`);\n      await new Promise(r => setTimeout(r, waitMs));\n    }\n\n    // Check TPM\n    const currentTPM = this.tokenBuckets.reduce((sum, b) => sum + b.tokens, 0);\n    if (currentTPM + estimatedTokens > this.tpm) {\n      const waitMs = this.tokenBuckets[0].time - windowStart + 100;\n      console.warn(`TPM limit (${this.tpm}), waiting ${waitMs}ms`);\n      await new Promise(r => setTimeout(r, waitMs));\n    }\n\n    this.requestTimes.push(Date.now());\n  }\n\n  recordUsage(tokens: number): void {\n    this.tokenBuckets.push({ time: Date.now(), tokens });\n  }\n}\n```\n\n### Step 2: Retry with Retry-After Header\n\n```typescript\nimport { Mistral } from '@mistralai/mistralai';\n\nasync function chatWithRetry(\n  client: Mistral,\n  params: { model: string; messages: any[] },\n  maxRetries = 5,\n): Promise<any> {\n  for (let attempt = 0; attempt <= maxRetries; attempt++) {\n    try {\n      return await client.chat.complete(params);\n    } catch (error: any) {\n      if (error.status !== 429 || attempt === maxRetries) throw error;\n\n      // Respect Retry-After header from Mistral\n      const retryAfter = error.headers?.get?.('retry-after');\n      const waitSec = retryAfter ? parseInt(retryAfter) : Math.min(2 ** attempt, 60);\n      console.warn(`429 \u2014 retrying in ${waitSec}s (attempt ${attempt + 1}/${maxRetries})`);\n      await new Promise(r => setTimeout(r, waitSec * 1000));\n    }\n  }\n}\n```\n\n### Step 3: Rate-Limited Client Wrapper\n\n```typescript\nconst limiter = new MistralRateLimiter(100, 500_000);\nconst client = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });\n\nasync function rateLimitedChat(messages: any[], model = 'mistral-small-latest') {\n  const estimatedTokens = messages.reduce(\n    (sum, m) => sum + Math.ceil((m.content?.length ?? 0) / 4), 0\n  );\n\n  await limiter.waitIfNeeded(estimatedTokens);\n  const response = await client.chat.complete({ model, messages });\n\n  if (response.usage) {\n    limiter.recordUsage(\n      (response.usage.promptTokens ?? 0) + (response.usage.completionTokens ?? 0)\n    );\n  }\n  return response;\n}\n```\n\n### Step 4: Model Fallback for Throughput\n\n```typescript\nclass ModelRouter {\n  private limiters: Record<string, MistralRateLimiter>;\n\n  constructor() {\n    this.limiters = {\n      'mistral-large-latest': new MistralRateLimiter(30, 200_000),\n      'mistral-small-latest': new MistralRateLimiter(120, 500_000),\n    };\n  }\n\n  async chat(messages: any[], preferred = 'mistral-large-latest') {\n    try {\n      return await rateLimitedChat(messages, preferred);\n    } catch (error: any) {\n      if (error.status === 429 && preferred !== 'mistral-small-latest') {\n        console.warn(`Falling back to mistral-small-latest`);\n        return rateLimitedChat(messages, 'mistral-small-latest');\n      }\n      throw error;\n    }\n  }\n}\n```\n\n### Step 5: Batch Embedding with Rate Awareness\n\n```python\nimport time\nfrom mistralai import Mistral\n\ndef batch_embed(client: Mistral, texts: list[str], batch_size: int = 32) -> list:\n    \"\"\"Batch embed with automatic rate limiting.\"\"\"\n    all_embeddings = []\n    for i in range(0, len(texts), batch_size):\n        batch = texts[i:i + batch_size]\n        try:\n            response = client.embeddings.create(\n                model=\"mistral-embed\", inputs=batch\n            )\n            all_embeddings.extend([d.embedding for d in response.data])\n        except Exception as e:\n            if hasattr(e, \"status_code\") and e.status_code == 429:\n                time.sleep(10)\n                response = client.embeddings.create(\n                    model=\"mistral-embed\", inputs=batch\n                )\n                all_embeddings.extend([d.embedding for d in response.data])\n            else:\n                raise\n    return all_embeddings\n```\n\n### Step 6: Usage Dashboard\n\n```typescript\nfunction rateLimitStatus(limiter: MistralRateLimiter) {\n  const now = Date.now();\n  const windowStart = now - 60_000;\n  const activeRequests = limiter['requestTimes'].filter(t => t > windowStart).length;\n  const activeTokens = limiter['tokenBuckets']\n    .filter(b => b.time > windowStart)\n    .reduce((sum, b) => sum + b.tokens, 0);\n\n  return {\n    rpm: { used: activeRequests, limit: limiter['rpm'], pct: (activeRequests / limiter['rpm'] * 100).toFixed(1) },\n    tpm: { used: activeTokens, limit: limiter['tpm'], pct: (activeTokens / limiter['tpm'] * 100).toFixed(1) },\n  };\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `429` errors | Exceeded RPM or TPM | Use rate limiter + exponential backoff |\n| Inconsistent limits | All keys share workspace budget | Coordinate across services |\n| Batch failures | Too many tokens per batch | Reduce batch size for embeddings |\n| Spike traffic blocked | No request smoothing | Queue requests, spread over window |\n\n## Resources\n\n- [Rate Limits & Usage Tiers](https://docs.mistral.ai/deployment/ai-studio/tier/)\n- [Pricing](https://docs.mistral.ai/deployment/laplateforme/pricing/)\n- [Batch Inference](https://docs.mistral.ai/capabilities/batch/) \u2014 50% cheaper, no rate limits\n\n## Output\n\n- Token-aware rate limiter with RPM + TPM tracking\n- Retry logic respecting Retry-After headers\n- Model fallback routing for throughput\n- Rate limit dashboard for monitoring\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "mistral-rate-limits",
-    "description": "Implement Mistral AI rate limiting, backoff, and request management.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

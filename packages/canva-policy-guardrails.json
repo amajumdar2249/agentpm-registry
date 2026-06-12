@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031436",
   "name": "canva-policy-guardrails",
   "slug": "canva-policy-guardrails",
   "description": "Implement Canva Connect API lint rules, policy enforcement, and automated",
   "content": "# Canva Policy & Guardrails\n\n## Overview\n\nAutomated policy enforcement for Canva Connect API integrations \u2014 prevent token leaks, enforce rate limit handling, require error handling, and validate OAuth configuration.\n\n## ESLint Rules\n\n### No Hardcoded Credentials\n\n```javascript\n// eslint-rules/no-canva-credentials.js\nmodule.exports = {\n  meta: {\n    type: 'problem',\n    docs: { description: 'Disallow hardcoded Canva OAuth credentials' },\n  },\n  create(context) {\n    return {\n      Literal(node) {\n        if (typeof node.value !== 'string') return;\n        const val = node.value;\n\n        // Canva client IDs start with \"OCA\"\n        if (/^OCA[A-Za-z0-9]{10,}/.test(val)) {\n          context.report({ node, message: 'Hardcoded Canva client ID detected. Use environment variable.' });\n        }\n\n        // Canva access tokens start with \"cnvat_\"\n        if (/^cnvat_[A-Za-z0-9]{20,}/.test(val)) {\n          context.report({ node, message: 'Hardcoded Canva access token detected. Use environment variable.' });\n        }\n      },\n    };\n  },\n};\n```\n\n### Require Rate Limit Handling\n\n```javascript\n// eslint-rules/require-canva-retry.js\nmodule.exports = {\n  meta: {\n    type: 'suggestion',\n    docs: { description: 'Canva API calls should handle 429 responses' },\n  },\n  create(context) {\n    return {\n      CallExpression(node) {\n        // Check for fetch calls to api.canva.com\n        if (node.callee.name === 'fetch' &&\n            node.arguments[0]?.value?.includes('api.canva.com')) {\n          // Check if parent is try-catch or has .catch()\n          const parent = node.parent;\n          if (parent.type !== 'AwaitExpression' ||\n              parent.parent?.type !== 'TryStatement') {\n            context.report({\n              node,\n              message: 'Canva API calls should be wrapped in try-catch with 429 handling',\n            });\n          }\n        }\n      },\n    };\n  },\n};\n```\n\n## Pre-Commit Hooks\n\n```yaml\n# .pre-commit-config.yaml\nrepos:\n  - repo: local\n    hooks:\n      - id: canva-no-tokens\n        name: Check for Canva tokens\n        entry: bash -c 'git diff --cached --name-only | xargs grep -lE \"(cnvat_|OCA[A-Z0-9]{10})\" 2>/dev/null && echo \"ERROR: Canva credentials found\" && exit 1 || exit 0'\n        language: system\n        pass_filenames: false\n\n      - id: canva-no-raw-urls\n        name: Check for hardcoded Canva API URLs\n        entry: bash -c 'git diff --cached --name-only | xargs grep -lE \"api\\.canva\\.com/rest/v1\" --include=\"*.ts\" --include=\"*.js\" 2>/dev/null | while read f; do grep -n \"api\\.canva\\.com\" \"$f\" | grep -v \"const.*BASE\\|const.*URL\\|import\\|from\\|//\" && echo \"WARNING: Direct Canva URL in $f \u2014 use client wrapper\" && exit 1; done; exit 0'\n        language: system\n        pass_filenames: false\n```\n\n## CI Policy Checks\n\n```yaml\n# .github/workflows/canva-policy.yml\nname: Canva Policy Check\n\non: [push, pull_request]\n\njobs:\n  policy:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n\n      - name: Check for hardcoded credentials\n        run: |\n          if grep -rE \"(cnvat_[a-zA-Z0-9]{20,}|OCA[A-Z0-9]{10,})\" \\\n            --include=\"*.ts\" --include=\"*.js\" --include=\"*.json\" \\\n            --exclude-dir=node_modules .; then\n            echo \"ERROR: Hardcoded Canva credentials found\"\n            exit 1\n          fi\n\n      - name: Check for unhandled API calls\n        run: |\n          # Warn if raw fetch to Canva without error handling\n          DIRECT_CALLS=$(grep -rn \"fetch.*api\\.canva\\.com\" \\\n            --include=\"*.ts\" --include=\"*.js\" \\\n            --exclude=\"*client.ts\" --exclude=\"*test*\" \\\n            . 2>/dev/null | wc -l)\n          if [ \"$DIRECT_CALLS\" -gt 0 ]; then\n            echo \"WARNING: $DIRECT_CALLS direct Canva API calls found outside client wrapper\"\n            grep -rn \"fetch.*api\\.canva\\.com\" --include=\"*.ts\" --include=\"*.js\" \\\n              --exclude=\"*client.ts\" --exclude=\"*test*\" .\n          fi\n\n      - name: Validate .env.example\n        run: |\n          if [ -f .env.example ]; then\n            for var in CANVA_CLIENT_ID CANVA_CLIENT_SECRET CANVA_REDIRECT_URI; do\n              if ! grep -q \"^${var}=\" .env.example; then\n                echo \"WARNING: ${var} missing from .env.example\"\n              fi\n            done\n          fi\n```\n\n## Runtime Guardrails\n\n```typescript\n// Prevent dangerous operations and enforce patterns at runtime\n\nclass CanvaGuardrails {\n  // Block requests without proper authorization header\n  static validateRequest(init: RequestInit): void {\n    const authHeader = (init.headers as Record<string, string>)?.['Authorization'];\n    if (!authHeader || !authHeader.startsWith('Bearer ')) {\n      throw new Error('Canva API call missing Bearer token');\n    }\n  }\n\n  // Enforce token is not expired before making call\n  static validateToken(expiresAt: number): void {\n    if (Date.now() > expiresAt) {\n      throw new Error('Canva access token expired \u2014 refresh before calling');\n    }\n  }\n\n  // Block sensitive operations based on environment\n  static validateEnvironment(operation: string): void {\n    const blocked = ['deleteAsset', 'deleteFolder'];\n    if (process.env.NODE_ENV !== 'production' && blocked.includes(operation)) {\n      // Allow in dev for testing\n      return;\n    }\n    // In production, require explicit confirmation\n    if (process.env.NODE_ENV === 'production' && blocked.includes(operation)) {\n      console.warn(`[guardrail] Destructive operation: ${operation}`);\n    }\n  }\n\n  // Rate limit self-check \u2014 don't send if we know we'll get 429\n  static checkRateLimit(\n    endpoint: string,\n    tracker: Map<string, { count: number; resetAt: number }>\n  ): void {\n    const window = tracker.get(endpoint);\n    if (window && window.count <= 0 && Date.now() < window.resetAt) {\n      const waitMs = window.resetAt - Date.now();\n      throw new Error(`Rate limit exhausted for ${endpoint}. Wait ${(waitMs / 1000).toFixed(0)}s`);\n    }\n  }\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| ESLint rule not firing | Wrong config path | Check plugin registration |\n| Pre-commit skipped | `--no-verify` used | Enforce in CI |\n| False positive on \"OCA\" | String matches pattern | Narrow regex or add allowlist |\n| Guardrail blocks valid op | Too strict | Add environment-based exceptions |\n\n## Resources\n\n- [ESLint Plugin Development](https://eslint.org/docs/latest/extend/plugins)\n- [Pre-commit Framework](https://pre-commit.com/)\n- [Canva Scopes](https://www.canva.dev/docs/connect/appendix/scopes/)\n\n## Next Steps\n\nFor architecture blueprints, see `canva-architecture-variants`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "canva-policy-guardrails",
-    "description": "Implement Canva Connect API lint rules, policy enforcement, and automated",
-    "allowed-tools": "Read, Write, Edit, Bash(npx:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

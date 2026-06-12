@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000001062",
   "name": "deploying-postgres-k8s",
   "slug": "deploying-postgres-k8s",
   "description": "|",
   "content": "\n# Deploying PostgreSQL on Kubernetes\n\nDeploy production-ready PostgreSQL clusters using CloudNativePG operator (v1.28+) with automated failover.\n\n## Quick Start\n\n```bash\n# 1. Install CloudNativePG operator\nkubectl apply --server-side -f \\\n  https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.28/releases/cnpg-1.28.0.yaml\n\n# 2. Wait for operator\nkubectl rollout status deployment -n cnpg-system cnpg-controller-manager\n\n# 3. Deploy PostgreSQL cluster\nkubectl apply -f - <<EOF\napiVersion: postgresql.cnpg.io/v1\nkind: Cluster\nmetadata:\n  name: pg-cluster\nspec:\n  instances: 3\n  storage:\n    size: 10Gi\nEOF\n\n# 4. Wait for cluster\nkubectl wait cluster/pg-cluster --for=condition=Ready --timeout=300s\n```\n\n## Operator Installation\n\n### Direct Manifest (Recommended)\n\n```bash\nkubectl apply --server-side -f \\\n  https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.28/releases/cnpg-1.28.0.yaml\n\n# Verify\nkubectl rollout status deployment -n cnpg-system cnpg-controller-manager\nkubectl get pods -n cnpg-system\n```\n\n### Helm Installation\n\n```bash\nhelm repo add cnpg https://cloudnative-pg.github.io/charts\nhelm repo update\n\nhelm upgrade --install cnpg \\\n  --namespace cnpg-system \\\n  --create-namespace \\\n  cnpg/cloudnative-pg\n```\n\n### Namespace-Scoped (Enhanced Security)\n\n```bash\nhelm upgrade --install cnpg \\\n  --namespace cnpg-system \\\n  --create-namespace \\\n  --set config.clusterWide=false \\\n  cnpg/cloudnative-pg\n```\n\n## Cluster Configurations\n\n### Development (Single Instance)\n\n```yaml\napiVersion: postgresql.cnpg.io/v1\nkind: Cluster\nmetadata:\n  name: pg-dev\nspec:\n  instances: 1\n  imageName: ghcr.io/cloudnative-pg/postgresql:17.2\n  primaryUpdateStrategy: unsupervised\n  storage:\n    size: 5Gi\n  postgresql:\n    parameters:\n      max_connections: \"100\"\n      shared_buffers: \"256MB\"\n```\n\n### Production (HA with 3 Replicas)\n\n```yaml\napiVersion: postgresql.cnpg.io/v1\nkind: Cluster\nmetadata:\n  name: pg-production\nspec:\n  instances: 3\n  imageName: ghcr.io/cloudnative-pg/postgresql:17.2\n  primaryUpdateStrategy: unsupervised\n\n  storage:\n    storageClass: standard\n    size: 100Gi\n\n  resources:\n    requests:\n      memory: \"2Gi\"\n      cpu: \"1\"\n    limits:\n      memory: \"4Gi\"\n      cpu: \"2\"\n\n  postgresql:\n    parameters:\n      max_connections: \"200\"\n      shared_buffers: \"1GB\"\n      effective_cache_size: \"3GB\"\n      maintenance_work_mem: \"256MB\"\n      checkpoint_completion_target: \"0.9\"\n      wal_buffers: \"16MB\"\n      default_statistics_target: \"100\"\n      random_page_cost: \"1.1\"\n      effective_io_concurrency: \"200\"\n\n  affinity:\n    podAntiAffinityType: required  # Spread across nodes\n\n  monitoring:\n    enablePodMonitor: true\n```\n\n### With Bootstrap Database\n\n```yaml\napiVersion: postgresql.cnpg.io/v1\nkind: Cluster\nmetadata:\n  name: pg-cluster\nspec:\n  instances: 3\n  storage:\n    size: 10Gi\n\n  bootstrap:\n    initdb:\n      database: learnflow\n      owner: app_user\n      secret:\n        name: app-user-secret\n```\n\nCreate the secret first:\n\n```bash\nkubectl create secret generic app-user-secret \\\n  --from-literal=username=app_user \\\n  --from-literal=password=$(openssl rand -hex 16)\n```\n\n## Connection Secrets\n\nCloudNativePG automatically creates connection secrets:\n\n| Secret | Contents |\n|--------|----------|\n| `pg-cluster-app` | App credentials (recommended) |\n| `pg-cluster-superuser` | Superuser credentials |\n\n### Get Connection String\n\n```bash\n# Get app credentials\nkubectl get secret pg-cluster-app -o jsonpath='{.data.uri}' | base64 -d\n\n# Get superuser credentials (admin tasks only)\nkubectl get secret pg-cluster-superuser -o jsonpath='{.data.uri}' | base64 -d\n```\n\n### Use in Deployment\n\n```yaml\nenv:\n  - name: DATABASE_URL\n    valueFrom:\n      secretKeyRef:\n        name: pg-cluster-app\n        key: uri\n```\n\n## Service Endpoints\n\n| Service | Port | Use |\n|---------|------|-----|\n| `pg-cluster-rw` | 5432 | Read-Write (primary) |\n| `pg-cluster-ro` | 5432 | Read-Only (replicas) |\n| `pg-cluster-r` | 5432 | Any instance |\n\n### Connect from Another Namespace\n\n```yaml\nenv:\n  - name: DATABASE_URL\n    value: \"postgresql://app_user:password@pg-cluster-rw.default.svc.cluster.local:5432/learnflow\"\n```\n\n## Database Operations\n\n### Connect with psql\n\n```bash\n# Using kubectl cnpg plugin (recommended)\nkubectl cnpg psql pg-cluster -- -c \"SELECT version();\"\n\n# Or directly\nkubectl exec -it pg-cluster-1 -- psql -U postgres\n```\n\n### Create Database and User\n\n```bash\nkubectl exec -it pg-cluster-1 -- psql -U postgres <<EOF\nCREATE DATABASE myapp;\nCREATE USER myapp_user WITH ENCRYPTED PASSWORD 'secure_password';\nGRANT ALL PRIVILEGES ON DATABASE myapp TO myapp_user;\n\\c myapp\nGRANT ALL ON SCHEMA public TO myapp_user;\nEOF\n```\n\n### Run Migrations\n\n```bash\n# From local machine\nkubectl port-forward svc/pg-cluster-rw 5432:5432 &\nDATABASE_URL=\"postgresql://postgres:password@localhost:5432/learnflow\" alembic upgrade head\n```\n\n## Backup Configuration\n\n### Backup to S3\n\n```yaml\napiVersion: postgresql.cnpg.io/v1\nkind: Cluster\nmetadata:\n  name: pg-cluster\nspec:\n  instances: 3\n  storage:\n    size: 10Gi\n\n  backup:\n    barmanObjectStore:\n      destinationPath: \"s3://my-bucket/pg-backups\"\n      s3Credentials:\n        accessKeyId:\n          name: s3-creds\n          key: ACCESS_KEY_ID\n        secretAccessKey:\n          name: s3-creds\n          key: SECRET_ACCESS_KEY\n      wal:\n        compression: gzip\n      data:\n        compression: gzip\n    retentionPolicy: \"30d\"\n```\n\n### Schedule Backups\n\n```yaml\napiVersion: postgresql.cnpg.io/v1\nkind: ScheduledBackup\nmetadata:\n  name: pg-backup-daily\nspec:\n  schedule: \"0 0 * * *\"  # Daily at midnight\n  backupOwnerReference: cluster\n  cluster:\n    name: pg-cluster\n```\n\n## Monitoring\n\n### Check Cluster Status\n\n```bash\nkubectl get cluster pg-cluster\nkubectl describe cluster pg-cluster\nkubectl get pods -l cnpg.io/cluster=pg-cluster\n```\n\n### View Logs\n\n```bash\nkubectl logs pg-cluster-1 -f\nkubectl logs -l cnpg.io/cluster=pg-cluster --all-containers\n```\n\n### Prometheus Metrics\n\nWith `enablePodMonitor: true`, metrics available at:\n- `cnpg_backends_total` - Active connections\n- `cnpg_pg_replication_lag_seconds` - Replica lag\n- `cnpg_pg_database_size_bytes` - Database size\n\n## Troubleshooting\n\n### Cluster Not Ready\n\n```bash\nkubectl describe cluster pg-cluster\nkubectl get pods -l cnpg.io/cluster=pg-cluster\nkubectl logs pg-cluster-1\n```\n\n### Connection Issues\n\n```bash\n# Test connectivity\nkubectl run pg-client --rm -it --restart=Never \\\n  --image=postgres:17 -- \\\n  psql \"postgresql://app_user:password@pg-cluster-rw:5432/learnflow\" -c \"SELECT 1;\"\n```\n\n### Common Issues\n\n| Error | Cause | Fix |\n|-------|-------|-----|\n| PVC pending | No storage class | Add `storageClass` to spec |\n| Connection refused | Wrong service name | Use `cluster-rw` for writes |\n| Auth failed | Wrong credentials | Check secret `cluster-app` |\n| Replica lag high | Heavy writes | Scale up, increase resources |\n\n## Cleanup\n\n```bash\n# Delete cluster (keeps PVCs by default)\nkubectl delete cluster pg-cluster\n\n# Delete PVCs (data loss!)\nkubectl delete pvc -l cnpg.io/cluster=pg-cluster\n\n# Remove operator\nkubectl delete -f \\\n  https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.28/releases/cnpg-1.28.0.yaml\n```\n\n## Verification\n\nRun: `python scripts/verify.py`\n\n## Related Skills\n\n- `operating-k8s-local` - Local Minikube cluster setup\n- `scaffolding-fastapi-dapr` - FastAPI services with SQLModel\n- `deploying-kafka-k8s` - Kafka for event-driven architecture",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "deploying-postgres-k8s",
-    "description": "|"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

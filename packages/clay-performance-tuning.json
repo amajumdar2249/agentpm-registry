@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031533",
   "name": "clay-performance-tuning",
   "slug": "clay-performance-tuning",
   "description": "Optimize Clay table enrichment throughput, reduce processing time, and",
   "content": "# Clay Performance Tuning\n\n## Overview\n\nOptimize Clay table processing speed, enrichment hit rates, and credit efficiency. Clay processes enrichment columns sequentially per row, and each enrichment column makes external API calls. Performance tuning focuses on reducing wasted enrichments, ordering columns optimally, and managing table auto-run behavior.\n\n## Prerequisites\n\n- Clay table with enrichment columns configured\n- Understanding of which providers are in your waterfall\n- Access to Clay table settings and column configuration\n\n## Instructions\n\n### Step 1: Order Enrichment Columns by Speed\n\nClay runs enrichment columns left-to-right. Place fast columns first:\n\n| Column Type | Typical Speed | Position |\n|-------------|---------------|----------|\n| Company lookup (Clearbit) | ~100ms | First (fastest) |\n| Email finder (single provider) | ~200ms | Second |\n| Email waterfall (multi-provider) | 1-10s | Middle |\n| Claygent AI research | 5-30s | Later |\n| HTTP API (outbound call) | Variable | Last |\n| AI text generation | 2-5s | After Claygent |\n\n**Why order matters:** Fast columns populate data that slow columns may need as input (e.g., company name feeds into Claygent research prompt).\n\n### Step 2: Add Conditional Run Rules\n\nPrevent enrichments from running on rows that won't yield results:\n\n```\n# In Clay column settings > \"Only run if\" condition:\n\n# Email waterfall: only run if we have enough input data\nISNOTEMPTY(domain) AND ISNOTEMPTY(first_name) AND ISNOTEMPTY(last_name)\n\n# Claygent: only run for high-value prospects\nICP Score >= 60 AND ISNOTEMPTY(Company Name)\n\n# CRM push: only run for enriched, qualified leads\nICP Score >= 70 AND ISNOTEMPTY(Work Email)\n```\n\nThis prevents:\n\n- Waterfall enrichment on rows with missing domains (wasted credits)\n- Claygent research on low-value prospects (expensive AI credits)\n- CRM pushes for incomplete records\n\n### Step 3: Optimize Input Data Before Import\n\n```typescript\n// src/clay/pre-process.ts \u2014 clean data before sending to Clay\ninterface RawLead {\n  domain?: string;\n  email?: string;\n  first_name?: string;\n  last_name?: string;\n}\n\nfunction preProcessForClay(rows: RawLead[]): {\n  ready: RawLead[];\n  filtered: { row: RawLead; reason: string }[];\n  stats: { total: number; ready: number; filtered: number; deduped: number };\n} {\n  const personalDomains = new Set([\n    'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com',\n    'icloud.com', 'aol.com', 'protonmail.com', 'mail.com',\n  ]);\n\n  const seen = new Set<string>();\n  const ready: RawLead[] = [];\n  const filtered: { row: RawLead; reason: string }[] = [];\n  let deduped = 0;\n\n  for (const row of rows) {\n    // Normalize domain\n    const domain = row.domain?.toLowerCase().trim().replace(/^(https?:\\/\\/)?(www\\.)?/, '').replace(/\\/.*$/, '');\n\n    // Filter invalid\n    if (!domain || !domain.includes('.')) {\n      filtered.push({ row, reason: 'invalid domain' });\n      continue;\n    }\n    if (personalDomains.has(domain)) {\n      filtered.push({ row, reason: 'personal email domain' });\n      continue;\n    }\n    if (!row.first_name?.trim() || !row.last_name?.trim()) {\n      filtered.push({ row, reason: 'missing name' });\n      continue;\n    }\n\n    // Deduplicate\n    const key = `${domain}:${row.first_name?.toLowerCase()}:${row.last_name?.toLowerCase()}`;\n    if (seen.has(key)) {\n      deduped++;\n      continue;\n    }\n    seen.add(key);\n\n    ready.push({ ...row, domain });\n  }\n\n  return {\n    ready,\n    filtered,\n    stats: {\n      total: rows.length,\n      ready: ready.length,\n      filtered: filtered.length,\n      deduped,\n    },\n  };\n}\n\n// Usage\nconst { ready, stats } = preProcessForClay(rawLeads);\nconsole.log(`Pre-processing: ${stats.total} total -> ${stats.ready} ready (${stats.filtered} filtered, ${stats.deduped} deduped)`);\n// Typical result: 30-50% of rows filtered, saving that many credits\n```\n\n### Step 4: Limit Waterfall Depth\n\nEach additional waterfall provider adds 1-5 seconds per row and burns credits if the previous providers already found data:\n\n```yaml\n# Before: 5-provider waterfall (slow, expensive)\n# Each provider: ~2 credits, ~2s\n# Worst case: 10 credits, 10s per row\nwaterfall_deep:\n  providers: [apollo, hunter, prospeo, dropcontact, findymail]\n  max_time_per_row: \"~10s\"\n  max_credits_per_row: 10\n\n# After: 2-provider waterfall (fast, cheap)\n# Covers 80%+ of findable emails with 2 providers\nwaterfall_optimized:\n  providers: [apollo, hunter]\n  max_time_per_row: \"~4s\"\n  max_credits_per_row: 4\n  coverage_loss: \"~5-10%\"\n```\n\n**Rule of thumb:** Apollo + one backup provider covers 80-85% of findable work emails. Adding more providers gives diminishing returns.\n\n### Step 5: Use Table-Level Auto-Update Controls\n\n```yaml\n# Table Settings in Clay UI:\ntable_auto_update: ON   # Parent switch: if OFF, nothing auto-runs\ncolumn_settings:\n  company_lookup:\n    auto_run: ON          # Runs on every new row\n  email_waterfall:\n    auto_run: ON          # Runs on every new row (if condition met)\n    condition: \"ISNOTEMPTY(domain)\"\n  claygent_research:\n    auto_run: OFF         # Manual trigger only (expensive)\n  crm_push:\n    auto_run: ON          # Auto-push qualified leads\n    condition: \"ICP Score >= 70\"\n```\n\n### Step 6: Schedule Large Imports for Off-Peak\n\nClay's enrichment providers respond faster during off-peak hours (US nighttime):\n\n```typescript\n// src/clay/scheduler.ts\nfunction shouldProcessNow(rowCount: number): { proceed: boolean; reason: string } {\n  const hour = new Date().getUTCHours();\n  const isOffPeak = hour >= 2 && hour <= 8; // 2am-8am UTC\n\n  if (rowCount < 100) {\n    return { proceed: true, reason: 'Small batch \u2014 process anytime' };\n  }\n\n  if (rowCount >= 1000 && !isOffPeak) {\n    return {\n      proceed: false,\n      reason: `Large batch (${rowCount} rows). Schedule for 02:00-08:00 UTC for faster provider responses.`,\n    };\n  }\n\n  return { proceed: true, reason: isOffPeak ? 'Off-peak \u2014 optimal time' : 'Medium batch \u2014 acceptable' };\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Table stuck processing | Provider rate limit hit | Wait for reset or reduce concurrency |\n| Slow enrichment (>10s/row) | Deep waterfall (5+ providers) | Reduce to 2-3 providers |\n| Low hit rate (<40%) | Bad input data | Pre-validate and filter before import |\n| Credits burning with no results | No conditional run rules | Add \"Only run if\" conditions to columns |\n| Enrichment re-runs on edit | Table auto-update triggered | Turn off auto-update during bulk edits |\n\n## Output\n\n- Optimized table with conditional enrichment rules\n- Pre-processed input data (30-50% credit savings typical)\n- Column order optimized for speed\n- Waterfall depth reduced to 2-3 providers\n\n## Resources\n\n- [Clay University -- Table Management Settings](https://university.clay.com/docs/table-management-settings)\n- [Clay University -- Actions & Data Credits](https://university.clay.com/docs/actions-data-credits)\n\n## Next Steps\n\nFor cost optimization, see `clay-cost-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clay-performance-tuning",
-    "description": "Optimize Clay table enrichment throughput, reduce processing time, and",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

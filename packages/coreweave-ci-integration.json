@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031663",
   "name": "coreweave-ci-integration",
   "slug": "coreweave-ci-integration",
   "description": "Integrate CoreWeave deployments into CI/CD pipelines with GitHub Actions.",
   "content": "# CoreWeave CI Integration\n\n## Overview\n\nSet up CI/CD for CoreWeave GPU cloud workloads: run unit tests with mocked Kubernetes clients on every PR, deploy inference containers to CoreWeave namespaces on merge to main, and validate GPU resource requests against quota. CoreWeave uses standard Kubernetes APIs with GPU-specific scheduling, so CI pipelines authenticate via kubeconfig and manage deployments through `kubectl`.\n\n## GitHub Actions Workflow\n\n```yaml\n# .github/workflows/coreweave-ci.yml\nname: CoreWeave CI\non:\n  pull_request:\n    paths: ['src/**', 'k8s/**', 'Dockerfile']\n  push:\n    branches: [main]\n\njobs:\n  unit-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with: { node-version: '20' }\n      - run: npm ci\n      - run: npm test -- --reporter=verbose\n\n  deploy:\n    if: github.ref == 'refs/heads/main'\n    needs: unit-tests\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - name: Build and push container\n        run: |\n          echo \"${{ secrets.GHCR_TOKEN }}\" | docker login ghcr.io -u ${{ github.actor }} --password-stdin\n          docker build -t ghcr.io/${{ github.repository }}/inference:${{ github.sha }} .\n          docker push ghcr.io/${{ github.repository }}/inference:${{ github.sha }}\n      - name: Deploy to CoreWeave\n        env:\n          KUBECONFIG_DATA: ${{ secrets.COREWEAVE_KUBECONFIG }}\n        run: |\n          echo \"$KUBECONFIG_DATA\" | base64 -d > /tmp/kubeconfig\n          export KUBECONFIG=/tmp/kubeconfig\n          kubectl set image deployment/inference \\\n            inference=ghcr.io/${{ github.repository }}/inference:${{ github.sha }}\n          kubectl rollout status deployment/inference --timeout=300s\n```\n\n## Mock-Based Unit Tests\n\n```typescript\n// tests/coreweave-service.test.ts\nimport { describe, it, expect, vi } from 'vitest';\nimport { deployInferenceModel } from '../src/coreweave-service';\n\nvi.mock('@kubernetes/client-node', () => ({\n  KubeConfig: vi.fn().mockImplementation(() => ({\n    loadFromDefault: vi.fn(),\n    makeApiClient: vi.fn().mockReturnValue({\n      patchNamespacedDeployment: vi.fn().mockResolvedValue({ body: { status: { readyReplicas: 1 } } }),\n      listNamespacedPod: vi.fn().mockResolvedValue({\n        body: { items: [{ metadata: { name: 'inference-abc' }, status: { phase: 'Running' } }] },\n      }),\n    }),\n  })),\n  AppsV1Api: vi.fn(),\n}));\n\ndescribe('CoreWeave Service', () => {\n  it('deploys inference model with GPU requests', async () => {\n    const result = await deployInferenceModel('llama-70b', { gpu: 'A100', count: 4 });\n    expect(result.status).toBe('deployed');\n    expect(result.gpuType).toBe('A100');\n  });\n});\n```\n\n## Integration Tests\n\n```typescript\n// tests/integration/coreweave.integration.test.ts\nimport { describe, it, expect } from 'vitest';\nimport { KubeConfig, CoreV1Api } from '@kubernetes/client-node';\n\nconst hasKubeconfig = !!process.env.COREWEAVE_KUBECONFIG;\n\ndescribe.skipIf(!hasKubeconfig)('CoreWeave Live API', () => {\n  it('lists GPU nodes in namespace', async () => {\n    const kc = new KubeConfig();\n    kc.loadFromString(Buffer.from(process.env.COREWEAVE_KUBECONFIG!, 'base64').toString());\n    const k8sApi = kc.makeApiClient(CoreV1Api);\n    const { body } = await k8sApi.listNamespacedPod('default');\n    expect(Array.isArray(body.items)).toBe(true);\n  });\n});\n```\n\n## Error Handling\n\n| CI Issue | Cause | Fix |\n|----------|-------|-----|\n| `KUBECONFIG_DATA` empty | Secret not set | Run `gh secret set COREWEAVE_KUBECONFIG --body \"$(base64 -w0 kubeconfig)\"` |\n| Rollout timeout | GPU nodes unavailable | Increase `--timeout` or check CoreWeave GPU availability dashboard |\n| Image pull backoff | GHCR auth expired | Verify `GHCR_TOKEN` secret and image registry permissions |\n| Quota exceeded | GPU request exceeds namespace limit | Check namespace quota with `kubectl describe quota` |\n| Pod pending | No matching GPU node type | Verify `nodeSelector` matches available GPU SKUs (A100, H100) |\n\n## Resources\n\n- [CoreWeave Kubernetes Docs](https://docs.coreweave.com/coreweave-kubernetes/)\n- [GitHub Actions Secrets](https://docs.github.com/en/actions/security-guides/encrypted-secrets)\n\n## Next Steps\n\nFor deployment patterns, see `coreweave-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "coreweave-ci-integration",
-    "description": "Integrate CoreWeave deployments into CI/CD pipelines with GitHub Actions.",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,15 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000006757",
   "name": "go-concurrency",
   "slug": "go-concurrency",
   "description": "Use when writing concurrent Go code \u2014 goroutines, channels, mutexes, or thread-safety guarantees. Also use when parallelizing work, fixing data races, or protecting shared state, even if the user doesn't explicitly mention concurrency primitives. Does not cover context.Context patterns (see go-context).",
   "content": "\n# Go Concurrency\n\n## Goroutine Lifetimes\n\n> **Normative**: When you spawn goroutines, make it clear when or whether they\n> exit.\n\nGoroutines can leak by blocking on channel sends/receives. The GC **will not\nterminate** a blocked goroutine even if no other goroutine holds a reference to\nthe channel. Even non-leaking in-flight goroutines cause panics (send on closed\nchannel), data races, memory issues, and resource leaks.\n\n### Core Rules\n\n1. **Every goroutine needs a stop mechanism** \u2014 a predictable end time, a\n   cancellation signal, or both\n2. **Code must be able to wait** for the goroutine to finish\n3. **No goroutines in `init()`** \u2014 expose lifecycle methods (`Close`, `Stop`,\n   `Shutdown`) instead\n4. **Keep synchronization scoped** \u2014 constrain to function scope, factor logic\n   into synchronous functions\n\n```go\n// Good: Clear lifetime with WaitGroup\nvar wg sync.WaitGroup\nfor item := range queue {\n    wg.Add(1)\n    go func() { defer wg.Done(); process(ctx, item) }()\n}\nwg.Wait()\n```\n\n```go\n// Bad: No way to stop or wait\ngo func() { for { flush(); time.Sleep(delay) } }()\n```\n\n**Test for leaks** with [go.uber.org/goleak](https://pkg.go.dev/go.uber.org/goleak).\n\n> **Principle**: Never start a goroutine without knowing how it will stop.\n\n> Read [references/GOROUTINE-PATTERNS.md](references/GOROUTINE-PATTERNS.md) when\n> implementing stop/done channel patterns, goroutine waiting strategies, or\n> lifecycle-managed workers.\n\n---\n\n## Share by Communicating\n\n> \"Do not communicate by sharing memory; instead, share memory by communicating.\"\n\nThis is Go's foundational concurrency design principle. Use **channels** for\nownership transfer and orchestration \u2014 when one goroutine produces a value and\nanother consumes it. Use **mutexes** when multiple goroutines access shared\nstate and channels would add unnecessary complexity.\n\n**Default to channels.** Fall back to `sync.Mutex` / `sync.RWMutex` when the\nproblem is naturally about protecting a shared data structure (e.g., a cache or\ncounter) rather than passing data between goroutines.\n\n---\n\n## Synchronous Functions\n\n> **Normative**: Prefer synchronous functions over asynchronous ones.\n\n| Benefit | Why |\n|---|---|\n| Localized goroutines | Lifetimes easier to reason about |\n| Avoids leaks and races | Easier to prevent resource leaks and data races |\n| Easier to test | Check input/output without polling |\n| Caller flexibility | Caller adds concurrency when needed |\n\n> **Advisory**: It is quite difficult (sometimes impossible) to remove\n> unnecessary concurrency at the caller side. Let the caller add concurrency\n> when needed.\n\n> Read [references/GOROUTINE-PATTERNS.md](references/GOROUTINE-PATTERNS.md) when\n> writing synchronous-first APIs that callers may wrap in goroutines.\n\n---\n\n## Zero-value Mutexes\n\nThe zero-value of `sync.Mutex` and `sync.RWMutex` is valid \u2014 almost never need\na pointer to a mutex.\n\n```go\n// Good: Zero-value is valid    // Bad: Unnecessary pointer\nvar mu sync.Mutex                mu := new(sync.Mutex)\n```\n\n**Don't embed mutexes** \u2014 use a named `mu` field to keep `Lock`/`Unlock` as\nimplementation details, not exported API.\n\n> Read [references/SYNC-PRIMITIVES.md](references/SYNC-PRIMITIVES.md) when\n> implementing mutex-protected structs or deciding how to structure mutex fields.\n\n---\n\n## Channel Direction\n\n> **Normative**: Specify channel direction where possible.\n\nDirection prevents errors (compiler catches closing a receive-only channel),\nconveys ownership, and is self-documenting.\n\n```go\nfunc produce(out chan<- int) { /* send-only */ }\nfunc consume(in <-chan int)  { /* receive-only */ }\nfunc transform(in <-chan int, out chan<- int) { /* both */ }\n```\n\n### Channel Size: One or None\n\nChannels should have size **zero** (unbuffered) or **one**. Any other size\nrequires justification for:\n\n- How the size was determined\n- What prevents the channel from filling under load\n- What happens when writers block\n\n```go\nc := make(chan int)    // unbuffered \u2014 Good\nc := make(chan int, 1) // size one \u2014 Good\nc := make(chan int, 64) // arbitrary \u2014 needs justification\n```\n\n> Read [references/SYNC-PRIMITIVES.md](references/SYNC-PRIMITIVES.md) when\n> reviewing detailed channel direction examples with error-prone patterns.\n\n---\n\n## Atomic Operations\n\nUse `atomic.Bool`, `atomic.Int64`, etc. (stdlib `sync/atomic` since Go 1.19, or\n[go.uber.org/atomic](https://pkg.go.dev/go.uber.org/atomic)) for type-safe\natomic operations. Raw `int32`/`int64` fields make it easy to forget atomic\naccess on some code paths.\n\n```go\n// Good: Type-safe              // Bad: Easy to forget\nvar running atomic.Bool          var running int32 // atomic\nrunning.Store(true)              atomic.StoreInt32(&running, 1)\nrunning.Load()                   running == 1 // race!\n```\n\n> Read [references/SYNC-PRIMITIVES.md](references/SYNC-PRIMITIVES.md) when\n> choosing between sync/atomic and go.uber.org/atomic, or implementing atomic\n> state flags in structs.\n\n---\n\n## Documenting Concurrency\n\n> **Advisory**: Document thread-safety when it's not obvious from the operation\n> type.\n\nGo users assume read-only operations are safe for concurrent use, and mutating\noperations are not. Document concurrency when:\n\n1. **Read vs mutating is unclear** \u2014 e.g., a `Lookup` that mutates LRU state\n2. **API provides synchronization** \u2014 e.g., thread-safe clients\n3. **Interface has concurrency requirements** \u2014 document in type definition\n\n---\n\n## Context Usage\n\n> For context.Context guidance (parameter placement, struct storage, custom\n> types, derivation patterns), see the dedicated\n> [go-context](../go-context/SKILL.md) skill.\n\n---\n\n## Buffer Pooling with Channels\n\nUse a buffered channel as a free list to reuse allocated buffers. This \"leaky\nbuffer\" pattern uses `select` with `default` for non-blocking operations.\n\n> Read [references/BUFFER-POOLING.md](references/BUFFER-POOLING.md) when\n> implementing a worker pool with reusable buffers or choosing between\n> channel-based pools and `sync.Pool`.\n\n---\n\n## Advanced Patterns\n\n> Read [references/ADVANCED-PATTERNS.md](references/ADVANCED-PATTERNS.md) when\n> implementing request-response multiplexing with channels of channels, or\n> CPU-bound parallel computation across cores.\n\n---\n\n## Related Skills\n\n- **Context propagation**: See [go-context](../go-context/SKILL.md) when passing cancellation, deadlines, or request-scoped values through goroutines\n- **Error handling**: See [go-error-handling](../go-error-handling/SKILL.md) when propagating errors from goroutines or using errgroup\n- **Defensive hardening**: See [go-defensive](../go-defensive/SKILL.md) when protecting shared state at API boundaries or using defer for cleanup\n- **Interface design**: See [go-interfaces](../go-interfaces/SKILL.md) when choosing receiver types for types with sync primitives\n\n### External Resources\n\n- [Never start a goroutine without knowing how it will\n  stop](https://dave.cheney.net/2016/12/22/never-start-a-goroutine-without-knowing-how-it-will-stop)\n  \u2014 Dave Cheney\n- [Rethinking Classical Concurrency\n  Patterns](https://www.youtube.com/watch?v=5zXAHh5tJqQ) \u2014 Bryan Mills\n  (GopherCon 2018)\n- [When Go programs end](https://changelog.com/gotime/165) \u2014 Go Time podcast\n- [go.uber.org/goleak](https://pkg.go.dev/go.uber.org/goleak) \u2014 Goroutine leak\n  detector for testing\n- [go.uber.org/atomic](https://pkg.go.dev/go.uber.org/atomic) \u2014 Type-safe\n  atomic operations\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "go-concurrency",
-    "description": "Use when writing concurrent Go code \u2014 goroutines, channels, mutexes, or thread-safety guarantees. Also use when parallelizing work, fixing data races, or protecting shared state, even if the user doesn't explicitly mention concurrency primitives. Does not cover context.Context patterns (see go-context).",
-    "license": "Apache-2.0",
-    "compatibility": "Requires go.uber.org/atomic for atomic operation wrappers",
-    "metadata": "",
-    "sources": "Effective Go, Google Style Guide, Uber Style Guide"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "Apache-2.0",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

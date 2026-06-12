@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000026492",
   "name": "adk-evals",
   "slug": "adk-evals-2",
   "description": "Complete reference for writing, running, and iterating on evals (automated conversation tests) for ADK agents. Covers eval file format, all assertion types, CLI usage, and per-primitive testing patterns.",
   "content": "\n# ADK Evals Skill\n\n## What are Evals?\n\nEvals are automated conversation tests for ADK agents. Each eval defines a scenario \u2014 a sequence of user messages or events \u2014 and asserts on what the bot should do: what it says, which tools it calls, how state changes, which workflows run, and more.\n\nEvals run against a live dev bot (`adk dev`), so they test the full stack \u2014 not mocks.\n\n## When to Use This Skill\n\nUse this skill when the developer asks about:\n\n- **Writing evals** \u2014 file format, assertions, turn types, setup\n- **Running evals** \u2014 CLI commands, filtering, output interpretation\n- **Testing specific primitives** \u2014 how to test actions, tools, workflows, conversations, state\n- **The testing loop** \u2014 write \u2192 run \u2192 inspect traces \u2192 iterate\n- **CI integration** \u2014 exit codes, `--format json` flag, tagging strategies\n- **Eval configuration** \u2014 idleTimeout, judgePassThreshold, judgeModel\n\nOr when you are developing an ADK bot and need to write the equivalent of unit/end-to-end tests.\n\n**Trigger questions:**\n- \"How do I write an eval?\"\n- \"How do I test my workflow?\"\n- \"How do I assert that a tool was called with specific params?\"\n- \"My eval is failing, how do I debug it?\"\n- \"How do I test that the bot stays silent?\"\n- \"How do I run evals in CI?\"\n- \"How do I seed state before an eval?\"\n- \"How do I trigger a workflow in an eval?\"\n\n## Available Documentation\n\n| File | Contents |\n|------|----------|\n| `references/eval-format.md` | Complete file format \u2014 all fields, turn types, assertion categories, match operators, setup, outcome, options |\n| `references/testing-workflow.md` | Running evals, interpreting output, using traces, the write \u2192 test \u2192 iterate loop, CI integration |\n| `references/test-patterns.md` | Per-primitive patterns for actions, tools, workflows, conversations, and state |\n\n## How to Answer\n\n1. **Writing an eval** \u2192 Read `eval-format.md` for structure and assertions\n2. **Running evals** \u2192 Read `testing-workflow.md` for CLI commands and output\n3. **Testing a specific primitive** \u2192 Read `test-patterns.md` for the relevant section\n4. **Debugging a failure** \u2192 Combine `testing-workflow.md` (inspect traces) + `eval-format.md` (check assertion syntax)\n\n---\n\n## Quick Reference\n\n### Eval file structure\n\n```typescript\nimport { Eval } from '@botpress/evals'\n\nexport default new Eval({\n  name: 'greeting',\n  type: 'regression',\n  tags: ['basic'],\n\n  setup: {\n    state: { bot: { welcomeSent: false } },\n    workflow: { trigger: 'onboarding', input: { userId: 'test-1' } },\n  },\n\n  conversation: [\n    {\n      user: 'Hi!',\n      assert: {\n        response: [\n          { not_contains: 'error' },\n          { llm_judge: 'Response is friendly and offers to help' },\n        ],\n        tools: [{ not_called: 'createTicket' }],\n        state: [{ path: 'conversation.greeted', equals: true }],\n      },\n    },\n  ],\n\n  outcome: {\n    state: [{ path: 'conversation.greeted', equals: true }],\n  },\n\n  options: {\n    idleTimeout: 60000,\n    judgePassThreshold: 4,\n  },\n})\n```\n\n### Turn types\n\n| Turn | When to use |\n|------|------------|\n| `user: 'message'` | Standard user message |\n| `event: { type, payload }` | Non-message trigger (webhook, integration event) |\n| `expectSilence: true` | Assert bot does NOT respond |\n\n### Assertion categories\n\n| Category | What it checks |\n|----------|---------------|\n| `response` | Bot reply text (contains, not_contains, matches, llm_judge) |\n| `tools` | Tool calls (called, not_called, call_order, params) |\n| `state` | Bot/user/conversation state (equals, changed) |\n| `workflow` | Workflow execution (entered, completed) |\n| `timing` | Response time in ms (lte, gte) |\n\n### CLI commands\n\n```bash\nadk evals                        # run all evals\nadk evals <name>                 # run one eval\nadk evals --tag <tag>            # filter by tag\nadk evals --type regression      # filter by type\nadk evals --verbose              # show all assertions\nadk evals --format json          # JSON output for CI\n\nadk evals runs                   # list recent runs\nadk evals runs --latest          # most recent run\nadk evals runs --latest -v       # with full details\n```\n\n---\n\n## Critical Patterns\n\n\u2705 **Every turn needs `user` or `event`**\n\n```typescript\n// CORRECT\n{ user: 'hello', expectSilence: true }\n{ event: { type: 'payment.failed' }, expectSilence: true }\n```\n\n\u274c **`expectSilence` alone is not a valid turn**\n\n```typescript\n// WRONG \u2014 missing user or event\n{ expectSilence: true }\n```\n\n---\n\n\u2705 **Assert tool params to verify correct extraction**\n\n```typescript\n// CORRECT \u2014 verifies the LLM extracted the right values\n{ called: 'createTicket', params: { priority: { equals: 'high' } } }\n```\n\n\u274c **Only asserting the tool was called**\n\n```typescript\n// INCOMPLETE \u2014 doesn't verify params were correct\n{ called: 'createTicket' }\n```\n\n---\n\n\u2705 **Use `outcome` for post-conversation state and workflow assertions**\n\n```typescript\n// CORRECT \u2014 final state checked once after all turns\noutcome: {\n  state: [{ path: 'conversation.resolved', equals: true }],\n  workflow: [{ name: 'ticketFlow', completed: true }],\n}\n```\n\n---\n\n\u2705 **Seed state to test conditional behavior without running setup turns**\n\n```typescript\n// CORRECT \u2014 start in a known state\nsetup: {\n  state: {\n    user: { plan: 'pro' },\n    conversation: { phase: 'support' },\n  },\n}\n```\n\n\u274c **Using conversation turns to set up state (slow and fragile)**\n\n```typescript\n// WRONG \u2014 depends on the bot correctly processing setup turns\nconversation: [\n  { user: 'I am on the pro plan' },      // hoping bot sets user.plan\n  { user: 'I need help with billing' },   // actual test turn\n]\n```\n\n---\n\n## Example Questions\n\n**Writing evals:**\n- \"Write an eval that tests my createTicket tool is called with the right priority\"\n- \"How do I assert that the bot stays silent after an internal event?\"\n- \"How do I test a multi-turn conversation where context is retained?\"\n\n**Running evals:**\n- \"How do I run only regression evals?\"\n- \"How do I see which assertions failed and why?\"\n- \"How do I integrate evals into GitHub Actions?\"\n\n**Debugging:**\n- \"My eval says the tool wasn't called but I think it was \u2014 how do I check?\"\n- \"How do I inspect what the bot actually did during an eval?\"\n\n**Per-primitive:**\n- \"How do I test a workflow that uses step.sleep()?\"\n- \"How do I test that state changed from the seeded value?\"\n\n---\n\n## Response Format\n\n**Match depth to the question.**\n\n### Simple questions (\"what assertions are available?\", \"how do I run evals?\")\n\nAnswer directly \u2014 show the relevant table or CLI command. Don't generate a full eval file for an informational question.\n\n### Writing an eval\n\n1. Show the complete `new Eval({})` call with realistic field values\n2. Include imports (`import { Eval } from '@botpress/evals'`)\n3. Briefly explain non-obvious assertions \u2014 skip if the assertion is self-explanatory\n4. Suggest the CLI command to run it: `adk evals <name>`\n\n### Debugging a failing eval\n\n1. Ask for or show the failing assertion (`expected` / `actual` diff)\n2. Suggest opening traces in the Dev Console to see what the bot did\n3. Identify whether the issue is in the eval assertion or the bot's behavior\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "adk-evals",
-    "description": "Complete reference for writing, running, and iterating on evals (automated conversation tests) for ADK agents. Covers eval file format, all assertion types, CLI usage, and per-primitive testing patterns.",
-    "license": "MIT"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

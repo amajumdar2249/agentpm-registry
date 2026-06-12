@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032317",
   "name": "intercom-data-handling",
   "slug": "intercom-data-handling",
   "description": "Implement Intercom data handling for GDPR, contact export, data retention,",
   "content": "# Intercom Data Handling\n\n## Overview\n\nHandle sensitive contact data in Intercom integrations with GDPR/CCPA compliance, data export via the Data Export API, contact deletion, PII redaction in logs, and data retention policies.\n\n## Prerequisites\n\n- Understanding of GDPR/CCPA requirements\n- `intercom-client` SDK installed\n- Database for audit logging\n- Familiarity with Intercom's contact and conversation data model\n\n## Data Classification for Intercom\n\n| Category | Intercom Fields | Handling |\n|----------|----------------|----------|\n| PII | `email`, `name`, `phone`, `location` | Encrypt at rest, redact in logs |\n| Identifiers | `id`, `external_id`, `user_id` | Use for lookups, no display |\n| Conversation content | `body`, `conversation_parts` | May contain PII, scan before logging |\n| Custom attributes | User-defined | Depends on content |\n| System metadata | `created_at`, `updated_at`, `role` | Standard handling |\n\n## Instructions\n\n### Step 1: GDPR Data Subject Access Request (DSAR)\n\nExport all Intercom data for a specific user.\n\n```typescript\nimport { IntercomClient } from \"intercom-client\";\n\nconst client = new IntercomClient({\n  token: process.env.INTERCOM_ACCESS_TOKEN!,\n});\n\nasync function exportContactData(contactId: string): Promise<{\n  contact: any;\n  conversations: any[];\n  tags: any[];\n  segments: any[];\n  events: any[];\n}> {\n  // 1. Get contact profile\n  const contact = await client.contacts.find({ contactId });\n\n  // 2. Get conversations for this contact\n  const conversations = [];\n  const convList = await client.conversations.search({\n    query: {\n      field: \"contact_ids\",\n      operator: \"=\",\n      value: contactId,\n    },\n  });\n  for (const convo of convList.conversations) {\n    // Get full conversation with parts\n    const full = await client.conversations.find({\n      conversationId: convo.id,\n    });\n    conversations.push(full);\n  }\n\n  // 3. Get tags\n  const tags = await client.contacts.listTags({ contactId });\n\n  // 4. Get segments\n  const segments = await client.contacts.listSegments({ contactId });\n\n  // 5. Get data events\n  const events = await client.dataEvents.list({\n    type: \"user\",\n    userId: contact.externalId,\n  });\n\n  return {\n    contact: {\n      id: contact.id,\n      email: contact.email,\n      name: contact.name,\n      phone: contact.phone,\n      role: contact.role,\n      external_id: contact.externalId,\n      custom_attributes: contact.customAttributes,\n      location: contact.location,\n      created_at: contact.createdAt,\n      last_seen_at: contact.lastSeenAt,\n    },\n    conversations,\n    tags: tags.data || [],\n    segments: segments.data || [],\n    events: events.data || [],\n  };\n}\n```\n\n### Step 2: Right to Deletion (GDPR Article 17)\n\n```typescript\nasync function deleteContactData(contactId: string): Promise<{\n  deleted: boolean;\n  auditRecord: any;\n}> {\n  // 1. Export data for audit trail BEFORE deletion\n  const exportedData = await exportContactData(contactId);\n\n  // 2. Delete from Intercom\n  await client.contacts.delete({ contactId });\n\n  // 3. Delete from local cache/database\n  await localDb.intercomContacts.deleteMany({ intercom_id: contactId });\n  await localDb.intercomCache.deleteMany({ contact_id: contactId });\n\n  // 4. Record audit entry (required by GDPR to prove deletion)\n  const auditRecord = {\n    action: \"GDPR_DELETION\",\n    contact_id: contactId,\n    contact_email_hash: hashEmail(exportedData.contact.email), // Hash, don't store\n    deleted_at: new Date().toISOString(),\n    data_sources_purged: [\"intercom\", \"local_cache\", \"local_db\"],\n    conversations_affected: exportedData.conversations.length,\n  };\n\n  await localDb.auditLog.insert(auditRecord);\n\n  return { deleted: true, auditRecord };\n}\n```\n\n### Step 3: Intercom Data Export API (Bulk)\n\n```typescript\n// Export all messages for a date range (bulk export)\nasync function bulkExportMessages(\n  startDate: string,\n  endDate: string\n): Promise<string> {\n  // POST /export/messages/data\n  const response = await fetch(\"https://api.intercom.io/export/messages/data\", {\n    method: \"POST\",\n    headers: {\n      Authorization: `Bearer ${process.env.INTERCOM_ACCESS_TOKEN}`,\n      \"Content-Type\": \"application/json\",\n    },\n    body: JSON.stringify({\n      created_at_after: Math.floor(new Date(startDate).getTime() / 1000),\n      created_at_before: Math.floor(new Date(endDate).getTime() / 1000),\n    }),\n  });\n\n  const data = await response.json();\n  // Returns: { job_identifier: \"abc123\", status: \"pending\", download_url: null }\n\n  // Poll for completion\n  return data.job_identifier;\n}\n\nasync function checkExportStatus(jobId: string): Promise<{\n  status: string;\n  downloadUrl?: string;\n}> {\n  const response = await fetch(\n    `https://api.intercom.io/export/messages/data/${jobId}`,\n    {\n      headers: { Authorization: `Bearer ${process.env.INTERCOM_ACCESS_TOKEN}` },\n    }\n  );\n\n  const data = await response.json();\n  // When complete: { status: \"complete\", download_url: \"https://...\" }\n  // Download URL provides a CSV file\n  return { status: data.status, downloadUrl: data.download_url };\n}\n```\n\n### Step 4: PII Redaction in Logs\n\n```typescript\n// Fields to always redact from log output\nconst PII_FIELDS = new Set([\n  \"email\", \"name\", \"phone\", \"location\", \"ip_address\",\n  \"custom_attributes.address\", \"custom_attributes.ssn\",\n]);\n\nfunction redactIntercomData(data: Record<string, any>): Record<string, any> {\n  const redacted = { ...data };\n\n  for (const field of PII_FIELDS) {\n    const parts = field.split(\".\");\n    let current: any = redacted;\n    for (let i = 0; i < parts.length - 1; i++) {\n      current = current[parts[i]];\n      if (!current) break;\n    }\n    if (current && current[parts[parts.length - 1]]) {\n      current[parts[parts.length - 1]] = \"[REDACTED]\";\n    }\n  }\n\n  return redacted;\n}\n\n// Use in all logging\nconsole.log(\"Contact data:\", redactIntercomData(contact));\n// Output: { id: \"abc\", email: \"[REDACTED]\", name: \"[REDACTED]\", role: \"user\" }\n```\n\n### Step 5: Data Retention Policy\n\n```typescript\n// Retention periods for cached Intercom data\nconst RETENTION = {\n  contact_cache: 30,      // days - cached contact profiles\n  conversation_cache: 90,  // days - cached conversations\n  webhook_events: 30,      // days - processed webhook records\n  audit_log: 2555,         // days (7 years) - compliance requirement\n  data_export: 7,          // days - export download files\n};\n\nasync function enforceRetention(): Promise<{ deleted: Record<string, number> }> {\n  const results: Record<string, number> = {};\n\n  for (const [type, days] of Object.entries(RETENTION)) {\n    if (type === \"audit_log\") continue; // Never auto-delete audit logs\n\n    const cutoff = new Date();\n    cutoff.setDate(cutoff.getDate() - days);\n\n    const result = await localDb.collection(type).deleteMany({\n      created_at: { $lt: cutoff },\n    });\n\n    results[type] = result.deletedCount;\n  }\n\n  return { deleted: results };\n}\n\n// Schedule daily at 3 AM\n// cron: \"0 3 * * *\"\n```\n\n## Data Minimization\n\n```typescript\n// Only sync the fields you actually need from Intercom\nasync function syncContactMinimal(contactId: string) {\n  const contact = await client.contacts.find({ contactId });\n\n  // Store only necessary fields\n  return {\n    intercom_id: contact.id,\n    external_id: contact.externalId,\n    role: contact.role,\n    plan: contact.customAttributes?.plan,\n    last_seen_at: contact.lastSeenAt,\n    // DO NOT store: email, name, phone, location\n  };\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Export job stuck in \"pending\" | Large dataset | Poll every 30s, timeout at 1h |\n| Deletion returns 404 | Already deleted | Log and continue (idempotent) |\n| PII in conversation bodies | User-submitted content | Scan with regex, redact in logs |\n| Audit log gap | Failed write | Use write-ahead log or queue |\n\n## Resources\n\n- [Data Export API](https://developers.intercom.com/docs/references/rest-api/api.intercom.io/data-export/data_export)\n- [Contacts API](https://developers.intercom.com/docs/references/rest-api/api.intercom.io/contacts)\n- [GDPR Guide](https://gdpr.eu/developers/)\n- [Intercom Privacy](https://www.intercom.com/privacy)\n\n## Next Steps\n\nFor enterprise access control, see `intercom-enterprise-rbac`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "intercom-data-handling",
-    "description": "Implement Intercom data handling for GDPR, contact export, data retention,",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

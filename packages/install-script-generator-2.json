@@ -1,16 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000035029",
   "name": "install-script-generator",
   "slug": "install-script-generator-2",
   "description": "Generate cross-platform installation scripts for any software, library, or module. Produces a standalone install.sh runnable via a single curl/wget one-liner, with automatic OS, architecture, and package manager detection. Don't use for authoring Dockerfiles, CI/CD pipelines, or one-off local shell scripts.",
   "content": "\n# Install Script Generator\n\nGenerate robust, cross-platform installation scripts that users can run with a **single bash command** via GitHub raw URLs. This SKILL.md is a lean index \u2014 long templates and tables live under `references/` to protect the agent's context budget.\n\n## When to Use\n\n- The user asks for a `curl | bash` one-liner for their project.\n- A repo needs a `install.sh` that auto-detects OS, arch, and package manager.\n- A Python/Go/Node/Rust module should be installable in one command from a fresh machine.\n\nSkip this skill for Dockerfiles, CI/CD pipelines, or one-off local shell scripts.\n\n## Prerequisites\n\n- The repo has a known `<owner>/<repo>` (check `git remote -v`) and a default branch.\n- The target software's build system is identifiable (`Makefile`, `package.json`, `setup.py`, `Cargo.toml`, `go.mod`, etc.).\n- `python3` is available locally if you plan to run the helper scripts under `scripts/`.\n\n## Reference Files (read on demand to save tokens)\n\n| File | When to read |\n|------|--------------|\n| `references/install-template.md` | When generating `install.sh` \u2014 full bash template with detection helpers, dependency installer, and main entry point |\n| `references/readme-snippet.md` | When updating the README \u2014 copy-paste install block plus URL format notes |\n| `references/edge-cases.md` | When handling unusual OS/sudo/path scenarios and writing step reports |\n| `scripts/env_explorer.py` | Local environment probe (OS, arch, package managers, sudo) |\n| `scripts/plan_generator.py` | Generates `installation_plan.yaml` from env + target |\n| `scripts/doc_generator.py` | Renders user-facing `USAGE_GUIDE.md` |\n\nDo not inline these contents into the conversation; link to them. Keeping SKILL.md short preserves the context window for the actual install logic.\n\n## Repo Sync (mandatory before edits)\n\nBefore creating, updating, or deleting files in an existing repo, sync the current branch with remote:\n\n```bash\nbranch=\"$(git rev-parse --abbrev-ref HEAD)\"\ngit fetch origin\ngit pull --rebase origin \"$branch\"\n```\n\nIf the working tree is dirty, `git stash push -u -m pre-sync` first, sync, then `git stash pop`. If `origin` is missing or rebase/stash conflicts occur, stop and ask the user before continuing.\n\n## Workflow\n\n### Phase 1 \u2014 Exploration\n\n1. Identify the target software/module/tool.\n2. Inspect the repo for build files (`Makefile`, `package.json`, `setup.py`, `Cargo.toml`, `go.mod`, ...).\n3. List dependencies the software needs to build and run.\n4. Capture `<owner>/<repo>` and the default branch from `git remote -v` and `git branch --show-current`. Ask the user if missing.\n5. Run `python3 scripts/env_explorer.py` to capture OS, arch, package managers, shell, and sudo availability into `env_info.json`.\n\n### Phase 2 \u2014 Planning\n\n1. Resolve the dependency graph and order operations.\n2. Detect existing installations to avoid duplicate work.\n3. Plan a verification step for each phase.\n4. Plan rollback / cleanup on failure.\n5. Run `python3 scripts/plan_generator.py --target \"<name>\" --env-file env_info.json` to emit `installation_plan.yaml`.\n\n### Phase 3 \u2014 Generation (primary output)\n\nGenerate `install.sh` at the repo root using `references/install-template.md`. The template contains four sections you compose:\n\n1. Header + colour helpers (`info`, `ok`, `warn`, `err`, `die`).\n2. Detection helpers (`detect_os`, `detect_arch`, `detect_package_manager`, `need_sudo`).\n3. `install_deps` switch covering apt/dnf/yum/pacman/brew/zypper.\n4. `install_<tool>` (customised per target), `verify_installation`, and `main`.\n\nRead `references/install-template.md` for the exact code; do not paste it into chat. If Windows support is needed, also generate `install.ps1` (one-liner: `irm <raw_url> | iex`).\n\n### Phase 4 \u2014 Documentation\n\n1. Insert the install block from `references/readme-snippet.md` into the project README, substituting `<owner>/<repo>/<branch>`.\n2. Run `python3 scripts/doc_generator.py --target \"<name>\" --plan installation_plan.yaml` to emit `USAGE_GUIDE.md`.\n3. Print the final one-liner so the user can copy it.\n\n## Output Files\n\n| File | Description |\n|------|-------------|\n| `install.sh` | Primary output \u2014 standalone installer for `curl \\| bash` |\n| `install.ps1` | Optional Windows PowerShell installer |\n| `env_info.json` | Local environment probe |\n| `installation_plan.yaml` | Ordered install steps |\n| `USAGE_GUIDE.md` | User-facing docs |\n\n## Acceptance Criteria\n\n- `install.sh` exists at repo root, starts with `#!/usr/bin/env bash` and `set -euo pipefail`.\n- Auto-detects OS, architecture, and package manager; exits non-zero with a clear message on unsupported targets.\n- Handles `sudo` gracefully (root, sudo, or fail-fast).\n- Verifies the installation at the end (`command -v $TOOL_NAME` plus `--version` when available).\n- README contains a `curl -sSL ... | bash` one-liner that resolves to the raw GitHub URL.\n- Expected output on success ends with `[ OK ]  Installation complete!`.\n\n## Edge Cases\n\nSee `references/edge-cases.md` for the full list. Highlights:\n\n- **Unsupported OS / architecture** \u2014 `die` with the detected value; user sees what failed.\n- **No package manager** \u2014 `install_deps` aborts with the manager it expected.\n- **No sudo** \u2014 `need_sudo` exits with `Run as root or install sudo`.\n- **Windows native** \u2014 generate `install.ps1` separately; `install.sh` warns under MSYS/Cygwin.\n- **Script in subdirectory** \u2014 adjust the raw URL path; note it in the README snippet.\n\n## Step Completion Reports\n\nAfter each phase, emit a `\u25c6` block with `\u221a`/`\u00d7` checks and a `Result: PASS | FAIL | PARTIAL` line. The exact templates for the four phases live in `references/edge-cases.md` so you can copy them verbatim without bloating SKILL.md.\n\n## Expected Output\n\n```bash\ncurl -sSL https://raw.githubusercontent.com/owner/mytool/main/install.sh | bash\n```\n\nExpected runtime banner:\n\n```\n[INFO]  OS: linux | Arch: x86_64 | Package Manager: apt\n[ OK ]  Dependencies installed\n[ OK ]  mytool 1.2.0 installed successfully\n[ OK ]  Installation complete!\n```\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "install-script-generator",
-    "description": "Generate cross-platform installation scripts for any software, library, or module. Produces a standalone install.sh runnable via a single curl/wget one-liner, with automatic OS, architecture, and package manager detection. Don't use for authoring Dockerfiles, CI/CD pipelines, or one-off local shell scripts.",
-    "license": "MIT",
-    "effort": "high",
-    "metadata": "",
-    "version": "2.1.0",
-    "author": "Luong NGUYEN <luongnv89@gmail.com>"
+  "author": "Luong NGUYEN <luongnv89@gmail.com>",
+  "version": "2.1.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

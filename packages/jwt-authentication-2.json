@@ -1,14 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000040861",
   "name": "jwt-authentication",
   "slug": "jwt-authentication-2",
   "description": "Implement secure JWT (JSON Web Token) authentication in Node.js applications with access/refresh tokens and role-based access control",
   "content": "\n# JWT Authentication Skill\n\nImplement secure, scalable authentication in Node.js applications using JSON Web Tokens.\n\n## Quick Start\n\nJWT authentication in 4 steps:\n1. **Install** - `npm install jsonwebtoken bcryptjs`\n2. **Register** - Hash password, create user, generate token\n3. **Login** - Verify password, generate token\n4. **Protect** - Verify token in middleware\n\n## Core Concepts\n\n### Generate JWT\n```javascript\nconst jwt = require('jsonwebtoken');\n\nfunction generateToken(userId) {\n  return jwt.sign(\n    { id: userId },\n    process.env.JWT_SECRET,\n    { expiresIn: '1h' }\n  );\n}\n\nfunction generateRefreshToken(userId) {\n  return jwt.sign(\n    { id: userId },\n    process.env.JWT_REFRESH_SECRET,\n    { expiresIn: '7d' }\n  );\n}\n```\n\n### User Registration\n```javascript\nconst bcrypt = require('bcryptjs');\n\nasync function register(req, res) {\n  const { email, password, name } = req.body;\n\n  // Check if user exists\n  const existingUser = await User.findOne({ email });\n  if (existingUser) {\n    return res.status(409).json({ error: 'User already exists' });\n  }\n\n  // Hash password\n  const hashedPassword = await bcrypt.hash(password, 10);\n\n  // Create user\n  const user = await User.create({\n    email,\n    password: hashedPassword,\n    name\n  });\n\n  // Generate tokens\n  const accessToken = generateToken(user._id);\n  const refreshToken = generateRefreshToken(user._id);\n\n  res.status(201).json({\n    user: { id: user._id, email, name },\n    accessToken,\n    refreshToken\n  });\n}\n```\n\n### User Login\n```javascript\nasync function login(req, res) {\n  const { email, password } = req.body;\n\n  // Find user\n  const user = await User.findOne({ email });\n  if (!user) {\n    return res.status(401).json({ error: 'Invalid credentials' });\n  }\n\n  // Verify password\n  const isValid = await bcrypt.compare(password, user.password);\n  if (!isValid) {\n    return res.status(401).json({ error: 'Invalid credentials' });\n  }\n\n  // Generate tokens\n  const accessToken = generateToken(user._id);\n  const refreshToken = generateRefreshToken(user._id);\n\n  res.json({\n    user: { id: user._id, email: user.email },\n    accessToken,\n    refreshToken\n  });\n}\n```\n\n### Authentication Middleware\n```javascript\nasync function authenticate(req, res, next) {\n  try {\n    // Get token from header\n    const authHeader = req.headers.authorization;\n    if (!authHeader || !authHeader.startsWith('Bearer ')) {\n      return res.status(401).json({ error: 'No token provided' });\n    }\n\n    const token = authHeader.split(' ')[1];\n\n    // Verify token\n    const decoded = jwt.verify(token, process.env.JWT_SECRET);\n\n    // Get user\n    const user = await User.findById(decoded.id).select('-password');\n    if (!user) {\n      return res.status(401).json({ error: 'User not found' });\n    }\n\n    req.user = user;\n    next();\n  } catch (error) {\n    res.status(401).json({ error: 'Invalid token' });\n  }\n}\n\n// Usage\nrouter.get('/profile', authenticate, getProfile);\n```\n\n## Learning Path\n\n### Beginner (1-2 weeks)\n- \u2705 Understand JWT structure\n- \u2705 Implement registration/login\n- \u2705 Create authentication middleware\n- \u2705 Protect routes\n\n### Intermediate (3-4 weeks)\n- \u2705 Refresh token flow\n- \u2705 Role-based access control\n- \u2705 Password reset flow\n- \u2705 Token blacklisting\n\n### Advanced (5-6 weeks)\n- \u2705 OAuth integration\n- \u2705 Two-factor authentication\n- \u2705 Session management\n- \u2705 Security best practices\n\n## Advanced Patterns\n\n### Role-Based Access Control\n```javascript\nconst authorize = (...roles) => {\n  return (req, res, next) => {\n    if (!req.user) {\n      return res.status(401).json({ error: 'Not authenticated' });\n    }\n\n    if (!roles.includes(req.user.role)) {\n      return res.status(403).json({ error: 'Insufficient permissions' });\n    }\n\n    next();\n  };\n};\n\n// Usage\nrouter.delete('/users/:id',\n  authenticate,\n  authorize('admin', 'moderator'),\n  deleteUser\n);\n```\n\n### Token Refresh\n```javascript\nasync function refreshAccessToken(req, res) {\n  const { refreshToken } = req.body;\n\n  try {\n    const decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);\n\n    // Verify refresh token exists in database\n    const stored = await RefreshToken.findOne({\n      token: refreshToken,\n      userId: decoded.id\n    });\n\n    if (!stored) {\n      return res.status(401).json({ error: 'Invalid refresh token' });\n    }\n\n    // Generate new access token\n    const accessToken = generateToken(decoded.id);\n\n    res.json({ accessToken });\n  } catch (error) {\n    res.status(401).json({ error: 'Token refresh failed' });\n  }\n}\n```\n\n### Password Reset Flow\n```javascript\nasync function requestPasswordReset(req, res) {\n  const { email } = req.body;\n  const user = await User.findOne({ email });\n\n  if (!user) {\n    return res.status(404).json({ error: 'User not found' });\n  }\n\n  // Generate reset token (short expiry)\n  const resetToken = jwt.sign(\n    { id: user._id, purpose: 'reset' },\n    process.env.JWT_SECRET,\n    { expiresIn: '15m' }\n  );\n\n  // Send email with reset link\n  await sendResetEmail(user.email, resetToken);\n\n  res.json({ message: 'Reset email sent' });\n}\n\nasync function resetPassword(req, res) {\n  const { token, newPassword } = req.body;\n\n  try {\n    const decoded = jwt.verify(token, process.env.JWT_SECRET);\n\n    if (decoded.purpose !== 'reset') {\n      return res.status(400).json({ error: 'Invalid token' });\n    }\n\n    const hashedPassword = await bcrypt.hash(newPassword, 10);\n    await User.findByIdAndUpdate(decoded.id, { password: hashedPassword });\n\n    res.json({ message: 'Password reset successful' });\n  } catch (error) {\n    res.status(400).json({ error: 'Invalid or expired token' });\n  }\n}\n```\n\n## Security Best Practices\n- \u2705 Use strong JWT secrets (32+ characters, random)\n- \u2705 Short expiry for access tokens (15min - 1h)\n- \u2705 Longer expiry for refresh tokens (7d - 30d)\n- \u2705 Store refresh tokens in database\n- \u2705 Hash passwords with bcrypt (10+ rounds)\n- \u2705 Use HTTPS in production\n- \u2705 Implement rate limiting\n- \u2705 Validate all inputs\n- \u2705 Don't store sensitive data in JWT payload\n\n## JWT Structure\n```\nheader.payload.signature\n\nHeader (base64):\n{\n  \"alg\": \"HS256\",\n  \"typ\": \"JWT\"\n}\n\nPayload (base64):\n{\n  \"id\": \"user123\",\n  \"iat\": 1516239022,\n  \"exp\": 1516242622\n}\n\nSignature:\nHMACSHA256(\n  base64UrlEncode(header) + \".\" + base64UrlEncode(payload),\n  secret\n)\n```\n\n## Common JWT Claims\n- `iss` - Issuer\n- `sub` - Subject (user ID)\n- `aud` - Audience\n- `exp` - Expiration time\n- `iat` - Issued at\n- `nbf` - Not before\n\n## When to Use\n\nUse JWT authentication when:\n- Building stateless REST APIs\n- Need scalability (no server-side sessions)\n- Mobile app authentication\n- Microservices architecture\n- Single sign-on (SSO)\n\n## Related Skills\n- Express REST API (protect API endpoints)\n- Database Integration (store users)\n- Testing & Debugging (test auth flows)\n- Performance Optimization (token caching)\n\n## Resources\n- [JWT.io](https://jwt.io)\n- [OWASP Authentication Guide](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html)\n- [bcrypt Documentation](https://www.npmjs.com/package/bcryptjs)\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "jwt-authentication",
-    "description": "Implement secure JWT (JSON Web Token) authentication in Node.js applications with access/refresh tokens and role-based access control",
-    "sasmp_version": "1.3.0",
-    "bonded_agent": "01-nodejs-fundamentals",
-    "bond_type": "PRIMARY_BOND"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

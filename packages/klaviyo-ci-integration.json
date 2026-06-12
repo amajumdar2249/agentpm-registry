@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032360",
   "name": "klaviyo-ci-integration",
   "slug": "klaviyo-ci-integration",
   "description": "Configure CI/CD pipelines for Klaviyo integrations with GitHub Actions.",
   "content": "# Klaviyo CI Integration\n\n## Overview\n\nSet up GitHub Actions CI/CD pipelines for Klaviyo integrations with unit tests, integration tests against the real API, and deployment automation.\n\n## Prerequisites\n\n- GitHub repository with Actions enabled\n- Klaviyo test API key (from a test/sandbox account)\n- `klaviyo-api` SDK and vitest configured\n\n## Instructions\n\n### Step 1: Configure GitHub Secrets\n\n```bash\n# Store Klaviyo test credentials as GitHub secrets\ngh secret set KLAVIYO_PRIVATE_KEY --body \"pk_test_***\"\ngh secret set KLAVIYO_WEBHOOK_SIGNING_SECRET --body \"whsec_test_***\"\n```\n\n### Step 2: CI Workflow\n\nCreate `.github/workflows/klaviyo-ci.yml`:\n\n```yaml\nname: Klaviyo Integration CI\n\non:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n\njobs:\n  unit-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n      - run: npx tsc --noEmit\n      - run: npm test -- --coverage\n      - name: Check Klaviyo SDK version\n        run: npm list klaviyo-api\n\n  integration-tests:\n    runs-on: ubuntu-latest\n    needs: unit-tests\n    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n    env:\n      KLAVIYO_PRIVATE_KEY: ${{ secrets.KLAVIYO_PRIVATE_KEY }}\n      KLAVIYO_TEST: '1'\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n      - name: Run integration tests\n        run: npm run test:integration\n        timeout-minutes: 5\n      - name: Verify Klaviyo connectivity\n        run: |\n          curl -s -w \"HTTP %{http_code}\\n\" -o /dev/null \\\n            -H \"Authorization: Klaviyo-API-Key $KLAVIYO_PRIVATE_KEY\" \\\n            -H \"revision: 2024-10-15\" \\\n            \"https://a.klaviyo.com/api/accounts/\"\n```\n\n### Step 3: Unit Test Examples\n\n```typescript\n// tests/unit/klaviyo-events.test.ts\nimport { describe, it, expect, vi, beforeEach } from 'vitest';\nimport { ApiKeySession, EventsApi, ProfileEnum } from 'klaviyo-api';\n\nvi.mock('klaviyo-api', () => ({\n  ApiKeySession: vi.fn(),\n  EventsApi: vi.fn().mockImplementation(() => ({\n    createEvent: vi.fn().mockResolvedValue({ body: { data: { id: 'EVT_MOCK' } } }),\n    getEvents: vi.fn().mockResolvedValue({\n      body: { data: [], links: { next: null } },\n    }),\n  })),\n  ProfileEnum: { Profile: 'profile' },\n  EventEnum: { Event: 'event' },\n}));\n\ndescribe('Event Tracking', () => {\n  let eventsApi: EventsApi;\n\n  beforeEach(() => {\n    eventsApi = new EventsApi(new ApiKeySession('pk_test'));\n  });\n\n  it('tracks a purchase event', async () => {\n    const result = await eventsApi.createEvent({\n      data: {\n        type: 'event' as any,\n        attributes: {\n          metric: { data: { type: 'metric', attributes: { name: 'Placed Order' } } },\n          profile: { data: { type: 'profile', attributes: { email: 'test@example.com' } } },\n          properties: { orderId: 'ORD-TEST-001', value: 99.99 },\n          time: new Date().toISOString(),\n        },\n      },\n    });\n    expect(result.body.data.id).toBe('EVT_MOCK');\n  });\n});\n```\n\n### Step 4: Integration Test (Gated)\n\n```typescript\n// tests/integration/klaviyo-live.test.ts\nimport { describe, it, expect } from 'vitest';\nimport { ApiKeySession, AccountsApi, ProfilesApi, ProfileEnum } from 'klaviyo-api';\n\nconst SKIP = !process.env.KLAVIYO_TEST || !process.env.KLAVIYO_PRIVATE_KEY;\n\ndescribe.skipIf(SKIP)('Klaviyo Live API', () => {\n  const session = new ApiKeySession(process.env.KLAVIYO_PRIVATE_KEY!);\n\n  it('authenticates successfully', async () => {\n    const accountsApi = new AccountsApi(session);\n    const accounts = await accountsApi.getAccounts();\n    expect(accounts.body.data).toHaveLength(1);\n  });\n\n  it('creates and cleans up a test profile', async () => {\n    const profilesApi = new ProfilesApi(session);\n    const testEmail = `ci-test-${Date.now()}@example.com`;\n\n    const created = await profilesApi.createProfile({\n      data: {\n        type: ProfileEnum.Profile,\n        attributes: {\n          email: testEmail,\n          firstName: 'CI',\n          lastName: 'Test',\n          properties: { source: 'github-actions', timestamp: new Date().toISOString() },\n        },\n      },\n    });\n\n    expect(created.body.data.id).toBeTruthy();\n    expect(created.body.data.attributes.email).toBe(testEmail);\n  });\n});\n```\n\n### Step 5: PR Checks Configuration\n\n```yaml\n# .github/branch-protection.yml (or set via GitHub UI)\n# Required checks: unit-tests\n# Integration tests: optional (only on main push)\n```\n\n## Output\n\n- Unit tests run on every PR (mocked, no API key needed)\n- Integration tests run on main branch pushes (real API)\n- SDK version verified in CI\n- API connectivity smoke test included\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Secret not found in CI | Missing `gh secret set` | Add secret via repository settings |\n| Integration test 429 | Rate limited in CI | Add delays between tests, use dedicated test key |\n| Auth failures in CI | Wrong secret name | Verify secret name matches workflow env var |\n| Test timeout | Slow Klaviyo response | Increase `timeout-minutes` |\n\n## Resources\n\n- [GitHub Actions Documentation](https://docs.github.com/en/actions)\n- [GitHub Encrypted Secrets](https://docs.github.com/en/actions/security-guides/encrypted-secrets)\n- [Vitest CI Configuration](https://vitest.dev/guide/ci.html)\n\n## Next Steps\n\nFor deployment patterns, see `klaviyo-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "klaviyo-ci-integration",
-    "description": "Configure CI/CD pipelines for Klaviyo integrations with GitHub Actions.",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*), Bash(npm:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

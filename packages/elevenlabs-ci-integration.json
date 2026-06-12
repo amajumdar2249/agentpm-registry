@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031813",
   "name": "elevenlabs-ci-integration",
   "slug": "elevenlabs-ci-integration",
   "description": "Configure CI/CD pipelines for ElevenLabs with mocked unit tests and",
   "content": "# ElevenLabs CI Integration\n\n## Overview\n\nSet up CI/CD pipelines that test ElevenLabs integrations without burning character quota on every PR. Uses a two-tier strategy: mocked unit tests on every push, gated integration tests on demand.\n\n## Prerequisites\n\n- GitHub repository with Actions enabled\n- ElevenLabs API key for integration tests\n- npm/pnpm project with vitest configured\n\n## Instructions\n\n### Step 1: GitHub Actions Workflow\n\n```yaml\n# .github/workflows/elevenlabs-tests.yml\nname: ElevenLabs Tests\n\non:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n\njobs:\n  # Tier 1: Always runs \u2014 no API key needed, no quota cost\n  unit-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: \"20\"\n          cache: \"npm\"\n      - run: npm ci\n      - run: npm test -- --coverage\n        env:\n          # Mock mode \u2014 no real API calls\n          ELEVENLABS_API_KEY: \"sk_test_mock_key_for_ci\"\n\n  # Tier 2: Only on main or manual trigger \u2014 uses real API\n  integration-tests:\n    runs-on: ubuntu-latest\n    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'\n    needs: unit-tests\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: \"20\"\n          cache: \"npm\"\n      - run: npm ci\n\n      # Check quota before running integration tests\n      - name: Check ElevenLabs quota\n        env:\n          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}\n        run: |\n          REMAINING=$(curl -s https://api.elevenlabs.io/v1/user \\\n            -H \"xi-api-key: ${ELEVENLABS_API_KEY}\" | \\\n            jq '.subscription | (.character_limit - .character_count)')\n          echo \"Characters remaining: $REMAINING\"\n          if [ \"$REMAINING\" -lt 5000 ]; then\n            echo \"::warning::Low ElevenLabs quota ($REMAINING chars). Skipping integration tests.\"\n            echo \"SKIP_INTEGRATION=true\" >> $GITHUB_ENV\n          fi\n\n      - name: Run integration tests\n        if: env.SKIP_INTEGRATION != 'true'\n        env:\n          ELEVENLABS_API_KEY: ${{ secrets.ELEVENLABS_API_KEY }}\n          ELEVENLABS_INTEGRATION: \"1\"\n        run: npm run test:integration\n```\n\n### Step 2: Configure Repository Secrets\n\n```bash\n# Store API key as GitHub secret (use a test/dev key, NOT production)\ngh secret set ELEVENLABS_API_KEY --body \"sk_your_test_key_here\"\n\n# Optional: webhook secret for webhook tests\ngh secret set ELEVENLABS_WEBHOOK_SECRET --body \"whsec_your_secret_here\"\n```\n\n### Step 3: Unit Test with SDK Mock\n\n```typescript\n// tests/unit/tts-service.test.ts\nimport { describe, it, expect, vi, beforeEach } from \"vitest\";\n\n// Mock the entire SDK \u2014 no API calls, no quota usage\nvi.mock(\"@elevenlabs/elevenlabs-js\", () => ({\n  ElevenLabsClient: vi.fn().mockImplementation(() => ({\n    textToSpeech: {\n      convert: vi.fn().mockResolvedValue(\n        new ReadableStream({\n          start(controller) {\n            controller.enqueue(new Uint8Array([0xFF, 0xFB, 0x90, 0x00])); // MP3 header\n            controller.close();\n          },\n        })\n      ),\n      stream: vi.fn().mockImplementation(async function* () {\n        yield new Uint8Array([0xFF, 0xFB, 0x90, 0x00]);\n      }),\n    },\n    voices: {\n      getAll: vi.fn().mockResolvedValue({\n        voices: [\n          { voice_id: \"21m00Tcm4TlvDq8ikWAM\", name: \"Rachel\", category: \"premade\" },\n        ],\n      }),\n    },\n    user: {\n      get: vi.fn().mockResolvedValue({\n        subscription: { tier: \"pro\", character_count: 1000, character_limit: 500000 },\n      }),\n    },\n  })),\n}));\n\nimport { ElevenLabsClient } from \"@elevenlabs/elevenlabs-js\";\n\ndescribe(\"TTS Service\", () => {\n  let client: InstanceType<typeof ElevenLabsClient>;\n\n  beforeEach(() => {\n    client = new ElevenLabsClient();\n  });\n\n  it(\"should call TTS with correct parameters\", async () => {\n    await client.textToSpeech.convert(\"21m00Tcm4TlvDq8ikWAM\", {\n      text: \"Test speech\",\n      model_id: \"eleven_multilingual_v2\",\n      voice_settings: { stability: 0.5, similarity_boost: 0.75 },\n    });\n\n    expect(client.textToSpeech.convert).toHaveBeenCalledWith(\n      \"21m00Tcm4TlvDq8ikWAM\",\n      expect.objectContaining({\n        text: \"Test speech\",\n        model_id: \"eleven_multilingual_v2\",\n      })\n    );\n  });\n\n  it(\"should handle voice listing\", async () => {\n    const result = await client.voices.getAll();\n    expect(result.voices).toHaveLength(1);\n    expect(result.voices[0].name).toBe(\"Rachel\");\n  });\n});\n```\n\n### Step 4: Integration Test (Gated)\n\n```typescript\n// tests/integration/tts-smoke.test.ts\nimport { describe, it, expect } from \"vitest\";\n\nconst SKIP = !process.env.ELEVENLABS_INTEGRATION;\n\ndescribe.skipIf(SKIP)(\"ElevenLabs Integration\", () => {\n  it(\"should generate audio from text\", async () => {\n    const { ElevenLabsClient } = await import(\"@elevenlabs/elevenlabs-js\");\n    const client = new ElevenLabsClient();\n\n    // Use Flash model + short text to minimize quota usage\n    const audio = await client.textToSpeech.convert(\"21m00Tcm4TlvDq8ikWAM\", {\n      text: \"CI test.\",  // 8 characters = 4 credits (Flash)\n      model_id: \"eleven_flash_v2_5\",\n      output_format: \"mp3_22050_32\",\n    });\n\n    expect(audio).toBeDefined();\n  }, 30_000);\n\n  it(\"should list voices\", async () => {\n    const { ElevenLabsClient } = await import(\"@elevenlabs/elevenlabs-js\");\n    const client = new ElevenLabsClient();\n    const { voices } = await client.voices.getAll();\n    expect(voices.length).toBeGreaterThan(0);\n  });\n});\n```\n\n### Step 5: Package Scripts\n\n```json\n{\n  \"scripts\": {\n    \"test\": \"vitest run\",\n    \"test:watch\": \"vitest --watch\",\n    \"test:integration\": \"ELEVENLABS_INTEGRATION=1 vitest run tests/integration/\",\n    \"test:ci\": \"vitest run --coverage --reporter=junit --outputFile=test-results.xml\"\n  }\n}\n```\n\n## CI Strategy Summary\n\n| Tier | When | API Key | Quota Cost | Coverage |\n|------|------|---------|------------|----------|\n| Unit tests | Every push/PR | Mock key | 0 characters | SDK integration patterns |\n| Integration | Main + manual | Real test key | ~50 chars | End-to-end TTS verification |\n| Quota check | Before integration | Real test key | 0 (GET only) | Prevents surprise billing |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Secret not found in CI | Missing repository secret | `gh secret set ELEVENLABS_API_KEY` |\n| Integration tests timeout | Slow TTS generation | Increase test timeout to 30s; use Flash model |\n| Quota depleted in CI | Too many integration runs | Use quota guard; limit to main branch only |\n| Mock drift | SDK API changed | Update mocks when upgrading SDK |\n\n## Resources\n\n- [GitHub Actions Secrets](https://docs.github.com/en/actions/security-guides/using-secrets-in-github-actions)\n- [Vitest CI Configuration](https://vitest.dev/guide/ci.html)\n- [ElevenLabs JS SDK](https://github.com/elevenlabs/elevenlabs-js)\n\n## Next Steps\n\nFor deployment patterns, see `elevenlabs-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "elevenlabs-ci-integration",
-    "description": "Configure CI/CD pipelines for ElevenLabs with mocked unit tests and",
-    "Trigger": "elevenlabs CI\", \"elevenlabs GitHub Actions\",",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

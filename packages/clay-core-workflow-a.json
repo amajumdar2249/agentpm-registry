@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031517",
   "name": "clay-core-workflow-a",
   "slug": "clay-core-workflow-a",
   "description": "Build a complete lead enrichment pipeline using Clay tables, webhooks,",
   "content": "# Clay Core Workflow A: Lead Enrichment Pipeline\n\n## Overview\n\nPrimary workflow for Clay: take a list of companies or contacts, push them into a Clay table via webhook, let Clay's enrichment columns fill in missing data (emails, titles, company info, tech stack), and export the enriched results to your CRM or outreach tool. This is the core use case for 90%+ of Clay users.\n\n## Prerequisites\n\n- Completed `clay-install-auth` setup\n- Clay table with webhook source configured\n- At least one enrichment provider connected (Apollo, Clearbit, Hunter, etc.)\n- Destination CRM or outreach tool (HubSpot, Salesforce, Instantly, etc.)\n\n## Instructions\n\n### Step 1: Design Your Clay Table Schema\n\nIn the Clay web UI, create a table with these column types:\n\n| Column | Type | Purpose |\n|--------|------|---------|\n| `domain` | Input (webhook) | Company domain to enrich |\n| `first_name` | Input (webhook) | Contact first name |\n| `last_name` | Input (webhook) | Contact last name |\n| `Company Name` | Enrichment (Clearbit/Apollo) | Auto-filled from domain |\n| `Employee Count` | Enrichment (Clearbit) | Company headcount |\n| `Industry` | Enrichment (Clearbit) | Industry classification |\n| `Work Email` | Enrichment (Waterfall) | Verified work email |\n| `Job Title` | Enrichment (Apollo/PDL) | Current title |\n| `LinkedIn URL` | Enrichment (Apollo) | Profile link |\n| `ICP Score` | Formula | Computed fit score |\n\n### Step 2: Set Up Waterfall Email Enrichment\n\nIn Clay UI, add a waterfall enrichment column:\n\n1. Click **+ Add Column > Find Work Email (Waterfall)**\n2. Configure provider order (cheapest first):\n   - **Apollo** (2 credits) -- highest coverage\n   - **Hunter.io** (2 credits) -- strong for smaller companies\n   - **Prospeo** (2 credits) -- European coverage\n3. Map input: `first_name`, `last_name`, `domain`\n4. Enable **Stop on first result** to save credits\n5. Enable **Auto-run on new rows**\n\n### Step 3: Push Leads into Clay via Webhook\n\n```typescript\n// src/workflows/enrich-leads.ts\nimport { getClayClient } from '../clay/instance';\n\ninterface LeadInput {\n  domain: string;\n  first_name: string;\n  last_name: string;\n  source?: string;\n}\n\nasync function enrichLeadList(leads: LeadInput[]): Promise<void> {\n  const clay = getClayClient();\n\n  // Validate and deduplicate before sending\n  const cleaned = leads\n    .filter(l => l.domain?.includes('.') && l.first_name && l.last_name)\n    .filter((l, i, arr) =>\n      arr.findIndex(x => x.domain === l.domain && x.first_name === l.first_name) === i\n    );\n\n  console.log(`Sending ${cleaned.length} leads to Clay (filtered ${leads.length - cleaned.length} invalid/dupes)`);\n\n  const result = await clay.sendBatch(cleaned, 200);\n  console.log(`Sent: ${result.sent}, Failed: ${result.failed}`);\n\n  if (result.errors.length > 0) {\n    console.error('Failed rows:', result.errors);\n  }\n}\n```\n\n### Step 4: Add ICP Scoring Formula\n\nIn Clay, add a **Formula** column named `ICP Score`:\n\n```\n// Clay formula syntax (similar to spreadsheet formulas)\n// Score 0-100 based on company fit\n\nLET(\n  size_score, IF(Employee Count > 500, 30, IF(Employee Count > 100, 20, IF(Employee Count > 20, 10, 0))),\n  industry_score, IF(OR(Industry = \"Software\", Industry = \"Technology\", Industry = \"SaaS\"), 30, IF(Industry = \"Financial Services\", 20, 10)),\n  title_score, IF(OR(CONTAINS(Job Title, \"VP\"), CONTAINS(Job Title, \"Director\"), CONTAINS(Job Title, \"Head\")), 25, IF(CONTAINS(Job Title, \"Manager\"), 15, 5)),\n  email_score, IF(ISNOTEMPTY(Work Email), 15, 0),\n  size_score + industry_score + title_score + email_score\n)\n```\n\n### Step 5: Configure CRM Export\n\nAdd an **HTTP API** column to push high-scoring leads to your CRM:\n\n1. Click **+ Add Column > HTTP API**\n2. Set conditional run: `ICP Score >= 70 AND ISNOTEMPTY(Work Email)`\n3. Configure the API call to your CRM:\n\n```json\n{\n  \"method\": \"POST\",\n  \"url\": \"https://api.hubapi.com/crm/v3/objects/contacts\",\n  \"headers\": {\n    \"Authorization\": \"Bearer {{HubSpot API Key}}\",\n    \"Content-Type\": \"application/json\"\n  },\n  \"body\": {\n    \"properties\": {\n      \"email\": \"{{Work Email}}\",\n      \"firstname\": \"{{first_name}}\",\n      \"lastname\": \"{{last_name}}\",\n      \"company\": \"{{Company Name}}\",\n      \"jobtitle\": \"{{Job Title}}\"\n    }\n  }\n}\n```\n\n### Step 6: Monitor Enrichment Results\n\n```bash\n# Check your table's enrichment progress in the Clay UI\n# Key metrics to watch:\n# - Email find rate: target >60%\n# - Company enrichment rate: target >85%\n# - Average credits per row: target <10\n# - ICP score distribution: should have clear A/B/C tiers\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Low email find rate (<40%) | Bad input data | Clean domains, remove personal email domains |\n| Credits burning fast | Waterfall hitting all providers | Enable \"stop on first result\" |\n| Duplicate rows in table | Same lead sent twice | Deduplicate before webhook submission |\n| CRM push failing | Invalid field mapping | Test HTTP API column on single row first |\n| Enrichment not running | Auto-run disabled | Enable auto-run in column settings |\n\n## Output\n\n- Enriched lead table with emails, titles, company data\n- ICP scores for lead prioritization\n- Qualified leads auto-pushed to CRM\n- Credit usage report for cost tracking\n\n## Resources\n\n- [Clay University -- Enrichment Overview](https://university.clay.com/docs/actions-data-credits)\n- [Clay University -- CSV Import](https://university.clay.com/docs/csv-import-overview)\n- [Clay University -- Sources](https://university.clay.com/docs/sources)\n\n## Next Steps\n\nFor AI-powered personalization and CRM sync, see `clay-core-workflow-b`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clay-core-workflow-a",
-    "description": "Build a complete lead enrichment pipeline using Clay tables, webhooks,",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Bash(npm:*), Bash(node:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

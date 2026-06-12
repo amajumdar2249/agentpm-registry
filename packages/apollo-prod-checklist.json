@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031294",
   "name": "apollo-prod-checklist",
   "slug": "apollo-prod-checklist",
   "description": "Execute Apollo.io production deployment checklist.",
   "content": "# Apollo Production Checklist\n\n## Overview\n\nComprehensive pre-production checklist for Apollo.io integrations with automated validation scripts. Covers authentication, resilience, observability, compliance, and credit management.\n\n## Prerequisites\n\n- Valid Apollo.io API credentials\n- Node.js 18+\n- Completed `apollo-install-auth` setup\n\n## Instructions\n\n### Step 1: Authentication & Key Management\n\n```typescript\n// src/scripts/prod-checklist.ts\nimport axios from 'axios';\n\ninterface Check { category: string; name: string; pass: boolean; detail: string; }\nconst results: Check[] = [];\n\n// 1.1 API key is set (not hardcoded)\nresults.push({\n  category: 'Auth', name: 'API key from env/secrets',\n  pass: !!process.env.APOLLO_API_KEY,\n  detail: process.env.APOLLO_API_KEY ? 'Loaded from env' : 'NOT SET',\n});\n\n// 1.2 Using x-api-key header (not query param)\nconst { execSync } = await import('child_process');\nlet usesHeader = true;\ntry { execSync('grep -rn \"params.*api_key\" src/ --include=\"*.ts\"', { stdio: 'pipe' }); usesHeader = false; } catch {}\nresults.push({ category: 'Auth', name: 'x-api-key header auth', pass: usesHeader, detail: usesHeader ? 'OK' : 'Switch to x-api-key header' });\n\n// 1.3 API key is valid\ntry {\n  const resp = await axios.get('https://api.apollo.io/api/v1/auth/health', {\n    headers: { 'x-api-key': process.env.APOLLO_API_KEY! },\n  });\n  results.push({ category: 'Auth', name: 'Key valid', pass: resp.data.is_logged_in, detail: resp.data.is_logged_in ? 'OK' : 'Invalid key' });\n} catch (err: any) {\n  results.push({ category: 'Auth', name: 'Key valid', pass: false, detail: `HTTP ${err.response?.status}` });\n}\n\n// 1.4 .env gitignored\nconst gitIgnored = execSync('git check-ignore .env 2>/dev/null || echo NOT').toString().trim();\nresults.push({ category: 'Auth', name: '.env gitignored', pass: gitIgnored !== 'NOT', detail: gitIgnored !== 'NOT' ? 'OK' : 'Add .env to .gitignore' });\n```\n\n### Step 2: Resilience & Error Handling\n\n```typescript\nasync function fileContains(dir: string, pattern: string): Promise<boolean> {\n  try { execSync(`grep -r \"${pattern}\" ${dir} --include=\"*.ts\" -l`, { stdio: 'pipe' }); return true; }\n  catch { return false; }\n}\n\nresults.push({ category: 'Resilience', name: 'Rate limiting',\n  pass: await fileContains('src/', 'rate-limiter\\\\|SlidingWindow\\\\|RateLimit'),\n  detail: 'Rate limiter implementation' });\n\nresults.push({ category: 'Resilience', name: 'Retry logic',\n  pass: await fileContains('src/', 'withRetry\\\\|withBackoff\\\\|exponential'),\n  detail: 'Exponential backoff for 429/5xx' });\n\nresults.push({ category: 'Resilience', name: 'Error categorization',\n  pass: await fileContains('src/', 'categorizeError\\\\|ApolloApiError'),\n  detail: 'Typed error handling' });\n\nresults.push({ category: 'Resilience', name: 'Timeout configured',\n  pass: await fileContains('src/', 'timeout.*\\\\d'),\n  detail: 'Request timeout set' });\n```\n\n### Step 3: Observability\n\n```typescript\nresults.push({ category: 'Observability', name: 'PII redaction',\n  pass: await fileContains('src/', 'redact'),\n  detail: 'PII redaction in logs' });\n\nresults.push({ category: 'Observability', name: 'Structured logging',\n  pass: await fileContains('src/', 'pino\\\\|winston\\\\|console\\\\.log.*Apollo'),\n  detail: 'Logger with Apollo context' });\n\nresults.push({ category: 'Observability', name: 'Health endpoint',\n  pass: await fileContains('src/', '/health'),\n  detail: '/health endpoint checking Apollo connectivity' });\n```\n\n### Step 4: Credit & Cost Controls\n\n```typescript\nresults.push({ category: 'Credits', name: 'Credit tracking',\n  pass: await fileContains('src/', 'credit\\\\|CreditTracker'),\n  detail: 'Track enrichment credit usage' });\n\nresults.push({ category: 'Credits', name: 'Deduplication',\n  pass: await fileContains('src/', 'dedup\\\\|isAlreadyEnriched'),\n  detail: 'Prevent duplicate enrichment charges' });\n\nresults.push({ category: 'Credits', name: 'Budget controls',\n  pass: await fileContains('src/', 'budget\\\\|isOverBudget'),\n  detail: 'Daily credit budget enforcement' });\n```\n\n### Step 5: Generate Report\n\n```typescript\nfunction generateReport(results: Check[]) {\n  const categories = [...new Set(results.map((r) => r.category))];\n  let allPass = true;\n\n  console.log('\\n  Apollo Production Readiness Checklist\\n');\n\n  for (const cat of categories) {\n    console.log(`-- ${cat} --`);\n    for (const r of results.filter((r) => r.category === cat)) {\n      console.log(`  ${r.pass ? 'PASS' : 'FAIL'}  ${r.name}: ${r.detail}`);\n      if (!r.pass) allPass = false;\n    }\n    console.log('');\n  }\n\n  const passCount = results.filter((r) => r.pass).length;\n  console.log(`Score: ${passCount}/${results.length} checks passed`);\n  console.log(`Status: ${allPass ? 'READY FOR PRODUCTION' : 'BLOCKED \u2014 fix failing checks'}`);\n  process.exit(allPass ? 0 : 1);\n}\n\ngenerateReport(results);\n```\n\n## Output\n\n- Authentication checks (key source, header auth, validity, gitignore)\n- Resilience checks (rate limiting, retry, error typing, timeouts)\n- Observability checks (PII redaction, logging, health endpoint)\n- Credit controls (tracking, dedup, budget enforcement)\n- Formatted report with pass/fail score and exit code\n\n## Error Handling\n\n| Issue | Resolution |\n|-------|------------|\n| Auth checks fail | Verify `APOLLO_API_KEY` env var, switch to `x-api-key` header |\n| Missing rate limiting | Add `apollo-rate-limits` skill patterns |\n| No credit tracking | Add `apollo-cost-tuning` skill patterns |\n| Post-deploy failures | Run checklist in CI as a deployment gate |\n\n## Examples\n\n### Run as CI Gate\n\n```json\n{ \"scripts\": { \"prod:checklist\": \"tsx src/scripts/prod-checklist.ts\" } }\n```\n\n```bash\nnpm run prod:checklist && npm run deploy\n```\n\n## Resources\n\n- [Apollo Status Page](https://status.apollo.io)\n- [Apollo API Pricing](https://docs.apollo.io/docs/api-pricing)\n- [Create API Keys](https://docs.apollo.io/docs/create-api-key)\n\n## Next Steps\n\nProceed to `apollo-upgrade-migration` for API upgrade procedures.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "apollo-prod-checklist",
-    "description": "Execute Apollo.io production deployment checklist.",
-    "allowed-tools": "Read, Grep, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

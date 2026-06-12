@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000042242",
   "name": "org-orchestrate",
   "slug": "org-orchestrate-2",
   "description": "Set up and run full org automation including repo cloning, script generation, cron scheduling, and skill execution",
   "content": "\n# Org Orchestration\n\nOne skill to set up, schedule, and run the full suite of org automation.\nHandles repo cloning, script generation, cron jobs, and coordinated skill execution.\n\n## Subcommands\n\n- `/org-orchestrate setup <org>` \u2014 full first-time setup for an org\n- `/org-orchestrate cron` \u2014 install or update cron jobs\n- `/org-orchestrate run <org>` \u2014 run all org skills in the right order\n- `/org-orchestrate status` \u2014 check what's set up and what's missing\n- No argument \u2014 interactive: check status and ask what to do\n\n## Phase 1: Status check\n\n### Scripts\nRun `/setup-scripts` logic: verify all scripts in `~/.claude/scripts/` exist and are executable.\nIf any are missing, regenerate them.\n\n### Repos\nFor each org in `~/code/`, read the CLAUDE.md and check:\n1. Are all listed repos cloned locally?\n2. Are there repos on GitHub not listed in CLAUDE.md?\n3. Are remotes up to date?\n\n```bash\n# List GitHub repos for an org\ngh repo list <org> --limit 100 --json name,description,isArchived\n```\n\n### Cron\nCheck current crontab for existing automation entries:\n```bash\ncrontab -l 2>/dev/null\n```\n\n### Permissions\nAsk the user:\n- Which tool to use: `claude` or `happy`?\n- Whether to use `--dangerously-skip-permissions` for unattended runs\n- If not, which permission prompts to pre-approve\n\n## Phase 2: Setup (first time)\n\n### 2a: Scripts\nGenerate all helper scripts via `/setup-scripts`.\n\n### 2b: Interactive repo selection\n\nFor each org, fetch the full list of GitHub repos and present them grouped by status:\n\n```\n=== epinowcast ===\n\nAlready cloned (9):\n  [x] baselinenowcast, epidist, epinowcast, primarycensored, ...\n\nAvailable to clone (3):\n  [ ] actions \u2014 Reusable GitHub Actions\n  [ ] baselinenowcast-us-paper \u2014 Evaluating baseline nowcasting\n  [ ] coerceDT \u2014 Ingest and check user input\n\nExcluded (from CLAUDE.md):\n  [-] old-archive-repo \u2014 Excluded 2025-01-15\n\nInclude all available? [Y/n/select]\n```\n\nFor the \"select\" option, let the user pick individual repos.\n\nPersist decisions in the org's CLAUDE.md:\n- Cloned repos go in `## Local repos`\n- Explicitly excluded repos go in `## Excluded repos` with date\n\n```markdown\n## Excluded repos\n\n| Repo | Reason | Date |\n|---|---|---|\n| old-archive-repo | Archived, no active work | 2025-01-15 |\n| fork-of-something | Not maintained by $GITHUB_HANDLE | 2025-02-14 |\n```\n\n### 2c: Clone selected repos\nFor repos selected but not yet cloned:\n```bash\ngh repo clone <org>/<repo> ~/code/<org>/<repo>\n```\n\n### 2d: Set up Taskfile.yml\nFor repos without a Taskfile.yml, offer to copy the template from `~/.claude/templates/Taskfile.yml`.\nAuto-detect the project type (R package, Julia package, Quarto doc) and set the variables.\n\n### 2e: Cron jobs\nInstall cron entries.\nUse `launchd` plist on macOS for restart robustness.\n\n#### Recommended schedule\n\nAll times are overnight to avoid work clashes.\n\n| Job | Schedule | Script/Command |\n|---|---|---|\n| Bot task poll | `*/5 * * * *` | `cron-bot-tasks.sh` |\n| Nightly automation | `0 1 * * *` | `cron-schedule.sh` |\n| Daily summary | `0 8 * * *` (8am) | `claude --print --prompt \"/daily-summary\"` |\n| Weekly plan | `0 9 * * 1` (Mon 9am) | `claude --print --prompt \"/weekly-plan\"` |\n\nThe bot task poll runs every 5 minutes but only triggers Claude if there are new unprocessed requests (checked via emoji dedup).\n\n#### macOS launchd (restart-robust)\n\nCron jobs on macOS do not survive reboots without `launchd`.\nCreate plist files in `~/Library/LaunchAgents/`:\n\n```xml\n<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"...\">\n<plist version=\"1.0\">\n<dict>\n  <key>Label</key>\n  <string>com.$GITHUB_HANDLE.bot-tasks-poll</string>\n  <key>ProgramArguments</key>\n  <array>\n    <string>$HOME/.claude/scripts/cron-bot-tasks.sh</string>\n  </array>\n  <key>StartInterval</key>\n  <integer>300</integer>\n  <key>StandardOutPath</key>\n  <string>$HOME/.claude/logs/bot-tasks-poll.log</string>\n  <key>StandardErrorPath</key>\n  <string>$HOME/.claude/logs/bot-tasks-poll.err</string>\n  <key>RunAtLoad</key>\n  <true/>\n  <key>EnvironmentVariables</key>\n  <dict>\n    <key>PATH</key>\n    <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>\n    <key>HOME</key>\n    <string>$HOME</string>\n    <key>CODE_DIR</key>\n    <string>$HOME/code</string>\n  </dict>\n</dict>\n</plist>\n```\n\nLoad with: `launchctl load ~/Library/LaunchAgents/com.$GITHUB_HANDLE.bot-tasks-poll.plist`\nUnload with: `launchctl unload ~/Library/LaunchAgents/com.$GITHUB_HANDLE.bot-tasks-poll.plist`\n\nCreate similar plists for daily-summary and weekly-plan using `StartCalendarInterval`.\n\n### 2f: Initialise org CLAUDE.md files\nFor orgs without a CLAUDE.md, run `/working-on` to create one.\n\n## Phase 3: Run all org skills (ordered)\n\nWhen running a full pass, execute in this order to avoid wasted work:\n\n1. **Git pull all** \u2014 update main on all repos\n   - `git-pull-all.sh`\n2. **Maintenance first** \u2014 prune worktrees and unstick PRs so later skills don't trip on stale state\n   - `/org-maintenance <org>`\n3. **CI health** \u2014 fix CI so tests can pass for later PRs\n   - `/org-ci-health <org>`\n4. **Standards** \u2014 propagate config improvements (.github first, then repos)\n   - `/org-standards <org>`\n5. **Dependencies** \u2014 check cross-repo compat\n   - `/org-deps <org> [other-orgs...]`\n6. **Issues tidy** \u2014 add clarity to issues before trying to resolve them\n   - `/org-issues-tidy <org>`\n7. **Issues do** \u2014 resolve easy ones\n   - `/org-issues-do <org>`\n8. **Releases** \u2014 check what's ready to ship\n   - `/org-releases <org>`\n9. **Repo watch** \u2014 check for active repos not cloned locally\n   - `/repo-watch <org>`\n10. **Bot tasks** \u2014 process any pending requests\n    - `/bot-tasks`\n11. **Daily summary** \u2014 log what was done\n    - `/daily-summary`\n\nFor multiple orgs, run steps 2-9 per org, then steps 10-11 once.\n\nUse a team for parallel execution where skills are independent (e.g. different orgs).\n\n## Phase 4: Verify\n\nAfter setup or a run:\n- Check all scripts exist and are executable\n- Check cron/launchd entries are loaded\n- Check log files for recent errors\n- Report status table\n\n| Component | Status | Last run | Notes |\n|---|---|---|---|\n\n## Auto-Exit When Standalone\n\n**IMPORTANT**: If this command is being run as a standalone request, automatically exit after completing all phases successfully.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "org-orchestrate",
-    "description": "Set up and run full org automation including repo cloning, script generation, cron scheduling, and skill execution",
-    "argument-hint": "[org-name|setup|cron|run]"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

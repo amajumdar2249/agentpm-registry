@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009210",
   "name": "bio-epidemiological-genomics-phylodynamics",
   "slug": "bio-epidemiological-genomics-phylodynamics",
   "description": "Construct time-scaled phylogenies and infer evolutionary dynamics using TreeTime and BEAST2 for outbreak analysis. Estimate divergence times, molecular clock rates, and ancestral states. Use when dating outbreak origins, estimating transmission rates, or building time-calibrated trees.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: BioPython 1.83+, TreeTime 0.11+, scanpy 1.10+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Phylodynamics\n\n**\"Build a time-scaled tree for my outbreak\"** \u2192 Estimate divergence times and molecular clock rates from dated sequences to reconstruct outbreak timing and evolutionary dynamics.\n- Python: `treetime.TreeTime()` for maximum likelihood time-scaled trees\n- CLI: `treetime --tree tree.nwk --aln aln.fasta --dates dates.tsv`\n\n## TreeTime Basic Usage\n\n```python\nfrom treetime import TreeTime\nfrom Bio import Phylo\n\n# Load tree and alignment\ntree = Phylo.read('tree.nwk', 'newick')\n\n# Create TreeTime object with dates\n# dates_file: tab-separated with columns 'name' and 'date'\n# Date formats: 2020.5, 2020-06-15, numeric (decimal year)\ntt = TreeTime(\n    tree=tree,\n    aln='alignment.fasta',\n    dates='dates.tsv',\n    gtr='JC69'  # Nucleotide model: JC69, HKY85, GTR\n)\n\n# Run molecular clock analysis\ntt.run(\n    root='best',           # Root optimization: 'best', 'least-squares', or clade name\n    Tc='skyline',          # Coalescent prior: None, 'skyline', 'opt', or numeric\n    time_marginal='assign_ml'  # Date estimation method\n)\n\n# Access results\nprint(f'Root date: {tt.tree.root.numdate:.2f}')\nprint(f'Clock rate: {tt.clock_rate:.2e} subs/site/year')\n```\n\n## TreeTime CLI\n\n```bash\n# Install treetime\npip install phylo-treetime\n\n# Basic time tree\ntreetime --tree tree.nwk --aln alignment.fasta --dates dates.tsv --outdir results/\n\n# With coalescent prior (for population dynamics)\ntreetime --tree tree.nwk --aln alignment.fasta --dates dates.tsv \\\n    --coalescent skyline --outdir results/\n\n# Ancestral sequence reconstruction\ntreetime ancestral --tree tree.nwk --aln alignment.fasta --outdir results/\n\n# Mugration (discrete trait analysis, e.g., geographic spread)\ntreetime mugration --tree tree.nwk --states locations.tsv \\\n    --attribute location --outdir results/\n```\n\n## Date File Format\n\n**Goal:** Prepare a correctly formatted date file mapping sample names to decimal-year collection dates for TreeTime input.\n\n**Approach:** Extract name and date columns from metadata, convert dates to decimal year format, and write as a tab-separated file with 'name' and 'date' headers.\n\n```python\ndef prepare_date_file(metadata, name_col, date_col, output_path):\n    '''Prepare dates file for TreeTime\n\n    Date formats accepted:\n    - Decimal year: 2020.5 (July 2020)\n    - ISO format: 2020-06-15\n    - Year only: 2020 (treated as midpoint)\n\n    For incomplete dates, use ranges:\n    - [2020.0:2020.5] for first half of 2020\n    '''\n    dates = metadata[[name_col, date_col]].copy()\n    dates.columns = ['name', 'date']\n\n    # Convert to decimal year if needed\n    dates['date'] = dates['date'].apply(convert_to_decimal_year)\n\n    dates.to_csv(output_path, sep='\\t', index=False)\n    return output_path\n\n\ndef convert_to_decimal_year(date_str):\n    '''Convert date string to decimal year'''\n    from datetime import datetime\n\n    if isinstance(date_str, (int, float)):\n        return float(date_str)\n\n    try:\n        dt = datetime.strptime(str(date_str), '%Y-%m-%d')\n        year = dt.year\n        day_of_year = dt.timetuple().tm_yday\n        days_in_year = 366 if (year % 4 == 0) else 365\n        return year + (day_of_year - 1) / days_in_year\n    except:\n        return float(date_str)  # Assume already decimal\n```\n\n## Interpret Clock Results\n\n```python\ndef interpret_clock_rate(rate, genome_length):\n    '''Interpret molecular clock rate\n\n    Args:\n        rate: Substitutions per site per year\n        genome_length: Genome size in bp\n\n    Returns:\n        Estimated substitutions per year (genome-wide)\n\n    Typical rates:\n    - RNA viruses: 10^-3 to 10^-4 subs/site/year\n    - SARS-CoV-2: ~8\u00d710^-4 (24 subs/year for 30kb genome)\n    - Bacteria: 10^-6 to 10^-7 subs/site/year\n    - E. coli: ~10^-7 (5 SNPs/genome/year)\n    '''\n    subs_per_year = rate * genome_length\n\n    print(f'Clock rate: {rate:.2e} subs/site/year')\n    print(f'Genome-wide: ~{subs_per_year:.1f} substitutions/year')\n\n    # Estimate time to MRCA from SNP distance\n    example_snps = 10\n    time_estimate = example_snps / (2 * subs_per_year)\n    print(f'{example_snps} SNPs = ~{time_estimate:.1f} years since MRCA')\n```\n\n## Skyline Plot (Population Dynamics)\n\n**Goal:** Extract effective population size trajectory over time from a TreeTime coalescent skyline analysis.\n\n**Approach:** Parse the skyline JSON output from TreeTime to retrieve time points and corresponding Ne estimates for plotting population dynamics.\n\n```python\ndef extract_skyline(treetime_results_dir):\n    '''Extract coalescent skyline from TreeTime output\n\n    Skyline shows effective population size over time.\n    Useful for:\n    - Detecting population expansions (outbreak growth)\n    - Identifying bottlenecks\n    - Estimating R0 from growth rate\n    '''\n    import json\n\n    with open(f'{treetime_results_dir}/skyline.json') as f:\n        skyline = json.load(f)\n\n    times = skyline['times']\n    Ne = skyline['Ne']  # Effective population size\n\n    return times, Ne\n```\n\n## BEAST2 Integration\n\n```python\ndef prepare_beast_xml(alignment, dates, template='strict_clock'):\n    '''Prepare BEAST2 XML configuration\n\n    BEAST2 templates:\n    - strict_clock: Single clock rate (simple outbreaks)\n    - relaxed_clock: Rate variation (diverse sampling)\n    - bdsky: Birth-death skyline (epidemic dynamics)\n\n    Note: BEAST2 requires more setup than TreeTime but provides\n    full Bayesian uncertainty estimates.\n    '''\n    # BEAST2 typically configured via BEAUti GUI\n    # For automation, use templates from beast2.org\n\n    print('BEAST2 setup:')\n    print('1. Install BEAST2: https://beast2.org')\n    print('2. Run BEAUti to configure analysis')\n    print('3. Execute: beast -threads 4 analysis.xml')\n    print('4. Summarize: treeannotator -burnin 10 trees.trees output.tree')\n```\n\n## Related Skills\n\n- epidemiological-genomics/transmission-inference - Infer who-infected-whom\n- phylogenetics/modern-tree-inference - Build input phylogeny\n- epidemiological-genomics/variant-surveillance - Track lineage dynamics\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-epidemiological-genomics-phylodynamics",
-    "description": "Construct time-scaled phylogenies and infer evolutionary dynamics using TreeTime and BEAST2 for outbreak analysis. Estimate divergence times, molecular clock rates, and ancestral states. Use when dating outbreak origins, estimating transmission rates, or building time-calibrated trees.",
-    "tool_type": "python",
-    "primary_tool": "TreeTime"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

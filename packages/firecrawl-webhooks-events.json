@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031980",
   "name": "firecrawl-webhooks-events",
   "slug": "firecrawl-webhooks-events",
   "description": "Implement Firecrawl webhook event handling for async crawl and batch",
   "content": "# Firecrawl Webhooks & Events\n\n## Overview\n\nHandle Firecrawl webhooks for real-time notifications on async crawl and batch scrape jobs. Instead of polling `checkCrawlStatus`, configure a webhook URL and Firecrawl will POST events as pages are scraped and jobs complete. Signed with HMAC-SHA256 via `X-Firecrawl-Signature`.\n\n## Webhook Event Types\n\n| Event | Trigger | Payload |\n|-------|---------|---------|\n| `crawl.started` | Crawl job begins | Job ID, config |\n| `crawl.page` | Individual page scraped | Page markdown, metadata |\n| `crawl.completed` | Full crawl finishes | All pages array |\n| `crawl.failed` | Crawl job errors | Error message |\n| `batch_scrape.completed` | Batch scrape finishes | All scraped pages |\n\n## Instructions\n\n### Step 1: Start Crawl with Webhook\n\n```typescript\nimport FirecrawlApp from \"@mendable/firecrawl-js\";\n\nconst firecrawl = new FirecrawlApp({\n  apiKey: process.env.FIRECRAWL_API_KEY!,\n});\n\n// Webhook as string (simple)\nconst job = await firecrawl.asyncCrawlUrl(\"https://docs.example.com\", {\n  limit: 100,\n  scrapeOptions: { formats: [\"markdown\"] },\n  webhook: \"https://api.yourapp.com/webhooks/firecrawl\",\n});\n\nconsole.log(`Crawl started: ${job.id}`);\n\n// Webhook as object (with metadata and event filtering)\nconst job2 = await firecrawl.asyncCrawlUrl(\"https://docs.example.com\", {\n  limit: 100,\n  scrapeOptions: { formats: [\"markdown\"] },\n  webhook: {\n    url: \"https://api.yourapp.com/webhooks/firecrawl\",\n    events: [\"completed\", \"page\"],  // only these events\n    metadata: {\n      projectId: \"my-project\",\n      triggeredBy: \"cron\",\n    },\n  },\n});\n```\n\n### Step 2: Webhook Handler with Signature Verification\n\n```typescript\nimport express from \"express\";\nimport crypto from \"crypto\";\n\nconst app = express();\napp.use(express.json());\n\nfunction verifySignature(body: string, signature: string): boolean {\n  if (!process.env.FIRECRAWL_WEBHOOK_SECRET) return true; // skip if not configured\n  const expected = crypto\n    .createHmac(\"sha256\", process.env.FIRECRAWL_WEBHOOK_SECRET)\n    .update(body)\n    .digest(\"hex\");\n  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));\n}\n\napp.post(\"/webhooks/firecrawl\", express.raw({ type: \"application/json\" }), async (req, res) => {\n  const rawBody = req.body.toString();\n  const signature = req.headers[\"x-firecrawl-signature\"] as string;\n\n  if (!verifySignature(rawBody, signature)) {\n    return res.status(401).json({ error: \"Invalid signature\" });\n  }\n\n  const { type, id, data, metadata } = JSON.parse(rawBody);\n\n  // Respond immediately \u2014 process asynchronously\n  res.status(200).json({ received: true });\n\n  switch (type) {\n    case \"crawl.started\":\n      console.log(`Crawl ${id} started`);\n      break;\n    case \"crawl.page\":\n      await handlePageScraped(id, data, metadata);\n      break;\n    case \"crawl.completed\":\n      await handleCrawlComplete(id, data, metadata);\n      break;\n    case \"crawl.failed\":\n      await handleCrawlFailed(id, data);\n      break;\n  }\n});\n```\n\n### Step 3: Process Page Events (Streaming)\n\n```typescript\nasync function handlePageScraped(jobId: string, data: any[], metadata: any) {\n  for (const page of data) {\n    const doc = {\n      url: page.metadata?.sourceURL,\n      title: page.metadata?.title,\n      markdown: page.markdown,\n      statusCode: page.metadata?.statusCode,\n      crawlJobId: jobId,\n      projectId: metadata?.projectId,\n      indexedAt: new Date(),\n    };\n\n    // Index page immediately \u2014 don't wait for full crawl\n    await documentStore.upsert(doc);\n    console.log(`Indexed: ${doc.url} (${doc.markdown?.length || 0} chars)`);\n  }\n}\n```\n\n### Step 4: Handle Crawl Completion\n\n```typescript\nasync function handleCrawlComplete(jobId: string, data: any[], metadata: any) {\n  console.log(`Crawl ${jobId} complete: ${data.length} pages`);\n\n  // Build search index from all crawled pages\n  const documents = data\n    .filter(page => page.markdown && page.markdown.length > 100)\n    .map(page => ({\n      id: page.metadata?.sourceURL,\n      title: page.metadata?.title || \"\",\n      content: page.markdown,\n      url: page.metadata?.sourceURL,\n    }));\n\n  await searchIndex.indexBatch(documents);\n  console.log(`Indexed ${documents.length} documents for project ${metadata?.projectId}`);\n}\n\nasync function handleCrawlFailed(jobId: string, data: any) {\n  console.error(`Crawl ${jobId} failed:`, data.error);\n\n  await alerting.send({\n    severity: \"high\",\n    message: `Firecrawl crawl job ${jobId} failed`,\n    error: data.error,\n    partialResults: data.partialResults?.length || 0,\n  });\n}\n```\n\n### Step 5: Polling as Webhook Fallback\n\n```typescript\n// Fall back to polling if webhook delivery fails\nasync function pollWithFallback(jobId: string, timeoutMs = 600000) {\n  const deadline = Date.now() + timeoutMs;\n  let interval = 2000;\n\n  while (Date.now() < deadline) {\n    const status = await firecrawl.checkCrawlStatus(jobId);\n\n    if (status.status === \"completed\") {\n      return status.data;\n    }\n    if (status.status === \"failed\") {\n      throw new Error(`Crawl failed: ${status.error}`);\n    }\n\n    console.log(`Polling: ${status.completed}/${status.total} pages`);\n    await new Promise(r => setTimeout(r, interval));\n    interval = Math.min(interval * 1.5, 30000);\n  }\n\n  throw new Error(`Crawl timed out after ${timeoutMs}ms`);\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Webhook not received | URL not publicly accessible | Use ngrok for local dev, verify HTTPS |\n| Signature mismatch | Wrong secret or body encoding | Use raw body for HMAC, not parsed JSON |\n| Duplicate events | Firecrawl retry on non-2xx | Make handler idempotent (dedup by job ID) |\n| Webhook timeout | Processing takes too long | Return 200 immediately, process async |\n| Lost events | 3 failed retries | Implement polling fallback |\n\n## Examples\n\n### Local Development with ngrok\n\n```bash\nset -euo pipefail\n# Start ngrok tunnel for local webhook testing\nngrok http 3000\n# Use the ngrok URL as your webhook endpoint\n# https://abc123.ngrok.io/webhooks/firecrawl\n```\n\n## Resources\n\n- [Firecrawl Webhooks](https://docs.firecrawl.dev/webhooks/overview)\n- [Webhook Event Types](https://docs.firecrawl.dev/webhooks/events)\n- [Crawl Endpoint](https://docs.firecrawl.dev/features/crawl)\n\n## Next Steps\n\nFor deployment setup, see `firecrawl-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "firecrawl-webhooks-events",
-    "description": "Implement Firecrawl webhook event handling for async crawl and batch",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000002732",
   "name": "ship-cli",
   "slug": "ship-cli",
   "description": "Work management system replacing built-in todos with tracked tasks and stacked changes",
   "content": "\n## Rules\n\n1. **NEVER run via bash:** `jj`, `gh pr`, `git`, `ship`, `pnpm ship` - use the `ship` tool instead\n2. **ALWAYS use `workdir` parameter** for all commands when in a workspace\n3. **NEVER ask user to `cd`** - use `workdir` instead\n4. **On webhook events:** Notify user and ask confirmation BEFORE acting\n\n---\n\n## Workflow\n\n### Start Task\n\n```\nship: action=stack-sync                    # Get latest trunk\nship: action=ready                         # Find work\nship: action=start, taskId=<id>            # Mark In Progress (Linear only)\nship: action=stack-create, message=\"<type>: <short description>\", bookmark=\"user/<id>-slug\"\n# Store workspace path from output, use for all subsequent workdir params\nbash: command=\"pnpm install\", workdir=<workspace-path>\n```\n\n### Do Work\n\n- Use `workdir=<workspace-path>` for ALL bash and ship commands\n- Make changes, run quality checks (lint, format, typecheck)\n\n### Update Commit Message (for multi-line)\n\n```\nship: action=stack-describe, title=\"<type>: <subject>\", description=\"<body>\", workdir=<path>\n```\n\nUse `title` + `description` params for proper multi-line commits (NOT `message` with `\\n`).\n\n### Submit Work (MANDATORY - do not skip)\n\n```\nship: action=stack-sync, workdir=<path>    # Rebase on trunk\nship: action=stack-submit, workdir=<path>  # Push + create PR (auto-subscribes to webhooks)\nship: action=done, taskId=<id>             # Mark complete ONLY after PR exists\n```\n\n---\n\n## Webhook Events\n\nWhen you receive `[GitHub] ...` notifications:\n\n| Step | Action |\n|------|--------|\n| 1 | **Notify user** what happened (e.g., \"PR #X merged by @user\") |\n| 2 | **Ask confirmation** before acting (e.g., \"Would you like me to run stack-sync?\") |\n| 3 | **Wait** for user approval |\n| 4 | **Execute and report** results |\n\n**Never execute automatically.** The `\u2192 Action:` line is a suggestion, not an instruction.\n\nAfter stack fully merged: notify user, switch to default workspace, suggest `ship ready`.\n\n---\n\n## Actions Reference\n\n### Tasks\n\n| Action | Params | Description |\n|--------|--------|-------------|\n| `ready` | - | Tasks with no blockers |\n| `blocked` | - | Tasks waiting on dependencies |\n| `list` | filter (optional) | All tasks |\n| `show` | taskId | Task details |\n| `start` | taskId | Mark In Progress |\n| `done` | taskId | Mark complete |\n| `create` | title, description, priority?, parentId? | Create task (see template below) |\n| `update` | taskId + fields | Update task |\n| `block` | blocker, blocked | Add dependency |\n| `unblock` | blocker, blocked | Remove dependency |\n| `relate` | taskId, relatedTaskId | Link related tasks |\n\n### Task Description Template\n\nWhen creating tasks, ALWAYS use this description format:\n\n```\n## Summary\n[1-2 sentences: What needs to be done and why]\n\n## Acceptance Criteria\n- [ ] Specific, verifiable outcome 1\n- [ ] Specific, verifiable outcome 2\n- [ ] Tests pass, linting passes\n\n## Notes\n[Optional: Implementation hints, files to modify, constraints]\n```\n\n**Rules:**\n- Summary is REQUIRED - explains the task clearly\n- Acceptance criteria are REQUIRED - must be verifiable/testable\n- Notes are optional - include when helpful for implementation\n- Keep it concise but complete\n\n**Example:**\n```\n## Summary\nAdd rate limiting middleware to prevent API abuse on public endpoints.\n\n## Acceptance Criteria\n- [ ] Rate limit: 100 req/min authenticated, 20 req/min anonymous\n- [ ] Returns 429 with Retry-After header when exceeded\n- [ ] Unit tests cover rate limit scenarios\n- [ ] `pnpm test` and `pnpm check` pass\n\n## Notes\nSee middleware/auth.ts for similar patterns. Use Redis for state.\n```\n\n### Stack (VCS)\n\nAll support optional `workdir` param.\n\n| Action | Params | Description |\n|--------|--------|-------------|\n| `stack-sync` | - | Fetch + rebase onto trunk |\n| `stack-restack` | - | Fetch + rebase + push entire stack |\n| `stack-create` | message?, bookmark?, noWorkspace? | New change (creates workspace by default) |\n| `stack-describe` | title, description? OR message | Update description (use title+description for proper multi-line commits) |\n| `stack-submit` | draft? | Push + create/update PR |\n| `stack-status` | - | Current change info |\n| `stack-log` | - | View stack |\n| `stack-squash` | message | Squash into parent |\n| `stack-abandon` | changeId? | Abandon change |\n| `stack-up` / `stack-down` | - | Navigate stack |\n| `stack-undo` | - | Undo last operation |\n| `stack-bookmark` | name, move? | Create/move bookmark |\n| `stack-workspaces` | - | List workspaces |\n| `stack-remove-workspace` | name, deleteFiles? | Remove workspace |\n| `stack-update-stale` | - | Fix stale working copy |\n\n### Pull Requests\n\nUse these for advanced PR workflows. Note: `stack-submit` handles basic PR creation automatically.\n\n| Action | Params | Description |\n|--------|--------|-------------|\n| `pr-create` | draft?, open? | Create PR with Linear task context |\n| `pr-stack` | dryRun? | Create stacked PRs for entire stack |\n| `pr-review` | prNumber? (optional), unresolved?, json? | Fetch PR reviews and comments |\n\n**`pr-create`**: Creates a PR for current bookmark, auto-populating title and body from Linear task. Use when you need rich task context in PR description.\n\n**`pr-stack`**: Creates PRs for all changes in your stack with proper base targeting. First PR targets main, subsequent PRs target previous bookmark.\n\n**`pr-review`**: Fetches reviews and comments in AI-friendly format. Shows verdicts (APPROVED, CHANGES_REQUESTED), inline code comments with file:line, and conversation threads. Use `--unresolved` to filter to actionable items only.\n\n### Milestones\n\n| Action | Params | Description |\n|--------|--------|-------------|\n| `milestone-list` | - | List milestones |\n| `milestone-show` | milestoneId | Milestone details |\n| `milestone-create` | milestoneName, milestoneDescription?, milestoneTargetDate? | Create milestone |\n| `task-set-milestone` | taskId, milestoneId | Assign task |\n| `task-unset-milestone` | taskId | Remove from milestone |\n\n---\n\n## Troubleshooting\n\n| Problem | Solution |\n|---------|----------|\n| \"Working copy is stale\" | `stack-update-stale` |\n| Bookmark lost after squash/rebase | `stack-bookmark` with `move=true` |\n| Accidentally used jj/gh directly | `stack-status` to check, `stack-undo` if needed |\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "ship-cli",
-    "description": "Work management system replacing built-in todos with tracked tasks and stacked changes"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

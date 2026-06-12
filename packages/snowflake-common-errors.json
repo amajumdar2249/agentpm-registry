@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033278",
   "name": "snowflake-common-errors",
   "slug": "snowflake-common-errors",
   "description": "Diagnose and fix common Snowflake errors and SQL compilation failures.",
   "content": "# Snowflake Common Errors\n\n## Overview\n\nQuick reference for the most common Snowflake error codes, SQL compilation errors, and driver issues with real solutions.\n\n## Error Reference\n\n### 002003 (42S02): Object Does Not Exist\n\n```\nSQL compilation error: Object 'MY_DB.MY_SCHEMA.USERS' does not exist or not authorized.\n```\n\n**Causes:** Table doesn't exist, wrong database/schema context, or role lacks privileges.\n\n**Solutions:**\n\n```sql\n-- Check current context\nSELECT CURRENT_DATABASE(), CURRENT_SCHEMA(), CURRENT_ROLE();\n\n-- Verify object exists\nSHOW TABLES LIKE 'USERS' IN SCHEMA MY_DB.MY_SCHEMA;\n\n-- Grant access if needed\nGRANT SELECT ON TABLE MY_DB.MY_SCHEMA.USERS TO ROLE MY_ROLE;\n\n-- Use fully-qualified names to avoid context issues\nSELECT * FROM MY_DB.MY_SCHEMA.USERS;\n```\n\n### 000606: No Active Warehouse\n\n```\nSQL execution error: No active warehouse selected in the current session.\n```\n\n**Solutions:**\n\n```sql\n-- Set warehouse for session\nUSE WAREHOUSE COMPUTE_WH;\n\n-- Or set in connection config\n-- warehouse: 'COMPUTE_WH' in createConnection()\n\n-- Check warehouse state\nSHOW WAREHOUSES LIKE 'COMPUTE_WH';\n-- If SUSPENDED, it auto-resumes if AUTO_RESUME = TRUE\n```\n\n### 390100: Incorrect Username or Password\n\n```\nIncorrect username or password was specified.\n```\n\n**Solutions:**\n\n```bash\n# Verify credentials are set\necho $SNOWFLAKE_ACCOUNT  # Should be 'orgname-accountname'\necho $SNOWFLAKE_USER\n\n# Test with SnowSQL\nsnowsql -a $SNOWFLAKE_ACCOUNT -u $SNOWFLAKE_USER\n\n# Check account format \u2014 common mistake:\n# Wrong: myaccount.us-east-1.snowflakecomputing.com\n# Right: myorg-myaccount\n```\n\n### 390144: JWT Token Invalid (Key Pair Auth)\n\n```\nJWT token is invalid.\n```\n\n**Solutions:**\n\n```bash\n# Verify public key is assigned\n# Run in Snowflake:\n# DESC USER my_user;\n# Check RSA_PUBLIC_KEY column\n\n# Regenerate if needed\nopenssl genrsa 2048 | openssl pkcs8 -topk8 -inform PEM -out rsa_key.p8 -nocrypt\nopenssl rsa -in rsa_key.p8 -pubout -out rsa_key.pub\n\n# Re-assign (remove headers/newlines from pub key first)\n# ALTER USER my_user SET RSA_PUBLIC_KEY='MIIBIj...';\n```\n\n### 001003: SQL Compilation Error\n\n```\nSQL compilation error: syntax error line X at position Y unexpected 'TOKEN'.\n```\n\n**Common causes:**\n\n```sql\n-- Missing semicolons in multi-statement mode\n-- Wrong: SELECT 1 SELECT 2\n-- Right: SELECT 1; SELECT 2;\n\n-- Reserved word used as identifier\n-- Wrong: SELECT order FROM orders\n-- Right: SELECT \"order\" FROM orders\n\n-- Wrong function syntax\n-- Wrong: DATEADD('day', 1, col)\n-- Right: DATEADD(day, 1, col)  -- no quotes on date part\n```\n\n### 100038: Statement Timeout\n\n```\nStatement reached its statement or warehouse timeout of X second(s).\n```\n\n**Solutions:**\n\n```sql\n-- Increase statement timeout (seconds)\nALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = 3600;\n\n-- Or per-warehouse\nALTER WAREHOUSE COMPUTE_WH SET STATEMENT_TIMEOUT_IN_SECONDS = 3600;\n\n-- Check if query needs optimization\nSELECT query_id, query_text, execution_status, error_message,\n       total_elapsed_time / 1000 AS seconds\nFROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY())\nWHERE execution_status = 'FAIL'\nORDER BY start_time DESC LIMIT 10;\n```\n\n### 100035: Out of Memory / Result Too Large\n\n```\nResults exceed the allowed data size.\n```\n\n**Solutions:**\n\n```typescript\n// Use streaming in Node.js instead of fetching all rows\nconnection.execute({\n  sqlText: 'SELECT * FROM large_table',\n  streamResult: true,  // Don't buffer all rows in memory\n  complete: (err, stmt) => {\n    const stream = stmt.streamRows();\n    stream.on('data', (row) => processRow(row));\n    stream.on('end', () => console.log('Done'));\n  },\n});\n```\n\n```python\n# Use fetchmany() in Python\ncursor.execute(\"SELECT * FROM large_table\")\nwhile True:\n    rows = cursor.fetchmany(10000)\n    if not rows:\n        break\n    process_batch(rows)\n```\n\n### Node.js Driver: Network / Connection Errors\n\n```\nError: connect ECONNREFUSED\nError: getaddrinfo ENOTFOUND\n```\n\n**Solutions:**\n\n```typescript\n// Wrong account identifier format\n// Wrong: 'myaccount.us-east-1.snowflakecomputing.com'\n// Right: 'myorg-myaccount'\n\n// Check for proxy/firewall\n// Snowflake requires outbound HTTPS to *.snowflakecomputing.com\n\n// Enable connection diagnostics\nsnowflake.configure({ logLevel: 'DEBUG' });\n```\n\n### Python Connector: OperationalError\n\n```python\n# Common: snowflake.connector.errors.OperationalError\n# 250001: Could not connect to Snowflake backend\n\n# Check connectivity\nimport snowflake.connector\nsnowflake.connector.connect(\n    account='myorg-myaccount',\n    user='test',\n    password='test',\n    login_timeout=10,  # Fail fast for testing\n)\n```\n\n## Quick Diagnostic Script\n\n```bash\n#!/bin/bash\necho \"=== Snowflake Diagnostic ===\"\necho \"Account: ${SNOWFLAKE_ACCOUNT:-NOT SET}\"\necho \"User: ${SNOWFLAKE_USER:-NOT SET}\"\necho \"Password: ${SNOWFLAKE_PASSWORD:+SET (hidden)}\"\necho \"Warehouse: ${SNOWFLAKE_WAREHOUSE:-NOT SET}\"\necho \"\"\necho \"Connectivity test:\"\ncurl -s -o /dev/null -w \"HTTP %{http_code} in %{time_total}s\" \\\n  \"https://${SNOWFLAKE_ACCOUNT}.snowflakecomputing.com/session/v1/login-request\" || echo \"FAILED\"\necho \"\"\necho \"Driver versions:\"\nnpm list snowflake-sdk 2>/dev/null || echo \"Node.js driver: not installed\"\npip show snowflake-connector-python 2>/dev/null | grep Version || echo \"Python connector: not installed\"\n```\n\n## Error Handling\n\n| Error Code | Category | Quick Fix |\n|-----------|----------|-----------|\n| `002003` | Object not found | Check context, grant access |\n| `000606` | No warehouse | `USE WAREHOUSE x;` |\n| `390100` | Auth failure | Check account format, credentials |\n| `390144` | JWT invalid | Regenerate key pair |\n| `001003` | SQL syntax | Check reserved words, function syntax |\n| `100038` | Timeout | Increase timeout or optimize query |\n| `100035` | Too large | Use streaming or pagination |\n\n## Resources\n\n- [Error Messages](https://docs.snowflake.com/en/user-guide/client-connectivity-troubleshooting/error-messages)\n- [Key Pair Troubleshooting](https://docs.snowflake.com/en/user-guide/key-pair-auth-troubleshooting)\n- [Connection Troubleshooting](https://docs.snowflake.com/en/user-guide/admin-security-fed-auth-use)\n\n## Next Steps\n\nFor comprehensive debugging, see `snowflake-debug-bundle`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "snowflake-common-errors",
-    "description": "Diagnose and fix common Snowflake errors and SQL compilation failures.",
-    "allowed-tools": "Read, Grep, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

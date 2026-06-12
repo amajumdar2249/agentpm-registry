@@ -1,14 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000011049",
   "name": "ffmpeg-hardware-acceleration",
   "slug": "ffmpeg-hardware-acceleration",
   "description": "|",
   "content": "\n## When to Use This Skill\n\nActivate when **GPU acceleration is needed**:\n\n- Encoding speed is critical (10-30x faster than CPU)\n- Processing large batches of videos\n- Real-time encoding for streaming\n- Server-side transcoding at scale\n- Docker containers with GPU passthrough\n\nGPU encoding trades some quality for massive speed. Use `-cq`, `-qp`, or `-global_quality` for quality control.\n\n## Quick Reference\n\n| Platform | Encoder | Decoder | Detect Command |\n|----------|---------|---------|----------------|\n| NVIDIA | `h264_nvenc`, `hevc_nvenc`, `av1_nvenc` | `h264_cuvid`, `hevc_cuvid` | `ffmpeg -encoders \\| grep nvenc` |\n| Intel QSV | `h264_qsv`, `hevc_qsv`, `av1_qsv` | `h264_qsv`, `hevc_qsv` | `ffmpeg -encoders \\| grep qsv` |\n| AMD AMF | `h264_amf`, `hevc_amf`, `av1_amf` | N/A (use software) | `ffmpeg -encoders \\| grep amf` |\n| Apple | `h264_videotoolbox`, `hevc_videotoolbox` | `h264_videotoolbox` | macOS only |\n| VAAPI | `h264_vaapi`, `hevc_vaapi`, `av1_vaapi` | with `-hwaccel vaapi` | Linux only |\n| Vulkan | `h264_vulkan`, `hevc_vulkan`, `av1_vulkan`, `ffv1_vulkan` | VP9, ProRes RAW (8.0+) | `ffmpeg -encoders \\| grep vulkan` |\n\n**Current Latest**: FFmpeg 8.0.1 (released 2025-11-20). Check with `ffmpeg -version`.\n\n## Hardware Acceleration Overview\n\nHardware acceleration uses dedicated GPU/SoC components for video processing:\n\n- **NVENC/NVDEC** (NVIDIA): dedicated encode/decode engines\n- **QSV** (Intel): Quick Sync Video on Intel CPUs with integrated graphics\n- **AMF** (AMD): Advanced Media Framework for AMD GPUs\n- **VideoToolbox** (Apple): macOS/iOS hardware acceleration\n- **VAAPI** (Linux): Video Acceleration API (Intel, AMD on Linux)\n- **Vulkan Video** (Cross-platform, FFmpeg 7.1+/8.0): compute-shader-based codecs\n\n### Performance Comparison (2025 Benchmarks)\n\n| Method | Speed | Quality | Power | Use Case |\n|--------|-------|---------|-------|----------|\n| libx264 (CPU) | 1x | Best | High | Quality-critical |\n| libx265 (CPU) | 0.3x | Best | Very High | Archival |\n| h264_nvenc | 10-20x | Good | Low | Real-time, streaming |\n| hevc_nvenc | 8-15x | Good | Low | 4K streaming |\n| h264_qsv | 8-15x | Good | Very Low | Laptop, efficiency |\n| h264_amf | 8-15x | Good | Low | AMD systems |\n\n## Core Workflow\n\n1. **Detect what you have**: `ffmpeg -hwaccels`, `ffmpeg -encoders | grep <api>`\n2. **Pick a backend**: prefer the vendor-native one (NVENC on NVIDIA, QSV on Intel, AMF on AMD, VideoToolbox on Apple). Use Vulkan for cross-platform portability.\n3. **Build a full-GPU pipeline** where possible:\n   - Add `-hwaccel <api>` and `-hwaccel_output_format <api>` *before* `-i`\n   - Use GPU-side filters (`scale_cuda`, `scale_vulkan`, `vpp_qsv`, ...)\n   - Use the matching hardware encoder\n4. **Tune quality**: `-preset` (NVENC `p1-p7`), `-cq`/`-qp`/`-global_quality`, lookahead, spatial/temporal AQ\n5. **Verify**: benchmark with `ffmpeg -benchmark` and monitor GPU via `nvidia-smi dmon`, `intel_gpu_top`, etc.\n\n## Minimal Examples per Backend\n\n```bash\n# NVIDIA NVENC\nffmpeg -hwaccel cuda -hwaccel_output_format cuda -i input.mp4 \\\n  -c:v h264_nvenc -preset p4 -b:v 5M output.mp4\n\n# Intel QSV\nffmpeg -hwaccel qsv -hwaccel_output_format qsv -i input.mp4 \\\n  -c:v h264_qsv -preset medium -b:v 5M output.mp4\n\n# AMD AMF\nffmpeg -i input.mp4 -c:v h264_amf -quality balanced -b:v 5M output.mp4\n\n# Apple VideoToolbox\nffmpeg -i input.mp4 -c:v h264_videotoolbox -b:v 5M output.mp4\n\n# Linux VAAPI\nffmpeg -hwaccel vaapi -hwaccel_device /dev/dri/renderD128 \\\n  -hwaccel_output_format vaapi -i input.mp4 \\\n  -c:v h264_vaapi -b:v 5M output.mp4\n\n# Vulkan (cross-platform)\nffmpeg -init_hw_device vulkan -i input.mp4 \\\n  -c:v h264_vulkan -b:v 5M output.mp4\n```\n\n## Full GPU Pipeline Pattern (Critical)\n\n```bash\nffmpeg -y -vsync 0 \\\n  -hwaccel cuda -hwaccel_output_format cuda \\\n  -i input.mp4 \\\n  -vf scale_cuda=1280:720 \\\n  -c:v h264_nvenc -preset p4 -b:v 5M \\\n  -c:a copy \\\n  output.mp4\n```\n\nOmitting `-hwaccel_output_format` can cut throughput by up to 50% because decoded frames silently round-trip through CPU memory. See [`references/gpu-memory-and-troubleshooting.md`](references/gpu-memory-and-troubleshooting.md) for memory flow diagrams and best practices.\n\n## Cross-Vendor Filter Quick Map\n\n| Operation | NVIDIA | Intel | AMD/Linux | Cross-platform |\n|-----------|--------|-------|-----------|----------------|\n| Scale | `scale_cuda`, `scale_npp` | `vpp_qsv`, `scale_qsv` | `scale_vaapi` | `scale_vulkan`, `scale_opencl`, `libplacebo` |\n| Overlay | `overlay_cuda` | - | - | `overlay_vulkan`, `overlay_opencl` |\n| Deinterlace | `bwdif_cuda` | `vpp_qsv` | `deinterlace_vaapi` | `bwdif_vulkan` |\n| Denoise | `bilateral_cuda` | - | - | `nlmeans_vulkan`, `nlmeans_opencl` |\n| Chromakey | `chromakey_cuda` | - | - | `colorkey_opencl` |\n| Tonemap (HDR->SDR) | - | - | `tonemap_vaapi` | `libplacebo`, `tonemap_opencl` |\n| Pad/letterbox | `pad_cuda` (8.0+) | - | - | `pad_opencl` |\n\n## Use-Case Quick Recipes\n\n### Live streaming (low latency)\n\n```bash\nffmpeg -hwaccel cuda -hwaccel_output_format cuda -i input \\\n  -c:v h264_nvenc -preset p3 -tune ll -zerolatency 1 -b:v 6M \\\n  -f flv rtmp://server/live/stream\n```\n\n### VOD (quality target)\n\n```bash\nffmpeg -i input.mp4 \\\n  -c:v hevc_nvenc -preset p6 -tune hq \\\n  -rc vbr -cq 22 -b:v 0 \\\n  -rc-lookahead 32 -spatial-aq 1 \\\n  output.mp4\n```\n\n### Batch / parallel encoding\n\n```bash\nffmpeg -hwaccel cuda -hwaccel_output_format cuda -i input1.mp4 -c:v h264_nvenc output1.mp4 &\nffmpeg -hwaccel cuda -hwaccel_output_format cuda -i input2.mp4 -c:v h264_nvenc output2.mp4 &\nwait\n```\n\n### Docker (GPU passthrough)\n\n```bash\ndocker run --gpus all --rm -v $(pwd):/data \\\n  jrottenberg/ffmpeg:nvidia \\\n  -hwaccel cuda -hwaccel_output_format cuda \\\n  -i /data/input.mp4 -c:v h264_nvenc /data/output.mp4\n```\n\n## Best Practices\n\n1. Use full GPU pipelines when possible to avoid CPU/GPU memory transfers\n2. Match decode and encode hardware for best performance\n3. Pick presets deliberately - faster is not always better for quality\n4. Enable lookahead and AQ for quality-critical encodes\n5. Test on target hardware - quality varies by GPU generation\n6. Monitor GPU memory for high-resolution content\n7. Consider power efficiency for laptops and servers\n8. Update drivers regularly for performance and feature improvements\n\n## Reference Map\n\nFor deep dives on each backend, see:\n\n- **NVIDIA NVENC/NVDEC** (presets, CUDA filters, scale_npp, hybrid pipelines, two-pass, multi-GPU, 1:N ABR): [`references/nvidia-nvenc.md`](references/nvidia-nvenc.md)\n- **Intel QSV** (full pipeline, vpp_qsv, lookahead, multi-GPU, VVC decoding): [`references/intel-qsv.md`](references/intel-qsv.md)\n- **AMD AMF, VAAPI, Apple VideoToolbox** (encoders, scaling, VVC VAAPI 8.0+ SCC support): [`references/amd-amf-vaapi-videotoolbox.md`](references/amd-amf-vaapi-videotoolbox.md)\n- **Vulkan Video and Vulkan filters** (h264/hevc/av1/ffv1, VP9/ProRes RAW decode, scale/overlay/blur/transitions/libplacebo): [`references/vulkan.md`](references/vulkan.md)\n- **OpenCL filters** (scale, overlay, colorkey, nlmeans, deshake, unsharp, tonemap): [`references/opencl-filters.md`](references/opencl-filters.md)\n- **GPU memory management, filter comparison matrix, Docker, troubleshooting**: [`references/gpu-memory-and-troubleshooting.md`](references/gpu-memory-and-troubleshooting.md)\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "ffmpeg-hardware-acceleration",
-    "description": "|",
-    "PROACTIVELY activate for": "(1) NVIDIA NVENC/NVDEC encoding, (2) Intel Quick Sync Video (QSV), (3) AMD AMF encoding, (4) Apple VideoToolbox, (5) Linux VAAPI setup, (6) Vulkan Video 8.0 (FFv1, AV1, VP9, ProRes RAW), (7) VVC/H.266 hardware decoding (VAAPI/QSV), (8) GPU pipeline optimization with pad_cuda, (9) Docker GPU containers, (10) Performance benchmarking.",
-    "Provides": "Platform-specific commands, preset comparisons, quality tuning, full GPU pipeline examples, Vulkan compute codecs, VVC decoding, troubleshooting guides.",
-    "Ensures": "Maximum encoding speed with optimal quality using GPU acceleration."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

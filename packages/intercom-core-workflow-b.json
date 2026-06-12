@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032315",
   "name": "intercom-core-workflow-b",
   "slug": "intercom-core-workflow-b",
   "description": "Manage Intercom conversations: create, reply, close, snooze, assign,",
   "content": "# Intercom Conversations & Messaging\n\n## Overview\n\nManage the full conversation lifecycle: create, reply (as admin or contact), assign to teams, close, snooze, and tag. Conversations contain threaded \"parts\" including messages, notes, and assignments.\n\n## Prerequisites\n\n- Completed `intercom-install-auth` setup\n- Admin ID (from `client.admins.list()`)\n- Contact IDs for conversation participants\n\n## Instructions\n\n### Step 1: Create a Conversation\n\nConversations are created when a contact sends a message.\n\n```typescript\nimport { IntercomClient } from \"intercom-client\";\n\nconst client = new IntercomClient({\n  token: process.env.INTERCOM_ACCESS_TOKEN!,\n});\n\n// Create conversation from a contact\nconst conversation = await client.conversations.create({\n  from: {\n    type: \"user\",\n    id: \"6657add46abd0167d9419c3a\", // Contact ID\n  },\n  body: \"Hi, I'm having trouble with my billing. Can you help?\",\n});\n\nconsole.log(`Conversation ID: ${conversation.conversationId}`);\n```\n\n### Step 2: Reply to a Conversation\n\n```typescript\n// Admin reply (visible to customer)\nawait client.conversations.reply({\n  conversationId: conversation.conversationId,\n  body: \"Hi there! I'd be happy to help with billing. What's the issue?\",\n  type: \"admin\",\n  adminId: \"12345\", // Your admin ID\n});\n\n// Admin note (internal, not visible to customer)\nawait client.conversations.reply({\n  conversationId: conversation.conversationId,\n  body: \"Customer is on Enterprise plan, checking billing system...\",\n  type: \"note\",\n  adminId: \"12345\",\n});\n\n// Contact reply\nawait client.conversations.reply({\n  conversationId: conversation.conversationId,\n  body: \"I was charged twice for this month.\",\n  type: \"user\",\n  intercomUserId: \"6657add46abd0167d9419c3a\",\n});\n```\n\n### Step 3: Assign a Conversation\n\n```typescript\n// Assign to a specific admin\nawait client.conversations.assign({\n  conversationId: conversation.conversationId,\n  type: \"admin\",\n  adminId: \"12345\",\n  assigneeId: \"67890\", // Target admin ID\n  body: \"Assigning to billing specialist\",\n});\n\n// Assign to a team\nawait client.conversations.assign({\n  conversationId: conversation.conversationId,\n  type: \"team\",\n  adminId: \"12345\",\n  assigneeId: \"team-billing-123\",\n  body: \"Routing to billing team\",\n});\n\n// Auto-assign using assignment rules\n// POST /conversations/{id}/run_assignment_rules\nawait fetch(`https://api.intercom.io/conversations/${conversation.conversationId}/run_assignment_rules`, {\n  method: \"POST\",\n  headers: {\n    Authorization: `Bearer ${process.env.INTERCOM_ACCESS_TOKEN}`,\n    \"Content-Type\": \"application/json\",\n  },\n});\n```\n\n### Step 4: Close and Snooze Conversations\n\n```typescript\n// Close a conversation (with optional closing message)\nawait client.conversations.close({\n  conversationId: conversation.conversationId,\n  adminId: \"12345\",\n  body: \"Issue resolved! Let us know if you need anything else.\",\n});\n\n// Snooze until a specific time\nawait client.conversations.snooze({\n  conversationId: conversation.conversationId,\n  adminId: \"12345\",\n  snoozedUntil: Math.floor(Date.now() / 1000) + 86400, // 24 hours from now\n});\n\n// Reopen a closed conversation\nawait client.conversations.open({\n  conversationId: conversation.conversationId,\n  adminId: \"12345\",\n});\n```\n\n### Step 5: Tag Conversations\n\n```typescript\n// Tag a conversation\nawait client.conversations.attachTag({\n  conversationId: conversation.conversationId,\n  tagId: \"tag-billing-issue\",\n  adminId: \"12345\",\n});\n\n// Remove a tag\nawait client.conversations.detachTag({\n  conversationId: conversation.conversationId,\n  tagId: \"tag-billing-issue\",\n  adminId: \"12345\",\n});\n```\n\n### Step 6: Retrieve Conversation with Parts\n\n```typescript\nconst full = await client.conversations.find({\n  conversationId: conversation.conversationId,\n});\n\nconsole.log(`State: ${full.state}`);  // \"open\", \"closed\", \"snoozed\"\nconsole.log(`Assignee: ${full.adminAssigneeId}`);\nconsole.log(`Parts: ${full.conversationParts.totalCount}`);\n\n// Iterate conversation parts (messages, notes, assignments)\nfor (const part of full.conversationParts.conversationParts) {\n  console.log(`  [${part.partType}] ${part.author.type}: ${part.body?.substring(0, 50)}`);\n}\n\n// Conversation parts include:\n// - comment (admin/user messages)\n// - note (internal notes)\n// - assignment (team/admin assignments)\n// - close/open (state changes)\n```\n\n### Step 7: List and Filter Conversations\n\n```typescript\n// List all conversations\nconst conversations = await client.conversations.list();\n\n// Search conversations\nconst searched = await client.conversations.search({\n  query: {\n    operator: \"AND\",\n    value: [\n      { field: \"state\", operator: \"=\", value: \"open\" },\n      { field: \"admin_assignee_id\", operator: \"=\", value: \"12345\" },\n    ],\n  },\n  pagination: { per_page: 20 },\n  sort: { field: \"updated_at\", order: \"descending\" },\n});\n```\n\n## Conversation States\n\n| State | Description | Transitions |\n|-------|-------------|-------------|\n| `open` | Active, awaiting action | close, snooze |\n| `closed` | Resolved | open |\n| `snoozed` | Deferred until timestamp | open (auto or manual) |\n\n## Conversation Part Types\n\n| Part Type | Description | Who Creates |\n|-----------|-------------|------------|\n| `comment` | Visible message | Admin or contact |\n| `note` | Internal-only note | Admin |\n| `assignment` | Reassignment record | System or admin |\n| `close` | Conversation closed | Admin |\n| `open` | Conversation reopened | Admin or contact |\n\n## Error Handling\n\n| Error | HTTP Code | Cause | Solution |\n|-------|-----------|-------|----------|\n| `not_found` | 404 | Invalid conversation or admin ID | Verify IDs exist |\n| `conversation_not_found` | 404 | Conversation deleted | Handle gracefully |\n| `admin_not_found` | 404 | Admin ID invalid | Use `client.admins.list()` |\n| `parameter_invalid` | 422 | Missing body or type | Include required fields |\n| `conversation_closed` | 400 | Action on closed conversation | Reopen first |\n\n## Resources\n\n- [Conversations API](https://developers.intercom.com/docs/references/rest-api/api.intercom.io/conversations)\n- [Reply to Conversation](https://developers.intercom.com/docs/references/2.2/rest-api/conversations/reply-to-a-conversation)\n- [Manage Conversation](https://developers.intercom.com/docs/references/rest-api/api.intercom.io/conversations/manageconversation)\n\n## Next Steps\n\nFor common errors and debugging, see `intercom-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "intercom-core-workflow-b",
-    "description": "Manage Intercom conversations: create, reply, close, snooze, assign,",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

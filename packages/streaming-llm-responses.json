@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000001080",
   "name": "streaming-llm-responses",
   "slug": "streaming-llm-responses",
   "description": "|",
   "content": "\n# Streaming LLM Responses\n\nBuild responsive, real-time chat interfaces with streaming feedback.\n\n## Quick Start\n\n```typescript\nimport { useChatKit } from \"@openai/chatkit-react\";\n\nconst chatkit = useChatKit({\n  api: { url: API_URL, domainKey: DOMAIN_KEY },\n\n  onResponseStart: () => setIsResponding(true),\n  onResponseEnd: () => setIsResponding(false),\n\n  onEffect: ({ name, data }) => {\n    if (name === \"update_status\") updateUI(data);\n  },\n});\n```\n\n---\n\n## Response Lifecycle\n\n```\nUser sends message\n    \u2193\nonResponseStart() fires\n    \u2193\n[Streaming: tokens arrive, ProgressUpdateEvents shown]\n    \u2193\nonResponseEnd() fires\n    \u2193\nUI unlocks, ready for next interaction\n```\n\n---\n\n## Core Patterns\n\n### 1. Response Lifecycle Handlers\n\nLock UI during AI response to prevent race conditions:\n\n```typescript\nfunction ChatWithLifecycle() {\n  const [isResponding, setIsResponding] = useState(false);\n  const lockInteraction = useAppStore((s) => s.lockInteraction);\n  const unlockInteraction = useAppStore((s) => s.unlockInteraction);\n\n  const chatkit = useChatKit({\n    api: { url: API_URL, domainKey: DOMAIN_KEY },\n\n    onResponseStart: () => {\n      setIsResponding(true);\n      lockInteraction(); // Disable map/canvas/form interactions\n    },\n\n    onResponseEnd: () => {\n      setIsResponding(false);\n      unlockInteraction();\n    },\n\n    onError: ({ error }) => {\n      console.error(\"ChatKit error:\", error);\n      setIsResponding(false);\n      unlockInteraction();\n    },\n  });\n\n  return (\n    <div>\n      {isResponding && <LoadingOverlay />}\n      <ChatKit control={chatkit.control} />\n    </div>\n  );\n}\n```\n\n### 2. Client Effects (Fire-and-Forget)\n\nServer sends effects to update client UI without expecting a response:\n\n**Backend - Streaming Effects:**\n\n```python\nfrom chatkit.types import ClientEffectEvent\n\nasync def respond(self, thread, item, context):\n    # ... agent processing ...\n\n    # Fire client effect to update UI\n    yield ClientEffectEvent(\n        name=\"update_status\",\n        data={\n            \"state\": {\"energy\": 80, \"happiness\": 90},\n            \"flash\": \"Status updated!\"\n        }\n    )\n\n    # Another effect\n    yield ClientEffectEvent(\n        name=\"show_notification\",\n        data={\"message\": \"Task completed!\"}\n    )\n```\n\n**Frontend - Handling Effects:**\n\n```typescript\nconst chatkit = useChatKit({\n  api: { url: API_URL, domainKey: DOMAIN_KEY },\n\n  onEffect: ({ name, data }) => {\n    switch (name) {\n      case \"update_status\":\n        applyStatusUpdate(data.state);\n        if (data.flash) setFlashMessage(data.flash);\n        break;\n\n      case \"add_marker\":\n        addMapMarker(data);\n        break;\n\n      case \"select_mode\":\n        setSelectionMode(data.mode);\n        break;\n    }\n  },\n});\n```\n\n### 3. Progress Updates\n\nShow \"Searching...\", \"Loading...\", \"Analyzing...\" during long operations:\n\n```python\nfrom chatkit.types import ProgressUpdateEvent\n\n@function_tool\nasync def search_articles(ctx: AgentContext, query: str) -> str:\n    \"\"\"Search for articles matching the query.\"\"\"\n\n    yield ProgressUpdateEvent(message=\"Searching articles...\")\n\n    results = await article_store.search(query)\n\n    yield ProgressUpdateEvent(message=f\"Found {len(results)} articles...\")\n\n    for i, article in enumerate(results):\n        if i % 5 == 0:\n            yield ProgressUpdateEvent(\n                message=f\"Processing article {i+1}/{len(results)}...\"\n            )\n\n    return format_results(results)\n```\n\n### 4. Thread Lifecycle Events\n\nTrack thread changes for persistence and UI updates:\n\n```typescript\nconst chatkit = useChatKit({\n  api: { url: API_URL, domainKey: DOMAIN_KEY },\n\n  onThreadChange: ({ threadId }) => {\n    setThreadId(threadId);\n    if (threadId) localStorage.setItem(\"lastThreadId\", threadId);\n    clearSelections();\n  },\n\n  onThreadLoadStart: ({ threadId }) => {\n    setIsLoadingThread(true);\n  },\n\n  onThreadLoadEnd: ({ threadId }) => {\n    setIsLoadingThread(false);\n  },\n});\n```\n\n### 5. Client Tools (State Query)\n\nAI needs to read client-side state to make decisions:\n\n**Backend - Defining Client Tool:**\n\n```python\n@function_tool(name_override=\"get_selected_items\")\nasync def get_selected_items(ctx: AgentContext) -> dict:\n    \"\"\"Get the items currently selected on the canvas.\n\n    This is a CLIENT TOOL - executed in browser, result comes back.\n    \"\"\"\n    yield ProgressUpdateEvent(message=\"Reading selection...\")\n    pass  # Actual execution happens on client\n```\n\n**Frontend - Handling Client Tools:**\n\n```typescript\nconst chatkit = useChatKit({\n  api: { url: API_URL, domainKey: DOMAIN_KEY },\n\n  onClientTool: ({ name, params }) => {\n    switch (name) {\n      case \"get_selected_items\":\n        return { itemIds: selectedItemIds };\n\n      case \"get_current_viewport\":\n        return {\n          center: mapRef.current.getCenter(),\n          zoom: mapRef.current.getZoom(),\n        };\n\n      case \"get_form_data\":\n        return { values: formRef.current.getValues() };\n\n      default:\n        throw new Error(`Unknown client tool: ${name}`);\n    }\n  },\n});\n```\n\n---\n\n## Client Effects vs Client Tools\n\n| Type | Direction | Response Required | Use Case |\n|------|-----------|-------------------|----------|\n| **Client Effect** | Server \u2192 Client | No (fire-and-forget) | Update UI, show notifications |\n| **Client Tool** | Server \u2192 Client \u2192 Server | Yes (return value) | Get client state for AI decision |\n\n---\n\n## Common Patterns by Use Case\n\n### Interactive Map/Canvas\n\n```typescript\nonResponseStart: () => lockCanvas(),\nonResponseEnd: () => unlockCanvas(),\nonEffect: ({ name, data }) => {\n  if (name === \"add_marker\") addMarker(data);\n  if (name === \"pan_to\") panTo(data.location);\n},\nonClientTool: ({ name }) => {\n  if (name === \"get_selection\") return getSelectedItems();\n},\n```\n\n### Form-Based UI\n\n```typescript\nonResponseStart: () => setFormDisabled(true),\nonResponseEnd: () => setFormDisabled(false),\nonClientTool: ({ name }) => {\n  if (name === \"get_form_values\") return form.getValues();\n},\n```\n\n### Game/Simulation\n\n```typescript\nonResponseStart: () => pauseSimulation(),\nonResponseEnd: () => resumeSimulation(),\nonEffect: ({ name, data }) => {\n  if (name === \"update_entity\") updateEntity(data);\n  if (name === \"show_notification\") showToast(data.message);\n},\n```\n\n---\n\n## Thread Title Generation\n\nDynamically update thread title based on conversation:\n\n```python\nclass TitleAgent:\n    async def generate_title(self, first_message: str) -> str:\n        result = await Runner.run(\n            Agent(\n                name=\"TitleGenerator\",\n                instructions=\"Generate a 3-5 word title.\",\n                model=\"gpt-4o-mini\",  # Fast model\n            ),\n            input=f\"First message: {first_message}\",\n        )\n        return result.final_output\n\n# In ChatKitServer\nasync def respond(self, thread, item, context):\n    if not thread.title and item:\n        title = await self.title_agent.generate_title(item.content)\n        thread.title = title\n        await self.store.save_thread(thread, context)\n```\n\n---\n\n## Anti-Patterns\n\n1. **Not locking UI during response** - Leads to race conditions\n2. **Blocking in effects** - Effects should be fire-and-forget\n3. **Heavy computation in onEffect** - Use requestAnimationFrame for DOM updates\n4. **Missing error handling** - Always handle onError to unlock UI\n5. **Not persisting thread state** - Use onThreadChange to save context\n\n---\n\n## Verification\n\nRun: `python3 scripts/verify.py`\n\nExpected: `\u2713 streaming-llm-responses skill ready`\n\n## If Verification Fails\n\n1. Check: references/ folder has streaming-patterns.md\n2. **Stop and report** if still failing\n\n## References\n\n- [references/streaming-patterns.md](references/streaming-patterns.md) - Complete streaming configuration",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "streaming-llm-responses",
-    "description": "|"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

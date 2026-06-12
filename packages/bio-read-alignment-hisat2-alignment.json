@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009373",
   "name": "bio-read-alignment-hisat2-alignment",
   "slug": "bio-read-alignment-hisat2-alignment",
   "description": "Align RNA-seq reads with HISAT2, a memory-efficient splice-aware aligner. Use when STAR's memory requirements are too high or for general RNA-seq alignment.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: samtools 1.19+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# HISAT2 RNA-seq Alignment\n\n**\"Align RNA-seq reads with HISAT2\"** \u2192 Map RNA-seq reads to a reference genome with splice-aware alignment. Suitable for gene expression quantification workflows.\n- CLI: `hisat2 -x index -1 R1.fq -2 R2.fq | samtools sort -o aligned.bam`\n\n## Build Index\n\n```bash\n# Basic index (no annotation)\nhisat2-build -p 8 reference.fa hisat2_index\n\n# Index with splice sites and exons (recommended)\nhisat2_extract_splice_sites.py annotation.gtf > splice_sites.txt\nhisat2_extract_exons.py annotation.gtf > exons.txt\n\nhisat2-build -p 8 \\\n    --ss splice_sites.txt \\\n    --exon exons.txt \\\n    reference.fa hisat2_index\n```\n\n## Basic Alignment\n\n```bash\n# Paired-end reads\nhisat2 -p 8 -x hisat2_index \\\n    -1 reads_1.fq.gz -2 reads_2.fq.gz \\\n    -S aligned.sam\n\n# Single-end reads\nhisat2 -p 8 -x hisat2_index \\\n    -U reads.fq.gz \\\n    -S aligned.sam\n```\n\n## Direct to Sorted BAM\n\n```bash\n# Pipe to samtools\nhisat2 -p 8 -x hisat2_index \\\n    -1 r1.fq.gz -2 r2.fq.gz | \\\n    samtools sort -@ 4 -o aligned.sorted.bam -\n\nsamtools index aligned.sorted.bam\n```\n\n## Stranded Libraries\n\n```bash\n# Forward stranded (e.g., Ligation)\nhisat2 -p 8 -x hisat2_index \\\n    --rna-strandness FR \\\n    -1 r1.fq.gz -2 r2.fq.gz -S aligned.sam\n\n# Reverse stranded (e.g., dUTP, TruSeq - most common)\nhisat2 -p 8 -x hisat2_index \\\n    --rna-strandness RF \\\n    -1 r1.fq.gz -2 r2.fq.gz -S aligned.sam\n\n# Single-end stranded\nhisat2 -p 8 -x hisat2_index \\\n    --rna-strandness F \\    # or R for reverse\n    -U reads.fq.gz -S aligned.sam\n```\n\n## Novel Splice Junction Discovery\n\n```bash\n# Output novel splice junctions\nhisat2 -p 8 -x hisat2_index \\\n    --novel-splicesite-outfile novel_splices.txt \\\n    -1 r1.fq.gz -2 r2.fq.gz -S aligned.sam\n\n# Use known + novel junctions for subsequent alignments\nhisat2 -p 8 -x hisat2_index \\\n    --novel-splicesite-infile novel_splices.txt \\\n    -1 r1.fq.gz -2 r2.fq.gz -S aligned.sam\n```\n\n## Two-Pass Alignment (Manual)\n\n**Goal:** Improve splice junction sensitivity by discovering novel junctions across all samples in a first pass, then realigning with the combined junction set.\n\n**Approach:** Run HISAT2 on each sample to extract novel splice sites, merge and deduplicate junctions across samples, then realign all samples using the combined junction catalog.\n\n```bash\n# Pass 1: Discover junctions from all samples\nfor r1 in *_R1.fq.gz; do\n    r2=${r1/_R1/_R2}\n    base=$(basename $r1 _R1.fq.gz)\n    hisat2 -p 8 -x hisat2_index \\\n        --novel-splicesite-outfile ${base}_splices.txt \\\n        -1 $r1 -2 $r2 -S /dev/null\ndone\n\n# Combine and filter junctions\ncat *_splices.txt | sort -u > combined_splices.txt\n\n# Pass 2: Realign with all junctions\nfor r1 in *_R1.fq.gz; do\n    r2=${r1/_R1/_R2}\n    base=$(basename $r1 _R1.fq.gz)\n    hisat2 -p 8 -x hisat2_index \\\n        --novel-splicesite-infile combined_splices.txt \\\n        -1 $r1 -2 $r2 | \\\n        samtools sort -@ 4 -o ${base}.sorted.bam -\ndone\n```\n\n## Read Group Information\n\n```bash\nhisat2 -p 8 -x hisat2_index \\\n    --rg-id sample1 \\\n    --rg SM:sample1 \\\n    --rg PL:ILLUMINA \\\n    --rg LB:lib1 \\\n    -1 r1.fq.gz -2 r2.fq.gz -S aligned.sam\n```\n\n## Downstream Quantification\n\n```bash\n# Output name-sorted BAM for htseq-count\nhisat2 -p 8 -x hisat2_index -1 r1.fq.gz -2 r2.fq.gz | \\\n    samtools sort -n -@ 4 -o aligned.namesorted.bam -\n\n# Or coordinate-sorted for featureCounts\nhisat2 -p 8 -x hisat2_index -1 r1.fq.gz -2 r2.fq.gz | \\\n    samtools sort -@ 4 -o aligned.sorted.bam -\n```\n\n## Key Parameters\n\n| Parameter | Default | Description |\n|-----------|---------|-------------|\n| -p | 1 | Number of threads |\n| -x | - | Index basename |\n| --rna-strandness | unstranded | FR/RF/F/R |\n| --dta | off | Downstream transcriptome assembly |\n| --dta-cufflinks | off | For Cufflinks |\n| --min-intronlen | 20 | Minimum intron length |\n| --max-intronlen | 500000 | Maximum intron length |\n| -k | 5 | Max alignments to report |\n\n## For StringTie/Cufflinks\n\n```bash\n# Use --dta for StringTie\nhisat2 -p 8 -x hisat2_index \\\n    --dta \\\n    -1 r1.fq.gz -2 r2.fq.gz | \\\n    samtools sort -@ 4 -o aligned.sorted.bam -\n```\n\n## Alignment Summary\n\n```bash\n# HISAT2 prints summary to stderr\nhisat2 -p 8 -x hisat2_index -1 r1.fq.gz -2 r2.fq.gz -S aligned.sam 2> summary.txt\n```\n\nExample:\n```\n50000000 reads; of these:\n  50000000 (100.00%) were paired; of these:\n    2500000 (5.00%) aligned concordantly 0 times\n    45000000 (90.00%) aligned concordantly exactly 1 time\n    2500000 (5.00%) aligned concordantly >1 times\n95.00% overall alignment rate\n```\n\n## Memory Comparison\n\n| Aligner | Human Genome Memory |\n|---------|-------------------|\n| STAR | ~30GB |\n| HISAT2 | ~8GB |\n\n## Related Skills\n\n- read-alignment/star-alignment - Alternative with more features\n- rna-quantification/featurecounts-counting - Count aligned reads\n- rna-quantification/alignment-free-quant - Skip alignment entirely\n- differential-expression/deseq2-basics - Downstream DE analysis\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-read-alignment-hisat2-alignment",
-    "description": "Align RNA-seq reads with HISAT2, a memory-efficient splice-aware aligner. Use when STAR's memory requirements are too high or for general RNA-seq alignment.",
-    "tool_type": "cli",
-    "primary_tool": "HISAT2"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

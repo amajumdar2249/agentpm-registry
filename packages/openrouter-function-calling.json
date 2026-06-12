@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032802",
   "name": "openrouter-function-calling",
   "slug": "openrouter-function-calling",
   "description": "Implement function/tool calling with OpenRouter models. Use when building",
   "content": "# OpenRouter Function Calling\n\n## Overview\n\nOpenRouter supports OpenAI-compatible tool/function calling across multiple providers. Define tools as JSON Schema, send them with your request, and the model returns structured `tool_calls` instead of free text. This works with GPT-4o, Claude 3.5, Gemini, and other tool-capable models via the same API. The key difference from direct provider APIs: OpenRouter normalizes the tool calling interface, so the same code works across providers.\n\n## Basic Tool Calling\n\n```python\nimport os, json\nfrom openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"https://openrouter.ai/api/v1\",\n    api_key=os.environ[\"OPENROUTER_API_KEY\"],\n    default_headers={\"HTTP-Referer\": \"https://my-app.com\", \"X-Title\": \"my-app\"},\n)\n\n# Define tools with JSON Schema\ntools = [\n    {\n        \"type\": \"function\",\n        \"function\": {\n            \"name\": \"get_weather\",\n            \"description\": \"Get current weather for a location\",\n            \"parameters\": {\n                \"type\": \"object\",\n                \"properties\": {\n                    \"location\": {\"type\": \"string\", \"description\": \"City name\"},\n                    \"unit\": {\"type\": \"string\", \"enum\": [\"celsius\", \"fahrenheit\"]},\n                },\n                \"required\": [\"location\"],\n            },\n        },\n    },\n    {\n        \"type\": \"function\",\n        \"function\": {\n            \"name\": \"search_database\",\n            \"description\": \"Search the product database\",\n            \"parameters\": {\n                \"type\": \"object\",\n                \"properties\": {\n                    \"query\": {\"type\": \"string\"},\n                    \"limit\": {\"type\": \"integer\", \"default\": 10},\n                },\n                \"required\": [\"query\"],\n            },\n        },\n    },\n]\n\nresponse = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet\",  # Also works with openai/gpt-4o, etc.\n    messages=[{\"role\": \"user\", \"content\": \"What's the weather in Tokyo?\"}],\n    tools=tools,\n    tool_choice=\"auto\",  # \"auto\" | \"required\" | \"none\" | {\"type\":\"function\",\"function\":{\"name\":\"...\"}}\n    max_tokens=1024,\n)\n\nmessage = response.choices[0].message\nif message.tool_calls:\n    for tc in message.tool_calls:\n        print(f\"Function: {tc.function.name}\")\n        print(f\"Args: {json.loads(tc.function.arguments)}\")\n        # \u2192 Function: get_weather\n        # \u2192 Args: {\"location\": \"Tokyo\", \"unit\": \"celsius\"}\n```\n\n## Multi-Turn Tool Loop\n\n```python\ndef tool_loop(user_prompt: str, tools: list, model: str = \"openai/gpt-4o\", max_rounds: int = 5):\n    \"\"\"Execute tool calls in a loop until the model returns a text response.\"\"\"\n    messages = [{\"role\": \"user\", \"content\": user_prompt}]\n\n    for _ in range(max_rounds):\n        response = client.chat.completions.create(\n            model=model, messages=messages, tools=tools, max_tokens=1024,\n        )\n        msg = response.choices[0].message\n        messages.append(msg)  # Add assistant message (with tool_calls)\n\n        if not msg.tool_calls:\n            return msg.content  # Final text response\n\n        # Execute each tool call and feed results back\n        for tc in msg.tool_calls:\n            result = execute_tool(tc.function.name, json.loads(tc.function.arguments))\n            messages.append({\n                \"role\": \"tool\",\n                \"tool_call_id\": tc.id,\n                \"content\": json.dumps(result),\n            })\n\n    return \"Max tool rounds exceeded\"\n\ndef execute_tool(name: str, args: dict) -> dict:\n    \"\"\"Dispatch to actual function implementations.\"\"\"\n    TOOLS = {\n        \"get_weather\": lambda **kw: {\"temp\": 22, \"condition\": \"sunny\", \"location\": kw[\"location\"]},\n        \"search_database\": lambda **kw: {\"results\": [f\"Product matching '{kw['query']}'\"], \"count\": 1},\n    }\n    fn = TOOLS.get(name)\n    if not fn:\n        return {\"error\": f\"Unknown tool: {name}\"}\n    try:\n        return fn(**args)\n    except Exception as e:\n        return {\"error\": str(e)}\n\n# Usage\nresult = tool_loop(\"What's the weather in Tokyo and find me umbrella products?\", tools)\nprint(result)\n```\n\n## TypeScript Tool Calling\n\n```typescript\nimport OpenAI from \"openai\";\n\nconst client = new OpenAI({\n  baseURL: \"https://openrouter.ai/api/v1\",\n  apiKey: process.env.OPENROUTER_API_KEY,\n  defaultHeaders: { \"HTTP-Referer\": \"https://my-app.com\", \"X-Title\": \"my-app\" },\n});\n\nconst tools: OpenAI.ChatCompletionTool[] = [\n  {\n    type: \"function\",\n    function: {\n      name: \"calculate\",\n      description: \"Evaluate a math expression\",\n      parameters: {\n        type: \"object\",\n        properties: { expression: { type: \"string\" } },\n        required: [\"expression\"],\n      },\n    },\n  },\n];\n\nconst response = await client.chat.completions.create({\n  model: \"openai/gpt-4o\",\n  messages: [{ role: \"user\", content: \"What is 42 * 17 + 3?\" }],\n  tools,\n  tool_choice: \"auto\",\n  max_tokens: 512,\n});\n\nconst toolCalls = response.choices[0].message.tool_calls;\nif (toolCalls) {\n  for (const tc of toolCalls) {\n    const args = JSON.parse(tc.function.arguments);\n    console.log(`${tc.function.name}(${JSON.stringify(args)})`);\n  }\n}\n```\n\n## Structured Output (JSON Mode)\n\n```python\n# Force JSON output without tool calling (simpler for extraction tasks)\nresponse = client.chat.completions.create(\n    model=\"openai/gpt-4o\",\n    messages=[\n        {\"role\": \"system\", \"content\": \"Extract data as JSON with fields: name, email, company\"},\n        {\"role\": \"user\", \"content\": \"Contact Jane Smith at jane@acme.co, she works at Acme Corp\"},\n    ],\n    response_format={\"type\": \"json_object\"},\n    max_tokens=200,\n)\ndata = json.loads(response.choices[0].message.content)\n# \u2192 {\"name\": \"Jane Smith\", \"email\": \"jane@acme.co\", \"company\": \"Acme Corp\"}\n```\n\n## Model Compatibility\n\n| Model | Tool Calling | JSON Mode | Parallel Tools |\n|-------|-------------|-----------|----------------|\n| `openai/gpt-4o` | Yes | Yes | Yes |\n| `openai/gpt-4o-mini` | Yes | Yes | Yes |\n| `anthropic/claude-3.5-sonnet` | Yes | Via system prompt | Sequential |\n| `google/gemini-2.0-flash-001` | Yes | Yes | Yes |\n| `meta-llama/llama-3.1-70b-instruct` | Yes (varies) | Via prompt | No |\n\n## Error Handling\n\n| Error | Cause | Fix |\n|-------|-------|-----|\n| `tool_calls` is null | Model chose not to call tools | Use `tool_choice: \"required\"` to force tool use |\n| JSON parse error on arguments | Model generated malformed JSON | Wrap in try/catch; retry or use more capable model |\n| 400 invalid tool schema | Unsupported JSON Schema types | Stick to basic types (string, number, boolean, object, array) |\n| Tool called with wrong args | Schema description unclear | Improve parameter descriptions; add examples in description |\n\n## Enterprise Considerations\n\n- Not all models support tool calling -- check model capabilities via `/api/v1/models` before sending tools\n- Use `tool_choice: \"required\"` when you must get a tool call (e.g., extraction pipelines)\n- Validate tool arguments server-side before executing -- models can hallucinate argument values\n- Set `max_tokens` to prevent expensive completion when model decides not to use tools\n- Use fallback chain with tool-capable models only (see openrouter-fallback-config)\n- Log tool call names and arguments for audit trails (redact sensitive args)\n\n## References\n\n- [Examples](${CLAUDE_SKILL_DIR}/references/examples.md) | [Errors](${CLAUDE_SKILL_DIR}/references/errors.md)\n- [Tool/Function Calling](https://openrouter.ai/docs/features/tool-calling) | [API Reference](https://openrouter.ai/docs/api/reference/overview)\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "openrouter-function-calling",
-    "description": "Implement function/tool calling with OpenRouter models. Use when building",
-    "agents, structured output, or tool-augmented LLM workflows. Triggers": "openrouter",
-    "allowed-tools": "Read, Write, Edit, Bash, Grep",
-    "version": "2.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

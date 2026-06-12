@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032881",
   "name": "perplexity-debug-bundle",
   "slug": "perplexity-debug-bundle",
   "description": "Collect Perplexity debug evidence for support tickets and troubleshooting.",
   "content": "# Perplexity Debug Bundle\n\n## Current State\n\n!`node --version 2>/dev/null || echo 'N/A'`\n!`python3 --version 2>/dev/null || echo 'N/A'`\n!`echo \"PERPLEXITY_API_KEY: ${PERPLEXITY_API_KEY:+SET (${#PERPLEXITY_API_KEY} chars)}${PERPLEXITY_API_KEY:-NOT SET}\"`\n\n## Overview\n\nCollect all diagnostic information needed to troubleshoot Perplexity Sonar API issues. Generates a redacted bundle safe for sharing with support or teammates.\n\n## Prerequisites\n\n- `PERPLEXITY_API_KEY` environment variable\n- `curl` and `tar` available\n- Permission to collect environment info\n\n## Instructions\n\n### Step 1: Create Debug Bundle Script\n\n```bash\n#!/bin/bash\nset -euo pipefail\n# perplexity-debug-bundle.sh\n\nBUNDLE_DIR=\"perplexity-debug-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE_DIR\"\n\necho \"=== Perplexity Debug Bundle ===\" > \"$BUNDLE_DIR/summary.txt\"\necho \"Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\n```\n\n### Step 2: Collect Environment Info\n\n```bash\nset -euo pipefail\ncat >> \"$BUNDLE_DIR/summary.txt\" << 'EOF'\n--- Environment ---\nEOF\n\necho \"Node: $(node --version 2>/dev/null || echo 'not installed')\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"Python: $(python3 --version 2>/dev/null || echo 'not installed')\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"OS: $(uname -sr)\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"OpenAI SDK (npm): $(npm list openai 2>/dev/null | grep openai || echo 'not found')\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"OpenAI SDK (pip): $(pip show openai 2>/dev/null | grep Version || echo 'not found')\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"API Key: ${PERPLEXITY_API_KEY:+SET (prefix: ${PERPLEXITY_API_KEY:0:5}...)}${PERPLEXITY_API_KEY:-NOT SET}\" >> \"$BUNDLE_DIR/summary.txt\"\n```\n\n### Step 3: Test API Connectivity\n\n```bash\nset -euo pipefail\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"--- API Connectivity ---\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# DNS resolution\necho -n \"DNS: \" >> \"$BUNDLE_DIR/summary.txt\"\ndig +short api.perplexity.ai >> \"$BUNDLE_DIR/summary.txt\" 2>&1\n\n# API response test\necho -n \"API Health: \" >> \"$BUNDLE_DIR/summary.txt\"\ncurl -s -w \"HTTP %{http_code} in %{time_total}s\" \\\n  -o \"$BUNDLE_DIR/api-response.json\" \\\n  -H \"Authorization: Bearer ${PERPLEXITY_API_KEY}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"model\":\"sonar\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":5}' \\\n  https://api.perplexity.ai/chat/completions >> \"$BUNDLE_DIR/summary.txt\"\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# Model test\necho -n \"Model (sonar): \" >> \"$BUNDLE_DIR/summary.txt\"\ncurl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"Authorization: Bearer ${PERPLEXITY_API_KEY}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"model\":\"sonar\",\"messages\":[{\"role\":\"user\",\"content\":\"test\"}],\"max_tokens\":5}' \\\n  https://api.perplexity.ai/chat/completions >> \"$BUNDLE_DIR/summary.txt\"\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\n\necho -n \"Model (sonar-pro): \" >> \"$BUNDLE_DIR/summary.txt\"\ncurl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"Authorization: Bearer ${PERPLEXITY_API_KEY}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"model\":\"sonar-pro\",\"messages\":[{\"role\":\"user\",\"content\":\"test\"}],\"max_tokens\":5}' \\\n  https://api.perplexity.ai/chat/completions >> \"$BUNDLE_DIR/summary.txt\"\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\n```\n\n### Step 4: Collect Redacted Config\n\n```bash\nset -euo pipefail\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"--- Configuration (redacted) ---\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# Env vars (redacted)\nenv | grep -i \"PERPLEXITY\\|PPLX\" | sed 's/=.*/=***REDACTED***/' >> \"$BUNDLE_DIR/summary.txt\" 2>/dev/null\n\n# .env file (redacted)\nif [ -f .env ]; then\n  cat .env | sed 's/=.*/=***REDACTED***/' >> \"$BUNDLE_DIR/config-redacted.txt\"\nfi\n```\n\n### Step 5: Package Bundle\n\n```bash\nset -euo pipefail\ntar -czf \"$BUNDLE_DIR.tar.gz\" \"$BUNDLE_DIR\"\nrm -rf \"$BUNDLE_DIR\"\necho \"Bundle created: $BUNDLE_DIR.tar.gz\"\necho \"\"\necho \"REVIEW BEFORE SHARING \u2014 verify no secrets leaked\"\n```\n\n## Output\n\n- `perplexity-debug-YYYYMMDD-HHMMSS.tar.gz` containing:\n  - `summary.txt` \u2014 Environment, SDK versions, API connectivity results\n  - `api-response.json` \u2014 Raw API response (verify no sensitive query data)\n  - `config-redacted.txt` \u2014 Configuration with values masked\n\n## Sensitive Data Checklist\n\n**ALWAYS REDACT:** API keys, tokens, passwords, PII, internal URLs.\n**SAFE TO INCLUDE:** Error messages, HTTP status codes, SDK versions, latency measurements, model names.\n\n## Error Handling\n\n| Item | Purpose | Included |\n|------|---------|----------|\n| SDK versions | Compatibility check | Yes |\n| DNS resolution | Network routing | Yes |\n| HTTP status codes | API availability | Yes |\n| Response latency | Performance baseline | Yes |\n| Model access | Key permissions | Yes |\n\n## Resources\n\n- [Perplexity Community Forum](https://community.perplexity.ai)\n- [Perplexity API Docs](https://docs.perplexity.ai)\n\n## Next Steps\n\nFor rate limit issues, see `perplexity-rate-limits`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "perplexity-debug-bundle",
-    "description": "Collect Perplexity debug evidence for support tickets and troubleshooting.",
-    "allowed-tools": "Read, Bash(grep:*), Bash(curl:*), Bash(tar:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

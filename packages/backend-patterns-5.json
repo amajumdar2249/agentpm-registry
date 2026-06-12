@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000011401",
   "name": "backend-patterns",
   "slug": "backend-patterns-5",
   "description": ">",
   "content": "\n# backend-patterns - \u30d0\u30c3\u30af\u30a8\u30f3\u30c9\u30d1\u30bf\u30fc\u30f3\u96c6\n\n\u30d0\u30c3\u30af\u30a8\u30f3\u30c9\u30b3\u30fc\u30c9\u898f\u7d04\u3068\u30d1\u30bf\u30fc\u30f3\u3002\n\n## \u4f7f\u3044\u65b9\n\n```\n\u65b0\u3057\u3044API\u30eb\u30fc\u30c8\u3092\u4f5c\u308b\u6642\u3001\u3053\u306e\u30b9\u30ad\u30eb\u3092\u53c2\u7167\n```\n\n---\n\n## 1. API\u30eb\u30fc\u30c8\u69cb\u9020\n\n### \u8a8d\u8a3c\u30d1\u30bf\u30fc\u30f3\uff08Next.js\u4f8b\uff09\n\n```typescript\n// \u8a8d\u8a3c\u30df\u30c9\u30eb\u30a6\u30a7\u30a2\u3092\u4f7f\u7528\nimport { withAuth } from '@/lib/middleware/with-auth';\nimport { apiSuccess, apiError } from '@/lib/api-response';\n\nexport const GET = withAuth(async ({ userId, request }) => {\n  const data = await repository.findByUserId(userId);\n  return apiSuccess({ data });\n});\n\nexport const POST = withAuth(async ({ userId, request }) => {\n  const body = await request.json();\n  // \u30d0\u30ea\u30c7\u30fc\u30b7\u30e7\u30f3 & \u51e6\u7406\n  return apiSuccess({ created: result });\n});\n```\n\n### Express.js\u4f8b\n\n```typescript\nimport { Router } from 'express';\nimport { authenticate } from '@/middleware/auth';\nimport { validate } from '@/middleware/validate';\n\nconst router = Router();\n\nrouter.get('/', authenticate, async (req, res) => {\n  const data = await repository.findByUserId(req.user.id);\n  res.json({ success: true, data });\n});\n\nrouter.post('/', authenticate, validate(createSchema), async (req, res) => {\n  const result = await repository.create(req.body);\n  res.status(201).json({ success: true, data: result });\n});\n```\n\n---\n\n## 2. \u30ec\u30b9\u30dd\u30f3\u30b9\u5f62\u5f0f\n\n### \u7d71\u4e00\u30ec\u30b9\u30dd\u30f3\u30b9\n\n```typescript\n// lib/api-response.ts\nexport function apiSuccess<T>(data: T, options?: { status?: number }) {\n  return Response.json(\n    { success: true, data, timestamp: new Date().toISOString() },\n    { status: options?.status ?? 200 }\n  );\n}\n\nexport function apiError(message: string, options?: { status?: number; code?: string }) {\n  return Response.json(\n    { success: false, error: message, code: options?.code, timestamp: new Date().toISOString() },\n    { status: options?.status ?? 400 }\n  );\n}\n```\n\n### \u30ec\u30b9\u30dd\u30f3\u30b9\u5f62\u5f0f\n\n```json\n// \u6210\u529f\n{\n  \"success\": true,\n  \"data\": { ... },\n  \"timestamp\": \"2026-01-19T12:00:00.000Z\"\n}\n\n// \u30a8\u30e9\u30fc\n{\n  \"success\": false,\n  \"error\": \"Error message\",\n  \"code\": \"ERROR_CODE\",\n  \"timestamp\": \"2026-01-19T12:00:00.000Z\"\n}\n```\n\n---\n\n## 3. \u30d0\u30ea\u30c7\u30fc\u30b7\u30e7\u30f3\n\n### Zod\u30b9\u30ad\u30fc\u30de\n\n```typescript\nimport { z } from 'zod';\n\nconst createUserSchema = z.object({\n  email: z.string().email('Invalid email'),\n  name: z.string().min(1, 'Name is required').max(100),\n  role: z.enum(['user', 'admin']).optional(),\n});\n\n// API\u30eb\u30fc\u30c8\u3067\u4f7f\u7528\nconst validation = createUserSchema.safeParse(body);\nif (!validation.success) {\n  return apiError('Invalid input', { status: 400 });\n}\nconst { email, name, role } = validation.data;\n```\n\n### \u5171\u901a\u30b9\u30ad\u30fc\u30de\n\n```typescript\n// UUID\nconst idSchema = z.string().uuid('Invalid ID format');\n\n// \u30da\u30fc\u30b8\u30cd\u30fc\u30b7\u30e7\u30f3\nconst paginationSchema = z.object({\n  page: z.coerce.number().min(1).default(1),\n  limit: z.coerce.number().min(1).max(100).default(20),\n});\n```\n\n---\n\n## 4. Repository \u30d1\u30bf\u30fc\u30f3\n\n### \u57fa\u672c\u69cb\u9020\n\n```typescript\n// lib/repositories/user.repository.ts\nimport { db } from '@/db';\nimport { users } from '@/db/schema';\nimport { eq } from 'drizzle-orm';\n\nexport interface CreateUserInput {\n  email: string;\n  name: string;\n}\n\nexport const userRepository = {\n  async create(input: CreateUserInput) {\n    const [result] = await db.insert(users).values(input).returning();\n    return result;\n  },\n\n  async findById(id: string) {\n    const [result] = await db\n      .select()\n      .from(users)\n      .where(eq(users.id, id))\n      .limit(1);\n    return result ?? null;\n  },\n\n  async findByEmail(email: string) {\n    const [result] = await db\n      .select()\n      .from(users)\n      .where(eq(users.email, email))\n      .limit(1);\n    return result ?? null;\n  },\n\n  async update(id: string, input: Partial<CreateUserInput>) {\n    const [result] = await db\n      .update(users)\n      .set({ ...input, updatedAt: new Date() })\n      .where(eq(users.id, id))\n      .returning();\n    return result;\n  },\n\n  async delete(id: string) {\n    await db.delete(users).where(eq(users.id, id));\n  },\n};\n```\n\n---\n\n## 5. \u30a8\u30e9\u30fc\u30cf\u30f3\u30c9\u30ea\u30f3\u30b0\n\n```typescript\nexport const POST = withAuth(async ({ userId, request }) => {\n  try {\n    const body = await request.json();\n    const result = await repository.create(body);\n    return apiSuccess({ result });\n  } catch (error) {\n    console.error('[API] Error:', error);\n\n    if (error instanceof z.ZodError) {\n      return apiError('Validation failed', { status: 400 });\n    }\n\n    if (error instanceof Error && error.message.includes('unique')) {\n      return apiError('Already exists', { status: 409 });\n    }\n\n    return apiError('Internal server error', { status: 500 });\n  }\n});\n```\n\n---\n\n## 6. \u30c1\u30a7\u30c3\u30af\u30ea\u30b9\u30c8\n\n\u65b0\u3057\u3044API\u30eb\u30fc\u30c8\u4f5c\u6210\u6642:\n\n- [ ] \u8a8d\u8a3c\u30df\u30c9\u30eb\u30a6\u30a7\u30a2\u9069\u7528\n- [ ] \u30ea\u30af\u30a8\u30b9\u30c8\u30d0\u30ea\u30c7\u30fc\u30b7\u30e7\u30f3\uff08Zod\uff09\n- [ ] \u7d71\u4e00\u30ec\u30b9\u30dd\u30f3\u30b9\u5f62\u5f0f\u4f7f\u7528\n- [ ] \u30a8\u30e9\u30fc\u30cf\u30f3\u30c9\u30ea\u30f3\u30b0\uff08try-catch\uff09\n- [ ] \u8a8d\u53ef\u30c1\u30a7\u30c3\u30af\uff08\u30ea\u30bd\u30fc\u30b9\u6240\u6709\u8005\u78ba\u8a8d\uff09\n- [ ] \u30ed\u30b0\u51fa\u529b\n\n---\n\n## 7. \u30a2\u30f3\u30c1\u30d1\u30bf\u30fc\u30f3\n\n```typescript\n// \u274c \u8a8d\u8a3c\u306a\u3057\nexport async function GET(request: Request) {\n  const data = await db.select().from(users);\n  return Response.json(data);\n}\n\n// \u274c \u30d0\u30ea\u30c7\u30fc\u30b7\u30e7\u30f3\u306a\u3057\nconst { email } = await request.json();\nawait db.insert(users).values({ email });\n\n// \u274c \u30a8\u30e9\u30fc\u63e1\u308a\u3064\u3076\u3057\ntry {\n  await riskyOperation();\n} catch (e) {\n  // \u4f55\u3082\u3057\u306a\u3044\n}\n```\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "backend-patterns",
-    "description": ">",
-    "\u4f7f\u7528\u30bf\u30a4\u30df\u30f3\u30b0": "(1) \u65b0\u3057\u3044API\u30eb\u30fc\u30c8\u4f5c\u6210\u6642 (2) Repository\u5b9f\u88c5\u6642 (3) \u30d0\u30ea\u30c7\u30fc\u30b7\u30e7\u30f3\u8a2d\u8a08\u6642",
-    "\u30c8\u30ea\u30ac\u30fc\u4f8b": "\u300cAPI\u30eb\u30fc\u30c8\u3092\u4f5c\u3063\u3066\u300d\u300cRepository\u30d1\u30bf\u30fc\u30f3\u3067\u300d\u300c\u30d0\u30c3\u30af\u30a8\u30f3\u30c9\u306e\u30d1\u30bf\u30fc\u30f3\u300d"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

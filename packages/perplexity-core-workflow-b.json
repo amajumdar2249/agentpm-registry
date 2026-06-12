@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032878",
   "name": "perplexity-core-workflow-b",
   "slug": "perplexity-core-workflow-b",
   "description": "Execute Perplexity multi-turn research sessions and batch query pipelines.",
   "content": "# Perplexity Core Workflow B: Multi-Query Research\n\n## Overview\n\nMulti-turn research workflow using Perplexity Sonar API. Decomposes a broad topic into focused sub-queries, runs them with context continuity, deduplicates citations, and synthesizes a structured research document. Use `sonar` for fast passes and `sonar-pro` for deep dives.\n\n## Prerequisites\n\n- Completed `perplexity-install-auth` setup\n- Familiarity with `perplexity-core-workflow-a`\n- `PERPLEXITY_API_KEY` set\n\n## Instructions\n\n### Step 1: Conversational Research Session\n\n```typescript\nimport OpenAI from \"openai\";\n\nconst perplexity = new OpenAI({\n  apiKey: process.env.PERPLEXITY_API_KEY,\n  baseURL: \"https://api.perplexity.ai\",\n});\n\ntype Message = OpenAI.ChatCompletionMessageParam;\n\nclass ResearchSession {\n  private messages: Message[] = [];\n  private allCitations: Set<string> = new Set();\n\n  constructor(systemPrompt: string = \"You are a research assistant. Provide thorough, cited answers.\") {\n    this.messages.push({ role: \"system\", content: systemPrompt });\n  }\n\n  async ask(question: string, model: \"sonar\" | \"sonar-pro\" = \"sonar\"): Promise<{\n    answer: string;\n    citations: string[];\n  }> {\n    this.messages.push({ role: \"user\", content: question });\n\n    const response = await perplexity.chat.completions.create({\n      model,\n      messages: this.messages,\n    } as any);\n\n    const answer = response.choices[0].message.content || \"\";\n    const citations = (response as any).citations || [];\n\n    // Maintain conversation context\n    this.messages.push({ role: \"assistant\", content: answer });\n\n    // Accumulate all citations across the session\n    citations.forEach((url: string) => this.allCitations.add(url));\n\n    return { answer, citations };\n  }\n\n  getAllCitations(): string[] {\n    return [...this.allCitations];\n  }\n\n  // Keep context manageable (Perplexity searches per turn)\n  trimHistory(keepLast: number = 6) {\n    const system = this.messages[0];\n    const recent = this.messages.slice(-(keepLast * 2));\n    this.messages = [system, ...recent];\n  }\n}\n```\n\n### Step 2: Batch Query Pipeline\n\n```typescript\ninterface ResearchPlan {\n  topic: string;\n  questions: string[];\n}\n\ninterface ResearchReport {\n  topic: string;\n  sections: Array<{ question: string; answer: string; citations: string[] }>;\n  allCitations: string[];\n  totalTokens: number;\n}\n\nasync function conductResearch(plan: ResearchPlan): Promise<ResearchReport> {\n  const sections: ResearchReport[\"sections\"] = [];\n  const allCitations = new Set<string>();\n  let totalTokens = 0;\n\n  for (const question of plan.questions) {\n    const response = await perplexity.chat.completions.create({\n      model: \"sonar-pro\",  // deeper research for each sub-question\n      messages: [\n        { role: \"system\", content: `Research context: ${plan.topic}` },\n        { role: \"user\", content: question },\n      ],\n    } as any);\n\n    const answer = response.choices[0].message.content || \"\";\n    const citations = (response as any).citations || [];\n\n    sections.push({ question, answer, citations });\n    citations.forEach((url: string) => allCitations.add(url));\n    totalTokens += response.usage?.total_tokens || 0;\n\n    // Rate limit protection: 50 RPM for most tiers\n    await new Promise((r) => setTimeout(r, 1500));\n  }\n\n  return {\n    topic: plan.topic,\n    sections,\n    allCitations: [...allCitations],\n    totalTokens,\n  };\n}\n```\n\n### Step 3: Topic Decomposition\n\n```typescript\nasync function decomposeTopic(topic: string): Promise<string[]> {\n  const response = await perplexity.chat.completions.create({\n    model: \"sonar\",\n    messages: [\n      {\n        role: \"system\",\n        content: \"Break this research topic into 4-6 specific, focused questions. Return one question per line, no numbering.\",\n      },\n      { role: \"user\", content: topic },\n    ],\n    max_tokens: 500,\n  });\n\n  return (response.choices[0].message.content || \"\")\n    .split(\"\\n\")\n    .map((q) => q.trim())\n    .filter((q) => q.length > 10);\n}\n```\n\n### Step 4: Compile Research Report\n\n```typescript\nfunction compileReport(report: ResearchReport): string {\n  let md = `# Research: ${report.topic}\\n\\n`;\n\n  for (const section of report.sections) {\n    md += `## ${section.question}\\n\\n`;\n    md += `${section.answer}\\n\\n`;\n  }\n\n  md += `## Bibliography\\n\\n`;\n  report.allCitations.forEach((url, i) => {\n    md += `${i + 1}. ${url}\\n`;\n  });\n\n  md += `\\n---\\n`;\n  md += `*${report.sections.length} queries | ${report.allCitations.length} unique sources | ${report.totalTokens} tokens*\\n`;\n\n  return md;\n}\n```\n\n### Step 5: Full Pipeline\n\n```typescript\nasync function researchTopic(topic: string): Promise<string> {\n  console.log(`Decomposing: ${topic}`);\n  const questions = await decomposeTopic(topic);\n  console.log(`Generated ${questions.length} sub-questions`);\n\n  const report = await conductResearch({ topic, questions });\n  console.log(`Found ${report.allCitations.length} unique sources`);\n\n  return compileReport(report);\n}\n\n// Usage\nconst markdown = await researchTopic(\"Impact of AI on drug discovery in 2025\");\nconsole.log(markdown);\n```\n\n### Step 6: Python Multi-Query Research\n\n```python\nimport asyncio, os\nfrom openai import OpenAI\n\nclient = OpenAI(api_key=os.environ[\"PERPLEXITY_API_KEY\"], base_url=\"https://api.perplexity.ai\")\n\ndef research_topic(topic: str, questions: list[str]) -> dict:\n    sections = []\n    all_citations = set()\n\n    for q in questions:\n        r = client.chat.completions.create(\n            model=\"sonar-pro\",\n            messages=[\n                {\"role\": \"system\", \"content\": f\"Research context: {topic}\"},\n                {\"role\": \"user\", \"content\": q},\n            ],\n        )\n        raw = r.model_dump()\n        citations = raw.get(\"citations\", [])\n        sections.append({\"question\": q, \"answer\": r.choices[0].message.content, \"citations\": citations})\n        all_citations.update(citations)\n\n    return {\"topic\": topic, \"sections\": sections, \"citations\": list(all_citations)}\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `429 Too Many Requests` | Batch queries too fast | Add 1-2s delay between queries |\n| Context overflow | Too many conversation turns | Call `trimHistory()` to keep last 6 turns |\n| Contradictory answers | Different sources disagree | Flag contradictions for manual review |\n| High cost | Using sonar-pro for all queries | Use sonar for decomposition, sonar-pro for deep dives |\n\n## Output\n\n- Structured research document with multiple sections\n- Consolidated bibliography of all cited sources\n- Token usage for cost tracking\n- Conversation session with context continuity\n\n## Resources\n\n- [Perplexity API Reference](https://docs.perplexity.ai/api-reference/chat-completions-post)\n- [Model Selection Guide](https://docs.perplexity.ai/getting-started/models)\n\n## Next Steps\n\nFor common errors, see `perplexity-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "perplexity-core-workflow-b",
-    "description": "Execute Perplexity multi-turn research sessions and batch query pipelines.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

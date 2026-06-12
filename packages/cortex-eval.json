@@ -1,15 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000030648",
   "name": "cortex-eval",
   "slug": "cortex-eval",
   "description": "Evaluate model performance \u2014 check for accuracy drops, data drift, and error patterns. Use when asked about \"model accuracy dropped\", \"evaluate the model\", \"check for drift\", or \"model performance\".",
   "content": "\n# Evaluate Model Performance\n\nYou are Cortex \u2014 the ML/AI engineer on the Engineering Team.\n\nFollow the output format defined in docs/output-kit.md \u2014 40-line CLI max, box-drawing skeleton, unified severity indicators, compressed prose.\n\n## Steps\n\n### Step 0: Run Static Analysis\n\nBefore any LLM-based evaluation, run the static analysis scanner to find LLM usage anti-patterns and prompt quality issues:\n\n```bash\n# From the project root (or team/cortex/scripts/)\npython team/cortex/scripts/cortex_agent/eval_scan.py . --out .reports/cortex-eval-latest.json\n```\n\nOr with selective scans:\n\n```bash\n# LLM usage only (finds missing error handling, unbounded costs, hardcoded models)\npython team/cortex/scripts/cortex_agent/eval_scan.py . --skip-prompts\n\n# Prompt evaluation only (finds injection risks, length issues, missing format instructions)\npython team/cortex/scripts/cortex_agent/eval_scan.py . --skip-usage\n```\n\nReview the JSON report at `.reports/cortex-eval-<ts>.json`. Exit code 2 means HIGH or CRITICAL findings exist \u2014 these should be addressed before continuing.\n\n### Step 1: Detect ML Environment\n\nScan the project to understand the ML stack and current model:\n\n```bash\n# Check for model artifacts, training scripts, metrics logs\nls -la model* *.pkl *.joblib *.onnx *.pt *.h5 2>/dev/null\nls -la train* evaluate* metrics* 2>/dev/null\ncat requirements.txt 2>/dev/null | grep -iE \"sklearn|torch|tensorflow|xgboost|lightgbm|mlflow|wandb\"\ncat pyproject.toml 2>/dev/null | grep -iE \"sklearn|torch|tensorflow|xgboost|lightgbm|mlflow|wandb\"\n\n# Check for experiment tracking\nls -la mlruns/ wandb/ .neptune/ 2>/dev/null\ngrep -rl \"mlflow\\|wandb\\|neptune\" --include=\"*.py\" . 2>/dev/null | head -10\n\n# Check for monitoring/metrics\nls -la metrics/ logs/ monitoring/ 2>/dev/null\n```\n\nNote the ML framework, model type, experiment tracking system, and any existing metrics. If nothing is detected, ask the user.\n\n### Step 2: Current Model Metrics vs Baseline\n\nEstablish where things stand:\n\n- **Find the baseline metrics** \u2014 check experiment tracking (MLflow, W&B), saved metrics files, or training logs\n- **Compute current metrics** \u2014 run evaluation on the latest data with the deployed model\n- **Compare:** is the model performing worse than baseline? By how much?\n- **Segment the comparison** \u2014 overall metrics can hide problems (model is fine on segment A, broken on segment B)\n\nReport:\n\n```\n| Metric    | Baseline | Current | Delta  |\n|-----------|----------|---------|--------|\n| [metric]  | [value]  | [value] | [+/-]  |\n```\n\n### Step 3: Data Distribution Shift (Feature Drift)\n\nCheck if the input data has changed:\n\n- **Feature distributions:** compare training data distributions vs recent production data\n- **Statistical tests:** KS test, PSI (Population Stability Index), or simple histogram comparison\n- **New categories:** are there categorical values in production that weren't in training?\n- **Missing data patterns:** has the rate of nulls/missing values changed?\n- **Volume changes:** is the prediction volume significantly different?\n\nFlag any feature where the distribution has shifted significantly.\n\n### Step 4: Prediction Distribution Changes\n\nCheck if the model's outputs have changed:\n\n- **Prediction distribution:** compare historical prediction distribution vs recent\n- **Confidence distribution:** is the model becoming less confident? More confident on wrong answers?\n- **Class balance shift:** for classification, has the predicted class balance changed?\n- **Output range shift:** for regression, has the output range moved?\n\nIf predictions shifted but features didn't, the problem is likely in the model or feature pipeline, not the data.\n\n### Step 5: Error Analysis\n\nDig into what the model is getting wrong:\n\n- **Worst predictions:** find the examples with the largest errors or highest-confidence wrong answers\n- **Error patterns:** group errors by feature segments \u2014 is the model failing on a specific cohort?\n- **New error patterns:** what is the model getting wrong now that it wasn't before?\n- **Confusion matrix diff:** for classification, compare current vs baseline confusion matrix\n- **Feature importance shift:** have the most important features changed?\n\n### Step 6: Identify Root Cause\n\nBased on the evidence from Steps 1-4, determine the root cause:\n\n- **Bad data:** new data source, schema change, data pipeline bug, missing values\n- **Concept drift:** the real-world relationship between features and target has changed\n- **Feature pipeline change:** a feature is being computed differently in serving vs training\n- **Training/serving skew:** features look different at training time vs inference time\n- **Upstream dependency change:** a service or data source the model depends on changed\n- **Volume/distribution shift:** the model is seeing a population it wasn't trained on\n\n### Step 7: Recommend Fix\n\nBased on root cause, recommend the appropriate fix:\n\n- **Bad data:** fix the data pipeline, backfill, retrain on clean data\n- **Concept drift:** retrain on recent data, consider online learning or more frequent retraining\n- **Feature pipeline bug:** fix the pipeline, verify training/serving parity, retrain if contaminated\n- **Training/serving skew:** align pipelines, add integration tests between train and serve\n- **Model rollback:** if the current model is worse and the previous version was fine, rollback while investigating\n\nPresent a summary:\n\n```\n## Model Evaluation Report\n\n**Model:** [name/version] | **Status:** [healthy/degraded/broken]\n\n### Metrics Comparison\n| Metric | Baseline | Current | Delta |\n|--------|----------|---------|-------|\n| [metric] | [value] | [value] | [+/-] |\n\n### Root Cause\n[One-line root cause]\n\n### Evidence\n- [Finding 1]\n- [Finding 2]\n- [Finding 3]\n\n### Recommended Fix\n1. [Immediate action]\n2. [Follow-up action]\n3. [Prevention measure]\n\n### Drift Summary\n- Feature drift: [none/low/moderate/severe]\n- Prediction drift: [none/low/moderate/severe]\n- Error pattern: [description]\n```\n\n## Delivery\n\nIf output exceeds the 40-line CLI budget, invoke `/atlas-report` with the full findings. The HTML report is the output. CLI is the receipt \u2014 box header, one-line verdict, top 3 findings, and the report path. Never dump analysis to CLI.\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "cortex-eval",
-    "description": "Evaluate model performance \u2014 check for accuracy drops, data drift, and error patterns. Use when asked about \"model accuracy dropped\", \"evaluate the model\", \"check for drift\", or \"model performance\".",
-    "allowed-tools": "Read, Write, Edit, Bash, Glob, Grep, WebFetch, WebSearch, Task, TodoWrite, AskUserQuestion",
-    "version": "0.9.8",
-    "author": "tonone-ai <hello@tonone.ai>",
-    "license": "MIT"
+  "author": "tonone-ai <hello@tonone.ai>",
+  "version": "0.9.8",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

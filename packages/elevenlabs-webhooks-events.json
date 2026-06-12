@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031830",
   "name": "elevenlabs-webhooks-events",
   "slug": "elevenlabs-webhooks-events",
   "description": "Implement ElevenLabs webhook HMAC signature verification and event handling.",
   "content": "# ElevenLabs Webhooks & Events\n\n## Overview\n\nElevenLabs webhooks send HTTP POST notifications when async operations complete. Supported event types include transcription completion, post-call data from Conversational AI agents, and call initiation failures. Webhooks use HMAC-SHA256 signatures for verification.\n\n## Prerequisites\n\n- ElevenLabs account (webhooks configured in Settings > Webhooks)\n- HTTPS endpoint accessible from the internet\n- Webhook secret (generated during webhook creation in dashboard)\n\n## Instructions\n\n### Step 1: Webhook Event Types\n\n| Event Type | Payload | When Triggered |\n|------------|---------|----------------|\n| `post_call_transcription` | Full conversation transcript, analysis, metadata | After Conversational AI call ends |\n| `post_call_audio` | Base64-encoded call audio, minimal metadata | After call ends (if audio recording enabled) |\n| `call_initiation_failure` | Failure reason, metadata | When an outbound call fails to connect |\n| `speech_to_text.completed` | Transcription result, word timestamps | Async STT job completes |\n\n### Step 2: Webhook Setup\n\n```bash\n# Create webhook in ElevenLabs dashboard:\n# Settings > Webhooks > Create Webhook\n# - URL: https://your-app.com/webhooks/elevenlabs\n# - Select event types to subscribe to\n# - Copy the generated HMAC secret\n```\n\n### Step 3: HMAC Signature Verification\n\n```typescript\n// src/elevenlabs/webhook-verify.ts\nimport crypto from \"crypto\";\n\n/**\n * Verify the ElevenLabs-Signature header using HMAC-SHA256.\n *\n * Header format: t=<unix_timestamp>,v1=<hex_signature>\n * Signed payload: \"<timestamp>.<raw_body>\"\n */\nexport function verifyWebhookSignature(\n  rawBody: string | Buffer,\n  signatureHeader: string,\n  secret: string\n): { valid: boolean; reason?: string } {\n  if (!signatureHeader || !secret) {\n    return { valid: false, reason: \"Missing signature header or secret\" };\n  }\n\n  // Parse header: t=1234567890,v1=abcdef...\n  const parts = new Map(\n    signatureHeader.split(\",\").map(p => {\n      const [key, ...val] = p.split(\"=\");\n      return [key, val.join(\"=\")] as [string, string];\n    })\n  );\n\n  const timestamp = parts.get(\"t\");\n  const signature = parts.get(\"v1\");\n\n  if (!timestamp || !signature) {\n    return { valid: false, reason: \"Malformed signature header\" };\n  }\n\n  // Replay protection: reject if older than 5 minutes\n  const age = Math.floor(Date.now() / 1000) - parseInt(timestamp);\n  if (age > 300) {\n    return { valid: false, reason: `Timestamp too old: ${age}s` };\n  }\n\n  // Compute expected HMAC\n  const signedPayload = `${timestamp}.${rawBody.toString()}`;\n  const expected = crypto\n    .createHmac(\"sha256\", secret)\n    .update(signedPayload)\n    .digest(\"hex\");\n\n  // Timing-safe comparison\n  try {\n    const isValid = crypto.timingSafeEqual(\n      Buffer.from(signature, \"hex\"),\n      Buffer.from(expected, \"hex\")\n    );\n    return { valid: isValid };\n  } catch {\n    return { valid: false, reason: \"Signature length mismatch\" };\n  }\n}\n```\n\n### Step 4: Express Webhook Handler\n\n```typescript\n// src/api/webhooks/elevenlabs.ts\nimport express from \"express\";\nimport { verifyWebhookSignature } from \"../../elevenlabs/webhook-verify\";\n\nconst router = express.Router();\n\n// CRITICAL: Use raw body parser for signature verification\nrouter.post(\"/webhooks/elevenlabs\",\n  express.raw({ type: \"application/json\" }),\n  async (req, res) => {\n    const signature = req.headers[\"elevenlabs-signature\"] as string;\n    const secret = process.env.ELEVENLABS_WEBHOOK_SECRET!;\n\n    const { valid, reason } = verifyWebhookSignature(req.body, signature, secret);\n\n    if (!valid) {\n      console.error(\"Webhook verification failed:\", reason);\n      return res.status(401).json({ error: \"Invalid signature\" });\n    }\n\n    // Return 200 immediately to prevent webhook auto-disable\n    res.status(200).json({ received: true });\n\n    // Process asynchronously\n    const event = JSON.parse(req.body.toString());\n    processEvent(event).catch(err =>\n      console.error(\"Webhook processing failed:\", err)\n    );\n  }\n);\n\n// Event routing\nasync function processEvent(event: any) {\n  const eventType = event.type || event.event_type;\n\n  switch (eventType) {\n    case \"post_call_transcription\":\n      await handleTranscription(event);\n      break;\n    case \"post_call_audio\":\n      await handleCallAudio(event);\n      break;\n    case \"call_initiation_failure\":\n      await handleCallFailure(event);\n      break;\n    case \"speech_to_text.completed\":\n      await handleSTTCompleted(event);\n      break;\n    default:\n      console.log(\"Unhandled event type:\", eventType);\n  }\n}\n```\n\n### Step 5: Event Handlers\n\n```typescript\n// Conversational AI post-call transcript\nasync function handleTranscription(event: any) {\n  const {\n    conversation_id,\n    transcript,       // Full conversation text\n    analysis,         // AI analysis of the call\n    metadata,         // Custom metadata from agent config\n    recording_url,    // Audio recording URL (if enabled)\n  } = event.data;\n\n  console.log(`[Transcript] Conversation ${conversation_id}`);\n  console.log(`Transcript: ${transcript?.substring(0, 200)}...`);\n\n  // Store in your database\n  // await db.conversations.upsert({ conversation_id, transcript, analysis });\n}\n\n// Post-call audio recording\nasync function handleCallAudio(event: any) {\n  const {\n    conversation_id,\n    audio_base64,     // Base64-encoded audio of the full conversation\n  } = event.data;\n\n  if (audio_base64) {\n    const audioBuffer = Buffer.from(audio_base64, \"base64\");\n    console.log(`[Audio] Received ${audioBuffer.length} bytes for ${conversation_id}`);\n    // Save audio: await fs.writeFile(`recordings/${conversation_id}.mp3`, audioBuffer);\n  }\n}\n\n// Failed outbound call\nasync function handleCallFailure(event: any) {\n  const {\n    conversation_id,\n    failure_reason,\n    metadata,\n  } = event.data;\n\n  console.error(`[Call Failed] ${conversation_id}: ${failure_reason}`);\n  // Alert: await alerting.notify(\"Call initiation failed\", { conversation_id, failure_reason });\n}\n\n// Async Speech-to-Text completion\nasync function handleSTTCompleted(event: any) {\n  const {\n    transcription_id,\n    text,\n    words,           // Word-level timestamps\n    language,\n  } = event.data;\n\n  console.log(`[STT Complete] ${transcription_id}: ${language}`);\n  console.log(`Text: ${text?.substring(0, 200)}...`);\n  // Process transcription results\n}\n```\n\n### Step 6: Idempotency Protection\n\n```typescript\n// Prevent duplicate processing if ElevenLabs retries delivery\nconst processedEvents = new Set<string>();\n\nasync function withIdempotency(\n  eventId: string,\n  handler: () => Promise<void>\n): Promise<void> {\n  if (processedEvents.has(eventId)) {\n    console.log(`Event ${eventId} already processed, skipping`);\n    return;\n  }\n\n  await handler();\n  processedEvents.add(eventId);\n\n  // Clean up old entries (in production, use Redis with TTL)\n  if (processedEvents.size > 10000) {\n    const oldest = Array.from(processedEvents).slice(0, 5000);\n    oldest.forEach(id => processedEvents.delete(id));\n  }\n}\n```\n\n### Step 7: Local Testing with ngrok\n\n```bash\n# Expose local server to internet\nngrok http 3000\n\n# Use the ngrok URL as webhook endpoint in ElevenLabs dashboard\n# https://abc123.ngrok.io/webhooks/elevenlabs\n\n# Test with curl (simulated event)\ncurl -X POST http://localhost:3000/webhooks/elevenlabs \\\n  -H \"Content-Type: application/json\" \\\n  -H \"ElevenLabs-Signature: t=$(date +%s),v1=test\" \\\n  -d '{\"type\":\"speech_to_text.completed\",\"data\":{\"text\":\"Hello world\"}}'\n```\n\n## Webhook Reliability\n\n| Behavior | Detail |\n|----------|--------|\n| Retry policy | ElevenLabs retries failed deliveries |\n| Auto-disable | After 10 consecutive failures AND 7+ days since last success |\n| Timeout | Your endpoint must respond within a few seconds |\n| Re-enable | Manually re-enable in dashboard after fixing the endpoint |\n| Authentication | HMAC-SHA256 via `ElevenLabs-Signature` header |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Signature mismatch | Wrong secret or body parsing | Use `express.raw()`, verify secret matches dashboard |\n| Webhook auto-disabled | 10+ consecutive failures | Fix endpoint, re-enable in dashboard |\n| Duplicate events | Retried delivery | Implement idempotency with event ID tracking |\n| Handler timeout | Slow processing | Return 200 immediately, process async |\n| Replay attack | Old timestamp reused | Check timestamp age (reject > 5 min) |\n\n## Resources\n\n- [ElevenLabs Webhooks Guide](https://elevenlabs.io/docs/overview/administration/webhooks)\n- [Post-Call Webhooks](https://elevenlabs.io/docs/agents-platform/workflows/post-call-webhooks)\n- [STT Webhooks](https://elevenlabs.io/docs/cookbooks/speech-to-text/webhooks)\n- [Webhook API Reference](https://elevenlabs.io/docs/api-reference/webhooks/list)\n\n## Next Steps\n\nFor performance optimization, see `elevenlabs-performance-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "elevenlabs-webhooks-events",
-    "description": "Implement ElevenLabs webhook HMAC signature verification and event handling.",
-    "Trigger": "elevenlabs webhook\", \"elevenlabs events\",",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

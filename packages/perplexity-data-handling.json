@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032880",
   "name": "perplexity-data-handling",
   "slug": "perplexity-data-handling",
   "description": "Implement Perplexity query sanitization, citation validation, result",
   "content": "# Perplexity Data Handling\n\n## Overview\n\nManage data flowing through Perplexity Sonar API. Critical concern: queries are sent to Perplexity for web search, so any PII in queries is exposed to external infrastructure. Responses contain citations (third-party URLs) that must be validated before displaying to users.\n\n## Data Flow\n\n```\nUser Input \u2192 Query Sanitization \u2192 Perplexity API \u2192 Response Parsing\n                                                         \u2502\n                                           \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u253c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n                                           \u2502             \u2502              \u2502\n                                      Answer Text    Citations    Search Results\n                                           \u2502             \u2502              \u2502\n                                      Format &      Validate &    Store for\n                                      Display       Deduplicate   Analytics\n```\n\n## Prerequisites\n\n- Perplexity API key configured\n- Understanding of PII regulations (GDPR/CCPA)\n- Cache storage (Redis or in-memory)\n\n## Instructions\n\n### Step 1: Query Sanitization\n\n```typescript\nfunction sanitizeQuery(query: string): { clean: string; redacted: boolean } {\n  let clean = query;\n  let redacted = false;\n\n  const patterns: Array<[RegExp, string]> = [\n    [/\\b[\\w.+-]+@[\\w-]+\\.[\\w.]+\\b/g, \"[email]\"],\n    [/\\b\\d{3}[-.]?\\d{3}[-.]?\\d{4}\\b/g, \"[phone]\"],\n    [/\\b\\d{3}-\\d{2}-\\d{4}\\b/g, \"[ssn]\"],\n    [/\\b\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}\\b/g, \"[card]\"],\n    [/\\b(pplx-|sk-|pk_|sk_live_)\\w{20,}\\b/g, \"[token]\"],\n    [/\\b(user|customer|account)\\s*#?\\s*\\d+\\b/gi, \"[id]\"],\n  ];\n\n  for (const [pattern, replacement] of patterns) {\n    if (pattern.test(clean)) {\n      clean = clean.replace(pattern, replacement);\n      redacted = true;\n    }\n  }\n\n  return { clean, redacted };\n}\n\nasync function safeSearch(rawQuery: string) {\n  const { clean, redacted } = sanitizeQuery(rawQuery);\n  if (redacted) {\n    console.warn(\"[Data] PII redacted from Perplexity query\");\n  }\n\n  return perplexity.chat.completions.create({\n    model: \"sonar\",\n    messages: [{ role: \"user\", content: clean }],\n  });\n}\n```\n\n### Step 2: Citation Validation\n\n```typescript\ninterface ValidatedCitation {\n  url: string;\n  domain: string;\n  valid: boolean;\n  index: number;\n}\n\nfunction validateCitations(citations: string[]): ValidatedCitation[] {\n  return citations.map((url, i) => {\n    try {\n      const parsed = new URL(url);\n      return {\n        url: url.replace(/[.,;:]+$/, \"\"),\n        domain: parsed.hostname,\n        valid: [\"http:\", \"https:\"].includes(parsed.protocol),\n        index: i + 1,\n      };\n    } catch {\n      return { url, domain: \"unknown\", valid: false, index: i + 1 };\n    }\n  });\n}\n\nfunction deduplicateCitations(citations: ValidatedCitation[]): ValidatedCitation[] {\n  const seen = new Set<string>();\n  return citations.filter((c) => {\n    const normalized = c.url.split(\"?\")[0].replace(/\\/$/, \"\");\n    if (seen.has(normalized)) return false;\n    seen.add(normalized);\n    return true;\n  });\n}\n\n// Replace [1] markers with linked citations\nfunction renderCitations(answer: string, citations: ValidatedCitation[]): string {\n  let rendered = answer;\n  for (const c of citations.filter((c) => c.valid)) {\n    rendered = rendered.replaceAll(`[${c.index}]`, `[${c.index}](${c.url})`);\n  }\n  return rendered;\n}\n```\n\n### Step 3: Result Caching with Freshness Policy\n\n```typescript\nimport { LRUCache } from \"lru-cache\";\nimport { createHash } from \"crypto\";\n\ninterface CachedResult {\n  answer: string;\n  citations: ValidatedCitation[];\n  cachedAt: number;\n  model: string;\n}\n\nconst CACHE_TTL: Record<string, number> = {\n  news: 30 * 60_000,       // 30 min for breaking/current events\n  research: 4 * 3600_000,  // 4 hours for research topics\n  factual: 24 * 3600_000,  // 24 hours for stable facts\n  default: 1 * 3600_000,   // 1 hour default\n};\n\nconst resultCache = new LRUCache<string, CachedResult>({ max: 500 });\n\nfunction detectQueryType(query: string): keyof typeof CACHE_TTL {\n  if (/\\b(latest|today|breaking|recent|this week)\\b/i.test(query)) return \"news\";\n  if (/\\b(research|study|paper|analysis|compare)\\b/i.test(query)) return \"research\";\n  if (/\\b(what is|define|how does|who is)\\b/i.test(query)) return \"factual\";\n  return \"default\";\n}\n\nasync function cachedSearch(query: string, model = \"sonar\") {\n  const hash = createHash(\"sha256\")\n    .update(`${model}:${query.toLowerCase().trim()}`)\n    .digest(\"hex\");\n\n  const cached = resultCache.get(hash);\n  if (cached) return { ...cached, fromCache: true };\n\n  const response = await safeSearch(query);\n  const rawCitations = (response as any).citations || [];\n  const citations = deduplicateCitations(validateCitations(rawCitations));\n  const queryType = detectQueryType(query);\n\n  const entry: CachedResult = {\n    answer: response.choices[0].message.content || \"\",\n    citations,\n    cachedAt: Date.now(),\n    model: response.model,\n  };\n\n  resultCache.set(hash, entry, { ttl: CACHE_TTL[queryType] });\n  return { ...entry, fromCache: false };\n}\n```\n\n### Step 4: Conversation Context Management\n\n```typescript\nimport OpenAI from \"openai\";\n\ntype Message = OpenAI.ChatCompletionMessageParam;\n\nclass SearchContext {\n  private messages: Message[] = [];\n  private readonly maxMessages = 10;\n  private readonly maxEstimatedTokens = 8000;\n\n  constructor(systemPrompt?: string) {\n    if (systemPrompt) {\n      this.messages.push({ role: \"system\", content: systemPrompt });\n    }\n  }\n\n  addUserMessage(content: string) {\n    this.messages.push({ role: \"user\", content });\n    this.trim();\n  }\n\n  addAssistantMessage(content: string) {\n    this.messages.push({ role: \"assistant\", content });\n    this.trim();\n  }\n\n  getMessages(): Message[] {\n    return [...this.messages];\n  }\n\n  private trim() {\n    // Keep system prompt + last N messages\n    while (this.messages.length > this.maxMessages) {\n      const systemIdx = this.messages[0].role === \"system\" ? 1 : 0;\n      this.messages.splice(systemIdx, 1);\n    }\n\n    // Trim if estimated tokens too high\n    while (this.estimateTokens() > this.maxEstimatedTokens && this.messages.length > 2) {\n      const systemIdx = this.messages[0].role === \"system\" ? 1 : 0;\n      this.messages.splice(systemIdx, 1);\n    }\n  }\n\n  private estimateTokens(): number {\n    return this.messages.reduce(\n      (sum, m) => sum + Math.ceil(String(m.content).length / 4),\n      0\n    );\n  }\n\n  clear() {\n    const system = this.messages.find((m) => m.role === \"system\");\n    this.messages = system ? [system] : [];\n  }\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| PII in search query | User entered personal data | Apply `sanitizeQuery` before API call |\n| Broken citation URLs | Source page moved/deleted | Validate URLs, filter invalid ones |\n| Stale cached results | TTL too long for news | Use query-type-aware TTL |\n| Context overflow | Too many conversation turns | Automatic trimming in SearchContext |\n| Duplicate citations | Same source cited multiple times | Deduplicate by normalized URL |\n\n## Output\n\n- Query sanitization stripping PII before API calls\n- Citation validation and deduplication\n- Cache with query-type-aware TTL\n- Conversation context with automatic trimming\n\n## Resources\n\n- [Perplexity API Documentation](https://docs.perplexity.ai)\n- [Perplexity Privacy Policy](https://www.perplexity.ai/privacy)\n\n## Next Steps\n\nFor access control, see `perplexity-enterprise-rbac`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "perplexity-data-handling",
-    "description": "Implement Perplexity query sanitization, citation validation, result",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031912",
   "name": "figma-deploy-integration",
   "slug": "figma-deploy-integration",
   "description": "Deploy Figma-powered applications to Vercel, Cloud Run, and Fly.io.",
   "content": "# Figma Deploy Integration\n\n## Overview\n\nDeploy Figma webhook receivers and design API services to production platforms with proper secret management and health checks.\n\n## Prerequisites\n\n- Figma PAT for production environment\n- Platform CLI installed (vercel, fly, or gcloud)\n- Application tested locally with Figma API\n\n## Instructions\n\n### Step 1: Vercel Deployment (Webhook Receiver)\n\n```bash\n# Store Figma secrets\nvercel env add FIGMA_PAT production\nvercel env add FIGMA_WEBHOOK_PASSCODE production\n\n# Deploy\nvercel --prod\n```\n\n```typescript\n// api/webhooks/figma.ts (Vercel serverless function)\nimport { NextRequest, NextResponse } from 'next/server';\nimport crypto from 'crypto';\n\nexport async function POST(req: NextRequest) {\n  const payload = await req.json();\n\n  // Verify passcode\n  const expected = process.env.FIGMA_WEBHOOK_PASSCODE!;\n  const received = payload.passcode || '';\n  if (!crypto.timingSafeEqual(Buffer.from(received), Buffer.from(expected))) {\n    return NextResponse.json({ error: 'Invalid passcode' }, { status: 401 });\n  }\n\n  // Process webhook event\n  switch (payload.event_type) {\n    case 'FILE_UPDATE':\n      console.log(`File updated: ${payload.file_name} (${payload.file_key})`);\n      // Trigger token re-sync, invalidate cache, etc.\n      break;\n    case 'FILE_COMMENT':\n      console.log(`New comment on ${payload.file_name}`);\n      break;\n    case 'LIBRARY_PUBLISH':\n      console.log(`Library published: ${payload.file_name}`);\n      break;\n  }\n\n  return NextResponse.json({ received: true });\n}\n\nexport const config = { maxDuration: 10 };\n```\n\n### Step 2: Google Cloud Run (Design Token API)\n\n```dockerfile\nFROM node:20-slim\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci --omit=dev\nCOPY dist/ ./dist/\nENV PORT=8080\nCMD [\"node\", \"dist/server.js\"]\n```\n\n```bash\nPROJECT_ID=\"${GOOGLE_CLOUD_PROJECT}\"\nSERVICE=\"figma-token-api\"\nREGION=\"us-central1\"\n\n# Store PAT in Secret Manager\necho -n \"${FIGMA_PAT}\" | gcloud secrets create figma-pat --data-file=-\n\n# Build and deploy\ngcloud builds submit --tag gcr.io/$PROJECT_ID/$SERVICE\ngcloud run deploy $SERVICE \\\n  --image gcr.io/$PROJECT_ID/$SERVICE \\\n  --region $REGION \\\n  --platform managed \\\n  --set-secrets=\"FIGMA_PAT=figma-pat:latest\" \\\n  --allow-unauthenticated \\\n  --max-instances=5 \\\n  --timeout=30s\n```\n\n### Step 3: Fly.io (Persistent Webhook Service)\n\n```toml\n# fly.toml\napp = \"figma-webhook-service\"\nprimary_region = \"iad\"\n\n[env]\n  NODE_ENV = \"production\"\n\n[http_service]\n  internal_port = 3000\n  force_https = true\n  auto_stop_machines = \"suspend\"\n  auto_start_machines = true\n  min_machines_running = 1\n\n[[http_service.checks]]\n  grace_period = \"10s\"\n  interval = \"30s\"\n  method = \"GET\"\n  path = \"/health\"\n  timeout = \"5s\"\n```\n\n```bash\nfly secrets set FIGMA_PAT=figd_your-token\nfly secrets set FIGMA_WEBHOOK_PASSCODE=your-passcode\nfly deploy\n```\n\n### Step 4: Health Check Endpoint\n\n```typescript\n// src/health.ts -- works on any platform\nimport { figmaFetch } from './figma-client';\n\nexport async function healthHandler(req: Request): Promise<Response> {\n  const start = Date.now();\n\n  try {\n    const res = await fetch('https://api.figma.com/v1/me', {\n      headers: { 'X-Figma-Token': process.env.FIGMA_PAT! },\n      signal: AbortSignal.timeout(5000),\n    });\n\n    return Response.json({\n      status: res.ok ? 'healthy' : 'degraded',\n      figma: {\n        authenticated: res.ok,\n        latencyMs: Date.now() - start,\n      },\n      timestamp: new Date().toISOString(),\n    });\n  } catch {\n    return Response.json({\n      status: 'unhealthy',\n      figma: { authenticated: false, latencyMs: Date.now() - start },\n    }, { status: 503 });\n  }\n}\n```\n\n## Output\n\n- Application deployed with Figma secrets configured\n- Webhook endpoint receiving Figma events\n- Health check validating Figma connectivity\n- Platform-specific optimizations applied\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Secret not found in runtime | Wrong env name | Verify with platform CLI (`vercel env ls`) |\n| Webhook timeout | Processing too slow | Return 200 immediately, process async |\n| Cold start latency | Serverless cold boot | Use Fly.io `min_machines_running: 1` or Cloud Run min instances |\n| Health check fails | PAT expired | Rotate token via platform secret management |\n\n## Resources\n\n- [Vercel Serverless Functions](https://vercel.com/docs/functions)\n- [Cloud Run Documentation](https://cloud.google.com/run/docs)\n- [Fly.io Documentation](https://fly.io/docs)\n\n## Next Steps\n\nFor webhook handling, see `figma-webhooks-events`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "figma-deploy-integration",
-    "description": "Deploy Figma-powered applications to Vercel, Cloud Run, and Fly.io.",
-    "allowed-tools": "Read, Write, Edit, Bash(vercel:*), Bash(fly:*), Bash(gcloud:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

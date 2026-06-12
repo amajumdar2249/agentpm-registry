@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032876",
   "name": "perplexity-common-errors",
   "slug": "perplexity-common-errors",
   "description": "Diagnose and fix Perplexity Sonar API errors and exceptions.",
   "content": "# Perplexity Common Errors\n\n## Overview\n\nQuick reference for the most common Perplexity Sonar API errors, their root causes, and fixes. All Perplexity errors follow the OpenAI error format since the API is OpenAI-compatible.\n\n## Prerequisites\n\n- `PERPLEXITY_API_KEY` environment variable set\n- `curl` available for diagnostic commands\n\n## Error Reference\n\n### 401 Unauthorized \u2014 Invalid API Key\n\n```json\n{\"error\": {\"message\": \"Invalid API key\", \"type\": \"authentication_error\", \"code\": 401}}\n```\n\n**Causes:** Key missing, expired, revoked, or doesn't start with `pplx-`.\n\n**Fix:**\n\n```bash\nset -euo pipefail\n# Verify key is set and has correct prefix\necho \"${PERPLEXITY_API_KEY:0:5}\"  # Should print \"pplx-\"\n\n# Test key directly\ncurl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"Authorization: Bearer $PERPLEXITY_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"model\":\"sonar\",\"messages\":[{\"role\":\"user\",\"content\":\"test\"}],\"max_tokens\":5}' \\\n  https://api.perplexity.ai/chat/completions\n# 200 = valid, 401 = invalid key\n```\n\nRegenerate at [perplexity.ai/settings/api](https://www.perplexity.ai/settings/api).\n\n---\n\n### 429 Too Many Requests \u2014 Rate Limited\n\n```json\n{\"error\": {\"message\": \"Rate limit exceeded\", \"type\": \"rate_limit_error\", \"code\": 429}}\n```\n\n**Causes:** Exceeded requests per minute (RPM). Most tiers allow 50 RPM. Perplexity uses a leaky bucket algorithm.\n\n**Fix:**\n\n```typescript\nasync function withBackoff<T>(fn: () => Promise<T>, maxRetries = 5): Promise<T> {\n  for (let i = 0; i <= maxRetries; i++) {\n    try {\n      return await fn();\n    } catch (err: any) {\n      if (err.status !== 429 || i === maxRetries) throw err;\n      const delay = Math.pow(2, i) * 1000 + Math.random() * 500;\n      console.log(`Rate limited. Retrying in ${delay.toFixed(0)}ms...`);\n      await new Promise(r => setTimeout(r, delay));\n    }\n  }\n  throw new Error(\"Unreachable\");\n}\n```\n\nSee `perplexity-rate-limits` for queue-based solutions.\n\n---\n\n### 400 Bad Request \u2014 Invalid Model\n\n```json\n{\"error\": {\"message\": \"Invalid model: gpt-4\", \"type\": \"invalid_request_error\"}}\n```\n\n**Cause:** Using a non-Perplexity model name.\n\n**Valid models:** `sonar`, `sonar-pro`, `sonar-reasoning-pro`, `sonar-deep-research`.\n\n---\n\n### 400 Bad Request \u2014 Invalid search_domain_filter\n\n```json\n{\"error\": {\"message\": \"search_domain_filter must contain at most 20 domains\"}}\n```\n\n**Cause:** Exceeding the 20-domain limit, or mixing allowlist (no prefix) with denylist (`-` prefix).\n\n**Fix:** Use either allowlist OR denylist mode, not both:\n\n```typescript\n// Allowlist: only these domains\nsearch_domain_filter: [\"python.org\", \"docs.python.org\"]\n\n// Denylist: exclude these domains\nsearch_domain_filter: [\"-reddit.com\", \"-quora.com\"]\n```\n\n---\n\n### Empty Citations Array\n\nNot an error, but a common surprise.\n\n**Causes:** Query too abstract, non-factual question, or model couldn't find relevant sources.\n\n**Fix:**\n\n```typescript\n// BAD: abstract query yields no citations\n\"Tell me about technology\"\n\n// GOOD: specific factual query\n\"What are the key features of TypeScript 5.5 released in 2025?\"\n```\n\nUse `sonar-pro` for more citations (2x average citation count vs `sonar`).\n\n---\n\n### Timeout / Hanging Request\n\n**Causes:** Complex query with `sonar-pro` or `sonar-deep-research`. Sonar: 1-3s typical. Sonar-pro: 3-8s. Deep research: 10-60s.\n\n**Fix:**\n\n```typescript\nconst controller = new AbortController();\nconst timeout = setTimeout(() => controller.abort(), 15000);\n\ntry {\n  const response = await perplexity.chat.completions.create(\n    { model: \"sonar\", messages: [{ role: \"user\", content: query }] },\n    { signal: controller.signal }\n  );\n  return response;\n} finally {\n  clearTimeout(timeout);\n}\n```\n\n---\n\n### 402 Payment Required \u2014 No Credits\n\n```json\n{\"error\": {\"message\": \"Insufficient credits\", \"type\": \"billing_error\"}}\n```\n\n**Cause:** Account has no API credits remaining.\n\n**Fix:** Add credits at [perplexity.ai/settings/api](https://www.perplexity.ai/settings/api).\n\n## Diagnostic Commands\n\n```bash\nset -euo pipefail\n# Quick API health check\ncurl -s -w \"\\nHTTP %{http_code} in %{time_total}s\\n\" \\\n  -H \"Authorization: Bearer $PERPLEXITY_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"model\":\"sonar\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":5}' \\\n  https://api.perplexity.ai/chat/completions\n\n# Check if key env var is set\nenv | grep PERPLEXITY\n\n# Test DNS resolution\ndig api.perplexity.ai +short\n```\n\n## Error Handling\n\n| HTTP Code | Error Type | Retry? | Action |\n|-----------|-----------|--------|--------|\n| 400 | `invalid_request_error` | No | Fix request parameters |\n| 401 | `authentication_error` | No | Regenerate API key |\n| 402 | `billing_error` | No | Add credits |\n| 429 | `rate_limit_error` | Yes | Exponential backoff |\n| 500+ | `server_error` | Yes | Retry after 2-5 seconds |\n\n## Output\n\n- Identified error cause from HTTP status and error type\n- Applied fix or workaround\n- Verified resolution with diagnostic commands\n\n## Resources\n\n- [Perplexity Error Handling Guide](https://docs.perplexity.ai/guides/perplexity-sdk-error-handling)\n- [API Reference](https://docs.perplexity.ai/api-reference/chat-completions-post)\n\n## Next Steps\n\nFor comprehensive debugging, see `perplexity-debug-bundle`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "perplexity-common-errors",
-    "description": "Diagnose and fix Perplexity Sonar API errors and exceptions.",
-    "allowed-tools": "Read, Grep, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

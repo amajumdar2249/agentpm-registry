@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000016334",
   "name": "forecasting-reverso",
   "slug": "forecasting-reverso",
   "description": "Zero-shot univariate time series forecasting using the Reverso foundation model (NumPy/Numba CPU-only inference). Activate when users provide time series data and request forecasts, predictions, or extrapolations. Supports Reverso Small (550K params). Triggers on \"forecast\", \"predict\", \"time series\", \"Reverso\", or when tabular data with a temporal dimension needs future-value estimation.",
   "content": "\n# Reverso Time Series Forecasting\n\nProduce zero-shot univariate time series forecasts using the Reverso foundation model family (arXiv:2602.17634), implemented in NumPy/Numba for CPU-only container execution.\n\n## Setup (run once per conversation)\n\n```bash\nuv pip install numba --system --break-system-packages\ncp /mnt/skills/user/forecasting-reverso/scripts/reverso.py /home/claude/reverso.py\ncp /mnt/skills/user/forecasting-reverso/scripts/load_checkpoint.py /home/claude/load_checkpoint.py\n```\n\n## Obtaining Weights\n\nTwo paths depending on network access:\n\n### Path A: Direct download (HuggingFace allow-listed)\n```python\nimport urllib.request, os\nos.makedirs(\"/tmp/reverso\", exist_ok=True)\nurl = \"https://huggingface.co/shinfxh/reverso/resolve/main/checkpoints/reverso_small/checkpoint.pth\"\nurllib.request.urlretrieve(url, \"/tmp/reverso/checkpoint.pth\")\n```\n\n### Path B: User upload (HuggingFace not accessible)\nIf the download fails with a network error, tell the user:\n\n> I can't reach HuggingFace from this environment. Please download the checkpoint from\n> https://huggingface.co/shinfxh/reverso/blob/main/checkpoints/reverso_small/checkpoint.pth\n> and upload it here.\n\nThen load from `/mnt/user-data/uploads/checkpoint.pth`.\n\n### Loading weights\n```python\nfrom load_checkpoint import load_checkpoint\nweights = load_checkpoint(\"/tmp/reverso/checkpoint.pth\")  # or upload path\n```\n\n## Model Configuration\n\nReverso Small uses this config (matching the published `args.json`):\n\n```python\nfrom reverso import ReversoConfig\nconfig = ReversoConfig(d_model=64, module_list=[\"conv\", \"attn\", \"conv\", \"attn\"])\n```\n\n## Forecasting\n\n```python\nfrom reverso import forecast, warmup_jit\nwarmup_jit()  # ~2s one-time JIT compilation\n\nresult = forecast(\n    series=data,               # 1-D array/list of floats\n    prediction_length=96,      # how many future steps\n    weights=weights,           # dict from load_checkpoint\n    config=config,\n)\n```\n\nThe function handles preprocessing (NaN interpolation, padding, min-max normalization) and autoregressive rollout internally.\n\n### Key parameters\n\n`flip_equivariant=True` \u2014 averages forward pass on original and vertically-flipped input. Slightly improves single-step predictions but can dampen amplitude over multi-step rollout. Default is `False`.\n\n## Input Handling\n\nAccept time series as Python list, NumPy array, CSV column, or inline values. Convert to 1-D float array before calling `forecast()`.\n\nFor CSV/DataFrame input, ask the user which column to forecast if ambiguous.\n\nThe model's context window is 2048 steps. Series shorter than 2048 are left-padded with the first value. Series longer than 2048 use only the most recent 2048 observations. Provide at least a few hundred real data points for meaningful results \u2014 heavily padded context degrades forecast quality because the long convolution kernels process mostly constant input.\n\n## Visualization\n\n```python\nimport matplotlib.pyplot as plt\nfig, ax = plt.subplots(figsize=(12, 4))\nn = len(history)\nax.plot(range(n), history, label=\"Historical\", color=\"#2563eb\")\nax.plot(range(n, n + len(preds)), preds,\n        label=\"Forecast\", color=\"#dc2626\", linewidth=2)\nax.axvline(x=n, color=\"gray\", linestyle=\"--\", alpha=0.4)\nax.set_xlabel(\"Time step\"); ax.set_ylabel(\"Value\")\nax.legend(); fig.tight_layout()\nfig.savefig(\"/mnt/user-data/outputs/forecast.png\", dpi=150)\n```\n\n## Performance\n\n| Phase | Latency |\n|---|---|\n| numba install (uv) | ~1.6s |\n| Weight loading (.pth) | <1s |\n| JIT warmup | ~2s |\n| Forward pass (L=2048) | ~80ms |\n| 96-step forecast (2 chunks) | ~160ms |\n| 192-step forecast (4 chunks) | ~320ms |\n\n## Container Environment Limits\n\nEach forward pass takes ~65ms at L=2048. In the ephemeral container, reject batch forecasting requests that would exceed ~1500 forward passes (~100s wall time) to avoid timeouts.\n\n**Detect the container environment** by checking for `/mnt/user-data` or `/mnt/skills`:\n```python\nimport os\nIN_CONTAINER = os.path.exists(\"/mnt/user-data\")\n```\n\n**Estimate cost before running** when processing multiple series:\n```python\nn_forwards = n_series * n_windows * max(1, pred_length // 48)\nest_seconds = n_forwards * 0.065\nif IN_CONTAINER and est_seconds > 100:\n    # Reject or subsample\n    max_series = int(1500 / (n_windows * max(1, pred_length // 48)))\n```\n\n**Practical limits at ~100s budget:**\n\n| Scenario | Series | Windows | Pred steps | Forwards | Time |\n|---|---|---|---|---|---|\n| Single series, 96-step | 1 | 1 | 2 chunks | 2 | 0.1s |\n| Small dataset (sz_taxi) | 156 | 6 | 48 | 936 | 61s |\n| Medium dataset, short horizon | 300 | 4 | 48 | 1200 | 78s |\n| Large dataset (m4_yearly) | 22974 | 1 | 48 | 22974 | **25min \u2717** |\n\nWhen a request exceeds the budget, inform the user with the estimated time and suggest either subsampling or running locally. For benchmark evaluation of large datasets, recommend running outside the container.\n\n## Limitations\n\nThe model is strongest with periodic or quasi-periodic signals and full 2048-point context. Short series (under ~200 points) are heavily padded and produce degraded forecasts \u2014 this is a model limitation, not an implementation bug. Edge cases: binary-valued input (e.g. step functions normalizing to exactly 0/1) and series ending at the exact min-max boundary are out-of-distribution for the training data.\n\nFor architecture details, weight mapping, and debugging guidance, read `references/architecture.md`.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "forecasting-reverso",
-    "description": "Zero-shot univariate time series forecasting using the Reverso foundation model (NumPy/Numba CPU-only inference). Activate when users provide time series data and request forecasts, predictions, or extrapolations. Supports Reverso Small (550K params). Triggers on \"forecast\", \"predict\", \"time series\", \"Reverso\", or when tabular data with a temporal dimension needs future-value estimation."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033060",
   "name": "replit-security-basics",
   "slug": "replit-security-basics",
   "description": "Apply Replit security best practices: Secrets management, REPL_IDENTITY",
   "content": "# Replit Security Basics\n\n## Overview\n\nSecurity best practices for Replit: Secrets (AES-256 encrypted env vars), REPL_IDENTITY token verification, Auth header trust model, public Repl exposure risks, and Secret Scanner protection.\n\n## Prerequisites\n\n- Replit account with Workspace access\n- Understanding of environment variables\n- Deployed app (for Auth security)\n\n## Instructions\n\n### Step 1: Secrets Management\n\nReplit Secrets are AES-256 encrypted at rest with TLS in transit. Keys rotate regularly. Two scopes:\n\n```markdown\nApp-level secrets: Specific to one Repl (lock icon in sidebar)\nAccount-level secrets: Apply across all your Repls (Account Settings > Secrets)\n```\n\n```typescript\n// Validate all required secrets at startup \u2014 fail fast\nconst REQUIRED = ['DATABASE_URL', 'JWT_SECRET', 'API_KEY'];\nconst missing = REQUIRED.filter(k => !process.env[k]);\nif (missing.length) {\n  console.error(`Missing secrets: ${missing.join(', ')}`);\n  console.error('Add them in the Secrets tab (lock icon in sidebar)');\n  process.exit(1);\n}\n```\n\n**Secret Scanner**: Replit detects when you paste API keys into code files and warns you to store them as Secrets instead. Never dismiss this warning.\n\n### Step 2: Public Repl Safety\n\nReplit Repls are **public by default** on free plans. Your source code is visible to anyone.\n\n```python\n# CRITICAL: Never hardcode secrets in source files\n# BAD \u2014 visible to anyone who views your Repl\nAPI_KEY = \"sk-live-abc123\"  # exposed!\n\n# GOOD \u2014 use Replit Secrets\nimport os\nAPI_KEY = os.environ.get(\"API_KEY\")\n```\n\n```gitignore\n# .gitignore (also applies if you connect Repl to GitHub)\n.env\n.env.local\n*.pem\n*.key\n```\n\n### Step 3: REPL_IDENTITY Token Verification\n\nEvery Repl gets a `REPL_IDENTITY` environment variable \u2014 a PASETO token signed by Replit infrastructure. Use it for service-to-service authentication between Repls.\n\n```typescript\n// Verify a request came from a specific Repl\nimport { verify } from '@replit/repl-auth';\n\nfunction verifyReplIdentity(identityToken: string): boolean {\n  try {\n    // REPL_PUBKEYS contains the ED25519 public key (base64-encoded)\n    const pubkeys = JSON.parse(process.env.REPL_PUBKEYS || '{}');\n    const payload = verify(identityToken, pubkeys);\n    // payload contains: replId, user, slug, aud\n    return !!payload;\n  } catch {\n    return false;\n  }\n}\n\n// Use in middleware for Repl-to-Repl calls\napp.post('/internal/api', (req, res) => {\n  const identity = req.headers['x-repl-identity'] as string;\n  if (!verifyReplIdentity(identity)) {\n    return res.status(403).json({ error: 'Invalid Repl identity' });\n  }\n  // Process trusted request\n});\n```\n\n### Step 4: Auth Header Trust Model\n\nReplit Auth headers (`X-Replit-User-*`) are injected by Replit's proxy. They can be trusted on deployed apps but NOT on external networks.\n\n```typescript\n// Auth headers to read (set by Replit proxy)\nconst AUTH_HEADERS = [\n  'x-replit-user-id',           // Unique user ID\n  'x-replit-user-name',         // Username\n  'x-replit-user-bio',          // User bio\n  'x-replit-user-url',          // Profile URL\n  'x-replit-user-profile-image',// Avatar URL\n  'x-replit-user-roles',        // Comma-separated roles\n  'x-replit-user-teams',        // Team memberships\n] as const;\n\n// IMPORTANT: Only trust these headers on *.replit.app or *.replit.dev domains\n// If your app is also accessible via a custom domain without Replit proxy,\n// an attacker could spoof these headers\nfunction isSecureContext(): boolean {\n  return !!process.env.REPL_SLUG; // Running on Replit\n}\n```\n\n### Step 5: Database Security\n\n```typescript\n// PostgreSQL: connection string is secure by default on newer Replit databases\n// Even if DATABASE_URL is leaked, it cannot be used outside your Repl\n\n// However, always use parameterized queries\n// BAD \u2014 SQL injection\nconst result = await pool.query(`SELECT * FROM users WHERE name = '${name}'`);\n\n// GOOD \u2014 parameterized\nconst result = await pool.query('SELECT * FROM users WHERE name = $1', [name]);\n\n// Replit KV Database: accessible only within the Repl\n// No external access possible \u2014 REPLIT_DB_URL is internal only\n```\n\n### Step 6: Security Checklist\n\n```markdown\n## Replit Security Audit Checklist\n\n### Secrets\n- [ ] All API keys stored in Replit Secrets (never in code)\n- [ ] Required secrets validated at startup\n- [ ] No secrets in console.log() or error responses\n- [ ] Secret Scanner warnings not dismissed\n\n### Access\n- [ ] Repl visibility appropriate (public vs private)\n- [ ] Auth headers validated on protected routes\n- [ ] Database queries use parameterized statements\n- [ ] Error responses don't expose stack traces in production\n\n### Deployment\n- [ ] Production uses Deployments (not just \"Run\")\n- [ ] Custom domains have SSL (auto-provisioned by Replit)\n- [ ] Health endpoint doesn't expose sensitive info\n- [ ] NODE_ENV set to \"production\" in deployment config\n\n### Team\n- [ ] Roles assigned with least privilege\n- [ ] Inactive members removed (seat audit)\n- [ ] SSO enforced (Enterprise)\n- [ ] Deployment permissions restricted to admins\n```\n\n## Error Handling\n\n| Security Issue | Detection | Mitigation |\n|----------------|-----------|------------|\n| Secret in source code | Secret Scanner alert | Move to Secrets tab immediately |\n| Public Repl with secrets | Code review | Make Repl private or use Secrets |\n| Auth header spoofing | Custom domain without proxy | Only trust headers on Replit domains |\n| SQL injection | Code audit | Use parameterized queries exclusively |\n| Stack trace exposure | Error handler review | Catch all errors, return safe messages |\n\n## Resources\n\n- [Replit Secrets](https://docs.replit.com/replit-workspace/workspace-features/secrets)\n- [Replit Security](https://replit.com/products/security)\n- [Repl Identity (PASETO)](https://blog.replit.com/repl-identity)\n- [Secure Vibe Coding](https://blog.replit.com/16-ways-to-vibe-code-securely)\n\n## Next Steps\n\nFor production deployment, see `replit-prod-checklist`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "replit-security-basics",
-    "description": "Apply Replit security best practices: Secrets management, REPL_IDENTITY",
-    "allowed-tools": "Read, Write, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

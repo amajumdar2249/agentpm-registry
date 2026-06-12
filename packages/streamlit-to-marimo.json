@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000011971",
   "name": "streamlit-to-marimo",
   "slug": "streamlit-to-marimo",
   "description": "Convert a Streamlit app to a marimo notebook",
   "content": "\n# Converting Streamlit Apps to Marimo\n\nFor general marimo notebook conventions (cell structure, PEP 723 metadata, output rendering, `marimo check`, variable naming, etc.), refer to the `marimo-notebook` skill. This skill focuses specifically on **mapping Streamlit concepts to marimo equivalents**.\n\n## Steps\n\n1. **Read the Streamlit app** to understand its widgets, layout, and state management.\n\n2. **Create a new marimo notebook** following the `marimo-notebook` skill conventions. Add all dependencies the Streamlit app uses (pandas, plotly, altair, etc.) \u2014 but replace `streamlit` with `marimo`. You should not overwrite the original file. \n\n3. **Map Streamlit components to marimo equivalents** using the reference tables below. Key principles:\n   - UI elements are **assigned to variables** and their current value is accessed via `.value`.\n   - Cells that reference a UI element automatically re-run when the user interacts with it \u2014 no callbacks needed.\n\n4. **Handle conceptual differences** in execution model, state, and caching (see below).\n\n5. **Run `uvx marimo check`** on the result and fix any issues.\n\n## Widget Mapping Reference\n\n### Input Widgets\n\n| Streamlit | marimo | Notes |\n|-----------|--------|-------|\n| `st.slider()` | `mo.ui.slider()` | |\n| `st.select_slider()` | `mo.ui.slider(steps=[...])` | Pass discrete values via `steps` |\n| `st.text_input()` | `mo.ui.text()` | |\n| `st.text_area()` | `mo.ui.text_area()` | |\n| `st.number_input()` | `mo.ui.number()` | |\n| `st.checkbox()` | `mo.ui.checkbox()` | |\n| `st.toggle()` | `mo.ui.switch()` | |\n| `st.radio()` | `mo.ui.radio()` | |\n| `st.selectbox()` | `mo.ui.dropdown()` | |\n| `st.multiselect()` | `mo.ui.multiselect()` | |\n| `st.date_input()` | `mo.ui.date()` | |\n| `st.time_input()` | `mo.ui.text()` | No dedicated time widget |\n| `st.file_uploader()` | `mo.ui.file()` | Use `.contents()` to read bytes |\n| `st.color_picker()` | `mo.ui.text(value=\"#000000\")` | No dedicated color picker |\n| `st.button()` | `mo.ui.button()` or `mo.ui.run_button()` | Use `run_button` for triggering expensive computations |\n| `st.download_button()` | `mo.download()` | Returns a download link element |\n| `st.form()` + `st.form_submit_button()` | `mo.ui.form(element)` | Wraps any element so its value only updates on submit |\n\n### Display Elements\n\n| Streamlit | marimo | Notes |\n|-----------|--------|-------|\n| `st.write()` | `mo.md()` or last expression | |\n| `st.markdown()` | `mo.md()` | Supports f-strings: `mo.md(f\"Value: {x.value}\")` |\n| `st.latex()` | `mo.md(r\"$...$\")` | marimo uses KaTeX; see `references/latex.md` |\n| `st.code()` | `mo.md(\"```python\\n...\\n```\")` | |\n| `st.dataframe()` | `df` (last expression) | DataFrames render as interactive marimo widgets natively; use `mo.ui.dataframe(df)` only for no-code transformations |\n| `st.table()` | `df` (last expression) | Use `mo.ui.table(df)` if you need row selection |\n| `st.metric()` | `mo.stat()` | |\n| `st.json()` | `mo.json()` or `mo.tree()` | `mo.tree()` for interactive collapsible view |\n| `st.image()` | `mo.image()` | |\n| `st.audio()` | `mo.audio()` | |\n| `st.video()` | `mo.video()` | |\n\n### Charts\n\n| Streamlit | marimo | Notes |\n|-----------|--------|-------|\n| `st.plotly_chart(fig)` | `fig` (last expression) | Use `mo.ui.plotly(fig)` for selections |\n| `st.altair_chart(chart)` | `chart` (last expression) | Use `mo.ui.altair_chart(chart)` for selections |\n| `st.pyplot(fig)` | `fig` (last expression) | Use `mo.ui.matplotlib(fig)` for interactive matplotlib |\n\n### Layout\n\n| Streamlit | marimo | Notes |\n|-----------|--------|-------|\n| `st.sidebar` | `mo.sidebar([...])` | Pass a list of elements |\n| `st.columns()` | `mo.hstack([...])` | Use `widths=[...]` for column ratios |\n| `st.tabs()` | `mo.ui.tabs({...})` | Dict of `{\"Tab Name\": content}` |\n| `st.expander()` | `mo.accordion({...})` | Dict of `{\"Title\": content}` |\n| `st.container()` | `mo.vstack([...])` | |\n| `st.empty()` | `mo.output.replace()` | |\n| `st.progress()` | `mo.status.progress_bar()` | |\n| `st.spinner()` | `mo.status.spinner()` | Context manager |\n\n## Key Conceptual Differences\n\n### Execution Model\n\nStreamlit reruns the **entire script** top-to-bottom on every interaction. Marimo uses a **reactive cell DAG** \u2014 only cells that depend on changed variables re-execute.\n\n- No need for `st.rerun()` \u2014 reactivity is automatic.\n- No need for `st.stop()` \u2014 structure cells so downstream cells naturally depend on upstream values.\n\n### State Management\n\n| Streamlit | marimo |\n|-----------|--------|\n| `st.session_state[\"key\"]` | Regular Python variables between cells |\n| Callback functions (`on_change`) | Cells referencing `widget.value` re-run automatically |\n| `st.query_params` | `mo.query_params` |\n\n### Caching\n\n| Streamlit | marimo |\n|-----------|--------|\n| `@st.cache_data` | `@mo.cache` | Caches based on function arguments; marimo-aware |\n| `@st.cache_resource` | `@mo.persistent_cache` | Persists across notebook restarts (serializes to disk) |\n\n`@mo.cache` is the primary caching decorator \u2014 it works like `functools.cache` but is aware of marimo's reactivity. `@mo.persistent_cache` goes further by persisting results to disk across sessions, useful for expensive computations like model training.\n\n### Multi-Page Apps\n\nMarimo offers two approaches for multi-page Streamlit apps:\n\n- **Single notebook with routing**: Use `mo.routes` with `mo.nav_menu` or `mo.sidebar` to build multiple \"pages\" (tabs/routes) inside one notebook.\n- **Multiple notebooks as a gallery**: Run a folder of notebooks with `marimo run folder/` to serve them as a gallery with navigation.\n\n### Deploying \n\nmarimo features molab to host marimo apps instead of the streamlit community cloud. You can generate an \"open in molab\" button via the `add-molab-badge` skill. \n\n### Custom components \n\nstreamlit has a feature for custom components. These are not compatible with marimo. You might be able to generate an equivalent anywidget via the `marimo-anywidget` skill but discuss this with the user before working on that. \n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "streamlit-to-marimo",
-    "description": "Convert a Streamlit app to a marimo notebook"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

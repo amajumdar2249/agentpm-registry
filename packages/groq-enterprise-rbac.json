@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032192",
   "name": "groq-enterprise-rbac",
   "slug": "groq-enterprise-rbac",
   "description": "Configure Groq organization management, API key scoping, spending controls,",
   "content": "# Groq Enterprise Access Management\n\n## Overview\n\nManage team access to Groq's inference API through API key strategy, model-level routing controls, spending limits, and usage monitoring. Groq uses flat API keys (`gsk_` prefix) with no built-in scoping -- access control is implemented at the application layer.\n\n## Groq Access Model\n\n- **API keys** are per-organization, not per-user\n- **No built-in scopes** -- every key has full API access\n- **Rate limits** are per-organization, shared across all keys\n- **Spending limits** are configurable in the Groq Console\n- **Projects** allow creating isolated API keys with separate limits\n\n## Instructions\n\n### Step 1: API Key Strategy\n\n```typescript\n// Create separate keys per team/service via Groq Console Projects\n// Each project gets its own API key and can have independent rate limits\n\n// Key naming convention: {team}-{environment}-{purpose}\nconst KEY_REGISTRY = {\n  // Each team gets a separate Groq Project\n  \"chatbot-prod\":         \"gsk_...\",  // Project: chatbot-production\n  \"chatbot-staging\":      \"gsk_...\",  // Project: chatbot-staging\n  \"analytics-prod\":       \"gsk_...\",  // Project: analytics-production\n  \"batch-processor\":      \"gsk_...\",  // Project: batch-processing\n} as const;\n```\n\n### Step 2: Application-Level Model Access Control\n\n```typescript\n// Since Groq keys don't have model scoping, implement it in your gateway\ninterface TeamConfig {\n  allowedModels: string[];\n  maxTokensPerRequest: number;\n  monthlyBudgetUsd: number;\n  rateLimitRPM: number;\n}\n\nconst TEAM_CONFIGS: Record<string, TeamConfig> = {\n  chatbot: {\n    allowedModels: [\"llama-3.3-70b-versatile\", \"llama-3.1-8b-instant\"],\n    maxTokensPerRequest: 2048,\n    monthlyBudgetUsd: 200,\n    rateLimitRPM: 60,\n  },\n  analytics: {\n    allowedModels: [\"llama-3.1-8b-instant\"],  // Only cheapest model\n    maxTokensPerRequest: 512,\n    monthlyBudgetUsd: 50,\n    rateLimitRPM: 30,\n  },\n  research: {\n    allowedModels: [\n      \"llama-3.3-70b-versatile\",\n      \"llama-3.1-8b-instant\",\n      \"meta-llama/llama-4-scout-17b-16e-instruct\",\n    ],\n    maxTokensPerRequest: 4096,\n    monthlyBudgetUsd: 500,\n    rateLimitRPM: 120,\n  },\n};\n\nfunction validateRequest(team: string, model: string, maxTokens: number): void {\n  const config = TEAM_CONFIGS[team];\n  if (!config) throw new Error(`Unknown team: ${team}`);\n  if (!config.allowedModels.includes(model)) {\n    throw new Error(`Team ${team} not authorized for model ${model}`);\n  }\n  if (maxTokens > config.maxTokensPerRequest) {\n    throw new Error(`max_tokens ${maxTokens} exceeds limit ${config.maxTokensPerRequest} for team ${team}`);\n  }\n}\n```\n\n### Step 3: Groq API Gateway\n\n```typescript\nimport Groq from \"groq-sdk\";\nimport PQueue from \"p-queue\";\n\n// Per-team rate limiting\nconst teamQueues = new Map<string, PQueue>();\n\nfunction getTeamQueue(team: string): PQueue {\n  if (!teamQueues.has(team)) {\n    const config = TEAM_CONFIGS[team];\n    teamQueues.set(team, new PQueue({\n      intervalCap: config?.rateLimitRPM || 30,\n      interval: 60_000,\n      concurrency: 5,\n    }));\n  }\n  return teamQueues.get(team)!;\n}\n\n// Gateway function: validates, rate-limits, and proxies to Groq\nasync function groqGateway(\n  team: string,\n  messages: any[],\n  model: string,\n  maxTokens: number\n) {\n  // Validate permissions\n  validateRequest(team, model, maxTokens);\n\n  // Check budget\n  const monthlySpend = await getTeamMonthlySpend(team);\n  const config = TEAM_CONFIGS[team];\n  if (monthlySpend >= config.monthlyBudgetUsd) {\n    throw new Error(`Team ${team} monthly budget of $${config.monthlyBudgetUsd} exhausted`);\n  }\n\n  // Rate-limited execution\n  const queue = getTeamQueue(team);\n  return queue.add(async () => {\n    const groq = new Groq({ apiKey: getTeamApiKey(team) });\n    const result = await groq.chat.completions.create({\n      model,\n      messages,\n      max_tokens: maxTokens,\n    });\n\n    // Track usage\n    await recordTeamUsage(team, model, result.usage!);\n    return result;\n  });\n}\n```\n\n### Step 4: Spending Controls\n\n```markdown\n## Groq Console Setup (per organization)\n\n1. Go to console.groq.com > Organization > Billing\n2. Set monthly spending cap\n3. Configure alerts at 50%, 80%, 95% thresholds\n4. Enable auto-pause when cap is reached\n\n## Application-Level Controls (per team)\n```\n\n```typescript\n// Track spending per team\nconst teamSpending = new Map<string, number>();\n\nasync function recordTeamUsage(\n  team: string,\n  model: string,\n  usage: any\n): Promise<void> {\n  const pricing: Record<string, { input: number; output: number }> = {\n    \"llama-3.1-8b-instant\": { input: 0.05, output: 0.08 },\n    \"llama-3.3-70b-versatile\": { input: 0.59, output: 0.79 },\n    \"meta-llama/llama-4-scout-17b-16e-instruct\": { input: 0.11, output: 0.34 },\n  };\n\n  const price = pricing[model] || { input: 0.10, output: 0.10 };\n  const cost =\n    (usage.prompt_tokens / 1_000_000) * price.input +\n    (usage.completion_tokens / 1_000_000) * price.output;\n\n  const current = teamSpending.get(team) || 0;\n  teamSpending.set(team, current + cost);\n\n  // Alert at thresholds\n  const budget = TEAM_CONFIGS[team].monthlyBudgetUsd;\n  const pct = ((current + cost) / budget) * 100;\n\n  if (pct >= 95) {\n    console.error(`[ALERT] Team ${team} at ${pct.toFixed(0)}% of monthly budget!`);\n  } else if (pct >= 80) {\n    console.warn(`[WARN] Team ${team} at ${pct.toFixed(0)}% of monthly budget`);\n  }\n}\n```\n\n### Step 5: API Key Rotation\n\n```bash\nset -euo pipefail\n# Zero-downtime key rotation process:\n\n# 1. Create new key in Groq Console (same Project)\n#    Name: chatbot-prod-2026-04\n\n# 2. Deploy new key alongside old key\n#    Both keys are valid simultaneously\n\n# 3. Update secret manager\n#    AWS: aws secretsmanager update-secret --secret-id groq/chatbot-prod --secret-string \"gsk_new_...\"\n#    GCP: echo -n \"gsk_new_...\" | gcloud secrets versions add groq-chatbot-prod --data-file=-\n\n# 4. Restart services to pick up new key\n\n# 5. Monitor for 24h -- verify no requests on old key\n\n# 6. Delete old key in Groq Console\n```\n\n### Step 6: Usage Dashboard Query\n\n```typescript\n// Weekly usage report per team\nfunction weeklyReport(records: Array<{ team: string; model: string; cost: number; tokens: number }>) {\n  const byTeam: Record<string, { cost: number; tokens: number; topModel: string }> = {};\n\n  for (const r of records) {\n    if (!byTeam[r.team]) byTeam[r.team] = { cost: 0, tokens: 0, topModel: \"\" };\n    byTeam[r.team].cost += r.cost;\n    byTeam[r.team].tokens += r.tokens;\n  }\n\n  console.table(\n    Object.entries(byTeam).map(([team, data]) => ({\n      team,\n      cost: `$${data.cost.toFixed(2)}`,\n      tokens: data.tokens.toLocaleString(),\n      budget: `$${TEAM_CONFIGS[team]?.monthlyBudgetUsd || \"N/A\"}`,\n    }))\n  );\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `429 rate_limit_exceeded` | Org-level RPM/TPM hit | Teams share org limits; reduce aggregate volume |\n| `401 invalid_api_key` | Key deleted or rotated | Update secret manager, restart services |\n| Budget exhausted | Monthly cap reached | Increase cap or wait for billing cycle reset |\n| Wrong model used | No server-side enforcement | Validate model against team config before calling Groq |\n\n## Resources\n\n- [Groq Projects](https://console.groq.com/docs/projects)\n- [Groq Spend Limits](https://console.groq.com/docs/spend-limits)\n- [Groq Rate Limits](https://console.groq.com/docs/rate-limits)\n- [Groq API Keys](https://console.groq.com/keys)\n\n## Next Steps\n\nFor migration strategies, see `groq-migration-deep-dive`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "groq-enterprise-rbac",
-    "description": "Configure Groq organization management, API key scoping, spending controls,",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000016828",
   "name": "trace-claude-code",
   "slug": "trace-claude-code",
   "description": "|",
   "content": "\n# Trace Claude Code to Braintrust\n\nAutomatically send Claude Code conversations to Braintrust for tracing and observability. Get full visibility into your AI coding sessions with hierarchical traces showing sessions, turns, and every tool call.\n\n## What you get\n\n```\nClaude Code Session (root trace)\n\u251c\u2500\u2500 Turn 1: \"Add error handling\"\n\u2502   \u251c\u2500\u2500 Read: src/app.ts\n\u2502   \u251c\u2500\u2500 Edit: src/app.ts\n\u2502   \u2514\u2500\u2500 Response: \"I've added try-catch...\"\n\u251c\u2500\u2500 Turn 2: \"Now run the tests\"\n\u2502   \u251c\u2500\u2500 Terminal: npm test\n\u2502   \u2514\u2500\u2500 Response: \"All tests pass...\"\n\u2514\u2500\u2500 Turn 3: \"Great, commit this\"\n    \u251c\u2500\u2500 Terminal: git add .\n    \u251c\u2500\u2500 Terminal: git commit -m \"...\"\n    \u2514\u2500\u2500 Response: \"Changes committed...\"\n```\n\n## How it works\n\nFour hooks capture the complete workflow:\n\n| Hook | What it captures |\n|------|------------------|\n| **SessionStart** | Creates root trace when you start Claude Code |\n| **PostToolUse** | Captures every tool call (file reads, edits, terminal commands) |\n| **Stop** | Captures conversation turns (your message + Claude's response) |\n| **SessionEnd** | Logs session summary when you exit |\n\n## Quick setup\n\nRun the setup script in any project directory where you want tracing:\n\n```bash\nbash /path/to/skills/trace-claude-code/setup.sh\n```\n\nThe script prompts for your API key and project name, then configures all hooks automatically.\n\n## Manual setup\n\n### Prerequisites\n\n- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed\n- [Braintrust API key](https://www.braintrust.dev/app/settings/api-keys)\n- `jq` command-line tool (`brew install jq` on macOS)\n\n### Configuration\n\nCreate `.claude/settings.local.json` in your project directory:\n\n```json\n{\n  \"hooks\": {\n    \"SessionStart\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"bash /path/to/hooks/session_start.sh\"\n          }\n        ]\n      }\n    ],\n    \"PostToolUse\": [\n      {\n        \"matcher\": \"*\",\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"bash /path/to/hooks/post_tool_use.sh\"\n          }\n        ]\n      }\n    ],\n    \"Stop\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"bash /path/to/hooks/stop_hook.sh\"\n          }\n        ]\n      }\n    ],\n    \"SessionEnd\": [\n      {\n        \"hooks\": [\n          {\n            \"type\": \"command\",\n            \"command\": \"bash /path/to/hooks/session_end.sh\"\n          }\n        ]\n      }\n    ]\n  },\n  \"env\": {\n    \"TRACE_TO_BRAINTRUST\": \"true\",\n    \"BRAINTRUST_API_KEY\": \"sk-...\",\n    \"BRAINTRUST_CC_PROJECT\": \"my-project\"\n  }\n}\n```\n\nReplace `/path/to/hooks/` with the actual path to this skill's hooks directory.\n\n### Environment variables\n\n| Variable | Required | Description |\n|----------|----------|-------------|\n| `TRACE_TO_BRAINTRUST` | Yes | Set to `\"true\"` to enable tracing |\n| `BRAINTRUST_API_KEY` | Yes | Your Braintrust API key |\n| `BRAINTRUST_CC_PROJECT` | No | Project name (default: `claude-code`) |\n| `BRAINTRUST_CC_DEBUG` | No | Set to `\"true\"` for verbose logging |\n\n## Viewing traces\n\nAfter running Claude Code with tracing enabled:\n\n1. Go to [braintrust.dev](https://www.braintrust.dev)\n2. Navigate to your project (e.g., `claude-code`)\n3. Click **Logs** to see all traced sessions\n\nEach trace shows:\n- **Session root**: The overall Claude Code session\n- **Turns**: Each conversation exchange (user input \u2192 assistant response)\n- **Tool calls**: Individual operations (file reads, edits, terminal commands)\n\n## Trace structure\n\nTraces are hierarchical:\n\n- **Session** (root span)\n  - `span_attributes.type`: `\"task\"`\n  - `metadata.session_id`: Unique session identifier\n  - `metadata.workspace`: Project directory\n\n- **Turn** (child of session)\n  - `span_attributes.type`: `\"llm\"`\n  - `input`: User message\n  - `output`: Assistant response\n  - `metadata.turn_number`: Sequential turn number\n\n- **Tool call** (child of turn or session)\n  - `span_attributes.type`: `\"tool\"`\n  - `input`: Tool input (file path, command, etc.)\n  - `output`: Tool result\n  - `metadata.tool_name`: Name of the tool used\n\n## Troubleshooting\n\n### No traces appearing\n\n1. **Check hooks are running:**\n   ```bash\n   tail -f ~/.claude/state/braintrust_hook.log\n   ```\n\n2. **Verify environment variables** in `.claude/settings.local.json`:\n   - `TRACE_TO_BRAINTRUST` must be `\"true\"`\n   - `BRAINTRUST_API_KEY` must be valid\n\n3. **Enable debug mode:**\n   ```json\n   {\n     \"env\": {\n       \"BRAINTRUST_CC_DEBUG\": \"true\"\n     }\n   }\n   ```\n\n### Permission errors\n\nMake hook scripts executable:\n\n```bash\nchmod +x /path/to/hooks/*.sh\n```\n\n### Missing jq command\n\nInstall jq:\n- **macOS**: `brew install jq`\n- **Ubuntu/Debian**: `sudo apt-get install jq`\n\n### State issues\n\nReset the tracing state:\n\n```bash\nrm ~/.claude/state/braintrust_state.json\n```\n\n### Hook logs\n\nView detailed hook execution logs:\n\n```bash\n# Follow logs in real-time\ntail -f ~/.claude/state/braintrust_hook.log\n\n# View last 50 lines\ntail -50 ~/.claude/state/braintrust_hook.log\n\n# Clear logs\n> ~/.claude/state/braintrust_hook.log\n```\n\n## File structure\n\n```\nhooks/\n\u251c\u2500\u2500 common.sh          # Shared utilities (logging, API, state)\n\u251c\u2500\u2500 session_start.sh   # Creates root trace span\n\u251c\u2500\u2500 post_tool_use.sh   # Captures tool calls\n\u251c\u2500\u2500 stop_hook.sh       # Captures conversation turns\n\u2514\u2500\u2500 session_end.sh     # Finalizes trace\n```\n\n## Alternative: SDK integration\n\nFor programmatic use with the Claude Agent SDK, use the native Braintrust integration:\n\n```typescript\nimport { initLogger, wrapClaudeAgentSDK } from \"braintrust\";\nimport * as claudeSDK from \"@anthropic-ai/claude-agent-sdk\";\n\ninitLogger({\n  projectName: \"my-project\",\n  apiKey: process.env.BRAINTRUST_API_KEY,\n});\n\nconst { query, tool } = wrapClaudeAgentSDK(claudeSDK);\n```\n\nSee [Braintrust Claude Agent SDK docs](https://www.braintrust.dev/docs/integrations/sdk-integrations/claude-agent-sdk) for details.\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "trace-claude-code",
-    "description": "|",
-    "version": "1.1.0"
+  "author": "agentpm",
+  "version": "1.1.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

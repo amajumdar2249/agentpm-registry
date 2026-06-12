@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033044",
   "name": "replit-hello-world",
   "slug": "replit-hello-world",
   "description": "Create a minimal working Replit app with database, object storage, and",
   "content": "# Replit Hello World\n\n## Overview\n\nBuild a working Replit app that demonstrates core platform services: Express/Flask server, Replit Database (key-value store), Object Storage (file uploads), Auth (user login), and PostgreSQL. Produces a running app you can deploy.\n\n## Prerequisites\n\n- Replit App created (template or blank)\n- `.replit` and `replit.nix` configured (see `replit-install-auth`)\n- Node.js 18+ or Python 3.10+\n\n## Instructions\n\n### Step 1: Node.js \u2014 Express + Replit Database\n\n```typescript\n// index.ts\nimport express from 'express';\nimport Database from '@replit/database';\n\nconst app = express();\nconst db = new Database();\napp.use(express.json());\n\n// Health check with Replit env vars\napp.get('/health', (req, res) => {\n  res.json({\n    status: 'ok',\n    repl: process.env.REPL_SLUG,\n    owner: process.env.REPL_OWNER,\n    timestamp: new Date().toISOString(),\n  });\n});\n\n// Replit Key-Value Database CRUD\n// Limits: 50 MiB total, 5,000 keys, 1 KB per key, 5 MiB per value\napp.post('/api/items', async (req, res) => {\n  const { key, value } = req.body;\n  await db.set(key, value);\n  res.json({ stored: key });\n});\n\napp.get('/api/items/:key', async (req, res) => {\n  const value = await db.get(req.params.key);\n  if (value === null) return res.status(404).json({ error: 'Not found' });\n  res.json({ key: req.params.key, value });\n});\n\napp.get('/api/items', async (req, res) => {\n  const prefix = (req.query.prefix as string) || '';\n  const keys = await db.list(prefix);\n  res.json({ keys });\n});\n\napp.delete('/api/items/:key', async (req, res) => {\n  await db.delete(req.params.key);\n  res.json({ deleted: req.params.key });\n});\n\nconst PORT = process.env.PORT || 3000;\napp.listen(PORT, () => {\n  console.log(`Server running on port ${PORT}`);\n  console.log(`Repl: ${process.env.REPL_SLUG} by ${process.env.REPL_OWNER}`);\n});\n```\n\n**package.json dependencies:**\n\n```json\n{\n  \"dependencies\": {\n    \"@replit/database\": \"^2.0.0\",\n    \"express\": \"^4.18.0\"\n  },\n  \"devDependencies\": {\n    \"@types/express\": \"^4.17.0\",\n    \"typescript\": \"^5.0.0\"\n  }\n}\n```\n\n### Step 2: Python \u2014 Flask + Replit Database\n\n```python\n# main.py\nfrom flask import Flask, request, jsonify\nfrom replit import db\nimport os\n\napp = Flask(__name__)\n\n@app.route('/health')\ndef health():\n    return jsonify({\n        'status': 'ok',\n        'repl': os.environ.get('REPL_SLUG'),\n        'owner': os.environ.get('REPL_OWNER'),\n    })\n\n# Replit DB works like a Python dict\n@app.route('/api/items', methods=['POST'])\ndef create_item():\n    data = request.json\n    db[data['key']] = data['value']\n    return jsonify({'stored': data['key']})\n\n@app.route('/api/items/<key>')\ndef get_item(key):\n    if key not in db:\n        return jsonify({'error': 'Not found'}), 404\n    return jsonify({'key': key, 'value': db[key]})\n\n@app.route('/api/items')\ndef list_items():\n    prefix = request.args.get('prefix', '')\n    keys = db.prefix(prefix) if prefix else list(db.keys())\n    return jsonify({'keys': keys})\n\n@app.route('/api/items/<key>', methods=['DELETE'])\ndef delete_item(key):\n    if key in db:\n        del db[key]\n    return jsonify({'deleted': key})\n\nif __name__ == '__main__':\n    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 3000)))\n```\n\n### Step 3: Add Object Storage (File Uploads)\n\n```typescript\n// storage.ts \u2014 Replit Object Storage (App Storage)\nimport { Client } from '@replit/object-storage';\n\nconst storage = new Client();\n\n// Upload text content\nawait storage.uploadFromText('notes/hello.txt', 'Hello from Replit!');\n\n// Upload from file on disk\nawait storage.uploadFromFilename('uploads/photo.jpg', '/tmp/photo.jpg');\n\n// Download as text\nconst { value } = await storage.downloadAsText('notes/hello.txt');\nconsole.log(value); // \"Hello from Replit!\"\n\n// Download as bytes\nconst { value: bytes } = await storage.downloadAsBytes('uploads/photo.jpg');\n\n// List objects with prefix\nconst objects = await storage.list({ prefix: 'notes/' });\nfor (const obj of objects) {\n  console.log(obj.name);  // \"notes/hello.txt\"\n}\n\n// Check existence\nconst { exists } = await storage.exists('notes/hello.txt');\n\n// Copy object\nawait storage.copy('notes/hello.txt', 'archive/hello-backup.txt');\n\n// Delete object\nawait storage.delete('notes/hello.txt');\n```\n\n**Python Object Storage:**\n\n```python\nfrom replit.object_storage import Client\n\nstorage = Client()\n\n# Upload text\nstorage.upload_from_text('notes/hello.txt', 'Hello from Replit!')\n\n# Download\ncontent = storage.download_as_text('notes/hello.txt')\n\n# List with prefix\nobjects = storage.list(prefix='notes/')\n\n# Delete\nstorage.delete('notes/hello.txt')\n\n# Check existence\nexists = storage.exists('notes/hello.txt')\n```\n\n### Step 4: Add Auth-Protected Route\n\n```typescript\n// Add to index.ts\napp.get('/api/me', (req, res) => {\n  const userId = req.headers['x-replit-user-id'];\n  if (!userId) return res.status(401).json({ error: 'Login required' });\n\n  res.json({\n    id: userId,\n    name: req.headers['x-replit-user-name'],\n    image: req.headers['x-replit-user-profile-image'],\n  });\n});\n\n// Client-side: fetch('/__replauthuser') returns current user\n```\n\n### Step 5: `.replit` for This App\n\n```toml\nentrypoint = \"index.ts\"\nrun = \"npx tsx index.ts\"\n\nmodules = [\"nodejs-20:v8-20230920-bd784b9\"]\n\n[nix]\nchannel = \"stable-24_05\"\n\n[env]\nPORT = \"3000\"\n\n[deployment]\nrun = [\"sh\", \"-c\", \"npx tsx index.ts\"]\ndeploymentTarget = \"autoscale\"\n```\n\n## Output\n\nAfter running, verify at these endpoints:\n\n- `GET /health` \u2014 returns Repl metadata\n- `POST /api/items` \u2014 stores key-value data\n- `GET /api/items?prefix=` \u2014 lists keys\n- `GET /api/me` \u2014 returns authenticated user (when deployed)\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `Cannot find module '@replit/database'` | Not installed | `npm install @replit/database` |\n| `db.set is not a function` | Wrong import | Use `new Database()` not `import db` |\n| `REPLIT_DB_URL undefined` | Not on Replit | DB only available inside a Repl |\n| Object Storage 403 | No bucket provisioned | Create bucket in Object Storage pane |\n| Auth headers empty | Running in dev | Auth works only on deployed `.replit.app` |\n\n## Resources\n\n- [Replit Database](https://docs.replit.com/cloud-services/storage-and-databases/replit-database)\n- [Object Storage Overview](https://docs.replit.com/cloud-services/storage-and-databases/object-storage/overview)\n- [Object Storage TypeScript SDK](https://docs.replit.com/cloud-services/storage-and-databases/object-storage/typescript-api-reference)\n- [Replit Auth](https://docs.replit.com/replit-workspace/replit-auth)\n\n## Next Steps\n\nDeploy with `replit-deploy-integration` or add PostgreSQL with `replit-data-handling`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "replit-hello-world",
-    "description": "Create a minimal working Replit app with database, object storage, and",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(pip:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

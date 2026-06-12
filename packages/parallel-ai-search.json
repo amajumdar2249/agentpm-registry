@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000019122",
   "name": "parallel-ai-search",
   "slug": "parallel-ai-search",
   "description": "Use Parallel's parallel-cli to do live web search, URL extraction (clean markdown), deep research reports, bulk data enrichment (CSV/JSON), FindAll entity discovery, and web monitoring. Use when the user asks to look something up online, needs current sources/citations, provides URLs to read or summarise, requests deep/exhaustive research, wants to enrich a dataset with web-sourced fields, wants a list of entities (companies/people/places), or wants to monitor the web for changes over time.",
   "content": "\n# Parallel AI Search (CLI Master)\n\nThis is a **single \u201cmaster\u201d skill** that replaces the earlier Node-script-based version of `parallel-ai-search`.\n\nIt routes to the right `parallel-cli` capability for the task:\n\n- **Search**: quick web lookup with citations (`parallel-cli search`)\n- **Extract**: turn URLs (including PDFs and JS-heavy pages) into clean, LLM-ready text (`parallel-cli extract`)\n- **Deep research**: multi-source reports with processor tiers (`parallel-cli research ...`)\n- **Enrich**: add web-sourced columns to CSV/JSON (`parallel-cli enrich ...`)\n- **FindAll**: discover entities from the web with optional enrichments (`parallel-cli findall ...`)\n- **Monitor**: track web changes on a cadence, optionally via webhook (`parallel-cli monitor ...`)\n\n## Routing rules (pick ONE)\n\nChoose the smallest / cheapest action that solves the user\u2019s request:\n\n1. **Extract** \u2014 if the user gives one or more URLs *or* says \u201cread/summarise this page\u201d, \u201cextract\u201d, \u201cquote\u201d, \u201cpull the content\u201d, \u201cwhat does this page say\u201d.\n2. **Deep research** \u2014 ONLY if the user explicitly asks for *deep*, *exhaustive*, *comprehensive*, *thorough investigation*, or a multi-source \u201creport\u201d.\n3. **Enrich** \u2014 if the user provides a list/table (CSV/JSON/inline objects) and wants new columns like CEO, revenue, funding, contact info, etc.\n4. **FindAll** \u2014 if the user wants you to **discover many entities** (companies/people/venues/etc.) that match criteria.\n5. **Monitor** \u2014 if the user wants **ongoing tracking** (\u201calert me\u201d, \u201ctrack changes\u201d, \u201cmonitor this weekly\u201d) rather than a one-off answer.\n6. **Search** \u2014 default for everything else that needs current web info or citations.\n\nOptional manual prefixes if the user invoked this skill directly:\n- `search: ...`\n- `extract: ...`\n- `research: ...`\n- `enrich: ...`\n- `findall: ...`\n- `monitor: ...`\n\nIf a prefix is present, honour it.\n\n## Setup and authentication (only when needed)\n\nBefore running any Parallel command, ensure auth works:\n\n```bash\nparallel-cli auth\n```\n\nIf `parallel-cli` is missing, install it:\n\n```bash\ncurl -fsSL https://parallel.ai/install.sh | bash\n```\n\nIf you cannot use the install script, use pipx:\n\n```bash\npipx install \"parallel-web-tools[cli]\"\npipx ensurepath\n```\n\nThen authenticate (choose one):\n\n```bash\n# Interactive OAuth (opens browser)\nparallel-cli login\n\n# Headless / SSH / CI\nparallel-cli login --device\n\n# Or environment variable\nexport PARALLEL_API_KEY=\"your_api_key\"\n```\n\n## Output & citation rules\n\n- **Always cite web-sourced facts** with inline markdown links: `[Source Title](https://...)`.\n- **End with a Sources list** whenever you used Search/Extract/Research output.\n- Prefer **official/primary** sources when available.\n- For long outputs, save to files in `/tmp/` and summarise in-chat.\n\n## Search (default web lookup)\n\nUse Search for fast, cost-effective answers with citations.\n\n### Command template\n\n```bash\nparallel-cli search \"$OBJECTIVE\"   --mode agentic   --max-results 10   --json\n```\n\nAdd any of these only when relevant:\n- `--after-date YYYY-MM-DD` (freshness constraint)\n- `--include-domains a.com b.org` (restrict sources)\n- `--exclude-domains spam.com` (block sources)\n- one or more `-q \"keyword query\"` flags (extra keyword probes)\n- `-o \"/tmp/$SLUG.search.json\"` (save full JSON to a file)\n\n### Parse + respond\n\nFrom the JSON results, extract **title**, **url**, and any **publish_date** / **excerpt** fields.\nAnswer the user\u2019s question, and cite each claim inline.\n\n## Extract (read one or more URLs)\n\nUse Extract when you need the actual contents of specific URLs (webpages, PDFs, JS-heavy sites).\n\n### Command template\n\n```bash\nparallel-cli extract \"$URL\" --json\n```\n\nAdd when relevant:\n- `--objective \"Focus area\"` (e.g., pricing, API usage, constraints)\n- `--full-content` (only if the user needs the whole page)\n- `--no-excerpts` (if you only want full content)\n- `-o \"/tmp/$SLUG.extract.json\"` (save full JSON to a file)\n\n### Respond\n\n- If the user asked for a **summary**, summarise with citations to the extracted URL.\n- If the user asked for the **verbatim text**, provide the extracted markdown *only if it is reasonably sized*; otherwise provide the key sections + offer to read more from the saved output.\n\n## Deep research (only when explicitly requested)\n\nDeep research is slower and may cost more than Search. Use it only when the user explicitly wants depth.\n\n### Step 1 \u2014 start (always async)\n\n```bash\nparallel-cli research run \"$QUESTION\" --processor pro-fast --no-wait --json\n```\n\nParse `run_id` (and any monitoring URL) from JSON and tell the user the run started.\n\n### Step 2 \u2014 poll (bounded timeout)\n\nChoose a short slug filename (lowercase-hyphen), then:\n\n```bash\nparallel-cli research poll \"$RUN_ID\" -o \"/tmp/$SLUG\" --timeout 540\n```\n\n- Share the **executive summary** printed by the poll command.\n- Mention the output files:\n  - `/tmp/$SLUG.md`\n  - `/tmp/$SLUG.json`\n\nIf polling times out, re-run the same poll command \u2014 the run continues server-side.\n\n## Enrich (CSV/JSON or inline data)\n\nUse Enrich to add web-sourced columns to structured data.\n\n### Step 1 \u2014 (optional) suggest columns\n\n```bash\nparallel-cli enrich suggest \"$INTENT\" --json\n```\n\nUse this when the user knows the goal but not the exact output schema.\n\n### Step 2 \u2014 run (always async for large jobs)\n\nFor CSV:\n\n```bash\nparallel-cli enrich run   --source-type csv   --source \"input.csv\"   --target \"/tmp/enriched.csv\"   --source-columns '[{\"name\":\"company\",\"description\":\"Company name\"}]'   --intent \"$INTENT\"   --no-wait --json\n```\n\nFor inline JSON rows:\n\n```bash\nparallel-cli enrich run   --data '[{\"company\":\"Google\"},{\"company\":\"Apple\"}]'   --target \"/tmp/enriched.csv\"   --intent \"$INTENT\"   --no-wait --json\n```\n\nParse `taskgroup_id` from JSON.\n\n### Step 3 \u2014 poll\n\n```bash\nparallel-cli enrich poll \"$TASKGROUP_ID\" --timeout 540 --json\n```\n\nAfter completion:\n- Tell the user the output file path (the `--target` you chose).\n- Preview a few rows (using file read tools if available) and report row counts.\n\nIf poll times out, re-run it \u2014 the job continues server-side.\n\n## FindAll (entity discovery)\n\nUse FindAll when the user wants you to discover a set of entities (e.g., \u201cAI startups in healthcare\u201d, \u201croofing companies in Charlotte\u201d, \u201cYC devtools companies\u201d).\n\n### Step 1 \u2014 run\n\n```bash\nparallel-cli findall run \"$OBJECTIVE\" --generator core --match-limit 25 --no-wait --json\n```\n\nUseful options:\n- `--dry-run --json` to preview schema before spending money\n- `--exclude '[{\"name\":\"Example Corp\",\"url\":\"example.com\"}]'` to avoid known entities\n- `--generator preview|base|core|pro` (core default; pro for hardest queries)\n\nParse `run_id` from JSON.\n\n### Step 2 \u2014 poll + fetch results\n\n```bash\nparallel-cli findall poll \"$RUN_ID\" --json\nparallel-cli findall result \"$RUN_ID\" --json\n```\n\nRespond with:\n- total entities found\n- a clean list/table of the best matches (name + URL + key attributes)\n- any caveats about ambiguous matches\n\n## Monitor (web change tracking)\n\nUse Monitor when the user wants ongoing tracking.\n\nCreate:\n\n```bash\nparallel-cli monitor create \"$OBJECTIVE\" --cadence daily --json\n```\n\nOptional:\n- `--cadence hourly|daily|weekly|every_two_weeks`\n- `--webhook https://example.com/hook` (deliver events externally)\n- `--output-schema '<JSON schema string>'` (structured events)\n\nManage:\n\n```bash\nparallel-cli monitor list --json\nparallel-cli monitor get \"$MONITOR_ID\" --json\nparallel-cli monitor update \"$MONITOR_ID\" --cadence weekly --json\nparallel-cli monitor delete \"$MONITOR_ID\"\nparallel-cli monitor events \"$MONITOR_ID\" --json\nparallel-cli monitor simulate \"$MONITOR_ID\" --json\n```\n\nRespond with the monitor id and how to retrieve events (or confirm webhook delivery).\n\n## Reference material\n\n- Copy/paste command templates and patterns: `references/command-templates.md`\n- Troubleshooting common failures: `references/troubleshooting.md`\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "parallel-ai-search",
-    "description": "Use Parallel's parallel-cli to do live web search, URL extraction (clean markdown), deep research reports, bulk data enrichment (CSV/JSON), FindAll entity discovery, and web monitoring. Use when the user asks to look something up online, needs current sources/citations, provides URLs to read or summarise, requests deep/exhaustive research, wants to enrich a dataset with web-sourced fields, wants a list of entities (companies/people/places), or wants to monitor the web for changes over time.",
-    "compatibility": "Requires parallel-cli installed + authenticated (PARALLEL_API_KEY or parallel-cli login) and internet access.",
-    "metadata": "",
-    "author": "openclaw",
-    "version": "2.0.0",
-    "homepage": "https://docs.parallel.ai/integrations/cli",
-    "openclaw": "{\"emoji\":\"\ud83d\udd0e\",\"primaryEnv\":\"PARALLEL_API_KEY\",\"cli\":\"parallel-cli\"}",
-    "allowed-tools": "Bash(parallel-cli:*) Bash(curl:*) Bash(pipx:*) Read"
+  "author": "openclaw",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

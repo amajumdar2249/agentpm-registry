@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033527",
   "name": "webflow-local-dev-loop",
   "slug": "webflow-local-dev-loop",
   "description": "Configure a Webflow local development workflow with TypeScript, hot",
   "content": "# Webflow Local Dev Loop\n\n## Overview\n\nSet up a fast, reproducible local development workflow for Webflow Data API v2 integrations\nwith TypeScript, hot reload, vitest mocking, and ngrok webhook tunneling.\n\n## Prerequisites\n\n- Completed `webflow-install-auth` setup\n- Node.js 18+ with npm/pnpm\n- API token with required scopes\n- ngrok (optional, for webhook testing)\n\n## Instructions\n\n### Step 1: Project Structure\n\n```\nmy-webflow-project/\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 webflow/\n\u2502   \u2502   \u251c\u2500\u2500 client.ts          # WebflowClient singleton\n\u2502   \u2502   \u251c\u2500\u2500 collections.ts    # CMS collection operations\n\u2502   \u2502   \u251c\u2500\u2500 sites.ts           # Site operations\n\u2502   \u2502   \u2514\u2500\u2500 types.ts           # Shared types\n\u2502   \u251c\u2500\u2500 webhooks/\n\u2502   \u2502   \u2514\u2500\u2500 handler.ts         # Webhook endpoint\n\u2502   \u2514\u2500\u2500 index.ts\n\u251c\u2500\u2500 tests/\n\u2502   \u251c\u2500\u2500 collections.test.ts\n\u2502   \u2514\u2500\u2500 fixtures/\n\u2502       \u2514\u2500\u2500 mock-items.json\n\u251c\u2500\u2500 .env.local                 # Local secrets (git-ignored)\n\u251c\u2500\u2500 .env.example               # Template for team\n\u251c\u2500\u2500 tsconfig.json\n\u251c\u2500\u2500 vitest.config.ts\n\u2514\u2500\u2500 package.json\n```\n\n### Step 2: Package Configuration\n\n```json\n{\n  \"name\": \"my-webflow-project\",\n  \"type\": \"module\",\n  \"scripts\": {\n    \"dev\": \"tsx watch src/index.ts\",\n    \"build\": \"tsc\",\n    \"test\": \"vitest run\",\n    \"test:watch\": \"vitest --watch\",\n    \"tunnel\": \"ngrok http 3000\"\n  },\n  \"dependencies\": {\n    \"webflow-api\": \"^3.3.0\",\n    \"express\": \"^4.21.0\"\n  },\n  \"devDependencies\": {\n    \"tsx\": \"^4.19.0\",\n    \"typescript\": \"^5.6.0\",\n    \"vitest\": \"^2.1.0\",\n    \"@types/express\": \"^5.0.0\",\n    \"@types/node\": \"^22.0.0\"\n  }\n}\n```\n\n### Step 3: Environment Setup\n\n```bash\n# .env.example\nWEBFLOW_API_TOKEN=your-token-here\nWEBFLOW_SITE_ID=your-site-id\nWEBFLOW_WEBHOOK_SECRET=your-webhook-secret\nNODE_ENV=development\n```\n\n```bash\ncp .env.example .env.local\n# Edit .env.local with real values\n```\n\nLoad environment in your app:\n\n```typescript\n// src/webflow/client.ts\nimport { WebflowClient } from \"webflow-api\";\nimport { config } from \"dotenv\";\n\nconfig({ path: \".env.local\" });\n\nlet client: WebflowClient | null = null;\n\nexport function getWebflowClient(): WebflowClient {\n  if (!client) {\n    const token = process.env.WEBFLOW_API_TOKEN;\n    if (!token) throw new Error(\"WEBFLOW_API_TOKEN not set in .env.local\");\n\n    client = new WebflowClient({\n      accessToken: token,\n    });\n  }\n  return client;\n}\n\nexport function getSiteId(): string {\n  const siteId = process.env.WEBFLOW_SITE_ID;\n  if (!siteId) throw new Error(\"WEBFLOW_SITE_ID not set in .env.local\");\n  return siteId;\n}\n```\n\n### Step 4: Hot Reload Development\n\n```bash\n# Start with hot reload \u2014 restarts on file changes\nnpm run dev\n```\n\nThe `tsx watch` command re-executes your entry file on every save. For an Express\nwebhook server:\n\n```typescript\n// src/index.ts\nimport express from \"express\";\nimport { getWebflowClient, getSiteId } from \"./webflow/client.js\";\n\nconst app = express();\napp.use(express.json());\n\napp.get(\"/health\", async (req, res) => {\n  const webflow = getWebflowClient();\n  try {\n    const { sites } = await webflow.sites.list();\n    res.json({ status: \"healthy\", sites: sites?.length });\n  } catch (error) {\n    res.status(503).json({ status: \"unhealthy\", error: String(error) });\n  }\n});\n\napp.listen(3000, () => console.log(\"Dev server: http://localhost:3000\"));\n```\n\n### Step 5: Testing with Vitest\n\n```typescript\n// vitest.config.ts\nimport { defineConfig } from \"vitest/config\";\n\nexport default defineConfig({\n  test: {\n    environment: \"node\",\n    globals: true,\n    setupFiles: [\"./tests/setup.ts\"],\n  },\n});\n```\n\n```typescript\n// tests/setup.ts\nimport { config } from \"dotenv\";\nconfig({ path: \".env.local\" });\n```\n\n```typescript\n// tests/collections.test.ts\nimport { describe, it, expect, vi, beforeEach } from \"vitest\";\nimport { WebflowClient } from \"webflow-api\";\n\n// Mock the SDK to avoid real API calls in tests\nvi.mock(\"webflow-api\", () => ({\n  WebflowClient: vi.fn().mockImplementation(() => ({\n    sites: {\n      list: vi.fn().mockResolvedValue({\n        sites: [\n          { id: \"site-123\", displayName: \"Test Site\", shortName: \"test\" },\n        ],\n      }),\n    },\n    collections: {\n      list: vi.fn().mockResolvedValue({\n        collections: [\n          {\n            id: \"col-456\",\n            displayName: \"Blog Posts\",\n            slug: \"blog-posts\",\n            itemCount: 12,\n            fields: [\n              { displayName: \"Name\", slug: \"name\", type: \"PlainText\", isRequired: true },\n              { displayName: \"Slug\", slug: \"slug\", type: \"PlainText\", isRequired: true },\n              { displayName: \"Post Body\", slug: \"post-body\", type: \"RichText\", isRequired: false },\n            ],\n          },\n        ],\n      }),\n      items: {\n        listItems: vi.fn().mockResolvedValue({\n          items: [\n            { id: \"item-789\", isDraft: false, fieldData: { name: \"Test Post\", slug: \"test-post\" } },\n          ],\n          pagination: { limit: 100, offset: 0, total: 1 },\n        }),\n        createItem: vi.fn().mockResolvedValue({\n          id: \"item-new\",\n          isDraft: true,\n          fieldData: { name: \"New Post\", slug: \"new-post\" },\n        }),\n      },\n    },\n  })),\n}));\n\ndescribe(\"Webflow Collections\", () => {\n  let webflow: WebflowClient;\n\n  beforeEach(() => {\n    webflow = new WebflowClient({ accessToken: \"test-token\" });\n  });\n\n  it(\"should list collections for a site\", async () => {\n    const { collections } = await webflow.collections.list(\"site-123\");\n    expect(collections).toHaveLength(1);\n    expect(collections![0].displayName).toBe(\"Blog Posts\");\n  });\n\n  it(\"should list items in a collection\", async () => {\n    const { items } = await webflow.collections.items.listItems(\"col-456\");\n    expect(items).toHaveLength(1);\n    expect(items![0].fieldData?.name).toBe(\"Test Post\");\n  });\n\n  it(\"should create a CMS item\", async () => {\n    const item = await webflow.collections.items.createItem(\"col-456\", {\n      fieldData: { name: \"New Post\", slug: \"new-post\" },\n    });\n    expect(item.id).toBe(\"item-new\");\n    expect(item.isDraft).toBe(true);\n  });\n});\n```\n\n### Step 6: Webhook Testing with ngrok\n\n```bash\n# Terminal 1: Start dev server\nnpm run dev\n\n# Terminal 2: Expose local server\nngrok http 3000\n\n# Copy the https:// URL from ngrok, then register webhook:\ncurl -X POST https://api.webflow.com/v2/sites/{site_id}/webhooks \\\n  -H \"Authorization: Bearer $WEBFLOW_API_TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"triggerType\": \"form_submission\",\n    \"url\": \"https://your-ngrok-url.ngrok.io/webhooks/webflow\"\n  }'\n```\n\n## Output\n\n- Working dev environment with hot reload (`tsx watch`)\n- Mocked test suite (no API calls in CI)\n- ngrok tunnel for webhook testing\n- Environment variable management via `.env.local`\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `WEBFLOW_API_TOKEN not set` | Missing .env.local | `cp .env.example .env.local` and fill in values |\n| Port 3000 in use | Another process | `lsof -ti:3000 \\| xargs kill` or change port |\n| Test mock type error | SDK version mismatch | Update mock to match current SDK types |\n| ngrok tunnel expired | Free tier limit | Restart ngrok or use paid plan |\n\n## Resources\n\n- [Webflow API Quick Start](https://developers.webflow.com/data/reference/rest-introduction/quick-start)\n- [Vitest Documentation](https://vitest.dev/)\n- [tsx Documentation](https://github.com/privatenumber/tsx)\n- [ngrok Documentation](https://ngrok.com/docs)\n\n## Next Steps\n\nSee `webflow-sdk-patterns` for production-ready code patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "webflow-local-dev-loop",
-    "description": "Configure a Webflow local development workflow with TypeScript, hot",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(pnpm:*), Bash(npx:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

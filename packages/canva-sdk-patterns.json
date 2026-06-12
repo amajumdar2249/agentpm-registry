@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031441",
   "name": "canva-sdk-patterns",
   "slug": "canva-sdk-patterns",
   "description": "Apply production-ready Canva Connect API client patterns for TypeScript",
   "content": "# Canva SDK Patterns\n\n## Overview\n\nProduction-ready patterns for wrapping the Canva Connect REST API. There is no official SDK \u2014 all integrations use `fetch` against `api.canva.com/rest/v1/*` with OAuth Bearer tokens. These patterns add automatic token refresh, retry logic, type safety, and multi-tenant support.\n\n## Prerequisites\n\n- Completed `canva-install-auth` setup\n- Understanding of OAuth 2.0 token lifecycle\n- TypeScript 5+ project (or Python 3.10+)\n\n## Pattern 1: Type-Safe Client with Auto Token Refresh\n\n```typescript\n// src/canva/client.ts\ninterface CanvaTokens {\n  accessToken: string;\n  refreshToken: string;\n  expiresAt: number; // Unix ms\n}\n\ninterface CanvaClientConfig {\n  clientId: string;\n  clientSecret: string;\n  tokens: CanvaTokens;\n  onTokenRefresh?: (tokens: CanvaTokens) => Promise<void>; // Persist new tokens\n}\n\nexport class CanvaClient {\n  private static BASE = 'https://api.canva.com/rest/v1';\n  private tokens: CanvaTokens;\n\n  constructor(private config: CanvaClientConfig) {\n    this.tokens = config.tokens;\n  }\n\n  async request<T = any>(path: string, init: RequestInit = {}): Promise<T> {\n    // Auto-refresh if token expires within 5 minutes\n    if (Date.now() > this.tokens.expiresAt - 300_000) {\n      await this.refreshToken();\n    }\n\n    const res = await fetch(`${CanvaClient.BASE}${path}`, {\n      ...init,\n      headers: {\n        'Authorization': `Bearer ${this.tokens.accessToken}`,\n        'Content-Type': 'application/json',\n        ...init.headers,\n      },\n    });\n\n    if (res.status === 401) {\n      await this.refreshToken();\n      return this.request(path, init); // Retry once after refresh\n    }\n\n    if (!res.ok) {\n      const body = await res.text();\n      throw new CanvaAPIError(res.status, body, path);\n    }\n\n    return res.status === 204 ? (null as T) : res.json();\n  }\n\n  private async refreshToken(): Promise<void> {\n    const basicAuth = Buffer.from(\n      `${this.config.clientId}:${this.config.clientSecret}`\n    ).toString('base64');\n\n    const res = await fetch(`${CanvaClient.BASE}/oauth/token`, {\n      method: 'POST',\n      headers: {\n        'Authorization': `Basic ${basicAuth}`,\n        'Content-Type': 'application/x-www-form-urlencoded',\n      },\n      body: new URLSearchParams({\n        grant_type: 'refresh_token',\n        refresh_token: this.tokens.refreshToken,\n      }),\n    });\n\n    if (!res.ok) throw new Error('Token refresh failed \u2014 user must re-authorize');\n\n    const data = await res.json();\n    this.tokens = {\n      accessToken: data.access_token,\n      refreshToken: data.refresh_token,  // Single-use \u2014 always store the new one\n      expiresAt: Date.now() + data.expires_in * 1000,\n    };\n\n    await this.config.onTokenRefresh?.(this.tokens);\n  }\n\n  // Convenience methods matching the REST API\n  async getMe() { return this.request('/users/me'); }\n  async getProfile() { return this.request('/users/me/profile'); }\n  async createDesign(body: object) { return this.request('/designs', { method: 'POST', body: JSON.stringify(body) }); }\n  async getDesign(id: string) { return this.request(`/designs/${id}`); }\n  async listDesigns(params?: URLSearchParams) { return this.request(`/designs?${params || ''}`); }\n  async createExport(body: object) { return this.request('/exports', { method: 'POST', body: JSON.stringify(body) }); }\n  async getExport(id: string) { return this.request(`/exports/${id}`); }\n  async createAutofill(body: object) { return this.request('/autofills', { method: 'POST', body: JSON.stringify(body) }); }\n  async getAutofill(id: string) { return this.request(`/autofills/${id}`); }\n}\n```\n\n## Pattern 2: Custom Error Class\n\n```typescript\n// src/canva/errors.ts\nexport class CanvaAPIError extends Error {\n  public readonly retryable: boolean;\n\n  constructor(\n    public readonly status: number,\n    public readonly body: string,\n    public readonly path: string\n  ) {\n    super(`Canva API ${status} on ${path}: ${body}`);\n    this.name = 'CanvaAPIError';\n    this.retryable = status === 429 || status >= 500;\n  }\n\n  get isRateLimited(): boolean { return this.status === 429; }\n  get isAuthError(): boolean { return this.status === 401 || this.status === 403; }\n  get isNotFound(): boolean { return this.status === 404; }\n}\n```\n\n## Pattern 3: Retry with Exponential Backoff\n\n```typescript\n// src/canva/retry.ts\nexport async function withRetry<T>(\n  fn: () => Promise<T>,\n  opts = { maxRetries: 3, baseDelayMs: 1000 }\n): Promise<T> {\n  for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {\n    try {\n      return await fn();\n    } catch (err) {\n      if (attempt === opts.maxRetries) throw err;\n      if (err instanceof CanvaAPIError && !err.retryable) throw err;\n\n      const delay = opts.baseDelayMs * Math.pow(2, attempt) + Math.random() * 500;\n      await new Promise(r => setTimeout(r, delay));\n    }\n  }\n  throw new Error('Unreachable');\n}\n```\n\n## Pattern 4: Multi-Tenant Factory\n\n```typescript\n// src/canva/factory.ts\nconst clients = new Map<string, CanvaClient>();\n\nexport function getCanvaClientForUser(userId: string, db: TokenStore): CanvaClient {\n  if (!clients.has(userId)) {\n    const tokens = db.getTokens(userId);\n    clients.set(userId, new CanvaClient({\n      clientId: process.env.CANVA_CLIENT_ID!,\n      clientSecret: process.env.CANVA_CLIENT_SECRET!,\n      tokens,\n      onTokenRefresh: async (newTokens) => {\n        await db.saveTokens(userId, newTokens);\n      },\n    }));\n  }\n  return clients.get(userId)!;\n}\n```\n\n## Pattern 5: Python REST Client\n\n```python\n# canva/client.py\nimport httpx\nimport base64\nimport time\n\nclass CanvaClient:\n    BASE = \"https://api.canva.com/rest/v1\"\n\n    def __init__(self, client_id: str, client_secret: str, tokens: dict):\n        self.client_id = client_id\n        self.client_secret = client_secret\n        self.tokens = tokens\n        self._http = httpx.AsyncClient(base_url=self.BASE, timeout=30)\n\n    async def request(self, method: str, path: str, **kwargs) -> dict:\n        if time.time() > self.tokens[\"expires_at\"] - 300:\n            await self._refresh()\n\n        resp = await self._http.request(\n            method, path,\n            headers={\"Authorization\": f\"Bearer {self.tokens['access_token']}\"},\n            **kwargs,\n        )\n\n        if resp.status_code == 401:\n            await self._refresh()\n            return await self.request(method, path, **kwargs)\n\n        resp.raise_for_status()\n        return resp.json() if resp.content else {}\n\n    async def _refresh(self):\n        creds = base64.b64encode(\n            f\"{self.client_id}:{self.client_secret}\".encode()\n        ).decode()\n\n        resp = await self._http.post(\n            \"/oauth/token\",\n            headers={\"Authorization\": f\"Basic {creds}\"},\n            data={\"grant_type\": \"refresh_token\", \"refresh_token\": self.tokens[\"refresh_token\"]},\n        )\n        resp.raise_for_status()\n        data = resp.json()\n        self.tokens = {\n            \"access_token\": data[\"access_token\"],\n            \"refresh_token\": data[\"refresh_token\"],\n            \"expires_at\": time.time() + data[\"expires_in\"],\n        }\n```\n\n## Response Validation with Zod\n\n```typescript\nimport { z } from 'zod';\n\nconst CanvaDesignSchema = z.object({\n  design: z.object({\n    id: z.string(),\n    title: z.string(),\n    owner: z.object({ user_id: z.string(), team_id: z.string() }),\n    urls: z.object({ edit_url: z.string(), view_url: z.string() }),\n    created_at: z.number(),\n    updated_at: z.number(),\n    page_count: z.number(),\n  }),\n});\n\nconst validated = CanvaDesignSchema.parse(await client.getDesign(id));\n```\n\n## Error Handling\n\n| Pattern | Use Case | Benefit |\n|---------|----------|---------|\n| Auto-refresh | All API calls | Transparent token lifecycle |\n| Error class | Error handling | Typed, retryable flags |\n| Retry wrapper | Transient failures | Exponential backoff + jitter |\n| Multi-tenant | SaaS apps | Per-user token isolation |\n\n## Resources\n\n- [Canva API Reference](https://www.canva.dev/docs/connect/api-reference/)\n- [Authentication](https://www.canva.dev/docs/connect/authentication/)\n- [OpenAPI Spec](https://www.canva.dev/sources/connect/api/latest/api.yml)\n\n## Next Steps\n\nApply patterns in `canva-core-workflow-a` for real-world usage.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "canva-sdk-patterns",
-    "description": "Apply production-ready Canva Connect API client patterns for TypeScript",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

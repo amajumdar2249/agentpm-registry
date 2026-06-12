@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031787",
   "name": "deepgram-upgrade-migration",
   "slug": "deepgram-upgrade-migration",
   "description": "Plan and execute Deepgram SDK upgrades and model migrations.",
   "content": "# Deepgram Upgrade Migration\n\n## Current State\n\n!`npm list @deepgram/sdk 2>/dev/null | grep deepgram || echo 'SDK not installed'`\n\n## Overview\n\nGuide for Deepgram SDK version upgrades (v3 -> v4 -> v5) and model migrations (Nova-2 -> Nova-3). Includes breaking change maps, side-by-side API comparison, A/B testing scripts, automated validation, and rollback procedures.\n\n## SDK Version History\n\n| Version | Client Init | STT API | Live API | TTS API | Status |\n|---------|------------|---------|----------|---------|--------|\n| v3.x | `createClient(key)` | `listen.prerecorded.transcribeUrl()` | `listen.live()` | `speak.request()` | Stable |\n| v4.x | `createClient(key)` | `listen.prerecorded.transcribeUrl()` | `listen.live()` | `speak.request()` | Stable |\n| v5.x | `new DeepgramClient({apiKey})` | `listen.v1.media.transcribeUrl()` | `listen.v1.connect()` | `speak.v1.audio.generate()` | Beta |\n\n## Instructions\n\n### Step 1: Identify Current Version and Breaking Changes\n\n```bash\n# Check installed version\nnpm list @deepgram/sdk\n\n# Check latest available\nnpm view @deepgram/sdk versions --json | tail -5\n```\n\n### Step 2: v3/v4 to v5 Migration Map\n\n```typescript\n// ============= CLIENT CREATION =============\n// v3/v4:\nimport { createClient } from '@deepgram/sdk';\nconst dg = createClient(process.env.DEEPGRAM_API_KEY!);\n\n// v5:\nimport { DeepgramClient } from '@deepgram/sdk';\nconst dg = new DeepgramClient({ apiKey: process.env.DEEPGRAM_API_KEY });\n\n// ============= PRE-RECORDED STT =============\n// v3/v4:\nconst { result, error } = await dg.listen.prerecorded.transcribeUrl(\n  { url: audioUrl },\n  { model: 'nova-3', smart_format: true }\n);\n\n// v5:\nconst response = await dg.listen.v1.media.transcribeUrl(\n  { url: audioUrl },\n  { model: 'nova-3', smart_format: true }\n);\n// v5 throws on error instead of returning { error }\n\n// ============= FILE TRANSCRIPTION =============\n// v3/v4:\nconst { result, error } = await dg.listen.prerecorded.transcribeFile(\n  buffer,\n  { model: 'nova-3', mimetype: 'audio/wav' }\n);\n\n// v5:\nconst response = await dg.listen.v1.media.transcribeFile(\n  createReadStream('audio.wav'),\n  { model: 'nova-3' }\n);\n\n// ============= LIVE STREAMING =============\n// v3/v4:\nconst connection = dg.listen.live({ model: 'nova-3', encoding: 'linear16' });\nconnection.on(LiveTranscriptionEvents.Transcript, (data) => { ... });\n\n// v5:\nconst connection = await dg.listen.v1.connect({ model: 'nova-3', encoding: 'linear16' });\n// Note: v5 connect() is async\n\n// ============= TEXT-TO-SPEECH =============\n// v3/v4:\nconst response = await dg.speak.request(\n  { text: 'Hello world' },\n  { model: 'aura-2-thalia-en' }\n);\nconst stream = await response.getStream();\n\n// v5:\nconst response = await dg.speak.v1.audio.generate(\n  { text: 'Hello world' },\n  { model: 'aura-2-thalia-en' }\n);\n\n// ============= ERROR HANDLING =============\n// v3/v4: Destructured { result, error }\nconst { result, error } = await dg.listen.prerecorded.transcribeUrl(src, opts);\nif (error) handleError(error);\n\n// v5: try/catch (throws on error)\ntry {\n  const result = await dg.listen.v1.media.transcribeUrl(src, opts);\n} catch (err) {\n  handleError(err);\n}\n```\n\n### Step 3: Model Migration (Nova-2 -> Nova-3)\n\n```typescript\n// Nova-3 is a drop-in replacement \u2014 same API, better accuracy\n// Just change the model parameter:\n\n// Before:\n{ model: 'nova-2' }\n\n// After:\n{ model: 'nova-3' }\n\n// Nova-3 improvements over Nova-2:\n// - Higher accuracy across all languages\n// - Better handling of accents and dialects\n// - Improved punctuation and formatting\n// - Same pricing tier\n// - Same API parameters\n```\n\n### Step 4: A/B Test Models\n\n```typescript\nasync function compareModels(audioUrl: string) {\n  const client = createClient(process.env.DEEPGRAM_API_KEY!);\n\n  const [nova2, nova3] = await Promise.all([\n    client.listen.prerecorded.transcribeUrl(\n      { url: audioUrl },\n      { model: 'nova-2', smart_format: true }\n    ),\n    client.listen.prerecorded.transcribeUrl(\n      { url: audioUrl },\n      { model: 'nova-3', smart_format: true }\n    ),\n  ]);\n\n  const t2 = nova2.result.results.channels[0].alternatives[0];\n  const t3 = nova3.result.results.channels[0].alternatives[0];\n\n  console.log('=== Nova-2 ===');\n  console.log(`Confidence: ${t2.confidence}`);\n  console.log(`Words: ${t2.words?.length}`);\n  console.log(`Transcript: ${t2.transcript.substring(0, 200)}...`);\n\n  console.log('\\n=== Nova-3 ===');\n  console.log(`Confidence: ${t3.confidence}`);\n  console.log(`Words: ${t3.words?.length}`);\n  console.log(`Transcript: ${t3.transcript.substring(0, 200)}...`);\n\n  // Simple word-level similarity\n  const words2 = new Set(t2.transcript.toLowerCase().split(/\\s+/));\n  const words3 = new Set(t3.transcript.toLowerCase().split(/\\s+/));\n  const intersection = new Set([...words2].filter(w => words3.has(w)));\n  const union = new Set([...words2, ...words3]);\n  const similarity = intersection.size / union.size;\n\n  console.log(`\\nSimilarity: ${(similarity * 100).toFixed(1)}%`);\n  console.log(`Nova-3 confidence delta: ${((t3.confidence - t2.confidence) * 100).toFixed(2)}%`);\n}\n```\n\n### Step 5: Automated Validation Suite\n\n```typescript\nimport { describe, it, expect } from 'vitest';\nimport { createClient } from '@deepgram/sdk';\n\nconst SAMPLE_URL = 'https://static.deepgram.com/examples/Bueller-Life-moves-702702706.wav';\n\ndescribe('Deepgram Migration Validation', () => {\n  const client = createClient(process.env.DEEPGRAM_API_KEY!);\n\n  it('API key is valid', async () => {\n    const { error } = await client.manage.getProjects();\n    expect(error).toBeNull();\n  });\n\n  it('Pre-recorded transcription works', async () => {\n    const { result, error } = await client.listen.prerecorded.transcribeUrl(\n      { url: SAMPLE_URL }, { model: 'nova-3', smart_format: true }\n    );\n    expect(error).toBeNull();\n    expect(result.results.channels[0].alternatives[0].transcript).toBeTruthy();\n    expect(result.results.channels[0].alternatives[0].confidence).toBeGreaterThan(0.8);\n  }, 30000);\n\n  it('Diarization returns speaker labels', async () => {\n    const { result } = await client.listen.prerecorded.transcribeUrl(\n      { url: SAMPLE_URL }, { model: 'nova-3', diarize: true, utterances: true }\n    );\n    const words = result.results.channels[0].alternatives[0].words;\n    expect(words?.[0]).toHaveProperty('speaker');\n  }, 30000);\n\n  it('TTS generates audio', async () => {\n    const response = await client.speak.request(\n      { text: 'Migration test successful.' },\n      { model: 'aura-2-thalia-en' }\n    );\n    const stream = await response.getStream();\n    expect(stream).toBeTruthy();\n  }, 15000);\n});\n```\n\n### Step 6: Rollback Procedure\n\n```bash\n# If issues are found after upgrade:\n\n# 1. Revert SDK version\nnpm install @deepgram/sdk@3.x.x  # Pin to previous working version\n\n# 2. Revert model in config\n# Change nova-3 back to nova-2 in environment/config\n\n# 3. Run validation\nnpx vitest run tests/deepgram-validation.test.ts\n\n# 4. Verify in production\ncurl -s -X POST 'https://api.deepgram.com/v1/listen?model=nova-2' \\\n  -H \"Authorization: Token $DEEPGRAM_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"url\":\"https://static.deepgram.com/examples/Bueller-Life-moves-702702706.wav\"}'\n```\n\n## Output\n\n- SDK version migration map (v3/v4 -> v5)\n- Model migration path (Nova-2 -> Nova-3)\n- A/B testing script with similarity scoring\n- Automated validation test suite\n- Rollback procedure\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `createClient is not a function` | v5 installed | Use `new DeepgramClient()` |\n| `listen.prerecorded is undefined` | v5 namespace change | Use `listen.v1.media` |\n| Quality regression after model change | Edge case in Nova-3 | A/B test, report to Deepgram, rollback |\n| `speak.request is undefined` | v5 namespace change | Use `speak.v1.audio.generate` |\n\n## Resources\n\n- [JS SDK Releases](https://github.com/deepgram/deepgram-js-sdk/releases)\n- [Model Options](https://developers.deepgram.com/docs/model)\n- [Models & Languages](https://developers.deepgram.com/docs/models-languages-overview)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "deepgram-upgrade-migration",
-    "description": "Plan and execute Deepgram SDK upgrades and model migrations.",
-    "Trigger": "upgrade deepgram\", \"deepgram migration\", \"update deepgram SDK\",",
-    "allowed-tools": "Read, Write, Edit, Grep, Bash(npm:*), Bash(pip:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

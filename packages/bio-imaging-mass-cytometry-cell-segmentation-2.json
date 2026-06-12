@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000029390",
   "name": "bio-imaging-mass-cytometry-cell-segmentation",
   "slug": "bio-imaging-mass-cytometry-cell-segmentation-2",
   "description": "Cell segmentation from multiplexed tissue images. Covers deep learning (Cellpose, Mesmer) and classical approaches for nuclear and whole-cell segmentation. Use when extracting single-cell data from IMC or MIBI images after preprocessing.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: Cellpose 3.0+, anndata 0.10+, matplotlib 3.8+, numpy 1.26+, pandas 2.2+, scanpy 1.10+, steinbock 0.16+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Cell Segmentation for IMC\n\n**\"Segment cells from my IMC images\"** \u2192 Identify individual cell boundaries in multiplexed imaging data using deep learning (Cellpose) or watershed-based approaches for single-cell extraction.\n- Python: `cellpose.models.Cellpose()` for deep learning segmentation\n- CLI: `steinbock segment` for pipeline-based segmentation\n\n## Cellpose Segmentation\n\n```python\nfrom cellpose import models, io\nimport numpy as np\nimport tifffile\n\n# Load image\nimg = tifffile.imread('processed.tiff')\n\n# Extract nuclear channel (e.g., DNA1)\nnuclear_channel = img[0]  # Adjust index based on panel\n\n# Initialize Cellpose model\nmodel = models.Cellpose(model_type='nuclei', gpu=True)\n\n# Run segmentation\nmasks, flows, styles, diams = model.eval(\n    nuclear_channel,\n    diameter=30,  # Average nucleus diameter in pixels\n    flow_threshold=0.4,\n    cellprob_threshold=0.0\n)\n\n# masks contains integer labels for each cell\nprint(f'Cells segmented: {masks.max()}')\n```\n\n## Whole-Cell Segmentation with Cellpose\n\n```python\n# Use membrane marker for whole-cell\nmembrane_channel = img[1]  # e.g., CD45\n\n# Combine nuclear and membrane for cyto model\nmodel = models.Cellpose(model_type='cyto2', gpu=True)\n\n# Create 2-channel input [membrane, nuclear]\nimg_input = np.stack([membrane_channel, nuclear_channel])\n\nmasks, flows, styles, diams = model.eval(\n    img_input,\n    channels=[1, 2],  # [membrane, nuclear]\n    diameter=50,\n    flow_threshold=0.4\n)\n```\n\n## Mesmer (DeepCell)\n\n```python\nfrom deepcell.applications import Mesmer\n\n# Initialize Mesmer\napp = Mesmer()\n\n# Prepare input: (batch, H, W, 2) - [nuclear, membrane]\nimg_input = np.stack([nuclear_channel, membrane_channel], axis=-1)\nimg_input = np.expand_dims(img_input, axis=0)\n\n# Segment\npredictions = app.predict(\n    img_input,\n    image_mpp=1.0,  # Microns per pixel\n    compartment='whole-cell'  # or 'nuclear'\n)\n\nmasks = predictions[0, :, :, 0]\n```\n\n## steinbock Segmentation\n\n```bash\n# Using steinbock with Cellpose\nsteinbock segment cellpose \\\n    --img processed \\\n    --model cyto2 \\\n    --channelwise \\\n    --nuclear-channel 0 \\\n    --membrane-channel 1 \\\n    -o masks\n\n# Using steinbock with DeepCell\nsteinbock segment deepcell \\\n    --img processed \\\n    --nuclear-channel 0 \\\n    --membrane-channel 1 \\\n    -o masks\n```\n\n## Extract Single-Cell Data\n\n**Goal:** Convert a segmented cell mask and multi-channel image stack into a per-cell expression matrix suitable for downstream phenotyping and spatial analysis.\n\n**Approach:** Iterate over regionprops of the label mask, compute mean intensity per channel within each cell's pixels, and collect morphological features (area, centroid, eccentricity) into a structured DataFrame.\n\n```python\nfrom skimage import measure\nimport pandas as pd\n\ndef extract_single_cell_data(img, masks, channel_names):\n    '''Extract mean intensity per cell per channel'''\n\n    # Region properties\n    props = measure.regionprops(masks)\n\n    # Cell info\n    cell_data = []\n    intensities = []\n\n    for prop in props:\n        # Basic properties\n        cell_info = {\n            'cell_id': prop.label,\n            'area': prop.area,\n            'centroid_x': prop.centroid[1],\n            'centroid_y': prop.centroid[0],\n            'eccentricity': prop.eccentricity\n        }\n        cell_data.append(cell_info)\n\n        # Mean intensity per channel\n        cell_mask = masks == prop.label\n        cell_intensities = [img[c][cell_mask].mean() for c in range(len(channel_names))]\n        intensities.append(cell_intensities)\n\n    cell_df = pd.DataFrame(cell_data)\n    intensity_df = pd.DataFrame(intensities, columns=channel_names)\n\n    return cell_df, intensity_df\n\ncell_info, intensities = extract_single_cell_data(img, masks, channel_names)\nprint(f'Extracted data for {len(cell_info)} cells')\n```\n\n## Quality Control\n\n```python\nimport matplotlib.pyplot as plt\n\ndef qc_segmentation(img, masks, nuclear_channel_idx=0):\n    '''Visualize segmentation quality'''\n\n    fig, axes = plt.subplots(1, 3, figsize=(15, 5))\n\n    # Nuclear channel\n    axes[0].imshow(img[nuclear_channel_idx], cmap='gray')\n    axes[0].set_title('Nuclear Channel')\n\n    # Segmentation masks\n    axes[1].imshow(masks, cmap='tab20')\n    axes[1].set_title(f'Segmentation ({masks.max()} cells)')\n\n    # Overlay\n    axes[2].imshow(img[nuclear_channel_idx], cmap='gray')\n    axes[2].contour(masks, colors='red', linewidths=0.5)\n    axes[2].set_title('Overlay')\n\n    for ax in axes:\n        ax.axis('off')\n\n    plt.tight_layout()\n    plt.savefig('segmentation_qc.png', dpi=150)\n    plt.close()\n\n    # Statistics\n    props = measure.regionprops(masks)\n    areas = [p.area for p in props]\n\n    print(f'Cells: {len(props)}')\n    print(f'Area: mean={np.mean(areas):.1f}, median={np.median(areas):.1f}')\n\nqc_segmentation(img, masks)\n```\n\n## Expand Nuclei to Cells\n\n```python\nfrom skimage.segmentation import expand_labels\n\n# If only nuclear segmentation available, expand to approximate cells\nnuclear_masks = masks  # From nuclear segmentation\nexpanded_masks = expand_labels(nuclear_masks, distance=10)\n\nprint(f'Expanded masks from nuclei')\n```\n\n## Save Results\n\n```python\nimport tifffile\n\n# Save masks as labeled image\ntifffile.imwrite('cell_masks.tiff', masks.astype(np.uint16))\n\n# Save single-cell data\ncell_info.to_csv('cell_info.csv', index=False)\nintensities.to_csv('cell_intensities.csv', index=False)\n\n# Create combined AnnData\nimport anndata as ad\n\nadata = ad.AnnData(X=intensities.values)\nadata.var_names = channel_names\nadata.obs = cell_info\n\n# Add spatial coordinates\nadata.obsm['spatial'] = cell_info[['centroid_x', 'centroid_y']].values\n\nadata.write('imc_segmented.h5ad')\n```\n\n## Related Skills\n\n- data-preprocessing - Prepare images before segmentation\n- phenotyping - Classify segmented cells\n- spatial-analysis - Analyze cell spatial relationships\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-imaging-mass-cytometry-cell-segmentation",
-    "description": "Cell segmentation from multiplexed tissue images. Covers deep learning (Cellpose, Mesmer) and classical approaches for nuclear and whole-cell segmentation. Use when extracting single-cell data from IMC or MIBI images after preprocessing.",
-    "tool_type": "python",
-    "primary_tool": "cellpose"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

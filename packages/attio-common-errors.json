@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031362",
   "name": "attio-common-errors",
   "slug": "attio-common-errors",
   "description": "Diagnose and fix the top Attio REST API errors by HTTP status code.",
   "content": "# Attio Common Errors\n\n## Overview\n\nEvery Attio API error returns a consistent JSON body. This skill covers the real error codes, response format, and proven solutions for each.\n\n## Attio Error Response Format\n\nAll errors from `https://api.attio.com/v2` return this structure:\n\n```json\n{\n  \"status_code\": 429,\n  \"type\": \"rate_limit_error\",\n  \"code\": \"rate_limit_exceeded\",\n  \"message\": \"Rate limit exceeded, please try again later\"\n}\n```\n\nFields: `status_code` (HTTP status), `type` (error category), `code` (specific code), `message` (human-readable).\n\n## Error Reference\n\n### 400 Bad Request -- `invalid_request`\n\n```json\n{ \"status_code\": 400, \"type\": \"invalid_request_error\", \"code\": \"invalid_request\", \"message\": \"...\" }\n```\n\n**Common causes and fixes:**\n\n| Message pattern | Cause | Fix |\n|----------------|-------|-----|\n| `Invalid value for attribute` | Wrong type for attribute slug | Check attribute type with `GET /v2/objects/{obj}/attributes` |\n| `Cannot query historic values` | Used history param on unsupported type | Remove `show_historic` for that attribute |\n| `Missing required field` | Required attribute not provided | Check `is_required` on attribute definition |\n| `Invalid filter format` | Malformed filter object | Use shorthand `{ \"email\": \"x\" }` or verbose `{ \"$and\": [...] }` |\n\n**Diagnostic:**\n\n```bash\n# List attributes to verify types\ncurl -s https://api.attio.com/v2/objects/people/attributes \\\n  -H \"Authorization: Bearer ${ATTIO_API_KEY}\" \\\n  | jq '.data[] | {slug: .api_slug, type: .type, required: .is_required}'\n```\n\n### 401 Unauthorized -- `authentication_error`\n\n```json\n{ \"status_code\": 401, \"type\": \"authentication_error\", \"code\": \"invalid_api_key\", \"message\": \"...\" }\n```\n\n| Cause | Fix |\n|-------|-----|\n| Missing `Authorization` header | Add `Authorization: Bearer sk_...` |\n| Token revoked or deleted | Generate new token in Attio dashboard |\n| Malformed header | Ensure format is `Bearer <token>` (one space, no quotes) |\n\n**Diagnostic:**\n\n```bash\n# Verify token works\ncurl -s -o /dev/null -w \"%{http_code}\" \\\n  https://api.attio.com/v2/objects \\\n  -H \"Authorization: Bearer ${ATTIO_API_KEY}\"\n# Should return 200\n```\n\n### 403 Forbidden -- `insufficient_scopes`\n\n```json\n{ \"status_code\": 403, \"type\": \"authorization_error\", \"code\": \"insufficient_scopes\",\n  \"message\": \"Token requires 'record_permission:read-write' scope\" }\n```\n\n| Operation | Required scopes |\n|-----------|----------------|\n| List/get records | `object_configuration:read` + `record_permission:read` |\n| Create/update records | `object_configuration:read` + `record_permission:read-write` |\n| List entries | `object_configuration:read` + `record_permission:read` + `list_entry:read` |\n| Create/update entries | Above + `list_entry:read-write` |\n| Create notes | `note:read-write` + `object_configuration:read` + `record_permission:read` |\n| List tasks | `task:read` + `object_configuration:read` + `record_permission:read` + `user_management:read` |\n| Manage webhooks | `webhook:read-write` |\n\n**Fix:** Edit token in **Settings > Developers > Access tokens**, add missing scope, save. No need to regenerate.\n\n### 404 Not Found -- `not_found`\n\n```json\n{ \"status_code\": 404, \"type\": \"not_found_error\", \"code\": \"not_found\", \"message\": \"...\" }\n```\n\n| Cause | Fix |\n|-------|-----|\n| Wrong object slug | Verify with `GET /v2/objects` -- use `api_slug` field |\n| Invalid record_id | Record may have been deleted or merged |\n| Wrong list slug | Verify with `GET /v2/lists` |\n| Typo in endpoint path | Check path starts with `/v2/` |\n\n### 409 Conflict -- `conflict`\n\nOccurs when creating a record with a value that conflicts with an existing unique attribute (e.g., duplicate email or domain).\n\n**Fix:** Use `PUT` (assert) instead of `POST` to upsert:\n\n```typescript\n// Assert: create or update matching record\nawait client.put(\"/objects/people/records\", {\n  data: {\n    values: {\n      email_addresses: [\"existing@example.com\"],\n      name: [{ first_name: \"Updated\", last_name: \"Name\" }],\n    },\n  },\n});\n```\n\n### 422 Unprocessable Entity -- `validation_error`\n\n| Message pattern | Cause | Fix |\n|----------------|-------|-----|\n| `Invalid email address` | Malformed email string | Validate email format before sending |\n| `Invalid phone number` | Not E.164 format | Prefix with country code: `+14155551234` |\n| `Unknown attribute` | Attribute slug does not exist | List attributes first |\n| `Invalid record reference` | target_record_id doesn't exist | Verify record exists first |\n\n### 429 Too Many Requests -- `rate_limit_exceeded`\n\n```json\n{\n  \"status_code\": 429,\n  \"type\": \"rate_limit_error\",\n  \"code\": \"rate_limit_exceeded\",\n  \"message\": \"Rate limit exceeded, please try again later\"\n}\n```\n\nAttio uses a **sliding window algorithm** with a **10-second window**. The `Retry-After` response header contains a date (usually the next second).\n\n**Immediate fix:**\n\n```typescript\nif (res.status === 429) {\n  const retryAfter = res.headers.get(\"Retry-After\");\n  const waitMs = retryAfter\n    ? new Date(retryAfter).getTime() - Date.now()\n    : 1000;\n  await new Promise((r) => setTimeout(r, Math.max(waitMs, 100)));\n  // Retry the request\n}\n```\n\nSee `attio-rate-limits` for full backoff and queue patterns.\n\n### 500+ Server Error\n\nRare, but Attio may reduce rate limits during incidents. Always implement retry for 5xx.\n\n**Check:** [status.attio.com](https://status.attio.com)\n\n## Quick Diagnostic Script\n\n```bash\n#!/bin/bash\necho \"=== Attio Diagnostic ===\"\necho -n \"Auth: \"\ncurl -s -o /dev/null -w \"%{http_code}\" \\\n  https://api.attio.com/v2/objects \\\n  -H \"Authorization: Bearer ${ATTIO_API_KEY}\"\necho \"\"\n\necho -n \"Status page: \"\ncurl -s https://status.attio.com/api/v2/status.json | jq -r '.status.description'\n\necho \"Objects:\"\ncurl -s https://api.attio.com/v2/objects \\\n  -H \"Authorization: Bearer ${ATTIO_API_KEY}\" \\\n  | jq -r '.data[].api_slug' 2>/dev/null || echo \"FAILED\"\n```\n\n## Error Handling Pattern\n\n```typescript\nimport { AttioApiError } from \"./client\";\n\nasync function handleAttioError(err: AttioApiError): Promise<void> {\n  switch (err.statusCode) {\n    case 401: throw new Error(\"Attio auth failed -- check ATTIO_API_KEY\");\n    case 403: throw new Error(`Missing scope: ${err.message}`);\n    case 404: console.warn(\"Resource not found, may have been deleted\");  break;\n    case 409: console.warn(\"Conflict -- use PUT to upsert instead\");     break;\n    case 429: /* handled by retry wrapper */ break;\n    default:  throw err;\n  }\n}\n```\n\n## Resources\n\n- [Attio REST API Overview](https://docs.attio.com/rest-api/overview)\n- [Attio Rate Limiting Guide](https://docs.attio.com/rest-api/guides/rate-limiting)\n- [Attio Status Page](https://status.attio.com)\n\n## Next Steps\n\nFor evidence collection, see `attio-debug-bundle`. For retry patterns, see `attio-rate-limits`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "attio-common-errors",
-    "description": "Diagnose and fix the top Attio REST API errors by HTTP status code.",
-    "Trigger": "attio error\", \"fix attio\", \"attio not working\",",
-    "allowed-tools": "Read, Grep, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

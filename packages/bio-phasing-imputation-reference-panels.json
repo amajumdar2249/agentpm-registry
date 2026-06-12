@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009344",
   "name": "bio-phasing-imputation-reference-panels",
   "slug": "bio-phasing-imputation-reference-panels",
   "description": "Download, prepare, and manage reference panels for phasing and imputation. Covers 1000 Genomes, HRC, and TOPMed panels. Use when setting up imputation infrastructure or selecting appropriate reference panels for target populations.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: bcftools 1.19+, picard 3.1+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Reference Panels\n\n**\"Set up reference panels for imputation\"** \u2192 Download, prepare, and manage reference panels (1000 Genomes, HRC, TOPMed) for genotype phasing and imputation, including population subsetting and format conversion.\n- CLI: `bcftools view -S panel_samples.txt` for subsetting, `bcftools norm` for normalization\n\n## 1000 Genomes Phase 3 (GRCh38)\n\n```bash\n# Download from IGSR\nBASE_URL=\"http://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000G_2504_high_coverage/working/20201028_3202_phased\"\n\nfor chr in {1..22}; do\n    wget ${BASE_URL}/CCDG_14151_B01_GRM_WGS_2020-08-05_chr${chr}.filtered.shapeit2-duohmm-phased.vcf.gz\n    wget ${BASE_URL}/CCDG_14151_B01_GRM_WGS_2020-08-05_chr${chr}.filtered.shapeit2-duohmm-phased.vcf.gz.tbi\ndone\n```\n\n## Subset by Population\n\n```bash\n# Download sample info\nwget http://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/1000G_2504_high_coverage/1000G_2504_high_coverage.sequence.index\n\n# Create population sample lists\ngrep \"EUR\" samples.txt | cut -f1 > european_samples.txt\ngrep \"AFR\" samples.txt | cut -f1 > african_samples.txt\ngrep \"EAS\" samples.txt | cut -f1 > east_asian_samples.txt\n\n# Subset reference to specific population\nbcftools view -S european_samples.txt \\\n    1000GP.chr22.vcf.gz \\\n    -Oz -o 1000GP_EUR.chr22.vcf.gz\n```\n\n## Convert to Beagle Format\n\n```bash\n# Beagle uses VCF directly, but ensure proper format\nbcftools view -m2 -M2 -v snps reference.vcf.gz | \\\n    bcftools annotate --set-id '%CHROM:%POS:%REF:%ALT' | \\\n    bgzip > reference_beagle.vcf.gz\nbcftools index reference_beagle.vcf.gz\n```\n\n## Convert to IMPUTE5 Format\n\n```bash\n# IMPUTE5 uses its own format\nimp5Converter \\\n    --h reference.vcf.gz \\\n    --r chr22 \\\n    --o reference.chr22.imp5\n```\n\n## HRC Reference Panel\n\n```bash\n# HRC requires registration at EGA\n# After access granted:\n\n# Download from EGA using pyega3\npip install pyega3\npyega3 -cf credentials.json fetch EGAD00001002729\n\n# HRC contains 32,470 samples (mostly European)\n```\n\n## TOPMed Reference Panel\n\n```bash\n# TOPMed available through imputation servers\n# Or download from dbGaP with appropriate access\n\n# Use via Michigan Imputation Server:\n# 1. Upload study VCF\n# 2. Select \"TOPMed r2\" as reference\n# 3. Download imputed results\n```\n\n## Genetic Maps\n\n```bash\n# Beagle format (GRCh38) - from Browning lab\nwget https://faculty.washington.edu/browning/beagle/genetic_maps/plink.GRCh38.map.zip\nunzip plink.GRCh38.map.zip -d genetic_maps/\n\n# SHAPEIT5 format (recommended for SHAPEIT5)\nwget https://github.com/odelaneau/shapeit5/raw/main/maps/genetic_maps.b38.tar.gz\ntar xzf genetic_maps.b38.tar.gz\n```\n\n## Check Reference Panel\n\n```bash\n# Basic stats\nbcftools stats reference.vcf.gz | head -50\n\n# Sample count\nbcftools query -l reference.vcf.gz | wc -l\n\n# Variant count\nbcftools view -H reference.vcf.gz | wc -l\n\n# Check chromosomes\nbcftools index -s reference.vcf.gz\n```\n\n## Lift Over Reference Panel\n\n```bash\n# GRCh37 to GRCh38\n# Using Picard\njava -jar picard.jar LiftoverVcf \\\n    I=reference_hg19.vcf.gz \\\n    O=reference_hg38.vcf.gz \\\n    CHAIN=hg19ToHg38.over.chain.gz \\\n    REJECT=rejected.vcf \\\n    R=hg38.fa\n\n# Or using CrossMap\nCrossMap.py vcf hg19ToHg38.chain reference_hg19.vcf hg38.fa reference_hg38.vcf\n```\n\n## Align Study to Reference\n\n```bash\n# Check strand concordance\nbcftools +fixref study.vcf.gz -Oz -o study_fixed.vcf.gz -- \\\n    -f reference.fa \\\n    -i reference_panel.vcf.gz \\\n    -m flip\n\n# Statistics on fixes\nbcftools +fixref study.vcf.gz -- -f reference.fa -m stats\n```\n\n## Filter Reference Panel\n\n```bash\n# Remove singletons (appear in only 1 sample)\nbcftools view -c 2 reference.vcf.gz -Oz -o reference_no_singletons.vcf.gz\n\n# Filter by MAF\nbcftools view -q 0.001:minor reference.vcf.gz -Oz -o reference_maf001.vcf.gz\n\n# Remove indels (SNPs only)\nbcftools view -v snps reference.vcf.gz -Oz -o reference_snps.vcf.gz\n```\n\n## Merge Custom Panel with 1000G\n\n```bash\n# If you have additional reference samples\nbcftools merge \\\n    1000GP.chr22.vcf.gz \\\n    custom_reference.chr22.vcf.gz \\\n    -Oz -o combined_reference.chr22.vcf.gz\n\n# Ensure matching variants first\nbcftools isec -n=2 \\\n    1000GP.chr22.vcf.gz \\\n    custom_reference.chr22.vcf.gz \\\n    -p isec_output\n```\n\n## Reference Panel Comparison\n\n| Panel | Samples | Variants | Populations |\n|-------|---------|----------|-------------|\n| 1000G Phase 3 | 2,504 | 88M | 26 global |\n| HRC r1.1 | 32,470 | 40M | European-heavy |\n| TOPMed r2 | 97,256 | 308M | 60% European, diverse |\n| UK10K | 3,781 | 42M | British |\n\n## Related Skills\n\n- phasing-imputation/haplotype-phasing - Use panels for phasing\n- phasing-imputation/genotype-imputation - Use panels for imputation\n- variant-calling/vcf-manipulation - VCF file operations\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-phasing-imputation-reference-panels",
-    "description": "Download, prepare, and manage reference panels for phasing and imputation. Covers 1000 Genomes, HRC, and TOPMed panels. Use when setting up imputation infrastructure or selecting appropriate reference panels for target populations.",
-    "tool_type": "cli",
-    "primary_tool": "bcftools"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

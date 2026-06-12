@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031427",
   "name": "canva-incident-runbook",
   "slug": "canva-incident-runbook",
   "description": "Execute Canva Connect API incident response with triage, mitigation,",
   "content": "# Canva Incident Runbook\n\n## Overview\n\nRapid incident response for Canva Connect API integration failures. Covers triage, mitigation, escalation, and postmortem.\n\n## Quick Triage (First 5 Minutes)\n\n```bash\n#!/bin/bash\n# canva-triage.sh \u2014 Run immediately when incident detected\n\necho \"=== Canva Triage ===\"\n\n# 1. Is it Canva or us?\necho -n \"Canva API: \"\ncurl -s -o /dev/null -w \"HTTP %{http_code} (%{time_total}s)\\n\" \\\n  -H \"Authorization: Bearer $CANVA_ACCESS_TOKEN\" \\\n  \"https://api.canva.com/rest/v1/users/me\"\n\n# 2. Check our health endpoint\necho -n \"Our health: \"\ncurl -s -o /dev/null -w \"HTTP %{http_code}\\n\" \\\n  \"https://api.ourapp.com/health\"\n\n# 3. Error rate (if Prometheus available)\necho \"Error rate (5min):\"\ncurl -s \"localhost:9090/api/v1/query?query=rate(canva_api_errors_total[5m])\" \\\n  | python3 -c \"import sys,json; d=json.load(sys.stdin); print(d['data']['result'])\" 2>/dev/null \\\n  || echo \"Prometheus not available\"\n\n# 4. Rate limit status\necho -n \"Rate limit remaining: \"\ncurl -sD - -o /dev/null -H \"Authorization: Bearer $CANVA_ACCESS_TOKEN\" \\\n  \"https://api.canva.com/rest/v1/designs?limit=1\" 2>&1 \\\n  | grep -i \"x-ratelimit-remaining\" || echo \"unknown\"\n```\n\n## Decision Tree\n\n```\nAPI returning errors?\n\u251c\u2500\u2500 YES \u2192 What HTTP status?\n\u2502   \u251c\u2500\u2500 401 \u2192 Token expired \u2192 Refresh token, check rotation\n\u2502   \u251c\u2500\u2500 403 \u2192 Scope issue \u2192 Verify integration permissions\n\u2502   \u251c\u2500\u2500 429 \u2192 Rate limited \u2192 Enable backoff, check Retry-After\n\u2502   \u251c\u2500\u2500 5xx \u2192 Canva outage \u2192 Enable fallback, monitor status page\n\u2502   \u2514\u2500\u2500 Other \u2192 Check request format against API docs\n\u2514\u2500\u2500 NO \u2192 Is our integration healthy?\n    \u251c\u2500\u2500 YES \u2192 Likely resolved or intermittent \u2192 Monitor\n    \u2514\u2500\u2500 NO \u2192 Check our infra (pods, memory, DNS, TLS)\n```\n\n## Severity Levels\n\n| Level | Definition | Response Time | Example |\n|-------|------------|---------------|---------|\n| P1 | All design operations broken | < 15 min | All API calls returning 5xx |\n| P2 | Degraded \u2014 some operations fail | < 1 hour | Exports failing, designs work |\n| P3 | Minor \u2014 non-critical feature down | < 4 hours | Webhooks delayed |\n| P4 | No user impact | Next business day | Monitoring gap |\n\n## Immediate Mitigation by Error Type\n\n### 401 \u2014 Token Expired / Revoked\n\n```bash\n# Check if token is valid\ncurl -s -H \"Authorization: Bearer $TOKEN\" \\\n  https://api.canva.com/rest/v1/users/me | python3 -m json.tool\n\n# If expired: refresh all affected users' tokens\n# If revoked: users must re-authorize via OAuth flow\n```\n\n### 429 \u2014 Rate Limited\n\n```bash\n# Check how long to wait\ncurl -sD - -o /dev/null -H \"Authorization: Bearer $TOKEN\" \\\n  \"https://api.canva.com/rest/v1/designs\" 2>&1 \\\n  | grep -i \"retry-after\"\n\n# Immediate: reduce request rate\n# Enable queue-based rate limiting\n```\n\n### 5xx \u2014 Canva Service Error\n\n```bash\n# Check Canva status page (no official status.canva.com for API)\n# Check Canva developer community for reported outages\n\n# Enable graceful degradation\n# Return cached data where possible\n# Show \"Design features temporarily unavailable\" to users\n```\n\n## Communication Templates\n\n### Internal (Slack)\n\n```\nP[1-4] INCIDENT: Canva Integration\nStatus: INVESTIGATING | MITIGATING | RESOLVED\nImpact: [Describe user impact]\nAPI Response: HTTP [status code]\nCurrent action: [What you're doing]\nNext update: [Time]\nIC: @[name]\n```\n\n### External (Status Page)\n\n```\nCanva Design Features \u2014 Degraded Performance\n\nWe are experiencing issues with our design integration.\nUsers may see delays or errors when creating/exporting designs.\n\nWe are actively working with our design platform provider to resolve this.\n\nLast updated: [ISO 8601 timestamp]\n```\n\n## Post-Incident\n\n### Evidence Collection\n\n```bash\n# Collect logs for the incident window\nkubectl logs -l app=canva-integration --since=2h > incident-canva-logs.txt\n\n# Export metrics\ncurl \"localhost:9090/api/v1/query_range?query=canva_api_errors_total&start=$(date -d '2 hours ago' +%s)&end=$(date +%s)&step=60\" > metrics.json\n```\n\n### Postmortem Template\n\n```markdown\n## Incident: Canva API [Error Type]\n**Date:** YYYY-MM-DD HH:MM UTC\n**Duration:** X hours Y minutes\n**Severity:** P[1-4]\n\n### Summary\n[1-2 sentence description]\n\n### Timeline (UTC)\n- HH:MM \u2014 [First alert / error detected]\n- HH:MM \u2014 [Investigation started]\n- HH:MM \u2014 [Root cause identified]\n- HH:MM \u2014 [Mitigation applied]\n- HH:MM \u2014 [Confirmed resolved]\n\n### Root Cause\n[Was it Canva-side or our integration? Token issue? Rate limit? Code bug?]\n\n### Impact\n- Users affected: N\n- Failed operations: N designs / N exports\n\n### Action Items\n- [ ] [Preventive measure] \u2014 Owner \u2014 Due date\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Can't determine if Canva is down | No status page API | Test with known-good token |\n| Token refresh fails | Revoked integration | Re-authorize user |\n| All users affected | Integration-level issue | Check client credentials |\n| Single user affected | User-level token issue | Refresh that user's token |\n\n## Resources\n\n- [Canva API Reference](https://www.canva.dev/docs/connect/api-reference/)\n- [Canva Changelog](https://www.canva.dev/docs/connect/changelog/)\n\n## Next Steps\n\nFor data handling, see `canva-data-handling`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "canva-incident-runbook",
-    "description": "Execute Canva Connect API incident response with triage, mitigation,",
-    "allowed-tools": "Read, Grep, Bash(kubectl:*), Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

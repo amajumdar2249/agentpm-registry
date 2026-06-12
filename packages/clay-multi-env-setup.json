@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031531",
   "name": "clay-multi-env-setup",
   "slug": "clay-multi-env-setup",
   "description": "Configure Clay integrations across development, staging, and production",
   "content": "# Clay Multi-Environment Setup\n\n## Overview\n\nConfigure Clay integrations across dev/staging/prod with isolated tables, separate webhook URLs, and environment-specific enrichment settings. Clay is a single workspace per account, so multi-environment isolation requires separate tables, careful naming, and environment-aware application code.\n\n## Prerequisites\n\n- Clay account (one workspace can hold multiple tables)\n- Environment variable management per deployment target\n- Understanding of Clay table and webhook concepts\n\n## Instructions\n\n### Step 1: Create Per-Environment Tables\n\nIn Clay, create separate tables for each environment:\n\n| Table Name | Environment | Webhook URL | Auto-Enrich | Credit Cap |\n|------------|-------------|-------------|-------------|------------|\n| `[DEV] Outbound Leads` | Development | Dev webhook | ON (small batches) | 100 rows |\n| `[STG] Outbound Leads` | Staging | Staging webhook | ON | 500 rows |\n| `Outbound Leads` | Production | Prod webhook | ON | 10,000 rows |\n\nEach table gets its own webhook URL. Copy each URL to the appropriate environment's secrets.\n\n### Step 2: Environment Configuration\n\n```typescript\n// src/config/clay.ts \u2014 environment-aware Clay configuration\ninterface ClayEnvConfig {\n  webhookUrl: string;\n  apiKey?: string;                // Enterprise API (if applicable)\n  maxRowsPerBatch: number;\n  delayBetweenRowsMs: number;\n  enableCRMSync: boolean;\n  tablePrefix: string;\n}\n\nfunction getClayConfig(): ClayEnvConfig {\n  const env = process.env.NODE_ENV || 'development';\n\n  const configs: Record<string, ClayEnvConfig> = {\n    development: {\n      webhookUrl: process.env.CLAY_WEBHOOK_URL_DEV!,\n      maxRowsPerBatch: 10,          // Small batches to conserve credits\n      delayBetweenRowsMs: 500,      // Slow, safe\n      enableCRMSync: false,         // Never push dev data to real CRM\n      tablePrefix: '[DEV]',\n    },\n    staging: {\n      webhookUrl: process.env.CLAY_WEBHOOK_URL_STG!,\n      maxRowsPerBatch: 100,\n      delayBetweenRowsMs: 250,\n      enableCRMSync: false,         // Use sandbox CRM if needed\n      tablePrefix: '[STG]',\n    },\n    production: {\n      webhookUrl: process.env.CLAY_WEBHOOK_URL!,\n      apiKey: process.env.CLAY_API_KEY,\n      maxRowsPerBatch: 1000,\n      delayBetweenRowsMs: 100,\n      enableCRMSync: true,\n      tablePrefix: '',\n    },\n  };\n\n  const config = configs[env];\n  if (!config) throw new Error(`Unknown environment: ${env}`);\n  if (!config.webhookUrl) throw new Error(`CLAY_WEBHOOK_URL not set for ${env}`);\n\n  return config;\n}\n```\n\n### Step 3: Environment Variable Management\n\n```bash\n# .env.development\nCLAY_WEBHOOK_URL_DEV=https://app.clay.com/api/v1/webhooks/dev-webhook-id\nNODE_ENV=development\n\n# .env.staging\nCLAY_WEBHOOK_URL_STG=https://app.clay.com/api/v1/webhooks/stg-webhook-id\nNODE_ENV=staging\n\n# .env.production (never in git \u2014 use secrets manager)\nCLAY_WEBHOOK_URL=https://app.clay.com/api/v1/webhooks/prod-webhook-id\nCLAY_API_KEY=clay_ent_production_key\nNODE_ENV=production\n```\n\n```bash\n# GitHub Actions \u2014 per-environment secrets\ngh secret set CLAY_WEBHOOK_URL_DEV --body \"https://app.clay.com/api/v1/webhooks/dev-id\"\ngh secret set CLAY_WEBHOOK_URL_STG --body \"https://app.clay.com/api/v1/webhooks/stg-id\"\ngh secret set CLAY_WEBHOOK_URL --body \"https://app.clay.com/api/v1/webhooks/prod-id\"\ngh secret set CLAY_API_KEY --body \"clay_ent_production_key\"\n```\n\n### Step 4: Startup Validation\n\n```typescript\n// src/config/validate.ts \u2014 fail fast if config is wrong\nimport { z } from 'zod';\n\nconst ClayConfigSchema = z.object({\n  webhookUrl: z.string().url().startsWith('https://'),\n  apiKey: z.string().startsWith('clay_ent_').optional(),\n  maxRowsPerBatch: z.number().positive().max(10_000),\n  delayBetweenRowsMs: z.number().min(0),\n  enableCRMSync: z.boolean(),\n  tablePrefix: z.string(),\n});\n\nexport function validateClayConfig(config: unknown) {\n  const result = ClayConfigSchema.safeParse(config);\n  if (!result.success) {\n    console.error('Clay configuration invalid:', result.error.format());\n    process.exit(1);\n  }\n  console.log(`Clay config validated for ${process.env.NODE_ENV}`);\n  return result.data;\n}\n```\n\n### Step 5: Environment-Aware Safety Guards\n\n```typescript\n// src/clay/guards.ts \u2014 prevent production data in dev and vice versa\nfunction safetyCheck(env: string, rowCount: number): void {\n  if (env === 'development' && rowCount > 50) {\n    throw new Error(`Dev environment: refusing to process ${rowCount} rows (max 50). Use staging or production.`);\n  }\n  if (env === 'staging' && rowCount > 1000) {\n    throw new Error(`Staging environment: refusing to process ${rowCount} rows (max 1000). Use production.`);\n  }\n}\n\nfunction preventCrossEnvData(env: string, crmPushEnabled: boolean): void {\n  if (env !== 'production' && crmPushEnabled) {\n    throw new Error(`CRM sync is disabled in ${env}. Only production can push to CRM.`);\n  }\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Wrong table receives data | Dev webhook URL in production | Validate webhook URL matches environment |\n| Dev data in production CRM | CRM sync enabled in dev | Guard CRM sync to production only |\n| Credit waste in dev/staging | Full enrichment on test data | Set low row caps on dev/staging tables |\n| Missing webhook URL at startup | Environment variable not set | Add startup validation with Zod |\n\n## Resources\n\n- [Clay University -- Table Management Settings](https://university.clay.com/docs/table-management-settings)\n- [Zod Documentation](https://zod.dev/)\n\n## Next Steps\n\nFor monitoring and observability, see `clay-observability`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clay-multi-env-setup",
-    "description": "Configure Clay integrations across development, staging, and production",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

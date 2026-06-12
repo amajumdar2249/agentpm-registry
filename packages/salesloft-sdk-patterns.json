@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033155",
   "name": "salesloft-sdk-patterns",
   "slug": "salesloft-sdk-patterns",
   "description": "Apply production-ready SalesLoft API patterns for TypeScript and Python.",
   "content": "# SalesLoft SDK Patterns\n\n## Overview\n\nProduction-ready patterns for the SalesLoft REST API v2. There is no official TypeScript/Python SDK -- build a typed wrapper around `https://api.salesloft.com/v2/` with automatic pagination, retry, and error normalization.\n\n## Prerequisites\n\n- Completed `salesloft-install-auth` setup\n- `axios` or `node-fetch` installed\n- Familiarity with async/await and generics\n\n## Instructions\n\n### Step 1: Typed API Client Singleton\n\n```typescript\n// src/salesloft/client.ts\nimport axios, { AxiosInstance, AxiosError } from 'axios';\n\ninterface SalesloftPaging {\n  per_page: number;\n  current_page: number;\n  total_pages: number;\n  total_count: number;\n}\n\ninterface SalesloftListResponse<T> {\n  data: T[];\n  metadata: { paging: SalesloftPaging };\n}\n\ninterface SalesloftSingleResponse<T> {\n  data: T;\n}\n\nlet instance: AxiosInstance | null = null;\n\nexport function getSalesloftClient(): AxiosInstance {\n  if (!instance) {\n    instance = axios.create({\n      baseURL: process.env.SALESLOFT_BASE_URL || 'https://api.salesloft.com/v2',\n      headers: { Authorization: `Bearer ${process.env.SALESLOFT_API_KEY}` },\n      timeout: 30_000,\n    });\n    // Add response interceptor for rate-limit headers\n    instance.interceptors.response.use(undefined, handleRateLimitError);\n  }\n  return instance;\n}\n```\n\n### Step 2: Automatic Pagination Iterator\n\n```typescript\n// SalesLoft paginates with page/per_page params, max 100 per page\nasync function* paginate<T>(\n  endpoint: string,\n  params: Record<string, any> = {},\n): AsyncGenerator<T> {\n  const client = getSalesloftClient();\n  let page = 1;\n  let totalPages = 1;\n\n  do {\n    const { data: response } = await client.get<SalesloftListResponse<T>>(\n      endpoint, { params: { ...params, per_page: 100, page } }\n    );\n    for (const item of response.data) yield item;\n    totalPages = response.metadata.paging.total_pages;\n    page++;\n  } while (page <= totalPages);\n}\n\n// Usage: iterate all people\nfor await (const person of paginate<Person>('/people.json')) {\n  console.log(person.display_name);\n}\n```\n\n### Step 3: Error Handling with Rate-Limit Awareness\n\n```typescript\n// SalesLoft uses cost-based rate limiting: 600 cost/min\n// High-page requests (page > 100) cost 3-30 points instead of 1\nasync function handleRateLimitError(error: AxiosError) {\n  if (error.response?.status === 429) {\n    const retryAfter = parseInt(\n      error.response.headers['retry-after'] || '60', 10\n    );\n    console.warn(`Rate limited. Waiting ${retryAfter}s...`);\n    await new Promise(r => setTimeout(r, retryAfter * 1000));\n    return getSalesloftClient().request(error.config!);\n  }\n  throw error;\n}\n\nclass SalesloftApiError extends Error {\n  constructor(\n    message: string,\n    public status: number,\n    public retryable: boolean,\n  ) {\n    super(message);\n    this.name = 'SalesloftApiError';\n  }\n}\n```\n\n### Step 4: Python Equivalent\n\n```python\nimport os, time, requests\nfrom typing import Iterator, Any\n\nclass SalesloftClient:\n    BASE_URL = \"https://api.salesloft.com/v2\"\n\n    def __init__(self, api_key: str | None = None):\n        self.session = requests.Session()\n        self.session.headers[\"Authorization\"] = f\"Bearer {api_key or os.environ['SALESLOFT_API_KEY']}\"\n\n    def get(self, endpoint: str, **params) -> dict:\n        resp = self.session.get(f\"{self.BASE_URL}/{endpoint}\", params=params)\n        if resp.status_code == 429:\n            time.sleep(int(resp.headers.get(\"Retry-After\", 60)))\n            return self.get(endpoint, **params)\n        resp.raise_for_status()\n        return resp.json()\n\n    def paginate(self, endpoint: str, **params) -> Iterator[dict]:\n        page = 1\n        while True:\n            result = self.get(endpoint, page=page, per_page=100, **params)\n            yield from result[\"data\"]\n            if page >= result[\"metadata\"][\"paging\"][\"total_pages\"]:\n                break\n            page += 1\n```\n\n## Output\n\n- Type-safe client singleton with rate-limit retry\n- Automatic pagination that handles all pages\n- Error normalization for consistent handling\n- Python and TypeScript implementations\n\n## Error Handling\n\n| Status | Meaning | Retryable | Cost |\n|--------|---------|-----------|------|\n| `401` | Invalid/expired token | No (refresh token) | 0 |\n| `404` | Resource not found | No | 1 |\n| `422` | Validation error | No (fix payload) | 1 |\n| `429` | Rate limited | Yes (wait `Retry-After`) | 0 |\n| `5xx` | Server error | Yes (backoff) | 1 |\n\n## Resources\n\n- [SalesLoft API Basics](https://developers.salesloft.com/docs/platform/api-basics/)\n- [Rate Limits](https://developers.salesloft.com/docs/platform/api-basics/rate-limits/)\n- [People Endpoint](https://developers.salesloft.com/docs/api/people-index/)\n\n## Next Steps\n\nApply patterns in `salesloft-core-workflow-a` for real-world usage.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "salesloft-sdk-patterns",
-    "description": "Apply production-ready SalesLoft API patterns for TypeScript and Python.",
-    "Trigger": "salesloft SDK patterns\", \"salesloft best practices\", \"salesloft client",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

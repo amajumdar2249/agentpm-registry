@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031455",
   "name": "castai-performance-tuning",
   "slug": "castai-performance-tuning",
   "description": "Optimize CAST AI autoscaler performance, node provisioning speed, and",
   "content": "# CAST AI Performance Tuning\n\n## Overview\n\nTune CAST AI for faster node provisioning, more responsive autoscaling, and efficient API usage. Covers headroom configuration, instance family selection, and API caching for multi-cluster dashboards.\n\n## Prerequisites\n\n- CAST AI Phase 2 (full automation) enabled\n- Understanding of workload scheduling patterns\n- Access to autoscaler policy configuration\n\n## Instructions\n\n### Step 1: Optimize Node Provisioning Speed\n\n```bash\n# Configure headroom for proactive scaling (avoids waiting for pending pods)\ncurl -X PUT -H \"X-API-Key: ${CASTAI_API_KEY}\" \\\n  -H \"Content-Type: application/json\" \\\n  \"https://api.cast.ai/v1/kubernetes/clusters/${CASTAI_CLUSTER_ID}/policies\" \\\n  -d '{\n    \"enabled\": true,\n    \"unschedulablePods\": {\n      \"enabled\": true,\n      \"headroom\": {\n        \"enabled\": true,\n        \"cpuPercentage\": 15,\n        \"memoryPercentage\": 15\n      }\n    }\n  }'\n```\n\nHeadroom pre-provisions spare capacity so pods schedule immediately instead of waiting 2-5 minutes for new nodes.\n\n### Step 2: Instance Family Optimization\n\n```hcl\n# Terraform: Prefer instance families with fast launch times\nresource \"castai_node_template\" \"fast_launch\" {\n  cluster_id = castai_eks_cluster.this.id\n  name       = \"fast-launch-workers\"\n\n  constraints {\n    spot                  = true\n    use_spot_fallbacks    = true\n    fallback_restore_rate_seconds = 300\n\n    # Newer instance types launch faster and have better availability\n    instance_families {\n      include = [\"m6i\", \"m7i\", \"c6i\", \"c7i\", \"r6i\", \"r7i\"]\n    }\n\n    # Enable spot diversity for faster provisioning\n    spot_diversity_price_increase_limit_percent = 25\n\n    architectures = [\"amd64\"]\n  }\n}\n```\n\n### Step 3: Evictor Tuning for Faster Consolidation\n\n```bash\n# Reduce empty node delay for dev/staging (faster downscale)\nhelm upgrade castai-evictor castai-helm/castai-evictor \\\n  -n castai-agent \\\n  --reuse-values \\\n  --set evictor.aggressiveMode=true \\\n  --set evictor.cycleInterval=120\n\n# For production, use non-aggressive with longer intervals\n# --set evictor.aggressiveMode=false\n# --set evictor.cycleInterval=600\n```\n\n### Step 4: API Performance for Multi-Cluster Dashboards\n\n```typescript\nimport { LRUCache } from \"lru-cache\";\n\nconst cache = new LRUCache<string, unknown>({ max: 100, ttl: 60_000 });\n\ninterface ClusterSummary {\n  id: string;\n  name: string;\n  savings: number;\n  savingsPercent: number;\n  nodeCount: number;\n  spotPercent: number;\n}\n\nasync function getClusterSummary(clusterId: string): Promise<ClusterSummary> {\n  const cacheKey = `summary:${clusterId}`;\n  const cached = cache.get(cacheKey) as ClusterSummary | undefined;\n  if (cached) return cached;\n\n  const [cluster, savings, nodes] = await Promise.all([\n    castaiGet(`/v1/kubernetes/external-clusters/${clusterId}`),\n    castaiGet(`/v1/kubernetes/clusters/${clusterId}/savings`),\n    castaiGet(`/v1/kubernetes/external-clusters/${clusterId}/nodes`),\n  ]);\n\n  const spotNodes = nodes.items.filter(\n    (n: { lifecycle: string }) => n.lifecycle === \"spot\"\n  ).length;\n\n  const summary: ClusterSummary = {\n    id: clusterId,\n    name: cluster.name,\n    savings: savings.monthlySavings,\n    savingsPercent: savings.savingsPercentage,\n    nodeCount: nodes.items.length,\n    spotPercent: nodes.items.length > 0\n      ? (spotNodes / nodes.items.length) * 100\n      : 0,\n  };\n\n  cache.set(cacheKey, summary);\n  return summary;\n}\n\n// Aggregate across all clusters\nasync function getDashboardData(\n  clusterIds: string[]\n): Promise<ClusterSummary[]> {\n  return Promise.all(clusterIds.map(getClusterSummary));\n}\n```\n\n### Step 5: Workload Autoscaler Tuning\n\n```yaml\n# Faster resource adjustment with shorter cooldown\n# (use with caution in production)\nmetadata:\n  annotations:\n    autoscaling.cast.ai/cpu-headroom: \"10\"     # Lower headroom = tighter fit\n    autoscaling.cast.ai/memory-headroom: \"15\"\n    autoscaling.cast.ai/apply-type: \"immediate\" # Apply without waiting\n```\n\n## Performance Benchmarks\n\n| Metric | Default | Tuned |\n|--------|---------|-------|\n| Node provision time | 3-5 min | 1-3 min (with headroom) |\n| Empty node removal | 5 min | 2 min (aggressive evictor) |\n| Workload resize | 5 min cooldown | Immediate |\n| API response (cached) | 200ms | <5ms |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Headroom over-provisioning | Percentage too high | Reduce to 5-10% |\n| Aggressive evictor causing disruptions | PDB not set | Add PodDisruptionBudgets |\n| Cache stale data | TTL too long | Reduce cache TTL to 30s |\n| Instance type unavailable | Too narrow constraints | Add more instance families |\n\n## Resources\n\n- [Autoscaler Settings](https://docs.cast.ai/docs/autoscaler-settings)\n- [Workload Autoscaler Annotations](https://docs.cast.ai/docs/workload-autoscaler-annotations-reference)\n- [Node Configuration](https://docs.cast.ai/docs/node-configuration)\n\n## Next Steps\n\nFor cost optimization strategies, see `castai-cost-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "castai-performance-tuning",
-    "description": "Optimize CAST AI autoscaler performance, node provisioning speed, and",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Bash(kubectl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

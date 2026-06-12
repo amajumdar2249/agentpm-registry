@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000042900",
   "name": "run-parallel-agents-feature-debug",
   "slug": "run-parallel-agents-feature-debug-2",
   "description": "|",
   "content": "\n<EXTREMELY-IMPORTANT>\nThis skill orchestrates real Agent tool executions. Non-negotiable rules:\n1. Prove the failures do not share a root cause before parallelizing them.\n2. Write a complete prompt for every spawned agent because fresh `subagent_type` agents do not inherit task context.\n3. Launch all parallel agents in a single assistant message with multiple `Agent(...)` tool uses.\n4. Use `run_in_background: true` for independent debug lanes and do not poll background output.\n5. Use `isolation: \"worktree\"` for debug lanes that may modify code.\n</EXTREMELY-IMPORTANT>\n\n# Run Parallel Agents Feature Debug\n\n## Inputs\n\n- `$request`: Optional problem set, failure list, or user direction such as `debug these three failing suites in parallel` or `split these bugs across agents`.\n\n## Goal\n\nExploit Claude Code's real parallel agent runtime to diagnose and fix independent failures concurrently without splitting one root cause into multiple conflicting investigations.\n\n## Step 0: Resolve the candidate debug lanes\n\nIdentify the failure set:\n\n- explicit user bug list\n- failing test groups\n- broken subsystems\n- grouped compile, lint, runtime, or performance failures\n\nThen determine:\n\n- failure count\n- likely subsystem boundaries\n- whether each failure is a symptom or a standalone issue\n- whether the lanes are debug/fix work rather than planning or broad exploration\n\nDo not use this skill if:\n\n- there are fewer than 3 independent lanes\n- the failures may share one root cause\n- one broken dependency, config value, schema change, or deploy event could explain multiple symptoms\n- the work still needs decomposition before execution\n\nUse `AskUserQuestion` only if safe clustering depends on user clarification.\n\n**Success criteria**: You have a concrete set of candidate debug lanes worth triaging for independence.\n\n## Step 1: Prove independence and reject shared-root-cause traps\n\nFor each candidate lane, check:\n\n- whether the failure started at the same time as other lanes\n- whether the same dependency, config, migration, environment, or upstream service appears in multiple traces\n- whether one fix could plausibly collapse several symptoms\n- whether the write scope is disjoint if multiple lanes reach the fix stage\n\nParallelize only when:\n\n- root cause is plausibly distinct\n- reproduction is lane-local\n- expected fixes do not overlap heavily\n\nIf there is meaningful doubt, do not parallelize yet. Diagnose the shared root cause first.\n\nLoad `references/debug_patterns.md` for root-cause heuristics and framework-specific failure patterns.\nLoad `references/agent-runtime-semantics.md` for the runtime rules that make or break parallel debug execution.\n\n**Success criteria**: Every selected lane is likely independent at both diagnosis and fix time.\n\n## Step 2: Match each debug lane to the right agent\n\nChoose the most appropriate specialized agent for each lane based on:\n\n- framework and language\n- failing files and directories\n- error signatures\n- whether the lane is runtime, test, build, or performance focused\n\nLoad `references/agent_matching_logic.md` for detailed matching rules and edge cases.\n\nPractical defaults:\n\n- use the most specific framework/domain agent available\n- use `general-purpose` only when no stronger fit exists\n- do not invent agent types\n\n**Success criteria**: Every lane has a justified debug agent assignment.\n\n## Step 3: Build full debugging briefs\n\nBecause fresh `subagent_type` agents start without the main thread's task context, every prompt must contain:\n\n- the exact problem statement\n- the concrete error or symptom\n- reproduction steps, if known\n- affected files or directories\n- likely scope boundaries\n- what counts as success\n- required verification command or test\n- whether the lane should only diagnose or both diagnose and fix\n\nPrefer real evidence over summaries:\n\n- failing command output\n- stack trace excerpts\n- failing test names\n- impacted file paths\n\nDo not hand a fresh agent vague instructions like \"fix this suite\" without the actual failure surface.\n\n**Success criteria**: Each lane prompt is complete enough for a fresh agent to diagnose without basic follow-up questions.\n\n## Step 4: Launch all agents in one parallel batch\n\nLaunch every lane in a single assistant message containing multiple `Agent(...)` tool uses.\n\nRequired launch semantics for fix-capable debug lanes:\n\n- `subagent_type`: matched agent type\n- `description`: short 3-5 word description\n- `prompt`: full debugging brief\n- `run_in_background: true`\n- `isolation: \"worktree\"`\n\nRuntime-specific rules:\n\n- do not split the launches across multiple assistant messages if the user asked for parallel debugging\n- do not rely on target-agent defaults for async or isolation when parallel safety matters\n- do not use read-only forks here; this skill is for fresh specialized debug agents\n\nLoad `references/agent-runtime-semantics.md` for the exact source-backed reasons behind these rules.\n\n**Success criteria**: All independent debug lanes are launched concurrently with explicit, safe runtime settings.\n\n## Step 5: Aggregate completions without polling\n\nAfter launch:\n\n- continue with non-overlapping coordination work\n- wait for completion notifications instead of polling background transcripts\n- trust returned agent summaries unless there is a concrete reason to inspect deeper\n\nWhen each lane completes, capture:\n\n- status\n- diagnosed root cause\n- files touched\n- verification result\n- blockers or unresolved scope\n\nIf a lane concludes the issue was not independent after all, stop pretending the original clustering was valid and reframe the remaining work.\n\n**Success criteria**: Every spawned lane has a tracked outcome without unnecessary transcript noise.\n\n## Step 6: Validate fixes and check for conflicts\n\nBefore treating the parallel debug session as complete:\n\n- rerun the original failing test or validation command for each lane\n- confirm the original symptom is actually gone\n- check for overlapping file edits or contradictory fixes\n- confirm one lane did not silently re-break another lane's subsystem\n\nIf conflicts exist:\n\n- stop automatic aggregation\n- identify the overlapping files or contradictory fixes\n- merge intentionally or escalate to the user\n\nIf multiple lanes converged on the same root cause:\n\n- say so explicitly\n- consolidate the result instead of pretending they were independent wins\n\n**Success criteria**: The final result reflects real fixes, not just parallel patch attempts.\n\n## Step 7: Report the consolidated result\n\nSummarize:\n\n- which debug lanes ran\n- which agents handled them\n- root cause and fix status per lane\n- verification result per lane\n- conflicts, converged root causes, or remaining blockers\n\nBe explicit about partial success. Debugging is only finished when the original failures are actually resolved or clearly re-scoped.\n\n**Success criteria**: The user gets a concise but accurate parallel-debug summary.\n\n## Guardrails\n\n- Do not use this skill for fewer than 3 genuinely independent lanes.\n- Do not parallelize symptoms that may share a root cause.\n- Do not keep giant examples, scorecards, or framework catalogs inline in `SKILL.md`.\n- Do not assume fresh agents know the surrounding task context.\n- Do not poll or tail background agent output unless the user explicitly asks.\n- Do not rely on default agent `background` or `isolation` settings when explicit launch parameters are safer.\n- Do not add `disable-model-invocation`; this skill should remain available when the user asks for parallel debugging.\n- Do not add `context: fork`; this workflow coordinates fresh specialized agents, not read-only skill forks.\n- Do not add `paths:`; this is a generic orchestration skill.\n\n## When To Load References\n\n- `references/agent-runtime-semantics.md`\n  Use for source-backed Agent runtime rules: fresh context, single-message parallel launch, background behavior, worktree isolation, and explicit parameter precedence.\n\n- `references/debug_patterns.md`\n  Use for shared-root-cause heuristics, framework-specific error patterns, and triage guidance.\n\n- `references/agent_matching_logic.md`\n  Use for detailed agent-selection rules and framework-specific edge cases.\n\n## Output Contract\n\nReport:\n\n1. resolved debug lane set\n2. agent assignment per lane\n3. launch status\n4. root cause and fix status per lane\n5. verification results\n6. conflicts, shared-cause discoveries, or remaining blockers\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "run-parallel-agents-feature-debug",
-    "version": "2.0.0",
-    "description": "|",
-    "allowed-tools": "",
-    "effort": "high",
-    "argument-hint": "[debug request or problem set]",
-    "arguments": "",
-    "when_to_use": "|"
+  "author": "agentpm",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

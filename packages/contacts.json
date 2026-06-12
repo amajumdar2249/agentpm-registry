@@ -1,15 +1,47 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000010858",
   "name": "contacts",
   "slug": "contacts",
   "description": "Add, enrich, and manage contacts in Joel's Vault. Fire the Inngest enrichment pipeline for full multi-source dossiers, or create quick contacts manually. Use when: 'add a contact', 'enrich this person', 'who is X', 'VIP contact', 'update contact', or any task involving the Vault/Contacts directory.",
   "content": "\n# Contacts\n\nManage contacts in `~/Vault/Contacts/`. Each contact is a markdown file with YAML frontmatter.\n\n## Contact File Location\n\n```\n~/Vault/Contacts/<Name>.md\n```\n\nIndex file: `~/Vault/Contacts/index.md` \u2014 wikilink list of all contacts.\n\n## Frontmatter Schema\n\n```yaml\n---\nname: Full Name\naliases: [nickname, handle]\nrole: Current Role / Title\norganizations: [Org1, Org2]\nvip: true  # or false\nslack_user_id: U0XXXXXXX\nslack_dm_channel: D0XXXXXXX  # null if unknown\nwebsite: https://example.com\ngithub: username\ntwitter: handle\nemail: user@example.com\ntags: [vip, instructor, creator, family, employee]\n---\n```\n\n## Sections\n\n```markdown\n# Name\n\n## Contact Channels\n- Slack, email, social handles, website\n\n## Projects\n- Active projects, courses, collaborations\n\n## Key Context\n- Relationship notes, working style, history\n\n## Recent Activity\n- YYYY-MM-DD | channel | summary\n```\n\nSee `~/Vault/Contacts/Matt Pocock.md` for a fully enriched example.\n\n## Adding a Contact\n\n### Option 1: Fire the Enrichment Pipeline (preferred)\n\nSend an Inngest event. The `contact-enrich` function fans out across 7 sources (Slack, Roam, web/GitHub, Granola, recall memory, Typesense), synthesizes with LLM, and writes the Vault file.\n\n```bash\n# Via curl (CLI has OTEL import bug under Bun v1.3.9)\ncurl -s -X POST http://localhost:8288/e/37aa349b89692d657d276a40e0e47a15 \\\n  -H \"Content-Type: application/json\" \\\n  -d '[{\n    \"name\": \"contact/enrich.requested\",\n    \"data\": {\n      \"name\": \"Person Name\",\n      \"depth\": \"full\",\n      \"hints\": {\n        \"slack_user_id\": \"U0XXXXXXX\",\n        \"github\": \"username\",\n        \"twitter\": \"handle\",\n        \"email\": \"user@example.com\",\n        \"website\": \"https://example.com\"\n      }\n    },\n    \"ts\": EPOCH_MS\n  }]'\n```\n\n**Depth modes:**\n- `full` (~60s, ~$0.05): All 7 sources + LLM synthesis. Use for new contacts or periodic refresh.\n- `quick` (~10s, ~$0.01): Slack + memory only. Good for real-time VIP detection.\n\n**Hints are optional but help:** Any known identifiers (Slack ID, GitHub, email, Twitter, website) seed the search and improve results.\n\n### Option 2: Quick Manual Create\n\nFor simple contacts where enrichment is overkill:\n\n```markdown\n---\nname: Person Name\naliases: []\nrole: Role\norganizations: [Org]\nvip: false\nslack_user_id: null\nwebsite: null\ngithub: null\ntwitter: null\nemail: null\ntags: [tag1]\n---\n\n# Person Name\n\n## Contact Channels\n- ...\n\n## Key Context\n- ...\n```\n\nWrite to `~/Vault/Contacts/Person Name.md` and add `[[Person Name]]` to `index.md`.\n\n## Updating Contacts\n\nRe-run enrichment with the existing vault path:\n\n```json\n{\n  \"name\": \"contact/enrich.requested\",\n  \"data\": {\n    \"name\": \"Person Name\",\n    \"vault_path\": \"Contacts/Person Name.md\",\n    \"depth\": \"full\"\n  }\n}\n```\n\nThe synthesizer merges new data with existing content \u2014 it won't discard existing facts unless contradicted.\n\n## VIP Contacts (ADR-0151)\n\nMark `vip: true` in frontmatter. VIPs get **deep enrichment + ongoing monitoring**.\n\n### Deep Enrichment Playbook (one-time)\n\nEvery VIP gets the full treatment. This is what we did for Kent C. Dodds (Feb 26, 2026):\n\n| Step | Source | What to Capture |\n|---|---|---|\n| 1. Web presence | Web search `{name} + {org}` | Bio, role, location, personal details |\n| 2. Podcast/interviews | Web search `{name} podcast interview` | Appearance list, own podcasts, audiences |\n| 3. Joel collaborations | Their website, appearances pages | Joint podcasts, co-organized events, shared projects |\n| 4. Career timeline | Defuddle 2-3 key interview transcripts | Origin story, career arc, key decisions, values |\n| 5. GitHub profile | GitHub API or web | Repos, followers, orgs, contribution patterns |\n| 6. X/Twitter profile | X API v2 (use x-api skill) | Bio, followers, recent tweets, engagement |\n| 7. Key relationships | Cross-reference transcripts + contacts | Who they work with, who they mention, who we know in common |\n| 8. Content catalog | Website crawl (defuddle) | Courses, blog posts, open source projects |\n| 9. Audience reach | Podcast counts, social followers | Conference circuit, community presence |\n\n**Index to Typesense** after enrichment:\n- Batch-import appearances/content to `discoveries` collection (NDJSON, `action=upsert`)\n- Tag all docs with person's name slug (e.g. `kent-c-dodds`) for filtering\n- Fields: `id`, `title`, `url`, `summary`, `tags[]`, `timestamp`\n- Write a `Vault/Resources/{name}-media-appearances.md` reference doc linking back to contact\n\n**Output sections** in the vault note:\n- Background & Story (origin, career timeline)\n- Teaching/Work Philosophy (or equivalent for non-educators)\n- Key Relationships (cross-linked `[[wikilinks]]` to other contacts)\n- Audience & Reach\n- Content/Products\n- Podcast/Collaboration History with Joel\n- Recent Activity (timestamped)\n\n### Ongoing Monitoring (Phase 2-4 of ADR-0151)\n\n| Channel | Tool | Signal |\n|---|---|---|\n| Google Alerts | joelclawbot Google account | Name mentions in news, blogs, press |\n| X/Twitter list | joelclaw X account | Tweets, engagement |\n| GitHub activity | GitHub API (polling) | New repos, releases |\n| Podcast RSS | Feed monitoring | New episodes |\n| Website changes | Periodic defuddle + diff | Blog posts, launches, bio changes |\n\n**High-signal** (immediate): course launches, role changes, mentions of Joel/egghead/Skill, fundraising.\n**Low-signal** (daily/weekly digest): regular tweets, blog posts, OSS activity.\n\n### Current VIPs\n- Get notified to Joel via gateway after enrichment\n- Are refreshed weekly via scheduled cron\n- Have priority in channel intelligence pipeline (ADR-0131, ADR-0132)\n- Get ongoing monitoring when ADR-0151 Phase 2+ is implemented\n\n## Roam Research Enrichment\n\nJoel's Roam archive (`~/Code/joelhooks/egghead-roam-research/`) contains the full egghead-era graph (2019-2024). Many contacts have extensive history there.\n\n### Quick Search (Python regex)\n```bash\ncd ~/Code/joelhooks/egghead-roam-research\npython3 -c \"\nimport re\nwith open('egghead-2026-01-19-13-09-38.edn', 'r') as f:\n    content = f.read()\npattern = r':block/string\\s+\\\"([^\\\"]*?)\\\"'\nmatches = []\nfor m in re.findall(pattern, content):\n    if '[[SEARCH_TAG]]' in m.lower():\n        matches.append(m)\nprint(f'Found {len(matches)} blocks')\nfor m in matches[:30]:\n    print(f'  - {m[:200]}')\n\"\n```\n\n### People Taxonomy\nPeople are tagged with relationship prefixes in Roam:\n- `[[collaborator/Name]]` \u2014 Strategic partners (Ian Jones, Alex Hillman)\n- `[[client/Name]]` \u2014 egghead instructors (Matt Pocock, Jacob Paris)\n- `[[staff/Name]]` \u2014 egghead team (Will Johnson, Daniel Miller, Maggie Appleton)\n- `[[name]]` (no prefix) \u2014 Informal references (Zac is `[[zac]]`)\n\n### Page Title Search\n```bash\npython3 -c \"\nimport re\nwith open('egghead-2026-01-19-13-09-38.edn', 'r') as f:\n    content = f.read()\npattern = r':node/title\\s+\\\"([^\\\"]*?SEARCH_TERM[^\\\"]*?)\\\"'\nfor m in re.findall(pattern, content):\n    print(f'  page: {m}')\n\"\n```\n\n### Adding to Contacts\nWhen extracting person data from Roam, add `roam_tag` to frontmatter:\n```yaml\nroam_tag: \"[[collaborator/Ian Jones]]\"\n```\nThis enables future re-queries and cross-referencing.\n\n### Datalog Queries (advanced)\nThe EDN file is Datomic-style. Clojure scripts exist at `scripts/` for structured analysis. See the `roam-research` skill for full Datalog patterns.\n\n## Resolving Unknown People\n\nWhen you encounter a Slack user ID (`<@U0XXXXXXX>`):\n\n```bash\n# Lease token and look up profile\nSLACK_USER=$(secrets lease slack_user_token --ttl 5m)\ncurl -s \"https://slack.com/api/users.info?user=U0XXXXXXX\" \\\n  -H \"Authorization: Bearer $SLACK_USER\" | jq '.user.real_name, .user.profile.email'\nsecrets revoke --all\n```\n\nThen fire enrichment with the resolved name and hints.\n\n## Inngest Function\n\n- Function: `contact-enrich` (`packages/system-bus/src/inngest/functions/contact-enrich.ts`)\n- Event: `contact/enrich.requested`\n- ADR: `~/Vault/docs/decisions/0133-contact-enrichment-pipeline.md`\n- Concurrency: 3 max\n- Sources: Slack, Slack Connect, Roam archive, GitHub/web, Granola meetings, recall memory, Typesense\n\n## Privacy\n\n- Contact files are in Vault (private, not in public repos)\n- Slack data stays private \u2014 never surface in public content\n- Email/phone are stored for Joel's reference only\n",
+  "author": "joel",
   "version": "1.0.0",
-  "metadata": {
-    "name": "contacts",
-    "displayName": "Contacts",
-    "description": "Add, enrich, and manage contacts in Joel's Vault. Fire the Inngest enrichment pipeline for full multi-source dossiers, or create quick contacts manually. Use when: 'add a contact', 'enrich this person', 'who is X', 'VIP contact', 'update contact', or any task involving the Vault/Contacts directory.",
-    "version": "1.0.0",
-    "author": "joel",
-    "tags": "[joelclaw, contacts, vault, enrichment, people]"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "[joelclaw",
+    "contacts",
+    "vault",
+    "enrichment",
+    "people]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

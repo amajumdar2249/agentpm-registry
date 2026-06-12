@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000027849",
   "name": "doc-to-markdown",
   "slug": "doc-to-markdown-2",
   "description": "Converts DOCX/PDF/PPTX to high-quality Markdown with automatic post-processing. Fixes pandoc grid tables, simple tables, image paths, CJK bold spacing, attribute noise, and code blocks. Benchmarked best-in-class (7.6/10) against Docling, MarkItDown, Pandoc raw, and Mammoth. Trigger on \"convert document\", \"docx to markdown\", \"parse word\", \"doc to markdown\", \"\u89e3\u6790word\", \"\u8f6c\u6362\u6587\u6863\".",
   "content": "\n# Doc to Markdown\n\nConvert documents to high-quality markdown with intelligent multi-tool orchestration and automatic DOCX post-processing.\n\n**Architecture**: Pandoc (best-in-class extraction) + 8 post-processing fixes (our value-add).\n\n## Quick Start\n\n```bash\n# DOCX \u2192 Markdown (one command, zero manual fixes)\nuv run --with pymupdf4llm --with markitdown scripts/convert.py document.docx -o output.md --assets-dir ./media\n\n# PDF \u2192 Markdown\nuv run --with pymupdf4llm --with markitdown scripts/convert.py document.pdf -o output.md\n\n# Run tests\nuv run --with pytest pytest scripts/test_convert.py -v\n```\n\n## Dual Mode\n\n| Mode | Speed | Quality | Use Case |\n|------|-------|---------|----------|\n| **Quick** (default) | Fast | Good | Drafts, simple documents |\n| **Heavy** | Slower | Best | Final documents, complex layouts |\n\n## Tool Selection\n\n| Format | Quick Mode | Heavy Mode |\n|--------|-----------|------------|\n| PDF | pymupdf4llm | pymupdf4llm + markitdown |\n| DOCX | pandoc + post-processing | pandoc + markitdown |\n| PPTX | markitdown | markitdown + pandoc |\n| XLSX | markitdown | markitdown |\n\n## DOCX Post-Processing (automatic)\n\nWhen converting DOCX via pandoc, 8 cleanups are applied automatically:\n\n| Problem | Fix | Test coverage |\n|---------|-----|---------------|\n| Grid tables (`+:---+`) | Single-column \u2192 blockquote, multi-column \u2192 pipe table | `TestPostprocessPipeline` |\n| Simple tables (`  ---- ----`) | Multi-column images \u2192 pipe table with captions | `TestSimpleTable` |\n| Image path nesting (`media/media/`) | Flatten to `media/`, absolute \u2192 relative | `test_stats_tracking` |\n| Pandoc attributes (`{width=\"...\"}`) | Removed | `test_pandoc_attributes_removed` |\n| CJK bold spacing (`**\u7c97\u4f53**\u4e2d\u6587`) | Add space around `**` for CJK bold spans | `TestCjkBoldSpacing` (15 cases) |\n| Indented dashed code blocks | \u2192 fenced ``` with language detection | `test_code_block_with_language` |\n| Escaped brackets (`\\[...\\]`) | \u2192 `[...]` | `test_escaped_brackets_fixed` |\n| Double-bracket links (`[[text]](url)`) | \u2192 `[text](url)` | `test_double_bracket_links_fixed` |\n\n### CJK Bold Spacing \u2014 why and how\n\nDOCX uses run-level styling (no spaces between bold/normal runs in CJK text). Markdown renderers need whitespace around `**` to recognize bold boundaries.\n\n**Rule**: if a `**content**` span contains any CJK character, ensure both sides have a space \u2014 unless already spaced or at line boundary. This handles CJK punctuation, emoji adjacency, and mixed content.\n\n```\nBefore: \u6253\u5f00**\u98de\u4e66**\uff0c\u5c31\u53ef\u4ee5    \u2192 some renderers fail to bold\nAfter:  \u6253\u5f00 **\u98de\u4e66** \uff0c\u5c31\u53ef\u4ee5  \u2192 universally renders correctly\n```\n\n## Heavy Mode Workflow\n\nHeavy Mode runs multiple tools in parallel and selects the best segments:\n\n1. **Parallel Execution**: Run all applicable tools simultaneously\n2. **Segment Analysis**: Parse each output into segments (tables, headings, images, paragraphs)\n3. **Quality Scoring**: Score each segment based on completeness and structure\n4. **Intelligent Merge**: Select best version of each segment across tools\n\n### Merge Criteria\n\n| Segment Type | Selection Criteria |\n|--------------|-------------------|\n| Tables | More rows/columns, proper header separator |\n| Images | Alt text present, local paths preferred |\n| Headings | Proper hierarchy, appropriate length |\n| Lists | More items, nested structure preserved |\n| Paragraphs | Content completeness |\n\n## Image Extraction\n\n```bash\n# Extract images with metadata\nuv run --with pymupdf scripts/extract_pdf_images.py document.pdf -o ./extracted-images\n\n# Generate markdown references file\nuv run --with pymupdf scripts/extract_pdf_images.py document.pdf --markdown refs.md\n```\n\nOutput:\n- Images: `extracted-images/img_page1_1.png`, `extracted-images/img_page2_1.jpg`\n- Metadata: `extracted-images/images_metadata.json` (page, position, dimensions)\n\n## Quality Validation\n\n```bash\n# Validate conversion quality\nuv run --with pymupdf scripts/validate_output.py document.pdf output.md\n\n# Generate HTML report\nuv run --with pymupdf scripts/validate_output.py document.pdf output.md --report report.html\n```\n\n### Quality Metrics\n\n| Metric | Pass | Warn | Fail |\n|--------|------|------|------|\n| Text Retention | >95% | 85-95% | <85% |\n| Table Retention | 100% | 90-99% | <90% |\n| Image Retention | 100% | 80-99% | <80% |\n\n## Merge Outputs Manually\n\n```bash\n# Merge multiple markdown files\npython scripts/merge_outputs.py output1.md output2.md -o merged.md\n\n# Show segment attribution\npython scripts/merge_outputs.py output1.md output2.md -o merged.md --verbose\n```\n\n## Path Conversion (Windows/WSL)\n\n```bash\n# Windows to WSL conversion\npython scripts/convert_path.py \"C:\\Users\\<windows-user>\\Documents\\file.pdf\"\n# Output: /mnt/c/Users/<windows-user>/Documents/file.pdf\n```\n\n## Common Issues\n\n**\"No conversion tools available\"**\n```bash\n# Install all tools\npip install pymupdf4llm\nuv tool install \"markitdown[pdf]\"\nbrew install pandoc\n```\n\n**FontBBox warnings during PDF conversion**\n- Harmless font parsing warnings, output is still correct\n\n**Images missing from output**\n- Use Heavy Mode for better image preservation\n- Or extract separately with `scripts/extract_pdf_images.py`\n\n**Tables broken in output**\n- Use Heavy Mode - it selects the most complete table version\n- Or validate with `scripts/validate_output.py`\n\n## Bundled Scripts\n\n| Script | Purpose |\n|--------|---------|\n| `convert.py` | Main orchestrator with Quick/Heavy mode + DOCX post-processing |\n| `test_convert.py` | 31 tests covering all post-processing functions |\n| `merge_outputs.py` | Merge multiple markdown outputs |\n| `validate_output.py` | Quality validation with HTML report |\n| `extract_pdf_images.py` | PDF image extraction with metadata |\n| `convert_path.py` | Windows to WSL path converter |\n\n## References\n\n- `references/benchmark-2026-03-22.md` - 5-tool benchmark (Docling/MarkItDown/Pandoc/Mammoth/ours)\n- `references/heavy-mode-guide.md` - Detailed Heavy Mode documentation\n- `references/tool-comparison.md` - Tool capabilities comparison\n- `references/conversion-examples.md` - Batch operation examples\n\n## Next Step: Clean Up Converted Content\n\nAfter converting documents to markdown, suggest cleanup:\n\n```\nConversion complete: [N] files converted to markdown.\n\nOptions:\nA) Clean up docs \u2014 run /daymade-docs:docs-cleaner to consolidate redundant content (Recommended if multiple files)\nB) Check facts \u2014 run /fact-checker to verify claims in the converted content\nC) No thanks \u2014 the markdown conversion is sufficient\n```\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "doc-to-markdown",
-    "description": "Converts DOCX/PDF/PPTX to high-quality Markdown with automatic post-processing. Fixes pandoc grid tables, simple tables, image paths, CJK bold spacing, attribute noise, and code blocks. Benchmarked best-in-class (7.6/10) against Docling, MarkItDown, Pandoc raw, and Mammoth. Trigger on \"convert document\", \"docx to markdown\", \"parse word\", \"doc to markdown\", \"\u89e3\u6790word\", \"\u8f6c\u6362\u6587\u6863\"."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

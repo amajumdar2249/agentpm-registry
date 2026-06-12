@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009228",
   "name": "bio-flow-cytometry-clustering-phenotyping",
   "slug": "bio-flow-cytometry-clustering-phenotyping",
   "description": "Unsupervised clustering and cell type identification for flow/mass cytometry. Covers FlowSOM, Phenograph, and CATALYST workflows. Use when discovering cell populations in high-dimensional cytometry data without predefined gates.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: FlowSOM 2.10+, scanpy 1.10+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- R: `packageVersion('<pkg>')` then `?function_name` to verify parameters\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Clustering and Phenotyping\n\n**\"Cluster my cytometry data to find cell types\"** \u2192 Discover cell populations in high-dimensional flow/mass cytometry data using unsupervised clustering without predefined gates.\n- R: `FlowSOM::FlowSOM()` for self-organizing map clustering\n- R: `CATALYST::cluster()` with Phenograph or FlowSOM\n\n## FlowSOM Clustering\n\n**Goal:** Cluster cytometry events into cell populations using self-organizing maps.\n\n**Approach:** Build a FlowSOM grid on marker channels, then extract metacluster assignments per cell.\n\n```r\nlibrary(FlowSOM)\n\n# Prepare data\nexpr <- exprs(fcs)\nmarker_cols <- grep('CD|HLA', colnames(fcs), value = TRUE)\n\n# Build SOM\nfsom <- FlowSOM(fcs,\n                colsToUse = marker_cols,\n                xdim = 10, ydim = 10,\n                nClus = 20,\n                seed = 42)\n\n# Get cluster assignments\nclusters <- GetMetaclusters(fsom)\n\n# Add to flowFrame\nexprs(fcs) <- cbind(exprs(fcs), cluster = clusters)\n```\n\n## CATALYST Workflow (Full Pipeline)\n\n**Goal:** Run the complete CATALYST clustering pipeline from flowSet to annotated cell populations.\n\n**Approach:** Convert flowSet to SingleCellExperiment with prepData, then cluster on type markers with FlowSOM via CATALYST.\n\n```r\nlibrary(CATALYST)\nlibrary(SingleCellExperiment)\n\n# Create SCE from flowSet\nsce <- prepData(fs, panel, md, transform = TRUE, cofactor = 5)\n\n# Clustering\nsce <- cluster(sce,\n               features = 'type',  # Use 'type' markers from panel\n               xdim = 10, ydim = 10,\n               maxK = 20,\n               seed = 42)\n\n# View cluster assignments\ntable(cluster_ids(sce, 'meta20'))\n```\n\n## Phenograph Clustering\n\n**Goal:** Identify cell populations using graph-based community detection on marker expression.\n\n**Approach:** Build a k-nearest-neighbor graph on type markers, then partition with Louvain community detection via Rphenograph.\n\n```r\nlibrary(Rphenograph)\n\n# Extract expression matrix\nexpr <- assay(sce, 'exprs')\n\n# Run Phenograph\npheno_result <- Rphenograph(t(expr[rowData(sce)$marker_class == 'type', ]), k = 30)\n\n# Get clusters\nsce$phenograph <- factor(membership(pheno_result[[2]]))\n```\n\n## Dimensionality Reduction\n\n**Goal:** Project high-dimensional cytometry data into 2D for visualization of cell populations.\n\n**Approach:** Run UMAP or tSNE on type marker channels using CATALYST's runDR wrapper, then plot colored by cluster.\n\n```r\n# UMAP\nsce <- runDR(sce, dr = 'UMAP', features = 'type')\n\n# tSNE\nsce <- runDR(sce, dr = 'TSNE', features = 'type')\n\n# Plot\nplotDR(sce, 'UMAP', color_by = 'meta20')\n```\n\n## Cluster Annotation\n\n**Goal:** Assign cell type labels to clusters based on marker expression profiles.\n\n**Approach:** Visualize median marker expression per cluster with a heatmap, then map cluster IDs to cell type names.\n\n```r\n# Heatmap of marker expression by cluster\nplotExprHeatmap(sce, features = 'type',\n                by = 'cluster_id', k = 'meta20',\n                scale = 'first', row_anno = FALSE)\n\n# Manual annotation\ncluster_annotation <- c(\n    '1' = 'CD4 T cells',\n    '2' = 'CD8 T cells',\n    '3' = 'B cells',\n    '4' = 'NK cells',\n    '5' = 'Monocytes'\n)\n\nsce$cell_type <- cluster_annotation[as.character(cluster_ids(sce, 'meta20'))]\n```\n\n## Cluster Merging\n\n**Goal:** Reduce overclustering by merging similar clusters into biologically meaningful groups.\n\n**Approach:** Define a mapping table from original to merged cluster IDs, then apply with CATALYST's mergeClusters.\n\n```r\n# Merge similar clusters\nmerging_table <- data.frame(\n    original = 1:20,\n    merged = c(1, 1, 2, 2, 3, 3, 4, 4, 5, 5,\n               6, 6, 7, 7, 8, 8, 9, 9, 10, 10)\n)\n\nsce <- mergeClusters(sce, k = 'meta20', table = merging_table, id = 'merged')\n```\n\n## Abundance Analysis (per sample)\n\n**Goal:** Quantify the relative frequency of each cell population across samples and conditions.\n\n**Approach:** Cross-tabulate cluster assignments by sample ID, convert to proportions, and plot grouped by condition.\n\n```r\n# Cluster frequencies per sample\nabundances <- table(cluster_ids(sce, 'meta20'), sce$sample_id)\nfreq <- prop.table(abundances, margin = 2)\n\n# Plot\nplotAbundances(sce, k = 'meta20', by = 'cluster_id', group_by = 'condition')\n```\n\n## Marker Expression Summary\n\n**Goal:** Summarize and compare marker expression levels across clusters and conditions.\n\n**Approach:** Plot per-cluster median expression with CATALYST's plotClusterExprs and pseudo-bulk expression faceted by cluster.\n\n```r\n# Median expression per cluster\nplotClusterExprs(sce, k = 'meta20', features = 'type')\n\n# Expression by cluster and condition\nplotPbExprs(sce, k = 'meta20', features = 'type', facet_by = 'cluster_id')\n```\n\n## Export Results\n\n**Goal:** Save clustering results and annotated SCE object for downstream analysis or sharing.\n\n**Approach:** Extract cluster assignments into colData, export as CSV, and serialize the full SCE as RDS.\n\n```r\n# Add cluster info to metadata\ncolData(sce)$cluster <- cluster_ids(sce, 'meta20')\n\n# Export to CSV\nresults <- as.data.frame(colData(sce))\nwrite.csv(results, 'clustering_results.csv', row.names = FALSE)\n\n# Save SCE\nsaveRDS(sce, 'sce_clustered.rds')\n```\n\n## Choosing Number of Clusters\n\n**Goal:** Determine the optimal number of metaclusters for the dataset.\n\n**Approach:** Compare normalized reduction stability (NRS) plots and heatmaps at different K values to find where clusters remain distinct.\n\n```r\n# Delta area plot\nplotNRS(sce, features = 'type')\n\n# Or visual inspection of heatmap at different K\nplotExprHeatmap(sce, features = 'type', by = 'cluster_id', k = 'meta10')\nplotExprHeatmap(sce, features = 'type', by = 'cluster_id', k = 'meta20')\n```\n\n## Batch Integration\n\n**Goal:** Remove batch effects from cytometry data before or after clustering.\n\n**Approach:** Detect batch effects by coloring UMAP by batch variable, then apply MNN correction with batchelor if needed.\n\n```r\n# If batch effects present\nlibrary(batchelor)\n\nsce <- runDR(sce, dr = 'UMAP', features = 'type')\n\n# Check for batch effects\nplotDR(sce, 'UMAP', color_by = 'batch')\n\n# MNN correction if needed\nsce_corrected <- fastMNN(sce, batch = sce$batch)\n```\n\n## Related Skills\n\n- gating-analysis - Manual alternative\n- differential-analysis - Compare clusters between conditions\n- single-cell/clustering - Similar concepts for scRNA-seq\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-flow-cytometry-clustering-phenotyping",
-    "description": "Unsupervised clustering and cell type identification for flow/mass cytometry. Covers FlowSOM, Phenograph, and CATALYST workflows. Use when discovering cell populations in high-dimensional cytometry data without predefined gates.",
-    "tool_type": "r",
-    "primary_tool": "CATALYST"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

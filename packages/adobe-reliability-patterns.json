@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031164",
   "name": "adobe-reliability-patterns",
   "slug": "adobe-reliability-patterns",
   "description": "Implement reliability patterns for Adobe APIs: circuit breakers for",
   "content": "# Adobe Reliability Patterns\n\n## Overview\n\nProduction-grade reliability patterns for Adobe API integrations. Adobe APIs present unique challenges: IMS tokens expire after 24h, Firefly/Photoshop jobs are async with variable completion times, and rate limits vary by API. These patterns address each failure mode.\n\n## Prerequisites\n\n- Understanding of circuit breaker pattern\n- `opossum` installed for circuit breaker (`npm install opossum`)\n- Queue infrastructure (BullMQ/Redis) for dead letter queue\n- Caching layer for fallback data\n\n## Instructions\n\n### Pattern 1: Circuit Breaker per Adobe API\n\nDifferent Adobe APIs fail independently \u2014 use separate circuit breakers:\n\n```typescript\nimport CircuitBreaker from 'opossum';\n\n// IMS circuit breaker (auth failures cascade to everything)\nconst imsBreaker = new CircuitBreaker(\n  async () => {\n    const res = await fetch('https://ims-na1.adobelogin.com/ims/token/v3', {\n      method: 'POST',\n      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },\n      body: new URLSearchParams({\n        client_id: process.env.ADOBE_CLIENT_ID!,\n        client_secret: process.env.ADOBE_CLIENT_SECRET!,\n        grant_type: 'client_credentials',\n        scope: process.env.ADOBE_SCOPES!,\n      }),\n    });\n    if (!res.ok) throw new Error(`IMS ${res.status}`);\n    return res.json();\n  },\n  {\n    timeout: 10_000,              // IMS should respond in 10s\n    errorThresholdPercentage: 30, // Open after 30% errors\n    resetTimeout: 60_000,         // Try again after 1 min\n    volumeThreshold: 3,           // Minimum calls before tripping\n  }\n);\n\n// Firefly circuit breaker (higher tolerance for latency)\nconst fireflyBreaker = new CircuitBreaker(\n  async (fn: () => Promise<any>) => fn(),\n  {\n    timeout: 60_000,              // Firefly jobs can take up to 60s\n    errorThresholdPercentage: 50,\n    resetTimeout: 30_000,\n    volumeThreshold: 5,\n  }\n);\n\n// PDF Services circuit breaker\nconst pdfBreaker = new CircuitBreaker(\n  async (fn: () => Promise<any>) => fn(),\n  {\n    timeout: 30_000,\n    errorThresholdPercentage: 40,\n    resetTimeout: 30_000,\n    volumeThreshold: 5,\n  }\n);\n\n// Monitor circuit state\nfor (const [name, breaker] of [['ims', imsBreaker], ['firefly', fireflyBreaker], ['pdf', pdfBreaker]] as const) {\n  breaker.on('open', () => console.warn(`Circuit ${name} OPEN \u2014 failing fast`));\n  breaker.on('halfOpen', () => console.info(`Circuit ${name} HALF-OPEN \u2014 testing recovery`));\n  breaker.on('close', () => console.info(`Circuit ${name} CLOSED \u2014 normal`));\n}\n```\n\n### Pattern 2: Graceful Degradation with Fallback\n\n```typescript\n// When Adobe is down, return cached/default data instead of failing\n\ninterface FallbackResult<T> {\n  data: T;\n  source: 'live' | 'cached' | 'default';\n  staleness?: string;\n}\n\nasync function withAdobeFallback<T>(\n  liveFn: () => Promise<T>,\n  cacheKey: string,\n  defaultValue: T\n): Promise<FallbackResult<T>> {\n  // Try live API first\n  try {\n    const data = await liveFn();\n    // Update cache for future fallback\n    await cache.set(cacheKey, JSON.stringify(data), 'EX', 3600);\n    return { data, source: 'live' };\n  } catch (error: any) {\n    console.warn(`Adobe API failed (${error.message}), trying fallback`);\n  }\n\n  // Try cached data\n  const cached = await cache.get(cacheKey);\n  if (cached) {\n    const ttl = await cache.ttl(cacheKey);\n    return {\n      data: JSON.parse(cached),\n      source: 'cached',\n      staleness: `${3600 - ttl}s old`,\n    };\n  }\n\n  // Last resort: return default\n  return { data: defaultValue, source: 'default' };\n}\n\n// Usage: image generation with fallback to placeholder\nconst result = await withAdobeFallback(\n  () => generateImage({ prompt: 'product hero image' }),\n  'hero-image-cache',\n  { outputs: [{ image: { url: '/images/placeholder-hero.jpg' } }] }\n);\n\nif (result.source !== 'live') {\n  console.warn(`Serving ${result.source} data for hero image`);\n}\n```\n\n### Pattern 3: Dead Letter Queue for Failed Jobs\n\n```typescript\nimport { Queue, Worker } from 'bullmq';\nimport { Redis } from 'ioredis';\n\nconst redis = new Redis(process.env.REDIS_URL);\n\n// DLQ for failed Adobe operations\nconst adobeDlq = new Queue('adobe-dlq', { connection: redis });\n\n// Main processing queue\nconst adobeQueue = new Queue('adobe-jobs', { connection: redis });\n\nconst worker = new Worker('adobe-jobs', async (job) => {\n  try {\n    switch (job.data.operation) {\n      case 'firefly-generate':\n        return await generateImage(job.data.params);\n      case 'pdf-extract':\n        return await extractPdfContent(job.data.params.pdfPath);\n      case 'photoshop-cutout':\n        return await removeBackground(job.data.params);\n      default:\n        throw new Error(`Unknown operation: ${job.data.operation}`);\n    }\n  } catch (error: any) {\n    // Route to DLQ after max retries\n    if (job.attemptsMade >= 3) {\n      await adobeDlq.add('failed-job', {\n        originalJob: job.data,\n        error: error.message,\n        attempts: job.attemptsMade,\n        failedAt: new Date().toISOString(),\n      });\n      console.error(`Job ${job.id} moved to DLQ after ${job.attemptsMade} attempts`);\n      return; // Don't rethrow \u2014 job is handled\n    }\n    throw error; // Retry\n  }\n}, {\n  connection: redis,\n  concurrency: 5,\n  limiter: {\n    max: 10,\n    duration: 60_000, // Max 10 jobs per minute (respect Adobe rate limits)\n  },\n});\n```\n\n### Pattern 4: Timeout Hierarchy for Adobe APIs\n\n```typescript\n// Adobe APIs have very different latency profiles\nconst ADOBE_TIMEOUTS = {\n  ims_token: 10_000,       // IMS should be fast\n  firefly_sync: 30_000,    // Sync image generation\n  firefly_async: 5_000,    // Async job submission (fast, just queues)\n  firefly_poll: 120_000,   // Total polling timeout\n  pdf_extract: 30_000,     // PDF extraction\n  pdf_create: 20_000,      // PDF creation\n  photoshop_submit: 5_000, // Job submission\n  photoshop_poll: 120_000, // Total polling timeout\n};\n\nasync function timedAdobeCall<T>(\n  operation: keyof typeof ADOBE_TIMEOUTS,\n  fn: () => Promise<T>\n): Promise<T> {\n  const timeout = ADOBE_TIMEOUTS[operation];\n  return Promise.race([\n    fn(),\n    new Promise<never>((_, reject) =>\n      setTimeout(() => reject(new Error(`Adobe ${operation} timeout (${timeout}ms)`)), timeout)\n    ),\n  ]);\n}\n```\n\n### Pattern 5: Health Check with Degraded State\n\n```typescript\ntype ServiceHealth = 'healthy' | 'degraded' | 'unhealthy';\n\nasync function adobeHealthCheck(): Promise<{\n  status: ServiceHealth;\n  services: Record<string, any>;\n}> {\n  const checks = {\n    ims: {\n      status: imsBreaker.stats().state === 'closed' ? 'healthy' : 'unhealthy',\n      circuitState: imsBreaker.stats().state,\n    },\n    firefly: {\n      status: fireflyBreaker.stats().state === 'closed' ? 'healthy' :\n              fireflyBreaker.stats().state === 'halfOpen' ? 'degraded' : 'unhealthy',\n      circuitState: fireflyBreaker.stats().state,\n    },\n    pdf: {\n      status: pdfBreaker.stats().state === 'closed' ? 'healthy' : 'degraded',\n      circuitState: pdfBreaker.stats().state,\n    },\n    dlq: {\n      size: await adobeDlq.count(),\n      status: (await adobeDlq.count()) > 100 ? 'degraded' : 'healthy',\n    },\n  };\n\n  const overall: ServiceHealth =\n    checks.ims.status === 'unhealthy' ? 'unhealthy' :\n    Object.values(checks).some(c => c.status === 'degraded') ? 'degraded' :\n    'healthy';\n\n  return { status: overall, services: checks };\n}\n```\n\n## Output\n\n- Per-API circuit breakers (IMS, Firefly, PDF Services)\n- Graceful degradation with cached/default fallback\n- Dead letter queue for failed async jobs\n- Timeout hierarchy matching Adobe API latency profiles\n- Health check with degraded state detection\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| IMS circuit stays open | Credentials rotated | Update secret and restart |\n| Firefly circuit flapping | Intermittent 500s | Increase `resetTimeout` |\n| DLQ growing | Persistent failures | Investigate root cause; process DLQ |\n| Fallback data too stale | Long outage | Increase cache TTL; notify users |\n\n## Resources\n\n- [Opossum Circuit Breaker](https://nodeshift.dev/opossum/)\n- [BullMQ Documentation](https://docs.bullmq.io/)\n- [Circuit Breaker Pattern](https://martinfowler.com/bliki/CircuitBreaker.html)\n- [Adobe Status Page](https://status.adobe.com)\n\n## Next Steps\n\nFor policy enforcement, see `adobe-policy-guardrails`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "adobe-reliability-patterns",
-    "description": "Implement reliability patterns for Adobe APIs: circuit breakers for",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

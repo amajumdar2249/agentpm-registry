@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000016834",
   "name": "agentica-prompts",
   "slug": "agentica-prompts",
   "description": "Write reliable prompts for Agentica/REPL agents that avoid LLM instruction ambiguity",
   "content": "\n# Agentica Prompt Engineering\n\nWrite prompts that Agentica agents reliably follow. Standard natural language prompts fail ~35% of the time due to LLM instruction ambiguity.\n\n## The Orchestration Pattern\n\nProven workflow for context-preserving agent orchestration:\n\n```\n1. RESEARCH (Nia)     \u2192 Output to .claude/cache/agents/research/\n       \u2193\n2. PLAN (RP-CLI)      \u2192 Reads research, outputs .claude/cache/agents/plan/\n       \u2193\n3. VALIDATE           \u2192 Checks plan against best practices\n       \u2193\n4. IMPLEMENT (TDD)    \u2192 Failing tests first, then pass\n       \u2193\n5. REVIEW (Jury)      \u2192 Compare impl vs plan vs research\n       \u2193\n6. DEBUG (if needed)  \u2192 Research via Nia, don't assume\n```\n\n**Key:** Use Task (not TaskOutput) + directory handoff = clean context\n\n## Agent System Prompt Template\n\nInject this into each agent's system prompt for rich context understanding:\n\n```\n## AGENT IDENTITY\n\nYou are {AGENT_ROLE} in a multi-agent orchestration system.\nYour output will be consumed by: {DOWNSTREAM_AGENT}\nYour input comes from: {UPSTREAM_AGENT}\n\n## SYSTEM ARCHITECTURE\n\nYou are part of the Agentica orchestration framework:\n- Memory Service: remember(key, value), recall(query), store_fact(content)\n- Task Graph: create_task(), complete_task(), get_ready_tasks()\n- File I/O: read_file(), write_file(), edit_file(), bash()\n\nSession ID: {SESSION_ID} (all your memory/tasks scoped here)\n\n## DIRECTORY HANDOFF\n\nRead your inputs from: {INPUT_DIR}\nWrite your outputs to: {OUTPUT_DIR}\n\nOutput format: Write a summary file and any artifacts.\n- {OUTPUT_DIR}/summary.md - What you did, key findings\n- {OUTPUT_DIR}/artifacts/ - Any generated files\n\n## CODE CONTEXT\n\n{CODE_MAP}  <- Inject RepoPrompt codemap here\n\n## YOUR TASK\n\n{TASK_DESCRIPTION}\n\n## CRITICAL RULES\n\n1. RETRIEVE means read existing content - NEVER generate hypothetical content\n2. WRITE means create/update file - specify exact content\n3. When stuck, output what you found and what's blocking you\n4. Your summary.md is your handoff to the next agent - be precise\n```\n\n## Pattern-Specific Prompts\n\n### Swarm (Research)\n\n```\n## SWARM AGENT: {PERSPECTIVE}\n\nYou are researching: {QUERY}\nYour unique angle: {PERSPECTIVE}\n\nOther agents are researching different angles. You don't need to be comprehensive.\nFocus ONLY on your perspective. Be specific, not broad.\n\nOutput format:\n- 3-5 key findings from YOUR perspective\n- Evidence/sources for each finding\n- Uncertainties or gaps you identified\n\nWrite to: {OUTPUT_DIR}/{PERSPECTIVE}/findings.md\n```\n\n### Hierarchical (Coordinator)\n\n```\n## COORDINATOR\n\nTask to decompose: {TASK}\n\nAvailable specialists (use EXACTLY these names):\n{SPECIALIST_LIST}\n\nRules:\n1. ONLY use specialist names from the list above\n2. Each subtask should be completable by ONE specialist\n3. 2-5 subtasks maximum\n4. If task is simple, return empty list and handle directly\n\nOutput: JSON list of {specialist, task} pairs\n```\n\n### Generator/Critic (Generator)\n\n```\n## GENERATOR\n\nTask: {TASK}\n{PREVIOUS_FEEDBACK}\n\nProduce your solution. The Critic will review it.\n\nOutput structure (use EXACTLY these keys):\n{\n  \"solution\": \"your main output\",\n  \"code\": \"if applicable\",\n  \"reasoning\": \"why this approach\"\n}\n\nWrite to: {OUTPUT_DIR}/solution.json\n```\n\n### Generator/Critic (Critic)\n\n```\n## CRITIC\n\nReviewing solution at: {SOLUTION_PATH}\n\nEvaluation criteria:\n1. Correctness - Does it solve the task?\n2. Completeness - Any missing cases?\n3. Quality - Is it well-structured?\n\nIf APPROVED: Write {\"approved\": true, \"feedback\": \"why approved\"}\nIf NOT approved: Write {\"approved\": false, \"feedback\": \"specific issues to fix\"}\n\nWrite to: {OUTPUT_DIR}/critique.json\n```\n\n### Jury (Voter)\n\n```\n## JUROR #{N}\n\nQuestion: {QUESTION}\n\nVote independently. Do NOT try to guess what others will vote.\nYour vote should be based solely on the evidence.\n\nOutput: Your vote as {RETURN_TYPE}\n```\n\n## Verb Mappings\n\n| Action | Bad (ambiguous) | Good (explicit) |\n|--------|-----------------|-----------------|\n| Read | \"Read the file at X\" | \"RETRIEVE contents of: X\" |\n| Write | \"Put this in the file\" | \"WRITE to X: {content}\" |\n| Check | \"See if file has X\" | \"RETRIEVE contents of: X. Contains Y? YES/NO.\" |\n| Edit | \"Change X to Y\" | \"EDIT file X: replace 'old' with 'new'\" |\n\n## Directory Handoff Mechanism\n\nAgents communicate via filesystem, not TaskOutput:\n\n```python\n# Pattern implementation\nOUTPUT_BASE = \".claude/cache/agents\"\n\ndef get_agent_dirs(agent_id: str, phase: str) -> tuple[Path, Path]:\n    \"\"\"Return (input_dir, output_dir) for an agent.\"\"\"\n    input_dir = Path(OUTPUT_BASE) / f\"{phase}_input\"\n    output_dir = Path(OUTPUT_BASE) / agent_id\n    output_dir.mkdir(parents=True, exist_ok=True)\n    return input_dir, output_dir\n\ndef chain_agents(phase1_id: str, phase2_id: str):\n    \"\"\"Phase2 reads from phase1's output.\"\"\"\n    phase1_output = Path(OUTPUT_BASE) / phase1_id\n    phase2_input = phase1_output  # Direct handoff\n    return phase2_input\n```\n\n## Anti-Patterns\n\n| Pattern | Problem | Fix |\n|---------|---------|-----|\n| \"Tell me what X contains\" | May summarize or hallucinate | \"Return the exact text\" |\n| \"Check the file\" | Ambiguous action | Specify RETRIEVE or VERIFY |\n| Question form | Invites generation | Use imperative \"RETRIEVE\" |\n| \"Read and confirm\" | May just say \"confirmed\" | \"Return the exact text\" |\n| TaskOutput for handoff | Floods context with transcript | Directory-based handoff |\n| \"Be thorough\" | Subjective, inconsistent | Specify exact output format |\n\n## Expected Improvement\n\n- Without fixes: ~60% success rate\n- With RETRIEVE + explicit return: ~95% success rate\n- With structured tool schemas: ~98% success rate\n- With directory handoff: Context preserved, no transcript pollution\n\n## Code Map Injection\n\nUse RepoPrompt to generate code map for agent context:\n\n```bash\n# Generate codemap for agent context\nrp-cli --path . --output .claude/cache/agents/codemap.md\n\n# Inject into agent system prompt\ncodemap=$(cat .claude/cache/agents/codemap.md)\n```\n\n## Memory Context Injection\n\nExplain the memory system to agents:\n\n```\n## MEMORY SYSTEM\n\nYou have access to a 3-tier memory system:\n\n1. **Core Memory** (in-context): remember(key, value), recall(query)\n   - Fast key-value store for current session facts\n\n2. **Archival Memory** (searchable): store_fact(content), search_memory(query)\n   - FTS5-indexed long-term storage\n   - Use for findings that should persist\n\n3. **Recall** (unified): recall(query)\n   - Searches both core and archival\n   - Returns formatted context string\n\nAll memory is scoped to session_id: {SESSION_ID}\n```\n\n## References\n\n- ToolBench (2023): Models fail ~35% retrieval tasks with ambiguous descriptions\n- Gorilla (2023): Structured schemas improve reliability by 3x\n- ReAct (2022): Explicit reasoning before action reduces errors by ~25%\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "agentica-prompts",
-    "description": "Write reliable prompts for Agentica/REPL agents that avoid LLM instruction ambiguity",
-    "user-invocable": "false"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

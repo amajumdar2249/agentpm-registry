@@ -1,15 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000000160",
   "name": "postmark-webhooks",
   "slug": "postmark-webhooks",
   "description": "Use when setting up Postmark webhooks for tracking email delivery, bounces, opens, clicks, spam complaints, or subscription changes \u2014 includes webhook configuration, payload handling, and security.",
   "content": "\n# Postmark Webhooks\n\n## Overview\n\nPostmark webhooks deliver real-time event data to your endpoint via HTTP POST. Use webhooks to track what happens after you send an email.\n\n| Event | Trigger | Common Use |\n|-------|---------|------------|\n| **Delivery** | Email accepted by recipient server | Confirm delivery, update status |\n| **Bounce** | Email rejected by recipient server | Clean lists, alert support |\n| **SpamComplaint** | Recipient marked as spam | Remove from lists, investigate |\n| **Open** | Recipient opened email (tracking pixel) | Engagement analytics |\n| **Click** | Recipient clicked a tracked link | Engagement analytics, conversion tracking |\n| **SubscriptionChange** | Recipient unsubscribed | Update preferences, comply with regulations |\n\n## Quick Start\n\n1. **Create a webhook** via API or [Postmark dashboard](https://account.postmarkapp.com) (Server \u2192 Webhooks)\n2. **Set your endpoint URL** \u2014 must accept HTTP POST and return 200\n3. **Select event triggers** \u2014 choose which events to receive\n4. **Handle payloads** \u2014 parse the JSON body for each event type\n5. **Respond with 200** \u2014 acknowledge receipt immediately\n\n## Webhook API\n\n### Endpoints\n\n| Endpoint | Method | Description |\n|----------|--------|-------------|\n| `/webhooks` | `GET` | List all webhooks for a message stream |\n| `/webhooks/{webhookid}` | `GET` | Get a specific webhook |\n| `/webhooks` | `POST` | Create a webhook |\n| `/webhooks/{webhookid}` | `PUT` | Update a webhook |\n| `/webhooks/{webhookid}` | `DELETE` | Delete a webhook |\n\n### Create a Webhook\n\n```javascript\nconst postmark = require('postmark');\nconst client = new postmark.ServerClient(process.env.POSTMARK_SERVER_TOKEN);\n\nconst webhook = await client.createWebhook({\n  Url: 'https://yourdomain.com/webhooks/postmark',\n  MessageStream: 'outbound',\n  HttpAuth: {\n    Username: 'webhook-user',\n    Password: 'webhook-secret'\n  },\n  HttpHeaders: [\n    { Name: 'X-Custom-Header', Value: 'my-value' }\n  ],\n  Triggers: {\n    Open: { Enabled: true, PostFirstOpenOnly: false },\n    Click: { Enabled: true },\n    Delivery: { Enabled: true },\n    Bounce: { Enabled: true, IncludeContent: true },\n    SpamComplaint: { Enabled: true, IncludeContent: true },\n    SubscriptionChange: { Enabled: true }\n  }\n});\n\nconsole.log('Webhook created:', webhook.ID);\n```\n\n### cURL\n\n```bash\ncurl \"https://api.postmarkapp.com/webhooks\" \\\n  -X POST \\\n  -H \"Accept: application/json\" \\\n  -H \"Content-Type: application/json\" \\\n  -H \"X-Postmark-Server-Token: $POSTMARK_SERVER_TOKEN\" \\\n  -d '{\n    \"Url\": \"https://yourdomain.com/webhooks/postmark\",\n    \"MessageStream\": \"outbound\",\n    \"Triggers\": {\n      \"Open\": { \"Enabled\": true, \"PostFirstOpenOnly\": false },\n      \"Click\": { \"Enabled\": true },\n      \"Delivery\": { \"Enabled\": true },\n      \"Bounce\": { \"Enabled\": true, \"IncludeContent\": true },\n      \"SpamComplaint\": { \"Enabled\": true, \"IncludeContent\": true },\n      \"SubscriptionChange\": { \"Enabled\": true }\n    }\n  }'\n```\n\n### Trigger Options\n\n| Trigger | Options |\n|---------|---------|\n| **Open** | `Enabled`, `PostFirstOpenOnly` (true = only first open per recipient) |\n| **Click** | `Enabled` |\n| **Delivery** | `Enabled` |\n| **Bounce** | `Enabled`, `IncludeContent` (include original email content) |\n| **SpamComplaint** | `Enabled`, `IncludeContent` |\n| **SubscriptionChange** | `Enabled` |\n\n## Webhook Payloads\n\nAll payloads include `RecordType`, `MessageID`, `MessageStream`, and `Metadata` (from the original send). Use `RecordType` to route events:\n\n```javascript\napp.post('/webhooks/postmark', (req, res) => {\n  res.sendStatus(200); // respond immediately\n\n  const event = req.body;\n  switch (event.RecordType) {\n    case 'Delivery':          handleDelivery(event); break;\n    case 'Bounce':            handleBounce(event); break;\n    case 'SpamComplaint':     handleSpamComplaint(event); break;\n    case 'Open':              handleOpen(event); break;\n    case 'Click':             handleClick(event); break;\n    case 'SubscriptionChange': handleSubscriptionChange(event); break;\n  }\n});\n```\n\n### Bounce Types\n\n| Type | Code | Action |\n|------|------|--------|\n| `HardBounce` | 1 | Permanent \u2014 remove address from all lists |\n| `SoftBounce` | 4096 | Temporary \u2014 Postmark retries; monitor |\n| `Transient` | 2 | Temporary \u2014 retry may succeed |\n| `SpamNotification` | 512 | Marked as spam at recipient's server |\n| `Blocked` | 16 | Blocked by recipient server |\n| `DMARCPolicy` | 100000 | Rejected due to DMARC policy |\n\nSee [references/payload-examples.md](references/payload-examples.md) for full JSON payloads for all 6 event types.\n\nSee [references/handler-examples.md](references/handler-examples.md) for complete Node.js and Python implementations, async processing, deduplication, and metadata correlation.\n\n## Security\n\nAlways verify that requests are genuinely from Postmark using HTTP Basic Auth, custom headers, or IP allowlisting.\n\nSee [references/security.md](references/security.md) for full implementation examples.\n\n## Bounce Management\n\nUse the Bounces API and Suppression Management API alongside webhooks for comprehensive bounce handling.\n\nSee [references/bounce-management.md](references/bounce-management.md) for the Bounces API, suppression management, and bounce rate thresholds.\n\n## Webhook Management\n\nSee [references/webhook-setup.md](references/webhook-setup.md) for list, update, delete, and retry schedule details.\n\n## Common Mistakes\n\n| Mistake | Fix |\n|---------|-----|\n| Not responding 200 | Always return HTTP 200 \u2014 even if processing fails. Process asynchronously. |\n| Slow webhook handling | Respond 200 immediately, then process in background (queue, worker) |\n| No authentication | Use HTTP Basic Auth or custom headers to verify webhook source |\n| Ignoring bounce types | Handle `HardBounce` differently from `SoftBounce` \u2014 hard bounces require permanent suppression |\n| Not handling partial data | Some fields may be missing \u2014 always check for presence before accessing |\n| Duplicate handling | Webhooks may be delivered more than once \u2014 use `MessageID` for deduplication |\n| Missing MessageStream filter | Specify `MessageStream` when creating webhooks to avoid cross-stream events |\n| Not tracking metadata | Include `Metadata` when sending to correlate webhook events with your records |\n\n## Notes\n\n- Webhooks are configured per message stream \u2014 create separate webhooks for `outbound` and `broadcast`\n- Always respond HTTP 200 immediately \u2014 process webhook data asynchronously\n- Postmark retries failed webhook deliveries up to **10 times** over ~10.5 hours with escalating intervals: 1 min, 5 min, 10 min, 10 min, 10 min, 15 min, 30 min, 1 hr, 2 hrs, 6 hrs. A **403 response** immediately stops all retries. This retry schedule cannot be customized\n- Use `MessageID` to correlate webhook events with sent emails\n- `Metadata` from the original send is included in all webhook payloads\n- Open tracking requires a tracking pixel in HTML \u2014 it does not work with plain text emails\n- Click tracking requires `TrackLinks` to be enabled on the sent email\n- Bounce webhooks fire for bounces and blocks \u2014 check the `Type` field to distinguish\n- Spam complaints, unsubscribes, and manual deactivations have their own event types (not Bounce)\n- Individual open/click data is stored for 45 days; aggregated statistics are stored indefinitely\n",
+  "author": "postmark",
   "version": "1.0.0",
-  "metadata": {
-    "name": "postmark-webhooks",
-    "description": "Use when setting up Postmark webhooks for tracking email delivery, bounces, opens, clicks, spam complaints, or subscription changes \u2014 includes webhook configuration, payload handling, and security.",
-    "license": "MIT",
-    "metadata": "",
-    "author": "postmark",
-    "version": "1.0.0"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

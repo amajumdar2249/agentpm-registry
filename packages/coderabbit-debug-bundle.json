@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031621",
   "name": "coderabbit-debug-bundle",
   "slug": "coderabbit-debug-bundle",
   "description": "Collect CodeRabbit debug evidence for support tickets and troubleshooting.",
   "content": "# CodeRabbit Debug Bundle\n\n## Overview\n\nCollect all diagnostic information needed to troubleshoot CodeRabbit issues or file a support request. Since CodeRabbit is a GitHub/GitLab App (not an SDK), debugging focuses on: App installation status, `.coderabbit.yaml` configuration validity, PR review history, and GitHub webhook delivery logs.\n\n## Prerequisites\n\n- GitHub CLI (`gh`) authenticated\n- Repository admin access (for webhook logs)\n- Access to the GitHub repository where CodeRabbit is installed\n\n## Instructions\n\n### Step 1: Check CodeRabbit Installation Status\n\n```bash\nset -euo pipefail\nOWNER=\"${1:-your-org}\"\nREPO=\"${2:-your-repo}\"\n\necho \"=== CodeRabbit Debug Bundle ===\"\necho \"Repository: $OWNER/$REPO\"\necho \"Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)\"\necho \"\"\n\n# Check if CodeRabbit App is installed\necho \"--- Installation Status ---\"\nINSTALL=$(gh api \"repos/$OWNER/$REPO/installation\" --jq '.app_slug' 2>/dev/null)\nif [ \"$INSTALL\" = \"coderabbitai\" ]; then\n  echo \"CodeRabbit App: INSTALLED\"\nelse\n  echo \"CodeRabbit App: NOT INSTALLED\"\n  echo \"Fix: Visit https://github.com/apps/coderabbitai to install\"\nfi\n```\n\n### Step 2: Validate Configuration\n\n```bash\nset -euo pipefail\necho \"\"\necho \"--- Configuration Validation ---\"\n\n# Check if .coderabbit.yaml exists\nif [ -f .coderabbit.yaml ]; then\n  echo \".coderabbit.yaml: FOUND ($(wc -l < .coderabbit.yaml) lines)\"\n\n  # Validate YAML syntax\n  python3 -c \"\nimport yaml, sys\ntry:\n    config = yaml.safe_load(open('.coderabbit.yaml'))\n    print('YAML syntax: VALID')\n\n    # Check key configuration fields\n    reviews = config.get('reviews', {})\n    auto_review = reviews.get('auto_review', {})\n    print(f'auto_review.enabled: {auto_review.get(\\\"enabled\\\", \\\"not set\\\")}')\n    print(f'auto_review.drafts: {auto_review.get(\\\"drafts\\\", \\\"not set\\\")}')\n    print(f'profile: {reviews.get(\\\"profile\\\", \\\"not set\\\")}')\n\n    base_branches = auto_review.get('base_branches', [])\n    if base_branches:\n        print(f'base_branches: {base_branches}')\n    else:\n        print('base_branches: not set (reviews all branches)')\n\n    path_filters = reviews.get('path_filters', [])\n    print(f'path_filters: {len(path_filters)} rules')\n\n    path_instructions = reviews.get('path_instructions', [])\n    print(f'path_instructions: {len(path_instructions)} rules')\n\n    chat = config.get('chat', {})\n    print(f'chat.auto_reply: {chat.get(\\\"auto_reply\\\", \\\"not set\\\")}')\n\nexcept yaml.YAMLError as e:\n    print(f'YAML syntax: INVALID')\n    print(f'Error: {e}')\n    sys.exit(1)\n\" 2>&1\nelse\n  echo \".coderabbit.yaml: NOT FOUND\"\n  echo \"Fix: Create .coderabbit.yaml in repository root\"\nfi\n```\n\n### Step 3: Check Recent PR Review History\n\n```bash\nset -euo pipefail\nOWNER=\"${1:-your-org}\"\nREPO=\"${2:-your-repo}\"\n\necho \"\"\necho \"--- Recent PR Review History ---\"\n\n# Check last 10 closed PRs for CodeRabbit reviews\nfor PR_NUM in $(gh api \"repos/$OWNER/$REPO/pulls?state=all&per_page=10&sort=created&direction=desc\" \\\n  --jq '.[].number'); do\n\n  PR_TITLE=$(gh api \"repos/$OWNER/$REPO/pulls/$PR_NUM\" --jq '.title' 2>/dev/null)\n  PR_STATE=$(gh api \"repos/$OWNER/$REPO/pulls/$PR_NUM\" --jq '.state' 2>/dev/null)\n\n  CR_REVIEWS=$(gh api \"repos/$OWNER/$REPO/pulls/$PR_NUM/reviews\" \\\n    --jq '[.[] | select(.user.login==\"coderabbitai[bot]\")] | length' 2>/dev/null || echo \"0\")\n\n  CR_COMMENTS=$(gh api \"repos/$OWNER/$REPO/pulls/$PR_NUM/comments\" \\\n    --jq '[.[] | select(.user.login==\"coderabbitai[bot]\")] | length' 2>/dev/null || echo \"0\")\n\n  echo \"PR #$PR_NUM ($PR_STATE): $CR_REVIEWS reviews, $CR_COMMENTS comments - $PR_TITLE\"\ndone\n```\n\n### Step 4: Check Active Configuration via PR Comment\n\n```markdown\n# On any open PR, post this comment:\n@coderabbitai configuration\n\n# CodeRabbit will reply with the active configuration as YAML.\n# Compare this with your .coderabbit.yaml to find discrepancies.\n# Discrepancies usually mean:\n# 1. YAML syntax error causing config to be ignored\n# 2. Org-level config overriding repo config\n# 3. Config not on the base branch (CodeRabbit reads from base branch)\n```\n\n### Step 5: Check GitHub Webhook Deliveries\n\n```markdown\n# In GitHub UI:\n1. Go to repo > Settings > Webhooks\n2. Find the CodeRabbit webhook (coderabbit.ai endpoint)\n3. Click \"Recent Deliveries\"\n4. Look for:\n   - 200 response codes (success)\n   - 4xx/5xx codes (errors)\n   - Missing deliveries for PR events\n\n# Common webhook issues:\n# - 401: App credentials expired \u2192 reinstall\n# - 404: Webhook URL changed \u2192 reinstall\n# - No deliveries: Webhook was deleted \u2192 reinstall App\n```\n\n### Step 6: Compile Support Bundle\n\n```bash\nset -euo pipefail\nOWNER=\"${1:-your-org}\"\nREPO=\"${2:-your-repo}\"\nBUNDLE=\"coderabbit-debug-$(date +%Y%m%d-%H%M%S).txt\"\n\n{\n  echo \"=== CodeRabbit Debug Bundle ===\"\n  echo \"Repository: $OWNER/$REPO\"\n  echo \"Generated: $(date -u)\"\n  echo \"Git branch: $(git branch --show-current 2>/dev/null || echo 'N/A')\"\n  echo \"Git remote: $(git remote get-url origin 2>/dev/null || echo 'N/A')\"\n  echo \"\"\n\n  echo \"--- .coderabbit.yaml ---\"\n  cat .coderabbit.yaml 2>/dev/null || echo \"NOT FOUND\"\n  echo \"\"\n\n  echo \"--- App Installation ---\"\n  gh api \"repos/$OWNER/$REPO/installation\" 2>/dev/null || echo \"NOT INSTALLED\"\n  echo \"\"\n\n  echo \"--- Last 5 PRs ---\"\n  gh api \"repos/$OWNER/$REPO/pulls?state=all&per_page=5\" \\\n    --jq '.[] | \"#\\(.number) [\\(.state)] \\(.title) (by \\(.user.login))\"' 2>/dev/null\n  echo \"\"\n\n  echo \"--- GitHub Actions Status ---\"\n  gh run list --repo \"$OWNER/$REPO\" --limit 5 2>/dev/null || echo \"N/A\"\n} > \"$BUNDLE\"\n\necho \"Debug bundle saved: $BUNDLE\"\necho \"Review for sensitive data before sharing with support.\"\n```\n\n## Output\n\n- Installation status verified\n- Configuration validated for syntax and completeness\n- PR review history showing CodeRabbit activity\n- Active configuration compared with file on disk\n- Debug bundle file ready for support ticket\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `gh api` returns 404 | Wrong org/repo or no access | Verify repo name and `gh auth status` |\n| No CodeRabbit reviews found | App not installed on repo | Install from github.com/apps/coderabbitai |\n| YAML validation fails | Syntax error in config | Fix YAML syntax, validate before committing |\n| Webhook deliveries empty | App was uninstalled/reinstalled | Check webhook exists in repo settings |\n\n## Resources\n\n- [CodeRabbit FAQ](https://docs.coderabbit.ai/faq)\n- [CodeRabbit Status Page](https://status.coderabbit.ai)\n- [CodeRabbit Discord](https://discord.gg/coderabbit)\n- [CodeRabbit Support Email](mailto:support@coderabbit.ai)\n\n## Next Steps\n\nFor common error patterns and fixes, see `coderabbit-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "coderabbit-debug-bundle",
-    "description": "Collect CodeRabbit debug evidence for support tickets and troubleshooting.",
-    "allowed-tools": "Read, Bash(gh:*), Bash(git:*), Bash(python3:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

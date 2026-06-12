@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000042024",
   "name": "trader-cloud-backtest",
   "slug": "trader-cloud-backtest-2",
   "description": "Run a heavy neural-trader job (long walk-forward, big Monte-Carlo, parameter sweep, model training) on the Anthropic Managed Agent cloud runtime instead of locally",
   "content": "\n# Cloud backtest / train (neural-trader on a Managed Agent)\n\nDispatch a **heavy** `neural-trader` job to an Anthropic Claude Managed Agent (cloud container) instead of running it locally. See project ADR-117 (recipe + cost rules) and ADR-115 (the `managed_agent_*` runtime).\n\n## When to use this vs `trader-backtest` (local)\n\n| Job | Runtime |\n|---|---|\n| Quick sanity check; one short backtest (< ~1 min) | local \u2014 use the `trader-backtest` skill |\n| Multi-year **walk-forward**, big **Monte-Carlo** count, **parameter sweep** over a grid, or **model training** (LSTM/Transformer/N-BEATS) | **cloud \u2014 this skill** |\n\nPrereq: `ANTHROPIC_API_KEY` (or `CLAUDE_API_KEY`) + Managed Agents beta access. If `managed_agent_*` returns \"needs ANTHROPIC_API_KEY\", fall back to the local `trader-backtest` skill.\n\n## Steps\n\n1. **Estimate first.** From the job size, print an estimated cost (\u2248 container-minutes \u00d7 rate + tokens) \u2014 a long sweep is a deliberate choice, not a default.\n\n2. **Provision (or reuse) the container** \u2014 install neural-trader at container start so the agent doesn't reinstall mid-run:\n   ```\n   managed_agent_create({\n     name: \"nt-cloud\",\n     model: \"claude-haiku-4-5-20251001\",            // orchestration only \u2014 the compute is the Rust engine, not the LM (ADR-026)\n     system: \"You operate the `neural-trader` CLI in this container. Run exactly the commands asked, report the metrics, write requested artifacts, then stop.\",\n     networking: \"unrestricted\",                     // or \"restricted\" pinned to your data host\n     packages: { npm: [\"neural-trader\"] },           // add apt:[\"build-essential\"] ONLY if there's no prebuilt NAPI binary for the arch (neural-trader ships prebuilds \u2192 usually omit)\n     initScript: \"npm install -g --ignore-scripts neural-trader >/dev/null 2>&1 || npx -y neural-trader --version >/dev/null 2>&1 || true\"\n   })\n   \u2192 { sessionId, agentId, environmentId }\n   ```\n   For a **sweep**: create the environment once, run all configs in **one** `managed_agent_prompt` (one container), not N sessions.\n\n3. **Pre-flight cheap.** Before a 1000-path / multi-year run, do a tiny smoke first (1 MC path, ~3 months) \u2014 catches a bad strategy name / symbol in seconds:\n   ```\n   managed_agent_prompt({ sessionId, message: \"Run `npx neural-trader --backtest --strategy <name> --symbol <TICKER> --period <last 3 months> --mc-paths 1`. Just confirm it ran and report the Sharpe. Then stop.\", maxWaitMs: 60000 })\n   ```\n   If that fails, fix the args before the real run (and `managed_agent_terminate`).\n\n4. **Run the real job:**\n   ```\n   managed_agent_prompt({\n     sessionId,\n     message: \"Run `npx neural-trader --backtest --strategy <name> --symbol <TICKER> --period <range> --walk-forward --mc-paths <N>` (for training: `npx neural-trader --train --model <lstm|transformer|nbeats> --symbol <TICKER> --period <range>`; for a sweep: loop the configs and run each). Report: total return, annualized return, Sharpe, Sortino, max drawdown, win rate, profit factor, # trades, 95% CVaR. Write the equity curve to /tmp/equity.csv and the trade log to /tmp/trades.csv. Then stop.\",\n     maxWaitMs: <generous \u2014 minutes>\n   })\n   \u2192 { finished, status, stopReason, assistantText (the metrics), toolUses }\n   ```\n   If `finished:false`, follow up with `managed_agent_events({ sessionId })` until idle.\n\n5. **Pull artifacts (if needed):** `managed_agent_prompt({ sessionId, message: \"cat /tmp/equity.csv\" })` or `managed_agent_events` and read the tool_result.\n\n6. **Ingest locally + Ed25519 verify (ADR-126 Phase 4 fail-closed gate):**\n   - Build the `SignedBacktestArtifact` body from the cloud-returned metrics + params hash + runs hash. Sign it locally with `signBacktestArtifact(body, privateKeyHex)` from `plugins/ruflo-neural-trader/src/signed-artifact.mjs` (key resolution same as `trader-backtest`: `RUFLO_WITNESS_KEY_PATH` \u2192 `verification/witness-key.json` \u2192 degraded-unsigned warning).\n   - **Before storing OR promoting the artifact to a live strategy**: call `await verifyBacktestArtifact(artifact, trustedPublicKey)` where `trustedPublicKey` is the pinned project-config Ed25519 public key (NOT the `artifact.witnessPublicKey` field \u2014 that's attacker-controllable; see CWE-347 / #1922). If verification returns `false`: **REFUSE to promote** \u2014 emit a loud error `\"[ERROR] ruflo-neural-trader: SignedBacktestArtifact signature INVALID against trusted key \u2014 refusing to promote to live strategy\"` and return early. This is the fail-closed gate per ADR-126.\n   - On verify success: `memory_store({ key: \"backtest-<strategy>-<ts>\", value: JSON.stringify(signedArtifact), namespace: \"trading-backtests\" })`. The stored value carries `witnessSignature` + `witnessPublicKey`.\n   - If Sharpe > 1.5: `agentdb_pattern-store({ pattern: \"profitable-<strategy-type>\", data: \"<params + results>\" })`.\n   - Record the run's container time + token cost to the `cost-tracking` namespace (per ADR-117 \u2014 cloud sessions bill until terminated).\n\n7. **Terminate immediately** \u2014 results in hand:\n   ```\n   managed_agent_terminate({ sessionId, environmentId })   \u2192 { sessionDeleted: true, environmentDeleted: true }\n   ```\n   Never leave an idle billing container. (`ruflo doctor` / GC catches orphans \u2014 #1931.)\n\n## Cost rules (don't skip)\n\n- Install once (`initScript`), reuse the environment, batch sweeps into one prompt, pre-flight cheap, terminate eagerly, use Haiku/Sonnet for the agent loop, estimate before kicking off. (ADR-117 \u00a7\"Cost optimization\".)\n- A cloud backtest that runs for an hour costs an hour of container time + the agent-loop tokens. Be deliberate.\n\n## Quick example\n\n```\nmanaged_agent_create  { \"name\":\"nt-cloud\", \"model\":\"claude-haiku-4-5-20251001\", \"packages\":{\"npm\":[\"neural-trader\"]}, \"initScript\":\"npm install -g --ignore-scripts neural-trader >/dev/null 2>&1 || true\" }\n  \u2192 { sessionId:\"sesn_\u2026\", environmentId:\"env_\u2026\" }\nmanaged_agent_prompt   { \"sessionId\":\"sesn_\u2026\", \"message\":\"Run `npx neural-trader --backtest --strategy multi-indicator --symbol SPY --period 2020-2024 --walk-forward --mc-paths 1000`. Report Sharpe/Sortino/max-DD/win-rate/CVaR; write /tmp/equity.csv. Then stop.\", \"maxWaitMs\":600000 }\n  \u2192 { finished:true, status:\"idle\", assistantText:\"<metrics>\", toolUses:[{bash:\"npx neural-trader --backtest \u2026\"}] }\n# \u2026 memory_store the metrics, agentdb_pattern-store if Sharpe>1.5, record cost \u2026\nmanaged_agent_terminate { \"sessionId\":\"sesn_\u2026\", \"environmentId\":\"env_\u2026\" }\n```\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "trader-cloud-backtest",
-    "description": "Run a heavy neural-trader job (long walk-forward, big Monte-Carlo, parameter sweep, model training) on the Anthropic Managed Agent cloud runtime instead of locally",
-    "allowed-tools": "mcp__claude-flow__managed_agent_create mcp__claude-flow__managed_agent_prompt mcp__claude-flow__managed_agent_events mcp__claude-flow__managed_agent_status mcp__claude-flow__managed_agent_terminate mcp__claude-flow__memory_store mcp__claude-flow__memory_retrieve mcp__claude-flow__memory_search mcp__claude-flow__agentdb_pattern-store Bash Read",
-    "argument-hint": "<backtest|train|sweep> <strategy-or-model> --symbol <TICKER> [--period 2020-2024] [--mc-paths 1000]"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

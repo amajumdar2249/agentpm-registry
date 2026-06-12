@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033045",
   "name": "replit-incident-runbook",
   "slug": "replit-incident-runbook",
   "description": "Execute Replit incident response: triage deployment failures, database",
   "content": "# Replit Incident Runbook\n\n## Overview\n\nRapid incident response for Replit deployment failures, database issues, and platform outages. Covers triage, diagnosis, remediation, rollback, and communication.\n\n## Prerequisites\n\n- Access to Replit Workspace and Deployment settings\n- Deployment URL for health checks\n- Communication channel (Slack, email)\n- Rollback awareness (Deployment History)\n\n## Severity Levels\n\n| Level | Definition | Response Time | Examples |\n|-------|------------|---------------|----------|\n| P1 | Complete outage | < 15 min | App returns 5xx, DB down |\n| P2 | Degraded service | < 1 hour | Slow responses, intermittent errors |\n| P3 | Minor impact | < 4 hours | Non-critical feature broken |\n| P4 | No user impact | Next business day | Monitoring gap |\n\n## Quick Triage (First 5 Minutes)\n\n```bash\nset -euo pipefail\nDEPLOY_URL=\"https://your-app.replit.app\"\n\necho \"=== TRIAGE ===\"\n\n# 1. Check Replit platform status\necho -n \"Replit Status: \"\ncurl -s https://status.replit.com/api/v2/summary.json | \\\n  python3 -c \"import sys,json;print(json.load(sys.stdin)['status']['description'])\" 2>/dev/null || \\\n  echo \"Check https://status.replit.com\"\n\n# 2. Check your deployment health\necho -n \"App Health: \"\ncurl -s -o /dev/null -w \"HTTP %{http_code} (%{time_total}s)\" \"$DEPLOY_URL/health\" 2>/dev/null || echo \"UNREACHABLE\"\necho \"\"\n\n# 3. Get health details\necho \"Health Response:\"\ncurl -s \"$DEPLOY_URL/health\" 2>/dev/null | python3 -m json.tool 2>/dev/null || echo \"No response\"\n\n# 4. Check if it's a cold start issue (Autoscale)\necho -n \"Second request: \"\ncurl -s -o /dev/null -w \"HTTP %{http_code} (%{time_total}s)\\n\" \"$DEPLOY_URL/health\"\n```\n\n## Decision Tree\n\n```\nApp not responding?\n\u251c\u2500 YES: Is status.replit.com reporting an incident?\n\u2502   \u251c\u2500 YES \u2192 Platform issue. Wait for Replit. Communicate to users.\n\u2502   \u2514\u2500 NO \u2192 Your deployment issue. Continue below.\n\u2502\n\u2502   Can you access the Replit Workspace?\n\u2502   \u251c\u2500 YES \u2192 Check deployment logs:\n\u2502   \u2502   \u251c\u2500 Build error \u2192 Fix code, redeploy\n\u2502   \u2502   \u251c\u2500 Runtime crash \u2192 Check logs, fix, redeploy\n\u2502   \u2502   \u2514\u2500 Secret missing \u2192 Add to Secrets tab, redeploy\n\u2502   \u2514\u2500 NO \u2192 Network/browser issue. Try incognito window.\n\u2502\n\u2514\u2500 App responds but with errors?\n    \u251c\u2500 5xx errors \u2192 Check logs for crash/exception\n    \u251c\u2500 Slow responses \u2192 Check database, cold start, memory\n    \u2514\u2500 Auth not working \u2192 Verify deployment domain, not dev URL\n```\n\n## Remediation by Error Type\n\n### Deployment Crash (5xx / App Unreachable)\n\n```markdown\n1. Open Replit Workspace\n2. Go to Deployment Settings > Logs\n3. Look for the crash reason:\n   - \"Error: Cannot find module...\" \u2192 Missing dependency\n   - \"FATAL: Missing secrets...\" \u2192 Add to Secrets tab\n   - \"EADDRINUSE\" \u2192 Port conflict in .replit config\n   - \"JavaScript heap out of memory\" \u2192 Increase VM size or fix memory leak\n\n4. Fix the issue in code\n5. Click \"Deploy\" to redeploy\n6. If fix is unclear, ROLLBACK:\n   - Deployment Settings > History\n   - Click \"Rollback\" on last known-good version\n```\n\n### Database Connection Failure\n\n```markdown\n1. Check database status in Database pane\n2. Verify DATABASE_URL is set in Secrets\n3. Test connection:\n```\n\n```bash\n# From Replit Shell\nnode -e \"\nconst {Pool} = require('pg');\nconst pool = new Pool({connectionString: process.env.DATABASE_URL, ssl:{rejectUnauthorized:false}});\npool.query('SELECT NOW()').then(r => console.log('OK:', r.rows[0])).catch(e => console.error('FAIL:', e.message)).finally(() => pool.end());\n\"\n```\n\n```markdown\n4. If connection fails:\n   - Check if PostgreSQL is provisioned (Database pane)\n   - Try creating a new database\n   - Check for connection pool exhaustion (max connections)\n```\n\n### Cold Start Too Slow (Autoscale)\n\n```markdown\nIf cold starts exceed acceptable latency:\n1. Check deployment type: Autoscale scales to zero\n2. Options:\n   a. Switch to Reserved VM (always-on, no cold starts)\n   b. Set up external keep-alive (ping /health every 4 min)\n   c. Optimize startup: lazy imports, defer DB connection\n3. To switch:\n   - Update .replit: deploymentTarget = \"cloudrun\"\n   - Redeploy\n```\n\n### Secrets Missing After Deploy\n\n```markdown\n1. Open Secrets tab (lock icon in sidebar)\n2. Verify all required secrets are present\n3. Check Deployment Settings > Environment Variables\n4. Secrets should auto-sync (2025+), but if not:\n   - Remove and re-add the secret\n   - Redeploy\n5. For Account-level secrets:\n   - Account Settings > Secrets\n   - These apply to ALL Repls\n```\n\n## Rollback Procedure\n\n```markdown\nReplit supports one-click rollback to any previous deployment:\n\n1. Deployment Settings > History\n2. Find the last successful deployment\n3. Click \"Rollback to this version\"\n4. Verify health endpoint\n5. Investigate root cause before redeploying fix\n\nRollback restores:\n- Code at that deployment's commit\n- Deployment configuration at that time\n- Does NOT rollback database changes\n```\n\n## Communication Templates\n\n### Internal (Slack)\n\n```\nP[1-4] INCIDENT: [App Name] on Replit\nStatus: INVESTIGATING / IDENTIFIED / MONITORING / RESOLVED\nImpact: [What users are experiencing]\nCause: [If known]\nAction: [What we're doing]\nETA: [When we expect resolution]\nNext update: [Time]\n```\n\n### External (Status Page)\n\n```\n[App Name] Service Disruption\n\nWe are experiencing issues with [specific feature/service].\n[Describe user impact].\n\nWe have identified the cause and are working on a fix.\nEstimated resolution: [time].\n\nLast updated: [timestamp]\n```\n\n## Post-Incident\n\n### Evidence Collection\n\n```bash\nset -euo pipefail\n# Capture deployment logs\n# Go to Deployment Settings > Logs > Copy relevant entries\n\n# Capture timeline\necho \"Timeline of events:\" > incident-report.md\necho \"- [time] Issue detected\" >> incident-report.md\necho \"- [time] Investigation started\" >> incident-report.md\necho \"- [time] Root cause identified\" >> incident-report.md\necho \"- [time] Fix deployed / rollback executed\" >> incident-report.md\necho \"- [time] Service restored\" >> incident-report.md\n```\n\n### Postmortem Template\n\n```markdown\n## Incident: [Title]\n**Date:** YYYY-MM-DD\n**Duration:** X hours Y minutes\n**Severity:** P[1-4]\n\n### Summary\n[1-2 sentence description of what happened]\n\n### Root Cause\n[Technical explanation]\n\n### Timeline\n- HH:MM \u2014 First alert\n- HH:MM \u2014 Investigation started\n- HH:MM \u2014 Root cause found\n- HH:MM \u2014 Fix deployed / rollback\n- HH:MM \u2014 Service restored\n\n### Impact\n- Users affected: [N]\n- Downtime: [duration]\n\n### Action Items\n- [ ] [Prevention measure] \u2014 Owner \u2014 Due date\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Can't access Workspace | Replit outage | Use status.replit.com, wait |\n| Rollback not available | No previous deployments | Fix forward, deploy fix |\n| Logs too short | Container restarted | Set up external log aggregator |\n| DB rollback needed | Bad migration | Restore from Replit DB snapshot |\n\n## Resources\n\n- [Replit Status](https://status.replit.com)\n- [Deployment Rollbacks](https://blog.replit.com/introducing-deployment-rollbacks)\n- [Monitoring Deployments](https://docs.replit.com/cloud-services/deployments/monitoring-a-deployment)\n- [Replit Support](https://replit.com/support)\n\n## Next Steps\n\nFor data handling patterns, see `replit-data-handling`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "replit-incident-runbook",
-    "description": "Execute Replit incident response: triage deployment failures, database",
-    "allowed-tools": "Read, Grep, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

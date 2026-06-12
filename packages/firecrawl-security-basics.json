@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031978",
   "name": "firecrawl-security-basics",
   "slug": "firecrawl-security-basics",
   "description": "Apply Firecrawl security best practices for API key management and webhook",
   "content": "# Firecrawl Security Basics\n\n## Overview\n\nSecurity best practices for Firecrawl API keys, webhook signature verification, and scraped content handling. Firecrawl API keys start with `fc-` and grant full access to scrape, crawl, map, and extract endpoints \u2014 protecting them is critical.\n\n## Prerequisites\n\n- Firecrawl API key\n- Understanding of environment variables\n- Webhook endpoint (if using async crawl callbacks)\n\n## Instructions\n\n### Step 1: Secure API Key Storage\n\n```bash\n# .env (NEVER commit to git)\nFIRECRAWL_API_KEY=fc-your-api-key-here\n\n# .gitignore \u2014 add these patterns\necho -e \"\\n.env\\n.env.local\\n.env.*.local\" >> .gitignore\n```\n\n```typescript\n// Validate key exists before creating client\nimport FirecrawlApp from \"@mendable/firecrawl-js\";\n\nif (!process.env.FIRECRAWL_API_KEY?.startsWith(\"fc-\")) {\n  throw new Error(\"FIRECRAWL_API_KEY must be set and start with 'fc-'\");\n}\n\nconst firecrawl = new FirecrawlApp({\n  apiKey: process.env.FIRECRAWL_API_KEY,\n});\n```\n\n### Step 2: Verify Webhook Signatures\n\nFirecrawl signs webhook payloads with HMAC-SHA256 via the `X-Firecrawl-Signature` header.\n\n```typescript\nimport crypto from \"crypto\";\n\nfunction verifyWebhookSignature(\n  payload: string,\n  signature: string,\n  secret: string\n): boolean {\n  const expected = crypto\n    .createHmac(\"sha256\", secret)\n    .update(payload)\n    .digest(\"hex\");\n\n  // Timing-safe comparison prevents timing attacks\n  return crypto.timingSafeEqual(\n    Buffer.from(signature),\n    Buffer.from(expected)\n  );\n}\n\n// Express webhook handler with verification\napp.post(\"/webhooks/firecrawl\", (req, res) => {\n  const signature = req.headers[\"x-firecrawl-signature\"] as string;\n  const rawBody = JSON.stringify(req.body);\n\n  if (!verifyWebhookSignature(rawBody, signature, process.env.FIRECRAWL_WEBHOOK_SECRET!)) {\n    console.error(\"Invalid webhook signature \u2014 rejecting\");\n    return res.status(401).json({ error: \"Invalid signature\" });\n  }\n\n  // Process verified webhook\n  const { type, data } = req.body;\n  console.log(`Verified webhook: ${type}`);\n  res.status(200).json({ received: true });\n});\n```\n\n### Step 3: Separate Keys per Environment\n\n```bash\n# GitHub Actions secrets\ngh secret set FIRECRAWL_API_KEY_DEV --body \"fc-dev-...\"\ngh secret set FIRECRAWL_API_KEY_STAGING --body \"fc-staging-...\"\ngh secret set FIRECRAWL_API_KEY_PROD --body \"fc-prod-...\"\n```\n\n```typescript\n// Load correct key based on environment\nconst KEY_MAP: Record<string, string> = {\n  development: \"FIRECRAWL_API_KEY_DEV\",\n  staging: \"FIRECRAWL_API_KEY_STAGING\",\n  production: \"FIRECRAWL_API_KEY_PROD\",\n};\n\nconst envVar = KEY_MAP[process.env.NODE_ENV || \"development\"];\nconst apiKey = process.env[envVar] || process.env.FIRECRAWL_API_KEY;\n```\n\n### Step 4: Rotate Keys\n\n```bash\nset -euo pipefail\n# 1. Generate new key at firecrawl.dev/app\n# 2. Deploy new key alongside old key\n# 3. Verify new key works\ncurl -s https://api.firecrawl.dev/v1/scrape \\\n  -H \"Authorization: Bearer $NEW_FIRECRAWL_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"url\":\"https://example.com\",\"formats\":[\"markdown\"]}' | jq .success\n\n# 4. Remove old key from all environments\n# 5. Delete old key in Firecrawl dashboard\n```\n\n### Step 5: Sanitize Scraped Content\n\n```typescript\n// Scraped web content may contain PII, scripts, or malicious data\nfunction sanitizeScrapedContent(markdown: string): string {\n  return markdown\n    // Remove potential script injections\n    .replace(/<script[\\s\\S]*?<\\/script>/gi, \"\")\n    // Remove data URIs (potential XSS vectors)\n    .replace(/!\\[.*?\\]\\(data:.*?\\)/g, \"\")\n    // Remove javascript: links\n    .replace(/\\[.*?\\]\\(javascript:.*?\\)/g, \"\")\n    // Strip HTML comments\n    .replace(/<!--[\\s\\S]*?-->/g, \"\")\n    .trim();\n}\n```\n\n## Security Checklist\n\n- [ ] API key stored in environment variable, never hardcoded\n- [ ] `.env` files listed in `.gitignore`\n- [ ] Different keys for dev/staging/production\n- [ ] Webhook signatures verified before processing\n- [ ] Scraped content sanitized before storage/display\n- [ ] Key rotation scheduled quarterly\n- [ ] Git history scanned for leaked keys\n\n## Error Handling\n\n| Security Issue | Detection | Mitigation |\n|----------------|-----------|------------|\n| Leaked API key in git | `git log -p \\| grep \"fc-\"` | Rotate immediately, revoke old key |\n| Invalid webhook signature | Signature verification fails | Reject request, alert team |\n| Excessive scraping costs | Credit alerts from Firecrawl | Set credit limits per key |\n| PII in scraped content | Content scanning | Sanitize before storage |\n\n## Resources\n\n- [Firecrawl Dashboard](https://firecrawl.dev/app)\n- [Firecrawl Webhooks](https://docs.firecrawl.dev/webhooks/overview)\n- [GitHub Secret Scanning](https://docs.github.com/en/code-security/secret-scanning)\n\n## Next Steps\n\nFor production deployment, see `firecrawl-prod-checklist`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "firecrawl-security-basics",
-    "description": "Apply Firecrawl security best practices for API key management and webhook",
-    "allowed-tools": "Read, Write, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031660",
   "name": "cohere-security-basics",
   "slug": "cohere-security-basics",
   "description": "Apply Cohere security best practices for API key management and access",
   "content": "# Cohere Security Basics\n\n## Overview\n\nSecurity best practices for Cohere API keys, request validation, and data protection. Cohere uses bearer token auth with trial and production key tiers.\n\n## Prerequisites\n\n- Cohere account at [dashboard.cohere.com](https://dashboard.cohere.com)\n- Understanding of environment variables\n- Secret management solution for production\n\n## Instructions\n\n### Step 1: API Key Management\n\n```bash\n# NEVER hardcode keys \u2014 use environment variables\nexport CO_API_KEY=\"your-key-here\"\n\n# .env file (MUST be git-ignored)\nCO_API_KEY=your-key-here\n\n# .gitignore (mandatory entries)\n.env\n.env.local\n.env.*.local\n```\n\n**Key types:**\n\n- **Trial keys** \u2014 free, rate-limited, for development only\n- **Production keys** \u2014 metered billing, for live applications\n\n### Step 2: Runtime Validation\n\n```typescript\nimport { CohereClientV2 } from 'cohere-ai';\n\nfunction createSecureClient(): CohereClientV2 {\n  const apiKey = process.env.CO_API_KEY;\n\n  if (!apiKey) {\n    throw new Error('CO_API_KEY is required. Set it as an environment variable.');\n  }\n\n  // Basic key format check\n  if (apiKey.length < 20) {\n    throw new Error('CO_API_KEY appears malformed. Check dashboard.cohere.com.');\n  }\n\n  return new CohereClientV2({ token: apiKey });\n}\n```\n\n### Step 3: Key Rotation Procedure\n\n```bash\n# 1. Generate new key in Cohere dashboard\n#    \u2192 dashboard.cohere.com \u2192 API Keys \u2192 Create new key\n\n# 2. Deploy new key (keep old key active)\n# Vercel:\nvercel env add CO_API_KEY production\n\n# AWS:\naws secretsmanager update-secret --secret-id cohere/api-key --secret-string \"new-key\"\n\n# GCP:\necho -n \"new-key\" | gcloud secrets versions add cohere-api-key --data-file=-\n\n# 3. Verify new key works\ncurl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"Authorization: Bearer NEW_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  https://api.cohere.com/v2/chat \\\n  -d '{\"model\":\"command-r7b-12-2024\",\"messages\":[{\"role\":\"user\",\"content\":\"test\"}]}'\n# Should return 200\n\n# 4. Revoke old key in dashboard\n# 5. Monitor for 401 errors after revocation\n```\n\n### Step 4: Request Data Protection\n\n```typescript\n// Scrub PII before sending to Cohere API\nconst PII_PATTERNS: [string, RegExp][] = [\n  ['email', /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/g],\n  ['phone', /\\b\\d{3}[-.]?\\d{3}[-.]?\\d{4}\\b/g],\n  ['ssn', /\\b\\d{3}-\\d{2}-\\d{4}\\b/g],\n];\n\nfunction scrubPII(text: string): string {\n  let scrubbed = text;\n  for (const [type, regex] of PII_PATTERNS) {\n    scrubbed = scrubbed.replace(regex, `[REDACTED_${type.toUpperCase()}]`);\n  }\n  return scrubbed;\n}\n\n// Use before API calls when handling user data\nasync function safeCohereChat(userInput: string) {\n  const sanitized = scrubPII(userInput);\n\n  return cohere.chat({\n    model: 'command-a-03-2025',\n    messages: [{ role: 'user', content: sanitized }],\n    safetyMode: 'CONTEXTUAL', // CONTEXTUAL (default), STRICT, or OFF\n  });\n}\n```\n\n### Step 5: Logging Safety\n\n```typescript\nimport { CohereError } from 'cohere-ai';\n\nfunction safeLog(message: string, data?: Record<string, unknown>) {\n  const sanitized = { ...data };\n\n  // Never log API keys\n  delete sanitized.apiKey;\n  delete sanitized.token;\n  delete sanitized.authorization;\n\n  // Truncate request/response bodies\n  if (typeof sanitized.body === 'string' && (sanitized.body as string).length > 500) {\n    sanitized.body = (sanitized.body as string).slice(0, 500) + '...[truncated]';\n  }\n\n  console.log(`[cohere] ${message}`, sanitized);\n}\n\n// Wrap error logging\nfunction logCohereError(err: unknown) {\n  if (err instanceof CohereError) {\n    safeLog('API error', {\n      status: err.statusCode,\n      message: err.message,\n      // Do NOT log err.body \u2014 may contain sensitive request data\n    });\n  }\n}\n```\n\n### Step 6: Safety Modes\n\nCohere's Chat API supports safety modes that control content filtering:\n\n```typescript\n// CONTEXTUAL (default): Adapts based on context\nawait cohere.chat({\n  model: 'command-a-03-2025',\n  messages: [{ role: 'user', content: prompt }],\n  safetyMode: 'CONTEXTUAL',\n});\n\n// STRICT: Maximum safety filtering\nawait cohere.chat({\n  model: 'command-a-03-2025',\n  messages: [{ role: 'user', content: prompt }],\n  safetyMode: 'STRICT',\n});\n\n// Note: safetyMode not configurable with tools or documents params\n```\n\n## Security Checklist\n\n- [ ] `CO_API_KEY` stored in environment variables, never in code\n- [ ] `.env` files listed in `.gitignore`\n- [ ] Separate keys for development and production\n- [ ] Key rotation scheduled (quarterly recommended)\n- [ ] PII scrubbed from inputs sent to Cohere\n- [ ] API keys excluded from all log output\n- [ ] Production key has billing alerts configured\n- [ ] Git pre-commit hook scans for leaked keys\n\n## Git Pre-Commit Hook\n\n```bash\n#!/bin/bash\n# .git/hooks/pre-commit \u2014 detect Cohere keys in staged files\nif git diff --cached --diff-filter=ACM | grep -qiE 'CO_API_KEY|cohere.*key.*=.*[a-zA-Z0-9]{20}'; then\n  echo \"ERROR: Possible Cohere API key in commit. Remove before committing.\"\n  exit 1\nfi\n```\n\n## Error Handling\n\n| Security Issue | Detection | Mitigation |\n|----------------|-----------|------------|\n| Key in git history | `git log -p \\| grep CO_API_KEY` | Rotate key immediately |\n| Key in logs | Log audit | Add log scrubbing |\n| Key in error report | Error handler review | Sanitize error payloads |\n| Excessive token spend | Billing dashboard | Set budget alerts |\n\n## Resources\n\n- [Cohere API Keys Dashboard](https://dashboard.cohere.com/api-keys)\n- [Cohere Safety Modes](https://docs.cohere.com/docs/safety-modes)\n- [Cohere Rate Limits](https://docs.cohere.com/docs/rate-limits)\n\n## Next Steps\n\nFor production deployment, see `cohere-prod-checklist`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "cohere-security-basics",
-    "description": "Apply Cohere security best practices for API key management and access",
-    "allowed-tools": "Read, Write, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

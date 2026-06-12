@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032573",
   "name": "lucidchart-rate-limits",
   "slug": "lucidchart-rate-limits",
   "description": "Rate Limits for Lucidchart.",
   "content": "# Lucidchart Rate Limits\n\n## Overview\n\nLucidchart's API enforces per-OAuth-token rate limits, with document mutation operations (creating shapes, updating pages, modifying text) throttled more aggressively than read-only document listing. Automations that programmatically generate architecture diagrams or org charts from external data sources can easily exceed write limits when placing dozens of shapes and connectors in a single batch. Image export endpoints carry additional latency due to server-side rendering, making export-heavy workflows the most common throttling bottleneck.\n\n## Rate Limit Reference\n\n| Endpoint | Limit | Window | Scope |\n|----------|-------|--------|-------|\n| List documents | 120 req | 1 minute | Per OAuth token |\n| Get document / pages | 60 req | 1 minute | Per OAuth token |\n| Create/update shapes | 30 req | 1 minute | Per OAuth token |\n| Export to PNG/PDF | 10 req | 1 minute | Per OAuth token |\n| Create document | 15 req | 1 minute | Per OAuth token |\n\n## Rate Limiter Implementation\n\n```typescript\nclass LucidRateLimiter {\n  private tokens: number;\n  private lastRefill: number;\n  private readonly max: number;\n  private readonly refillRate: number;\n  private queue: Array<{ resolve: () => void }> = [];\n\n  constructor(maxPerMinute: number) {\n    this.max = maxPerMinute;\n    this.tokens = maxPerMinute;\n    this.lastRefill = Date.now();\n    this.refillRate = maxPerMinute / 60_000;\n  }\n\n  async acquire(): Promise<void> {\n    this.refill();\n    if (this.tokens >= 1) { this.tokens -= 1; return; }\n    return new Promise(resolve => this.queue.push({ resolve }));\n  }\n\n  private refill() {\n    const now = Date.now();\n    this.tokens = Math.min(this.max, this.tokens + (now - this.lastRefill) * this.refillRate);\n    this.lastRefill = now;\n    while (this.tokens >= 1 && this.queue.length) {\n      this.tokens -= 1;\n      this.queue.shift()!.resolve();\n    }\n  }\n}\n\nconst writeLimiter = new LucidRateLimiter(25);\nconst exportLimiter = new LucidRateLimiter(8);\n```\n\n## Retry Strategy\n\n```typescript\nasync function lucidRetry<T>(\n  limiter: LucidRateLimiter, fn: () => Promise<Response>, maxRetries = 3\n): Promise<T> {\n  for (let attempt = 0; attempt <= maxRetries; attempt++) {\n    await limiter.acquire();\n    const res = await fn();\n    if (res.ok) return res.json();\n    if (res.status === 429) {\n      const retryAfter = parseInt(res.headers.get(\"Retry-After\") || \"20\", 10);\n      const jitter = Math.random() * 2000;\n      await new Promise(r => setTimeout(r, retryAfter * 1000 + jitter));\n      continue;\n    }\n    if (res.status >= 500 && attempt < maxRetries) {\n      await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 2000));\n      continue;\n    }\n    throw new Error(`Lucidchart API ${res.status}: ${await res.text()}`);\n  }\n  throw new Error(\"Max retries exceeded\");\n}\n```\n\n## Batch Processing\n\n```typescript\nasync function batchCreateShapes(docId: string, pageId: string, shapes: any[], batchSize = 5) {\n  const results: any[] = [];\n  for (let i = 0; i < shapes.length; i += batchSize) {\n    const batch = shapes.slice(i, i + batchSize);\n    const batchResults = await Promise.all(\n      batch.map(shape => lucidRetry(writeLimiter, () =>\n        fetch(`${LUCID_BASE}/documents/${docId}/pages/${pageId}/shapes`, {\n          method: \"POST\", headers,\n          body: JSON.stringify(shape),\n        })\n      ))\n    );\n    results.push(...batchResults);\n    if (i + batchSize < shapes.length) await new Promise(r => setTimeout(r, 8000));\n  }\n  return results;\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Fix |\n|-------|-------|-----|\n| 429 on shape creation | Exceeded 30 writes/min token limit | Batch shapes, space 3s apart |\n| 429 on PNG export | Export limit (10/min) is very low | Queue exports with 8s spacing |\n| 408 on large document | Export rendering timeout | Request single page, not full doc |\n| 401 token expired | OAuth token TTL exceeded | Refresh token before batch operations |\n| 409 concurrent edit | Another user editing same page | Retry after 5s with fresh page version |\n\n## Resources\n\n- [Lucid Developer Portal](https://developer.lucid.co/reference/overview)\n\n## Next Steps\n\nSee `lucidchart-performance-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "lucidchart-rate-limits",
-    "description": "Rate Limits for Lucidchart.",
-    "Trigger": "lucidchart rate limits\".",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

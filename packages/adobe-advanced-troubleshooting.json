@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031139",
   "name": "adobe-advanced-troubleshooting",
   "slug": "adobe-advanced-troubleshooting",
   "description": "Apply advanced debugging techniques for Adobe API issues: IMS token",
   "content": "# Adobe Advanced Troubleshooting\n\n## Overview\n\nDeep debugging techniques for complex Adobe API issues that resist standard troubleshooting: IMS token problems, Firefly async job failures, PDF Services edge cases, and network-layer diagnostics.\n\n## Prerequisites\n\n- Access to production logs and metrics\n- `curl` with verbose mode for HTTP debugging\n- Understanding of OAuth 2.0 token flows\n- Network capture tools (`tcpdump`, `openssl s_client`)\n\n## Instructions\n\n### Technique 1: IMS Token Introspection\n\nWhen auth issues occur, decode the access token to check claims:\n\n```bash\n# Adobe IMS tokens are JWTs \u2014 decode the payload (middle segment)\nTOKEN=$(curl -s -X POST 'https://ims-na1.adobelogin.com/ims/token/v3' \\\n  -d \"client_id=${ADOBE_CLIENT_ID}&client_secret=${ADOBE_CLIENT_SECRET}&grant_type=client_credentials&scope=${ADOBE_SCOPES}\" | jq -r '.access_token')\n\n# Decode JWT payload (base64url-decode the middle segment)\necho \"$TOKEN\" | cut -d. -f2 | tr '_-' '/+' | base64 -d 2>/dev/null | python3 -m json.tool\n\n# Look for:\n# - \"exp\": expiration timestamp (is it expired?)\n# - \"iss\": should be \"ims-na1.adobelogin.com\"\n# - \"as\": scopes granted (do they match what you requested?)\n# - \"client_id\": verify it matches your ADOBE_CLIENT_ID\n```\n\n### Technique 2: Verbose HTTP Request Tracing\n\n```bash\n# Full HTTP trace against Firefly API\ncurl -v -X POST 'https://firefly-api.adobe.io/v3/images/generate' \\\n  -H \"Authorization: Bearer ${TOKEN}\" \\\n  -H \"x-api-key: ${ADOBE_CLIENT_ID}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"prompt\":\"test\",\"n\":1,\"size\":{\"width\":512,\"height\":512}}' 2>&1 | tee firefly-debug.log\n\n# Check for:\n# - TLS handshake issues (look for SSL/TLS lines)\n# - Request headers actually sent\n# - Response headers (Retry-After, x-request-id, x-adobe-*)\n# - Response body with error details\n```\n\n### Technique 3: Firefly Async Job Failure Analysis\n\n```typescript\n// When async Firefly jobs fail, the status endpoint returns error details\nasync function diagnoseFireflyJob(jobId: string, statusUrl: string) {\n  const token = await getAccessToken();\n\n  const response = await fetch(statusUrl, {\n    headers: {\n      'Authorization': `Bearer ${token}`,\n      'x-api-key': process.env.ADOBE_CLIENT_ID!,\n    },\n  });\n\n  const status = await response.json();\n\n  console.log('=== Firefly Job Diagnosis ===');\n  console.log('Job ID:', jobId);\n  console.log('Status:', status.status);\n\n  if (status.status === 'failed') {\n    console.log('Error code:', status.error?.code);\n    console.log('Error message:', status.error?.message);\n    console.log('Error details:', JSON.stringify(status.error?.details, null, 2));\n\n    // Common failure reasons:\n    // - \"content_policy\": prompt violated guidelines\n    // - \"input_validation\": invalid parameters\n    // - \"internal_error\": Adobe server issue (retry)\n    // - \"timeout\": job took too long (simplify prompt)\n  }\n\n  // Log all response headers for Adobe support\n  console.log('Response headers:', Object.fromEntries(response.headers.entries()));\n}\n```\n\n### Technique 4: PDF Services Error Code Mapping\n\n```typescript\n// src/adobe/pdf-error-map.ts\n// Comprehensive PDF Services error codes and recovery actions\n\nconst PDF_ERROR_MAP: Record<string, { cause: string; action: string; retryable: boolean }> = {\n  'DISQUALIFIED':      { cause: 'File is encrypted/password-protected', action: 'Decrypt PDF first', retryable: false },\n  'BAD_PDF':           { cause: 'Corrupted or invalid PDF', action: 'Validate with pdfinfo/pdftk', retryable: false },\n  'BAD_PDF_CONTENT':   { cause: 'PDF content is malformed', action: 'Re-export from source', retryable: false },\n  'UNSUPPORTED_MEDIA_TYPE': { cause: 'Wrong file format for operation', action: 'Check MimeType matches file', retryable: false },\n  'FILE_SIZE_EXCEEDED': { cause: 'File exceeds size limit', action: 'Compress or split PDF', retryable: false },\n  'PAGE_LIMIT_EXCEEDED': { cause: 'Too many pages for operation', action: 'Split into smaller PDFs', retryable: false },\n  'QUOTA_EXCEEDED':    { cause: 'Monthly transaction limit hit', action: 'Upgrade plan or wait for reset', retryable: false },\n  'INTERNAL_ERROR':    { cause: 'Adobe server error', action: 'Retry with backoff', retryable: true },\n  'TIMEOUT':           { cause: 'Processing timeout', action: 'Try smaller file or fewer pages', retryable: true },\n};\n\nexport function diagnosePdfError(errorCode: string): string {\n  const info = PDF_ERROR_MAP[errorCode];\n  if (!info) return `Unknown PDF Services error: ${errorCode}`;\n  return `${errorCode}: ${info.cause}\\nAction: ${info.action}\\nRetryable: ${info.retryable}`;\n}\n```\n\n### Technique 5: Layer-by-Layer Isolation\n\n```bash\n#!/bin/bash\n# adobe-layer-test.sh \u2014 Test each network layer independently\n\necho \"=== Layer 1: DNS Resolution ===\"\nnslookup ims-na1.adobelogin.com\nnslookup firefly-api.adobe.io\nnslookup image.adobe.io\n\necho \"\"\necho \"=== Layer 2: TCP Connectivity ===\"\nfor host in ims-na1.adobelogin.com firefly-api.adobe.io image.adobe.io; do\n  timeout 5 bash -c \"echo > /dev/tcp/$host/443\" 2>/dev/null && echo \"$host:443 OPEN\" || echo \"$host:443 BLOCKED\"\ndone\n\necho \"\"\necho \"=== Layer 3: TLS Handshake ===\"\nfor host in ims-na1.adobelogin.com firefly-api.adobe.io; do\n  echo | openssl s_client -connect \"$host:443\" -servername \"$host\" 2>/dev/null | grep -E \"subject|issuer|Verify return\"\ndone\n\necho \"\"\necho \"=== Layer 4: IMS Authentication ===\"\nHTTP_CODE=$(curl -s -o /dev/null -w \"%{http_code}\" -X POST \\\n  'https://ims-na1.adobelogin.com/ims/token/v3' \\\n  -d \"client_id=${ADOBE_CLIENT_ID}&client_secret=${ADOBE_CLIENT_SECRET}&grant_type=client_credentials&scope=${ADOBE_SCOPES}\")\necho \"IMS Token: HTTP $HTTP_CODE\"\n\necho \"\"\necho \"=== Layer 5: API Endpoint ===\"\nif [ \"$HTTP_CODE\" = \"200\" ]; then\n  TOKEN=$(curl -s -X POST 'https://ims-na1.adobelogin.com/ims/token/v3' \\\n    -d \"client_id=${ADOBE_CLIENT_ID}&client_secret=${ADOBE_CLIENT_SECRET}&grant_type=client_credentials&scope=${ADOBE_SCOPES}\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['access_token'])\")\n  API_CODE=$(curl -s -o /dev/null -w \"%{http_code}\" -X POST \\\n    'https://firefly-api.adobe.io/v3/images/generate' \\\n    -H \"Authorization: Bearer $TOKEN\" \\\n    -H \"x-api-key: $ADOBE_CLIENT_ID\" \\\n    -H \"Content-Type: application/json\" \\\n    -d '{\"prompt\":\"test\",\"n\":1,\"size\":{\"width\":512,\"height\":512}}')\n  echo \"Firefly API: HTTP $API_CODE\"\nfi\n```\n\n### Technique 6: Extract x-request-id for Adobe Support\n\n```typescript\n// Always capture x-request-id from Adobe responses for support escalation\nasync function debugAdobeCall(url: string, options: RequestInit) {\n  const response = await fetch(url, options);\n\n  const debugInfo = {\n    url,\n    status: response.status,\n    requestId: response.headers.get('x-request-id'),\n    retryAfter: response.headers.get('Retry-After'),\n    contentType: response.headers.get('content-type'),\n    date: response.headers.get('date'),\n  };\n\n  if (!response.ok) {\n    const body = await response.text();\n    console.error('Adobe API Error:', { ...debugInfo, body: body.slice(0, 500) });\n    // Include x-request-id in support ticket for Adobe to trace the request\n  }\n\n  return { response, debugInfo };\n}\n```\n\n## Support Escalation Template\n\n```\nAdobe Support Ticket\n\nSeverity: P[1-4]\nx-request-id: [from response header]\nTimestamp: [ISO 8601]\nClient ID: [first 8 chars only]\nAPI: [Firefly / PDF Services / Photoshop]\nEndpoint: [full URL]\nHTTP Status: [status code]\n\nIssue Summary: [1-2 sentences]\n\nSteps to Reproduce:\n1. [Step]\n2. [Step]\n\nEvidence:\n- Layer test results attached\n- Verbose curl output attached\n- JWT token claims (non-sensitive fields only)\n\nWorkarounds Attempted:\n1. [What you tried] - [Result]\n```\n\n## Output\n\n- IMS token decoded and claims inspected\n- HTTP request/response fully traced\n- Error codes mapped to recovery actions\n- Network layers tested independently\n- Support escalation with x-request-id\n\n## Resources\n\n- [Adobe Developer Support](https://developer.adobe.com/support)\n- [Adobe Status Page](https://status.adobe.com)\n- [Firefly API Reference](https://developer.adobe.com/firefly-services/docs/firefly-api/api/)\n- [PDF Services Error Reference](https://developer.adobe.com/document-services/docs/overview/pdf-services-api/howtos/)\n\n## Next Steps\n\nFor load testing, see `adobe-load-scale`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "adobe-advanced-troubleshooting",
-    "description": "Apply advanced debugging techniques for Adobe API issues: IMS token",
-    "allowed-tools": "Read, Grep, Bash(kubectl:*), Bash(curl:*), Bash(tcpdump:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

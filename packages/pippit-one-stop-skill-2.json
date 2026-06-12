@@ -1,19 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000040806",
   "name": "pippit-one-stop-skill",
   "slug": "pippit-one-stop-skill-2",
   "description": "Self-contained end-to-end Pippit.ai skill for AI creative generation/editing, generated asset downloads, overseas social video publishing, scheduling, task management, and analytics. Use when the user wants a one-stop Pippit flow from prompt or reference image/video assets to generated video, local download, TikTok/Facebook Page/Instagram scheduling, publish task CRUD, or performance analysis; also use for Pippit access-key setup for either creation or publishing.",
   "content": "\n# Pippit One-Stop Workflow\n\nUse this self-contained skill for overseas Pippit.ai workflows. It includes both backend script sets locally:\n\n- `scripts/nest/`: Pippit Nest AI generation, editing, reference uploads, progress polling, and result downloads.\n- `scripts/publish/`: Social account lookup, video upload, scheduled publishing, task CRUD, and analytics.\n\nNo external Pippit skill directories are required. For local commands, resolve `{baseDir}` to this skill folder. For detailed publishing payload fields, read [references/publishing-api.md](references/publishing-api.md).\n\nPippit Nest owns creative interpretation, prompt expansion, model choice, storyboarding, and workflow routing. The local agent should only upload references, pass the user's request through, poll progress, handle clarification requests, download results, and then publish the selected video when requested.\n\n## Route the Request\n\n- **Creative only**: Use `scripts/nest/` to generate/edit, poll, and download outputs. Stop after returning local files unless the user asks to publish.\n- **Publish only**: Use `scripts/publish/` for existing local videos, bound account checks, scheduling, task CRUD, or analytics.\n- **One-stop create-to-publish**: Use `scripts/nest/` first, download the generated video, then use `scripts/publish/` to upload and schedule it.\n- **Image-only output**: Publishing supports video only. If the user wants to publish an image/poster, ask whether to generate or convert it into a video first.\n\n## Creative Request Handling\n\n- Pass the user's creative or edit request to `scripts/nest/submit_run.py --message` as-is. Do not compress, summarize, rewrite, polish, translate, split, or add prompt language unless the user explicitly asks.\n- Keep one creative task as one Nest submission. Do not turn a single request into per-shot, per-scene, or per-asset runs unless the user explicitly asks for separate runs.\n- Do not manually write storyboards, infer camera plans, analyze styles, choose models, or orchestrate sub-prompts locally. Let Pippit Nest do that work.\n- When reference images or videos are provided, upload them and submit the original request with the returned asset IDs. Do not replace the user's wording with your own description of the references.\n- When Pippit asks for clarification or interaction, show the question to the user and submit the user's answer to the same `thread_id`; do not answer on the user's behalf.\n\n## Access Key\n\nUse one Pippit access key for both creation and publishing. Resolve it in this order:\n\n1. `PIPPIT_ACCESS_KEY`\n2. `PippitAccessKey`\n3. Local cache at `$CODEX_HOME/pippit-one-stop-skill/secrets.json`\n\nSave a new key once with either local save script:\n\n```bash\npython3 {baseDir}/scripts/nest/save_access_key.py --access-key \"...\"\n```\n\nDo not invent, retrieve, or echo the full access key. If no key is available, respond in English: \"No Pippit access key is configured. Please get one from https://www.pippit.ai, then provide it or save it before continuing.\"\n\n## One-Stop Flow\n\n1. Collect the minimum missing inputs:\n   - Creative request and any reference image/video files\n   - Target platform: TikTok, Facebook Page, or Instagram\n   - Bound platform account\n   - Title or caption\n   - Publish mode: default publish unless the user explicitly requests scheduled publish\n   - For scheduled publish: scheduled publish time with timezone\n2. For Pippit generation/editing, tell the user it consumes credits and wait for explicit confirmation before calling `submit_run.py`.\n3. Upload reference files one by one with `scripts/nest/upload_file.py` when references are provided.\n4. Submit the user's original creative request as a single `scripts/nest/submit_run.py --message` value, with uploaded asset IDs when present.\n5. Show `web_thread_link` when returned, then poll with `scripts/nest/get_thread.py` using both `thread_id` and `run_id`.\n6. If Pippit asks for clarification or interaction, show the question to the user and submit their answer to the same thread.\n7. Download generated result URLs with `scripts/nest/download_results.py`.\n8. Choose the generated video file to publish. If multiple videos exist and the user has not indicated one, ask them to choose.\n9. List bound social accounts with `scripts/publish/list_user_platform_account.py`. If no usable account exists, stop and direct the user to bind one on Pippit.\n10. Upload the final local video with `scripts/publish/upload_file.py`.\n11. If the user does not mention scheduling, treat the request as default publish; do not ask the user to choose a publish mode.\n12. For default publish, convert it into an explicit near-future scheduled time, defaulting to current local time plus 5 minutes rounded up to the next minute unless the user requests a different short delay. For scheduled publish, require an explicit absolute publish time with timezone.\n13. Restate platform, account, video file, caption/title, publish mode, and absolute schedule time. Wait for confirmation only when the platform/account/video/caption is missing or ambiguous, or when the user asked for scheduled publish without providing a concrete time. Do not ask solely because default publish mode or its near-future schedule time was inferred.\n14. Create the scheduled task with `scripts/publish/batchcreate_schedule_task.py`. Pippit publishing is scheduled-only; never claim an immediate publish path exists.\n15. Return task IDs/statuses, generated local file paths, and the Pippit thread link. If default publish was used, briefly mention that scheduled publish is also supported.\n\n## Local Commands\n\nUse [references/command-map.md](references/command-map.md) for full command examples. Common commands:\n\n```bash\npython3 {baseDir}/scripts/nest/submit_run.py --message \"Create a product video...\"\npython3 {baseDir}/scripts/nest/get_thread.py --thread-id THREAD_ID --run-id RUN_ID --after-seq 0\npython3 {baseDir}/scripts/nest/download_results.py --urls URL1 URL2 --output-dir ./pippit_output --prefix artifact\npython3 {baseDir}/scripts/publish/list_user_platform_account.py\npython3 {baseDir}/scripts/publish/upload_file.py /path/to/video.mp4\npython3 {baseDir}/scripts/publish/batchcreate_schedule_task.py --platform tiktok --platform-user-id PLATFORM_USER_ID --asset-id ASSET_ID --title \"TITLE_OR_CAPTION\" --schedule-time \"2026-05-15T20:00:00+08:00\"\n```\n\n## Publishing Rules\n\n- Publish only videos through `scripts/publish/`.\n- Treat unspecified publish mode as default publish. Default publish means \"publish soon\" and must still be implemented as a near-future scheduled task.\n- Do not schedule without a platform account, caption/title, publish mode, and explicit absolute schedule time. For default publish, compute the absolute near-future schedule time before creating the task.\n- After successfully creating a default publish task, add a short note that scheduled publish is also supported.\n- Resolve relative dates such as \"today\", \"tomorrow\", or \"next Friday\" into absolute dates before scheduling.\n- For TikTok, Instagram, or Facebook-specific settings, use script flags and JSON override options. Do not guess complex platform payloads; read [references/publishing-api.md](references/publishing-api.md) first.\n- One batch create call supports up to 10 tasks. Split larger batches deliberately.\n\n## Follow-Up Operations\n\n- To update, delete, or list scheduled tasks, use `scripts/publish/` task scripts and keep platform plus `platform_user_id` in the query.\n- To analyze published posts, use `scripts/publish/list_videos.py` and summarize title, platform, publish time, views, likes, comments, shares, and engagement rate when available.\n- To refine a generated asset before publishing, continue the same Pippit Nest thread with `scripts/nest/submit_run.py --thread-id`.\n\n## Output Expectations\n\nKeep the user-facing response concise but include the operational identifiers they need:\n\n- Nest generation: `thread_id`, `run_id`, `web_thread_link`, downloaded local files\n- Publishing: platform, `platform_user_id`, uploaded `asset_id`, task IDs, task status, scheduled time\n- Analytics: platform, account, video title, publish time, core metrics\n\nNever claim a generation, upload, or publishing task succeeded unless the relevant local script returned success.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "pippit-one-stop-skill",
-    "description": "Self-contained end-to-end Pippit.ai skill for AI creative generation/editing, generated asset downloads, overseas social video publishing, scheduling, task management, and analytics. Use when the user wants a one-stop Pippit flow from prompt or reference image/video assets to generated video, local download, TikTok/Facebook Page/Instagram scheduling, publish task CRUD, or performance analysis; also use for Pippit access-key setup for either creation or publishing.",
-    "user-invocable": "true",
-    "metadata": "",
-    "\"openclaw\"": "",
-    "\"emoji\"": "P\",",
-    "\"requires\"": "",
-    "\"bins\"": "[\"python3\"],",
-    "\"env\"": "[\"PIPPIT_ACCESS_KEY\"]",
-    "\"primaryEnv\"": "PIPPIT_ACCESS_KEY"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

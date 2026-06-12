@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031078",
   "name": "audit-standards",
   "slug": "audit-standards",
   "description": "Audits the current project against the development standards defined in ~/.claude/CLAUDE.md. Documents non-compliant findings as GitHub issues and writes a prioritised fix plan to the project CLAUDE.md. Use when the user says audit against settings, audit standards, check standards compliance, or audit this project.",
   "content": "\n# Audit Standards\n\nAudits the current project against the personal development standards loaded from `~/.claude/CLAUDE.md`.\nGenerates actionable GitHub issues and a prioritised fix plan.\n\nThe development standards from the user's global `~/.claude/CLAUDE.md` are already loaded into context.\nThe key principles to audit against are:\n\n1. **Codify, Don't Document** \u2014 manual steps should be executable scripts\n2. **Bash Script UX with pfb** \u2014 terminal output uses pfb with correct visual hierarchy\n3. **Markdown Standards** \u2014 all markdown passes markdownlint with zero warnings\n4. **Professional Documentation Tone** \u2014 formal docs are objective, not personal\n5. **Version Control Everything** \u2014 correct files committed, secrets excluded\n6. **Fail Fast, Pivot Early** \u2014 (process principle, skip for static audit)\n7. **Behavioral Integrity** \u2014 (process principle, skip for static audit)\n\n## Step 0: Pre-flight check\n\n```bash\ngh auth status 2>&1 || { echo \"ERROR: gh is not authenticated. Run: gh auth login\"; exit 1; }\n```\n\n## Step 1: Inventory the project\n\n```bash\nfind . -not -path './.git/*' -type f | sort\n```\n\nAlso read:\n\n- `README.md` \u2014 documentation tone and completeness\n- `CLAUDE.md` \u2014 project AI context file exists and is current\n- Any `.env`, `.env.template`, `.gitignore` \u2014 secrets handling\n- Any `*.sh` files \u2014 bash scripting standards\n- Any `*.md` files \u2014 markdown quality\n\n## Step 2: Audit each principle\n\n### Principle 1 \u2014 Codify, Don't Document\n\n- Does the README describe manual steps that should instead be scripts?\n- Do bash scripts use `#!/usr/bin/env bash` shebang?\n- Do scripts have Google-Style header docs (name, description, author, version, usage, dependencies)?\n- Do functions have `@param`, `@return`, `@example` doc comments?\n- Is author attribution derived from `git config user.name`/`git config user.email`?\n- Are scripts idempotent (safe to run multiple times)?\n\nRun: `grep -rn \"#!/\" --include=\"*.sh\" .` to find all scripts.\n\n### Principle 2 \u2014 Bash Script UX with pfb\n\nFor each `.sh` file:\n\n- Is pfb used for terminal output (not plain `echo` for status messages)?\n- Are emojis passed as a parameter, not embedded in the message string?\n- Are log levels (`pfb info/success/warn/error`) used for single-line status only?\n- Is visual hierarchy consistent (heading \u2192 subheading, not mixed)?\n\nRun: `grep -rn \"pfb\\|echo\" --include=\"*.sh\" .` and compare usage patterns.\n\n### Principle 3 \u2014 Markdown Standards\n\nCheck for a `.markdownlint.json` at the repo root:\n\n```bash\ncat .markdownlint.json 2>/dev/null || echo \"MISSING\"\n```\n\nRun markdownlint if available:\n\n```bash\nmarkdownlint '**/*.md' 2>&1 | head -50\n```\n\nCheck:\n\n- Blank lines around headings, lists, code blocks, tables\n- Code blocks specify a language (no bare triple-backtick fences)\n- Prose lines \u2264 120 characters\n- URLs wrapped in `<>` or link syntax\n- Consistent list numbering (1. 2. 3.)\n- YAML frontmatter description fields are single unbroken lines\n\n### Principle 4 \u2014 Professional Documentation Tone\n\nRead `README.md` and any formal docs. Flag:\n\n- Second-person language (\"you\", \"your\") in formal technical docs (README intro, architecture sections)\n- Conversational phrasing in formal sections\n- User-specific references that should be generic\n\nNote: READMEs and tutorials may use \"you\" in instructional sections \u2014 this is acceptable.\n\n### Principle 5 \u2014 Version Control Everything\n\n```bash\ncat .gitignore 2>/dev/null || echo \"MISSING .gitignore\"\nls .env* 2>/dev/null\n```\n\nCheck:\n\n- `.gitignore` exists and excludes `.env`, secrets, build artifacts, IDE files\n- `.env.template` exists if the project requires environment configuration\n- No `.env` with real values present\n- AI context files (`CLAUDE*.md`, `AGENTS*.md`, `GEMINI*.md`) are gitignored and symlinked\n\n#### AI context file check\n\nFind all AI context files in the project (excluding `.git`):\n\n```bash\nfind . -not -path './.git/*' \\( -name 'CLAUDE*.md' -o -name 'AGENTS*.md' -o -name 'GEMINI*.md' \\) | sort\n```\n\nFor each file found, verify two things:\n\n1. **Gitignored** \u2014 the pattern appears in `.gitignore`:\n\n   ```bash\n   git check-ignore -v <file>\n   ```\n\n2. **Symlink** \u2014 the file is a symbolic link (pointing to the private `ai-context` repo), not a regular tracked file:\n\n   ```bash\n   [ -L \"<file>\" ] && echo \"SYMLINK\" || echo \"REGULAR FILE \u2014 should be a symlink\"\n   ```\n\nA finding is raised for any AI context file that is **not** gitignored OR is **not** a symlink. The expected\npattern is: file is listed in `.gitignore`, stored in the private `ai-context` repo, and symlinked back into\nthe project directory so local AI tooling finds it normally (see `extract-ai-context.sh` in that repo).\n\n## Step 3: Generate GitHub issues\n\nFirst, fetch all open issues to avoid creating duplicates:\n\n```bash\ngh issue list --state open --limit 100 --json title --jq '.[].title'\n```\n\nFor each finding, check whether an open issue with a matching title already exists. If one does,\nskip it. Only create an issue if no existing open issue covers the same finding.\n\nFor each distinct finding with no existing open issue, create a GitHub issue:\n\n```bash\ngh issue create \\\n  --title \"<principle>: <brief description of violation>\" \\\n  --body \"$(cat <<'EOF'\n## Principle\n\n<which standard this relates to>\n\n## Finding\n\n<description of the non-compliance>\n\n## Expected\n\n<what the standard requires>\n\n## Current state\n\n<what was found in the project>\n\n## Suggested fix\n\n<concrete change to make>\nEOF\n)\" \\\n  --label \"enhancement\"\n```\n\nUse `--label \"bug\"` for missing required files or broken standards; `--label \"enhancement\"` for\nimprovements and style compliance.\n\nNote each issue number as you go.\n\n## Step 4: Write prioritised fix plan to CLAUDE.md\n\nAppend or update a section in the project `CLAUDE.md` under the heading\n`## Standards Audit \u2014 <today's date>`:\n\n```markdown\n## Standards Audit \u2014 YYYY-MM-DD\n\nIssues generated from `/audit-standards` review against ~/.claude/CLAUDE.md.\nSuggested fix order:\n\n### Group 1 \u2014 Correctness (fix first)\n\n- #N: <title>\n- #N: <title>\n\n### Group 2 \u2014 Standards Compliance\n\n- #N: <title>\n- #N: <title>\n\n### Group 3 \u2014 Quality Improvements\n\n- #N: <title>\n- #N: <title>\n```\n\nOrder: missing required files first, then standards violations, then style improvements.\n\n## Step 5: Report summary\n\nOutput a brief summary:\n\n- Total issues created (with links)\n- Which principle had the most findings\n- Top-priority fix\n- Link to the CLAUDE.md section added\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "audit-standards",
-    "description": "Audits the current project against the development standards defined in ~/.claude/CLAUDE.md. Documents non-compliant findings as GitHub issues and writes a prioritised fix plan to the project CLAUDE.md. Use when the user says audit against settings, audit standards, check standards compliance, or audit this project.",
-    "allowed-tools": "Read Glob Grep Bash"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

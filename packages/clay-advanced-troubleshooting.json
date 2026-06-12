@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031513",
   "name": "clay-advanced-troubleshooting",
   "slug": "clay-advanced-troubleshooting",
   "description": "Deep-debug complex Clay enrichment failures, provider degradation, and",
   "content": "# Clay Advanced Troubleshooting\n\n## Overview\n\nDeep debugging techniques for complex Clay issues that resist standard troubleshooting. Covers provider-level isolation, waterfall diagnosis, HTTP API column debugging, Claygent failure analysis, and Clay support escalation with proper evidence.\n\n## Prerequisites\n\n- Access to Clay table with the failing enrichments\n- curl and jq for API testing\n- Understanding of Clay's enrichment architecture (providers, waterfall, columns)\n- Browser developer tools for network inspection\n\n## Instructions\n\n### Step 1: Isolate the Failure Layer\n\n```bash\n#!/bin/bash\n# clay-layer-test.sh \u2014 test each integration layer independently\nset -euo pipefail\n\necho \"=== Layer Isolation Test ===\"\n\n# Layer 1: Webhook delivery\necho \"Layer 1: Webhook\"\nWEBHOOK_CODE=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n  -X POST \"$CLAY_WEBHOOK_URL\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"_debug\": true, \"domain\": \"google.com\"}')\necho \"  Webhook: $WEBHOOK_CODE\"\n\n# Layer 2: Enterprise API (if applicable)\nif [ -n \"${CLAY_API_KEY:-}\" ]; then\n  echo \"Layer 2: Enterprise API\"\n  API_RESULT=$(curl -s -X POST \"https://api.clay.com/v1/companies/enrich\" \\\n    -H \"Authorization: Bearer $CLAY_API_KEY\" \\\n    -H \"Content-Type: application/json\" \\\n    -d '{\"domain\": \"google.com\"}')\n  echo \"  API response keys: $(echo \"$API_RESULT\" | jq 'keys')\"\nfi\n\n# Layer 3: HTTP API callback endpoint\necho \"Layer 3: Callback endpoint\"\nCALLBACK_CODE=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n  -X POST \"${CLAY_CALLBACK_URL:-http://localhost:3000/api/clay/enriched}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"_debug_test\": true}')\necho \"  Callback: $CALLBACK_CODE\"\n\necho \"\"\necho \"First failing layer = root cause location\"\n```\n\n### Step 2: Diagnose Enrichment Column Failures\n\nIn the Clay UI, click on red/error cells to see detailed error messages:\n\n```yaml\n# Common enrichment column error patterns and root causes:\nerrors:\n  \"No data found\":\n    meaning: \"Provider has no data for this input\"\n    check:\n      - Is the input domain valid? (not personal email domain)\n      - Is the input name spelled correctly?\n      - Is the provider connected? (Settings > Connections)\n    fix: \"Add more waterfall providers for broader coverage\"\n\n  \"Rate limit exceeded\":\n    meaning: \"Provider API rate limit hit\"\n    check:\n      - How many rows are processing simultaneously?\n      - Is the provider's rate limit known? (see provider docs)\n    fix: \"Reduce table row count, add delay between batches\"\n\n  \"Invalid API key\":\n    meaning: \"Provider connection lost or key expired\"\n    check:\n      - Go to Settings > Connections\n      - Click on the failing provider\n      - Test the connection\n    fix: \"Reconnect with a valid API key\"\n\n  \"Timeout\":\n    meaning: \"Provider took too long to respond\"\n    check:\n      - Is the provider's status page showing issues?\n      - Is the input data unusually complex?\n    fix: \"Retry the column on failed rows (click cell > retry)\"\n\n  \"Column dependency not met\":\n    meaning: \"A column this enrichment depends on hasn't completed yet\"\n    check:\n      - Check column order (left to right execution)\n      - Is the prerequisite column populated?\n    fix: \"Reorder columns so dependencies run first\"\n```\n\n### Step 3: Debug HTTP API Column Issues\n\n```typescript\n// debug/http-api-column.ts \u2014 replicate Clay's HTTP API column call locally\nasync function debugHTTPAPIColumn(\n  url: string,\n  method: string,\n  headers: Record<string, string>,\n  body: Record<string, string>,\n  sampleRow: Record<string, string>,\n): Promise<void> {\n  // Replace {{column_name}} placeholders with sample data\n  let resolvedUrl = url;\n  let resolvedBody = JSON.stringify(body);\n\n  for (const [key, value] of Object.entries(sampleRow)) {\n    const placeholder = `{{${key}}}`;\n    resolvedUrl = resolvedUrl.replace(placeholder, value);\n    resolvedBody = resolvedBody.replace(new RegExp(placeholder.replace(/[{}]/g, '\\\\$&'), 'g'), value);\n  }\n\n  console.log('Resolved URL:', resolvedUrl);\n  console.log('Resolved body:', JSON.parse(resolvedBody));\n\n  const res = await fetch(resolvedUrl, {\n    method,\n    headers: { ...headers, 'Content-Type': 'application/json' },\n    body: method !== 'GET' ? resolvedBody : undefined,\n  });\n\n  console.log('Status:', res.status);\n  console.log('Response:', await res.text());\n}\n\n// Test with your actual column config and sample row data\nawait debugHTTPAPIColumn(\n  'https://api.hubapi.com/crm/v3/objects/contacts',\n  'POST',\n  { 'Authorization': 'Bearer your-hubspot-key' },\n  { email: '{{Work Email}}', firstname: '{{first_name}}' },\n  { 'Work Email': 'test@example.com', 'first_name': 'Jane' },\n);\n```\n\n### Step 4: Debug Claygent Failures\n\nCommon Claygent issues and diagnosis:\n\n```yaml\nclaygent_debugging:\n  empty_results:\n    symptom: \"Claygent returns empty or 'Could not find information'\"\n    diagnosis:\n      - Test the prompt manually in Clay's Claygent builder (click cell > edit)\n      - Try the URL in a browser \u2014 is the website accessible?\n      - Check if the website blocks bots (CloudFlare challenge page)\n    fixes:\n      - Use Navigator mode for JavaScript-heavy sites\n      - Simplify the prompt to a single question\n      - Add fallback sources: \"If not on the website, check LinkedIn/Crunchbase\"\n\n  inconsistent_results:\n    symptom: \"Same prompt returns different data each time\"\n    diagnosis:\n      - Claygent uses web search which can vary\n      - Dynamic website content changes between requests\n    fixes:\n      - Make prompts more specific (exact page URL vs general domain)\n      - Add structured output format: \"Return as JSON with keys: funding_amount, date, investors\"\n\n  high_credit_cost:\n    symptom: \"Claygent consuming too many credits\"\n    diagnosis:\n      - Each Claygent call costs credits + 1 action\n      - Running on all rows including low-value ones\n    fixes:\n      - Add conditional run: \"Only run if ICP Score >= 60\"\n      - Cache results: don't re-run on already-researched companies\n```\n\n### Step 5: Build a Support Escalation Package\n\n```markdown\n## Clay Support Escalation\n\n**Account:** [your email]\n**Plan:** [Starter/Explorer/Pro/Enterprise]\n**Date:** [YYYY-MM-DD]\n\n### Issue Description\n[One paragraph describing what's broken]\n\n### Impact\n- Rows affected: [count]\n- Duration: [how long has this been happening]\n- Credits impacted: [estimated wasted credits]\n\n### Steps to Reproduce\n1. [Step 1]\n2. [Step 2]\n3. [Expected result vs actual result]\n\n### Evidence\n- Table URL: [link to affected Clay table]\n- Screenshot of error cells: [attached]\n- Column configuration: [which enrichment, which provider]\n- Sample input data that fails: [3-5 rows]\n- Sample input data that works: [3-5 rows for comparison]\n\n### What I've Already Tried\n1. [Reconnected provider API key]\n2. [Tested with different input data]\n3. [Checked Clay status page \u2014 no incidents reported]\n4. [Tested provider API independently \u2014 works fine]\n\n### Environment\n- Browser: [Chrome/Firefox/Safari + version]\n- Plan tier: [with credit balance]\n- Provider connections: [list connected providers]\n\nSubmit at: https://community.clay.com or support@clay.com\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Intermittent enrichment failures | Provider rate limiting | Reduce concurrent rows, add delay |\n| All rows failing suddenly | Provider API key expired | Reconnect in Settings > Connections |\n| Partial data returned | Provider has limited coverage | Add waterfall fallback provider |\n| HTTP API column timeout | Target API slow | Increase timeout or process async |\n| Claygent blocked by website | Bot protection | Use Navigator mode or different data source |\n\n## Resources\n\n- [Clay Community Support](https://community.clay.com)\n- [Clay University](https://university.clay.com)\n\n## Next Steps\n\nFor high-volume scaling, see `clay-load-scale`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clay-advanced-troubleshooting",
-    "description": "Deep-debug complex Clay enrichment failures, provider degradation, and",
-    "allowed-tools": "Read, Grep, Bash(curl:*), Bash(node:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

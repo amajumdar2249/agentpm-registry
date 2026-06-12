@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032602",
   "name": "maintainx-webhooks-events",
   "slug": "maintainx-webhooks-events",
   "description": "Implement MaintainX webhook handling and event-driven integrations.",
   "content": "# MaintainX Webhooks & Events\n\n## Overview\n\nBuild real-time integrations with MaintainX using webhooks for work order updates, asset changes, and maintenance notifications. MaintainX fires webhook events when key resources change.\n\n## Prerequisites\n\n- MaintainX account with API access\n- HTTPS endpoint accessible from the internet (ngrok for local dev)\n- `MAINTAINX_API_KEY` environment variable configured\n\n## Instructions\n\n### Step 1: Register a Webhook\n\n```bash\ncurl -X POST https://api.getmaintainx.com/v1/webhooks \\\n  -H \"Authorization: Bearer $MAINTAINX_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"url\": \"https://your-app.example.com/webhooks/maintainx\",\n    \"events\": [\n      \"workorder.created\",\n      \"workorder.updated\",\n      \"workorder.status_changed\",\n      \"workorder.completed\"\n    ]\n  }'\n```\n\n### Step 2: Webhook Receiver (Express)\n\n```typescript\n// src/webhook-server.ts\nimport express from 'express';\nimport crypto from 'node:crypto';\n\nconst app = express();\napp.use(express.json({ limit: '1mb' }));\n\n// Signature verification middleware\nfunction verifySignature(secret: string) {\n  return (req: express.Request, res: express.Response, next: express.NextFunction) => {\n    const signature = req.headers['x-maintainx-signature'] as string;\n    if (!signature) {\n      return res.status(401).json({ error: 'Missing signature header' });\n    }\n\n    const expected = crypto\n      .createHmac('sha256', secret)\n      .update(JSON.stringify(req.body))\n      .digest('hex');\n\n    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {\n      return res.status(401).json({ error: 'Invalid signature' });\n    }\n    next();\n  };\n}\n\nconst WEBHOOK_SECRET = process.env.MAINTAINX_WEBHOOK_SECRET!;\n\napp.post(\n  '/webhooks/maintainx',\n  verifySignature(WEBHOOK_SECRET),\n  async (req, res) => {\n    const { event, data, timestamp } = req.body;\n\n    console.log(`[${timestamp}] Event: ${event}, Resource ID: ${data.id}`);\n\n    // Idempotency check\n    const eventId = req.headers['x-maintainx-event-id'] as string;\n    if (await isProcessed(eventId)) {\n      return res.status(200).json({ status: 'already_processed' });\n    }\n\n    try {\n      await routeEvent(event, data);\n      await markProcessed(eventId);\n      res.status(200).json({ status: 'ok' });\n    } catch (err) {\n      console.error('Webhook handler error:', err);\n      res.status(500).json({ error: 'Processing failed' });\n    }\n  },\n);\n\napp.listen(3000, () => console.log('Webhook server listening on :3000'));\n```\n\n### Step 3: Event Router\n\n```typescript\n// src/event-handlers.ts\n\ntype EventHandler = (data: any) => Promise<void>;\n\nconst handlers: Record<string, EventHandler> = {\n  'workorder.created': async (data) => {\n    console.log(`New work order: #${data.id} \"${data.title}\"`);\n    // Notify Slack, create ticket, etc.\n    if (data.priority === 'HIGH') {\n      await sendSlackAlert(`High priority WO created: ${data.title}`);\n    }\n  },\n\n  'workorder.status_changed': async (data) => {\n    console.log(`WO #${data.id}: ${data.previousStatus} \u2192 ${data.status}`);\n    if (data.status === 'COMPLETED') {\n      await syncCompletionToERP(data);\n    }\n  },\n\n  'workorder.completed': async (data) => {\n    console.log(`WO #${data.id} completed at ${data.completedAt}`);\n    await generateCompletionReport(data);\n  },\n\n  'workorder.updated': async (data) => {\n    await syncWorkOrderToDataWarehouse(data);\n  },\n};\n\nexport async function routeEvent(event: string, data: any) {\n  const handler = handlers[event];\n  if (handler) {\n    await handler(data);\n  } else {\n    console.warn(`Unhandled event type: ${event}`);\n  }\n}\n```\n\n### Step 4: Idempotency Store\n\n```typescript\n// src/idempotency.ts\n// Use Redis in production; Map for dev/testing\nconst processed = new Map<string, boolean>();\n\nexport async function isProcessed(eventId: string): Promise<boolean> {\n  return processed.has(eventId);\n}\n\nexport async function markProcessed(eventId: string): Promise<void> {\n  processed.set(eventId, true);\n  // In production: await redis.setex(`event:${eventId}`, 86400, '1');\n}\n```\n\n### Step 5: Local Development with ngrok\n\n```bash\n# Start your webhook server\nnpm run dev\n\n# In another terminal, expose it with ngrok\nngrok http 3000\n# Copy the https URL (e.g., https://abc123.ngrok-free.app)\n\n# Register the ngrok URL as a webhook\ncurl -X POST https://api.getmaintainx.com/v1/webhooks \\\n  -H \"Authorization: Bearer $MAINTAINX_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"url\": \"https://abc123.ngrok-free.app/webhooks/maintainx\",\n    \"events\": [\"workorder.created\", \"workorder.status_changed\"]\n  }'\n```\n\n### Step 6: List and Manage Webhooks\n\n```bash\n# List all registered webhooks\ncurl -s https://api.getmaintainx.com/v1/webhooks \\\n  -H \"Authorization: Bearer $MAINTAINX_API_KEY\" | jq .\n\n# Delete a webhook (replace ID)\ncurl -X DELETE https://api.getmaintainx.com/v1/webhooks/456 \\\n  -H \"Authorization: Bearer $MAINTAINX_API_KEY\"\n```\n\n## Output\n\n- Webhook endpoint with HMAC signature verification\n- Event router dispatching to type-specific handlers\n- Idempotency guard preventing duplicate processing\n- Local dev setup with ngrok for testing webhooks\n- Webhook registration and management via REST API\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| 401 on webhook registration | Invalid API key | Verify `MAINTAINX_API_KEY` |\n| Webhook not firing | URL not reachable | Ensure HTTPS, check firewall, test with ngrok |\n| Duplicate events | Retries from MaintainX | Implement idempotency with event ID deduplication |\n| Signature mismatch | Wrong secret or body mutation | Verify raw body is used for HMAC, check secret value |\n\n## Resources\n\n- [MaintainX API Reference](https://developer.maintainx.com/reference)\n- [ngrok Documentation](https://ngrok.com/docs)\n- [Webhook Security Best Practices](https://hookdeck.com/webhooks/guides/webhook-security-vulnerabilities-guide)\n\n## Next Steps\n\nFor performance optimization, see `maintainx-performance-tuning`.\n\n## Examples\n\n**Slack notification on high-priority work orders**:\n\n```typescript\nasync function sendSlackAlert(message: string) {\n  await fetch(process.env.SLACK_WEBHOOK_URL!, {\n    method: 'POST',\n    headers: { 'Content-Type': 'application/json' },\n    body: JSON.stringify({\n      text: `:rotating_light: MaintainX Alert: ${message}`,\n    }),\n  });\n}\n```\n\n**Polling fallback when webhooks are unavailable**:\n\n```typescript\n// Poll every 60 seconds for status changes\nasync function pollWorkOrders(client: MaintainXClient, since: string) {\n  const { workOrders } = await client.getWorkOrders({\n    updatedAtGte: since,\n    limit: 50,\n  });\n  for (const wo of workOrders) {\n    await routeEvent('workorder.updated', wo);\n  }\n  return new Date().toISOString();\n}\n```\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "maintainx-webhooks-events",
-    "description": "Implement MaintainX webhook handling and event-driven integrations.",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Bash(npm:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

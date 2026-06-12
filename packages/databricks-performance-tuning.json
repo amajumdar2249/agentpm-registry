@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031757",
   "name": "databricks-performance-tuning",
   "slug": "databricks-performance-tuning",
   "description": "Optimize Databricks cluster and query performance.",
   "content": "# Databricks Performance Tuning\n\n## Overview\n\nOptimize Databricks cluster sizing, Spark configuration, and Delta Lake query performance. Covers workload-specific Spark configs, Adaptive Query Execution (AQE), Liquid Clustering, Z-ordering, OPTIMIZE/VACUUM maintenance, query plan analysis, and caching strategies.\n\n## Prerequisites\n\n- Access to cluster configuration (admin or cluster owner)\n- Understanding of workload type (ETL batch, ML training, streaming, interactive)\n- Query history access for identifying slow queries\n\n## Instructions\n\n### Step 1: Cluster Sizing by Workload\n\n| Workload | Instance Family | Why | Workers |\n|----------|----------------|-----|---------|\n| ETL Batch | Compute-optimized (c5/c6) | CPU-heavy transforms | 2-8, autoscale |\n| ML Training | Memory-optimized (r5/r6) | Large model fits | 4-16, fixed |\n| Streaming | Compute-optimized (c5) | Sustained throughput | 2-4, fixed |\n| Interactive / Ad-hoc | General-purpose (m5) | Balanced | Single node or 1-4 |\n| Heavy shuffle / spill | Storage-optimized (i3) | Fast local NVMe | 4-8 |\n\n```python\ndef recommend_cluster(data_size_gb: float, workload: str) -> dict:\n    \"\"\"Recommend cluster config based on data size and workload type.\"\"\"\n    configs = {\n        \"etl_batch\": {\"node\": \"c5.2xlarge\", \"memory_gb\": 16, \"multiplier\": 1.5},\n        \"ml_training\": {\"node\": \"r5.2xlarge\", \"memory_gb\": 64, \"multiplier\": 2.0},\n        \"streaming\": {\"node\": \"c5.xlarge\", \"memory_gb\": 8, \"multiplier\": 1.0},\n        \"interactive\": {\"node\": \"m5.xlarge\", \"memory_gb\": 16, \"multiplier\": 1.0},\n    }\n    cfg = configs.get(workload, configs[\"etl_batch\"])\n    workers = max(1, int(data_size_gb / cfg[\"memory_gb\"] * cfg[\"multiplier\"]))\n\n    return {\n        \"node_type_id\": cfg[\"node\"],\n        \"num_workers\": workers,\n        \"autoscale\": {\"min_workers\": max(1, workers // 2), \"max_workers\": workers * 2},\n    }\n```\n\n### Step 2: Spark Configuration by Workload\n\n```python\nspark_configs = {\n    \"etl_batch\": {\n        \"spark.sql.shuffle.partitions\": \"auto\",  # AQE handles this in DBR 14+\n        \"spark.sql.adaptive.enabled\": \"true\",\n        \"spark.sql.adaptive.coalescePartitions.enabled\": \"true\",\n        \"spark.sql.adaptive.skewJoin.enabled\": \"true\",\n        \"spark.databricks.delta.optimizeWrite.enabled\": \"true\",\n        \"spark.databricks.delta.autoCompact.enabled\": \"true\",\n        \"spark.sql.files.maxPartitionBytes\": \"134217728\",  # 128MB\n    },\n    \"ml_training\": {\n        \"spark.driver.memory\": \"16g\",\n        \"spark.executor.memory\": \"16g\",\n        \"spark.memory.fraction\": \"0.8\",\n        \"spark.memory.storageFraction\": \"0.3\",\n        \"spark.serializer\": \"org.apache.spark.serializer.KryoSerializer\",\n        \"spark.kryoserializer.buffer.max\": \"1024m\",\n    },\n    \"streaming\": {\n        \"spark.sql.streaming.schemaInference\": \"true\",\n        \"spark.databricks.delta.autoCompact.minNumFiles\": \"10\",\n        \"spark.sql.shuffle.partitions\": \"auto\",\n    },\n    \"interactive\": {\n        \"spark.sql.inMemoryColumnarStorage.compressed\": \"true\",\n        \"spark.databricks.cluster.profile\": \"singleNode\",\n        \"spark.master\": \"local[*]\",\n    },\n}\n```\n\n### Step 3: Delta Lake Optimization\n\n#### OPTIMIZE with Z-Ordering\n\n```sql\n-- Compact small files and co-locate data by frequently filtered columns\nOPTIMIZE prod_catalog.silver.orders ZORDER BY (order_date, customer_id);\n\n-- Check file stats before and after\nDESCRIBE DETAIL prod_catalog.silver.orders;\n-- Look at: numFiles (should decrease), sizeInBytes\n```\n\n#### Liquid Clustering (DBR 13.3+ \u2014 Replaces Partitioning + Z-Order)\n\n```sql\n-- Enable Liquid Clustering \u2014 Databricks auto-optimizes data layout\nALTER TABLE prod_catalog.silver.orders CLUSTER BY (order_date, region);\n\n-- Trigger incremental clustering\nOPTIMIZE prod_catalog.silver.orders;\n\n-- Advantages over Z-order:\n-- * Incremental (only re-clusters new data)\n-- * No need to choose between partitioning and Z-ordering\n-- * Works with Deletion Vectors for faster DELETE/UPDATE\n```\n\n#### Predictive Optimization\n\n```sql\n-- Let Databricks auto-schedule OPTIMIZE and VACUUM\nALTER TABLE prod_catalog.silver.orders\nSET TBLPROPERTIES ('delta.enableDeletionVectors' = 'true');\n\n-- Enable at schema level for all tables\nALTER SCHEMA prod_catalog.silver\nSET DBPROPERTIES ('delta.enablePredictiveOptimization' = 'true');\n```\n\n#### Compute Statistics\n\n```sql\nANALYZE TABLE prod_catalog.silver.orders COMPUTE STATISTICS;\nANALYZE TABLE prod_catalog.silver.orders COMPUTE STATISTICS FOR COLUMNS order_date, amount, region;\n```\n\n### Step 4: Query Performance Analysis\n\n```sql\n-- Find slow queries (SQL warehouse query history)\nSELECT statement_id, executed_by,\n       total_duration_ms / 1000 AS duration_sec,\n       rows_produced, bytes_scanned / 1024 / 1024 AS scanned_mb,\n       statement_text\nFROM system.query.history\nWHERE total_duration_ms > 30000  -- > 30 seconds\n  AND start_time > current_timestamp() - INTERVAL 24 HOURS\nORDER BY total_duration_ms DESC\nLIMIT 20;\n```\n\n```python\n# Analyze a query plan for bottlenecks\ndf = spark.table(\"prod_catalog.silver.orders\").filter(\"region = 'US'\")\ndf.explain(mode=\"formatted\")\n# Look for: BroadcastHashJoin (good), SortMergeJoin (may be slow on skewed data)\n# Look for: ColumnarToRow conversion (indicates non-Photon path)\n```\n\n### Step 5: Join Optimization\n\n```python\nfrom pyspark.sql.functions import broadcast\n\n# Rule of thumb: broadcast tables < 100MB\n# BAD: Sort-merge join on small lookup table\nresult = orders.join(products, \"product_id\")  # triggers expensive shuffle\n\n# GOOD: Broadcast the small table\nresult = orders.join(broadcast(products), \"product_id\")  # no shuffle\n\n# For skewed keys: use AQE skew join handling\nspark.conf.set(\"spark.sql.adaptive.skewJoin.enabled\", \"true\")\nspark.conf.set(\"spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes\", \"256m\")\n```\n\n### Step 6: Caching Strategy\n\n```python\n# Cache a frequently-accessed table\nspark.table(\"prod_catalog.gold.daily_metrics\").cache()\n\n# Or use Delta Cache (automatic for i3/r5 instances with local SSD)\n# Enable in cluster config:\n# spark.databricks.io.cache.enabled = true\n# spark.databricks.io.cache.maxDiskUsage = 50g\n\n# NEVER cache Bronze tables \u2014 they're too large and change frequently\n# ALWAYS cache small lookup/dimension tables used in multiple queries\n```\n\n### Step 7: VACUUM and Table Maintenance Schedule\n\n```sql\n-- Clean up old file versions (default retention: 7 days)\nVACUUM prod_catalog.silver.orders RETAIN 168 HOURS;\n\n-- Schedule via Databricks job or DLT maintenance task\n-- Recommended: weekly OPTIMIZE, daily VACUUM for active tables\n```\n\n## Output\n\n- Cluster sized appropriately for workload type\n- Spark configs tuned per workload (ETL, ML, streaming, interactive)\n- Delta tables optimized with Z-ordering or Liquid Clustering\n- Slow queries identified via query history analysis\n- Join and caching strategies applied\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| OOM during shuffle | Skewed partition | Enable AQE skew join or salt the join key |\n| Slow joins | Large shuffle | `broadcast()` tables < 100MB |\n| Too many small files | Frequent small writes | Run `OPTIMIZE` or enable `autoCompact` |\n| VACUUM below retention | Retention < 7 days | Minimum is `168 HOURS`; set `delta.deletedFileRetentionDuration` |\n| Query plan shows `ColumnarToRow` | Non-Photon code path | Use Photon-enabled runtime (suffix `-photon-scala2.12`) |\n\n## Examples\n\n### Quick Table Tune-Up\n\n```sql\nOPTIMIZE prod_catalog.silver.orders ZORDER BY (order_date, customer_id);\nANALYZE TABLE prod_catalog.silver.orders COMPUTE STATISTICS;\nVACUUM prod_catalog.silver.orders RETAIN 168 HOURS;\n```\n\n### Before/After Comparison\n\n```python\nimport time\ntable = \"prod_catalog.silver.orders\"\nquery = f\"SELECT region, SUM(amount) FROM {table} WHERE order_date > '2024-01-01' GROUP BY region\"\n\n# Before optimization\nstart = time.time()\nspark.sql(query).collect()\nbefore = time.time() - start\n\nspark.sql(f\"OPTIMIZE {table} ZORDER BY (order_date, region)\")\n\n# After optimization\nstart = time.time()\nspark.sql(query).collect()\nafter = time.time() - start\n\nprint(f\"Before: {before:.1f}s, After: {after:.1f}s, Speedup: {before/after:.1f}x\")\n```\n\n## Resources\n\n- [Performance Guide](https://docs.databricks.com/aws/en/delta/best-practices)\n- [Liquid Clustering](https://docs.databricks.com/aws/en/delta/clustering)\n- [OPTIMIZE](https://docs.databricks.com/aws/en/sql/language-manual/delta-optimize)\n- [AQE](https://docs.databricks.com/aws/en/sql/language-manual/sql-ref-syntax-qry-select-adaptive)\n\n## Next Steps\n\nFor cost optimization, see `databricks-cost-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "databricks-performance-tuning",
-    "description": "Optimize Databricks cluster and query performance.",
-    "allowed-tools": "Read, Write, Edit, Bash(databricks:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

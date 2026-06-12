@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032810",
   "name": "openrouter-multi-provider",
   "slug": "openrouter-multi-provider",
   "description": "Use multiple AI providers (OpenAI, Anthropic, Google, Meta) through",
   "content": "# OpenRouter Multi-Provider\n\n## Overview\n\nOpenRouter's unified API lets you access models from OpenAI, Anthropic, Google, Meta, Mistral, and others with a single API key and endpoint. Model IDs use `provider/model-name` format. The same OpenAI SDK code works for any provider by simply changing the model ID. This skill covers provider comparison, cross-provider routing, feature normalization, and BYOK (Bring Your Own Key).\n\n## Provider Landscape\n\n```bash\n# List all providers and their model counts\ncurl -s https://openrouter.ai/api/v1/models | jq '\n  [.data[].id | split(\"/\")[0]] |\n  group_by(.) | map({provider: .[0], models: length}) |\n  sort_by(-.models)'\n```\n\n## Cross-Provider Comparison\n\n```python\nimport os, time, json\nfrom openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"https://openrouter.ai/api/v1\",\n    api_key=os.environ[\"OPENROUTER_API_KEY\"],\n    default_headers={\"HTTP-Referer\": \"https://my-app.com\", \"X-Title\": \"my-app\"},\n)\n\ndef compare_models(prompt: str, models: list[str], max_tokens: int = 500) -> list[dict]:\n    \"\"\"Run the same prompt across multiple models and compare results.\"\"\"\n    results = []\n    for model in models:\n        start = time.monotonic()\n        try:\n            response = client.chat.completions.create(\n                model=model,\n                messages=[{\"role\": \"user\", \"content\": prompt}],\n                max_tokens=max_tokens,\n                temperature=0,\n            )\n            latency = (time.monotonic() - start) * 1000\n            results.append({\n                \"model\": model,\n                \"served_by\": response.model,\n                \"content\": response.choices[0].message.content[:200] + \"...\",\n                \"tokens\": response.usage.prompt_tokens + response.usage.completion_tokens,\n                \"latency_ms\": round(latency, 1),\n                \"status\": \"ok\",\n            })\n        except Exception as e:\n            results.append({\"model\": model, \"status\": \"error\", \"error\": str(e)})\n\n    return results\n\n# Compare top-tier models on the same task\nresults = compare_models(\n    \"Explain the CAP theorem in distributed systems\",\n    models=[\n        \"anthropic/claude-3.5-sonnet\",   # Anthropic\n        \"openai/gpt-4o\",                 # OpenAI\n        \"google/gemini-2.0-flash-001\",   # Google\n        \"meta-llama/llama-3.1-70b-instruct\",  # Meta (open-source)\n    ],\n)\nfor r in results:\n    print(f\"{r['model']}: {r.get('latency_ms', 'N/A')}ms, {r.get('tokens', 'N/A')} tokens\")\n```\n\n## Provider Strength Matrix\n\n| Provider | Best For | Example Models | Price Range |\n|----------|----------|---------------|-------------|\n| Anthropic | Analysis, safety, long context | `claude-3.5-sonnet`, `claude-3-haiku` | $0.25-$15/1M |\n| OpenAI | Code generation, tool calling | `gpt-4o`, `gpt-4o-mini`, `o1` | $0.15-$60/1M |\n| Google | Multimodal, huge context (1M) | `gemini-2.0-flash-001`, `gemini-pro` | $0.075-$7/1M |\n| Meta | Budget tasks, self-hosting | `llama-3.1-8b-instruct`, `llama-3.1-70b-instruct` | $0.06-$0.90/1M |\n| Mistral | European data residency, code | `mistral-large`, `mixtral-8x7b` | $0.24-$8/1M |\n\n## Provider-Specific Routing\n\n```python\n# Force specific provider for a model\nresponse = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet\",\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n    max_tokens=200,\n    extra_body={\n        \"provider\": {\n            \"order\": [\"Anthropic\"],        # Direct to Anthropic\n            \"allow_fallbacks\": False,       # Don't fall back to other providers\n        },\n    },\n)\n\n# Cross-provider fallback: if Anthropic is down, try via AWS Bedrock\nresponse = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet\",\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n    max_tokens=200,\n    extra_body={\n        \"provider\": {\n            \"order\": [\"Anthropic\", \"AWS Bedrock\"],\n            \"allow_fallbacks\": True,\n        },\n    },\n)\n```\n\n## BYOK (Bring Your Own Key)\n\n```python\n# Use your own provider API key through OpenRouter\n# Configure BYOK in the OpenRouter dashboard:\n# Settings > Integrations > Add Provider Key\n\n# Benefits:\n# - First 1M requests/month free via OpenRouter\n# - After that, 5% of normal provider cost (vs full OpenRouter markup)\n# - Data flows directly to provider under your account\n# - Useful for high-volume production workloads\n\n# With BYOK configured, requests automatically use your provider key\nresponse = client.chat.completions.create(\n    model=\"openai/gpt-4o\",  # Uses YOUR OpenAI key, routed through OpenRouter\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n    max_tokens=200,\n)\n```\n\n## Feature Normalization\n\n```python\ndef normalized_completion(messages, model, **kwargs):\n    \"\"\"Handle provider-specific feature differences.\"\"\"\n    # JSON mode: OpenAI native, others via system prompt\n    if kwargs.pop(\"json_mode\", False):\n        if model.startswith(\"openai/\"):\n            kwargs[\"response_format\"] = {\"type\": \"json_object\"}\n        else:\n            # Add JSON instruction to system prompt for non-OpenAI models\n            messages = [{\"role\": \"system\", \"content\": \"Respond in valid JSON only.\"}] + [\n                m for m in messages if m[\"role\"] != \"system\"\n            ] + [m for m in messages if m[\"role\"] == \"system\"]\n\n    return client.chat.completions.create(model=model, messages=messages, **kwargs)\n```\n\n## Error Handling\n\n| Error | Cause | Fix |\n|-------|-------|-----|\n| Feature not supported | Provider lacks capability (e.g., tools on Llama) | Check model capabilities via `/models`; use fallback |\n| Different response quality | Providers trained differently | Test critical prompts per model; adjust system prompts |\n| Provider outage | Single provider down | Use `provider.order` with fallbacks across providers |\n| BYOK auth failure | Provider key expired or invalid | Update provider key in OpenRouter dashboard |\n\n## Enterprise Considerations\n\n- OpenRouter normalizes the API, but models differ in output quality, feature support, and data policies\n- Use `provider.order` + `allow_fallbacks: true` for cross-provider resilience\n- Test the same prompts across providers during evaluation; don't assume equal quality\n- BYOK eliminates OpenRouter margin for high-volume workloads (5% vs standard markup)\n- Route regulated data only to approved providers using `allow_fallbacks: false`\n- Monitor which provider actually serves each request (`response.model`) for attribution\n\n## References\n\n- [Examples](${CLAUDE_SKILL_DIR}/references/examples.md) | [Errors](${CLAUDE_SKILL_DIR}/references/errors.md)\n- [Supported Providers](https://openrouter.ai/models) | [Provider Routing](https://openrouter.ai/docs/features/provider-routing)\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "openrouter-multi-provider",
-    "description": "Use multiple AI providers (OpenAI, Anthropic, Google, Meta) through",
-    "workflows, or maximizing availability. Triggers": "openrouter providers'', ''multi",
-    "allowed-tools": "Read, Write, Edit, Bash, Grep",
-    "version": "2.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

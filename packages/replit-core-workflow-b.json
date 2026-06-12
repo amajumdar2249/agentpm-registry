@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033038",
   "name": "replit-core-workflow-b",
   "slug": "replit-core-workflow-b",
   "description": "Manage Replit Teams, member permissions, deployment promotion, and bulk",
   "content": "# Replit Core Workflow B \u2014 Teams & Admin\n\n## Overview\n\nSecondary workflow for Replit: team member management, role assignment, deployment promotion (dev to production), custom domain setup, and organizational audit. Complements the app-building workflow in `replit-core-workflow-a`.\n\n## Prerequisites\n\n- Replit Teams or Enterprise plan\n- Organization Owner or Admin role\n- Team API token stored in `REPLIT_TOKEN`\n\n## Instructions\n\n### Step 1: Team Member Management\n\n```typescript\n// src/admin/team-manager.ts\ninterface TeamMember {\n  username: string;\n  email: string;\n  role: 'owner' | 'admin' | 'member';\n  lastActive: string;\n}\n\nasync function listMembers(teamId: string): Promise<TeamMember[]> {\n  const res = await fetch(`https://replit.com/api/v1/teams/${teamId}/members`, {\n    headers: { Authorization: `Bearer ${process.env.REPLIT_TOKEN}` },\n  });\n  return res.json();\n}\n\nasync function inviteMember(teamId: string, email: string, role: string) {\n  return fetch(`https://replit.com/api/v1/teams/${teamId}/members`, {\n    method: 'POST',\n    headers: {\n      Authorization: `Bearer ${process.env.REPLIT_TOKEN}`,\n      'Content-Type': 'application/json',\n    },\n    body: JSON.stringify({ email, role }),\n  });\n}\n\nasync function removeMember(teamId: string, username: string) {\n  return fetch(`https://replit.com/api/v1/teams/${teamId}/members/${username}`, {\n    method: 'DELETE',\n    headers: { Authorization: `Bearer ${process.env.REPLIT_TOKEN}` },\n  });\n}\n```\n\n### Step 2: Seat Audit\n\n```typescript\n// Identify inactive members for seat optimization\nasync function auditSeats(teamId: string) {\n  const members = await listMembers(teamId);\n  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);\n\n  const audit = {\n    total: members.length,\n    active: members.filter(m => new Date(m.lastActive) > thirtyDaysAgo),\n    inactive: members.filter(m => new Date(m.lastActive) <= thirtyDaysAgo),\n    costPerSeat: 25, // USD/month for Teams\n  };\n\n  console.log(`Active: ${audit.active.length}, Inactive: ${audit.inactive.length}`);\n  console.log(`Potential savings: $${audit.inactive.length * audit.costPerSeat}/month`);\n\n  return audit;\n}\n```\n\n### Step 3: Deployment Promotion\n\n```typescript\n// Promote from development to production deployment\nasync function promoteDeployment(replId: string) {\n  // Step 1: Verify dev deployment is healthy\n  const devHealth = await fetch(`https://${replId}.replit.dev/health`);\n  if (!devHealth.ok) {\n    throw new Error('Development deployment not healthy. Fix before promoting.');\n  }\n\n  // Step 2: Trigger production deployment\n  const res = await fetch(`https://replit.com/api/v1/repls/${replId}/deploy`, {\n    method: 'POST',\n    headers: {\n      Authorization: `Bearer ${process.env.REPLIT_TOKEN}`,\n      'Content-Type': 'application/json',\n    },\n    body: JSON.stringify({\n      type: 'autoscale', // or 'reserved-vm'\n    }),\n  });\n\n  const deployment = await res.json();\n  console.log(`Production URL: ${deployment.url}`);\n\n  // Step 3: Verify production health\n  await new Promise(r => setTimeout(r, 10000)); // Wait for deploy\n  const prodHealth = await fetch(`${deployment.url}/health`);\n  if (!prodHealth.ok) {\n    console.error('Production health check failed. Consider rollback.');\n  }\n\n  return deployment;\n}\n```\n\n### Step 4: Custom Domain Configuration\n\n```markdown\n1. Go to Deployment Settings > Custom Domain\n2. Enter your domain: app.example.com\n3. Add DNS records at your registrar:\n   - CNAME: app -> your-repl-slug.replit.app\n4. Wait for SSL certificate auto-provisioning (1-5 minutes)\n5. Verify: curl -I https://app.example.com\n\nFor domains purchased through Replit:\n- MX records supported for custom email services\n- DNS managed in Replit dashboard\n```\n\n### Step 5: Bulk Repl Audit\n\n```typescript\n// Audit all team Repls for compliance\nasync function auditRepls(teamId: string) {\n  const res = await fetch(`https://replit.com/api/v1/teams/${teamId}/repls`, {\n    headers: { Authorization: `Bearer ${process.env.REPLIT_TOKEN}` },\n  });\n  const repls = await res.json();\n\n  const report = {\n    total: repls.length,\n    withDeployments: repls.filter((r: any) => r.deployment).length,\n    publicRepls: repls.filter((r: any) => r.isPublic).length,\n    staleRepls: repls.filter((r: any) => {\n      const lastEdit = new Date(r.lastEdited);\n      return Date.now() - lastEdit.getTime() > 90 * 24 * 60 * 60 * 1000;\n    }),\n  };\n\n  console.log('Repl Audit Report:');\n  console.log(`  Total: ${report.total}`);\n  console.log(`  Deployed: ${report.withDeployments}`);\n  console.log(`  Public: ${report.publicRepls} (review for secrets exposure)`);\n  console.log(`  Stale (>90 days): ${report.staleRepls.length}`);\n\n  return report;\n}\n```\n\n### Step 6: Activity Monitoring\n\n```bash\n# Review recent team activity\ncurl \"https://replit.com/api/v1/teams/TEAM_ID/audit-log?limit=50\" \\\n  -H \"Authorization: Bearer $REPLIT_TOKEN\" | \\\n  jq '.events[] | {user, action, resource, timestamp}'\n\n# Export member activity CSV\ncurl \"https://replit.com/api/v1/teams/TEAM_ID/members\" \\\n  -H \"Authorization: Bearer $REPLIT_TOKEN\" | \\\n  jq -r '.[] | [.username, .email, .role, .lastActive] | @csv' > team-activity.csv\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| 403 on member invite | Not an admin | Requires Owner or Admin role |\n| Seat limit exceeded | Plan capacity reached | Remove inactive or upgrade plan |\n| Deploy promotion fails | Dev not healthy | Fix dev deployment first |\n| DNS not resolving | Wrong CNAME record | Verify DNS points to `.replit.app` |\n\n## Resources\n\n- [Replit Teams](https://docs.replit.com/teams/identity-and-access-management/groups-and-permissions)\n- [Replit Deployments](https://docs.replit.com/cloud-services/deployments/reserved-vm-deployments)\n- [Custom Domains](https://docs.replit.com/hosting/custom-domains)\n\n## Next Steps\n\nFor common errors, see `replit-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "replit-core-workflow-b",
-    "description": "Manage Replit Teams, member permissions, deployment promotion, and bulk",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000044196",
   "name": "spawn-agents",
   "slug": "spawn-agents-2",
   "description": "Use when facing 2+ independent problems (different test files, unrelated bugs, separate subsystems) that can be investigated in parallel without shared state \u2014 covers the dispatch decision, the actual Claude Code parallelism mechanism, prompt construction, and integration after agents return",
   "content": "\n# Spawn Agents\n\n## Overview\n\nDelegate independent work to subagents with isolated context. By precisely crafting the agent's prompt, you ensure it stays focused and succeeds. Subagents inherit nothing from your session \u2014 you construct exactly what they need. This preserves your own context for coordination.\n\n**Core principle:** One agent per independent problem. Parallel only when truly independent. Over-dispatching is more common than under-dispatching.\n\n## The Decision: Dispatch or Not?\n\n**Dispatch when ALL of these hold:**\n- 2+ problems exist that are genuinely independent\n- Each can be understood without context from the others\n- Agents won't edit the same files or rely on the same in-flight changes\n- You'd otherwise lose tokens to context bloat investigating sequentially yourself\n\n**DO NOT dispatch when:**\n- The problems share a domain model, schema, or core utility (the bugs may have one root cause)\n- The work is one cohesive feature decomposed into pieces (e.g. \"implement auth: signup + login + reset + verify\" \u2014 all four touch User, middleware, and schema)\n- You don't yet know what's broken (exploratory debugging needs full context)\n- The task fits in one agent (don't shard for the sake of sharding)\n\n**Over-dispatch is the failure mode to fear most.** Capable models reach for parallelism reflexively. Resist: if streams share state, agents will conflict and you'll spend more time integrating than you saved dispatching.\n\n**Soft cap: ~3-4 agents per message.** If you're tempted to spawn 5+ in parallel, the more likely diagnosis is that they aren't truly independent \u2014 re-examine the decomposition before dispatching.\n\n## The Mechanism (Claude Code)\n\nParallelism in Claude Code is NOT a special `Task()` function. It is:\n\n> **Multiple `Agent` tool invocations in a single assistant message.**\n\nThe harness runs them concurrently. Sequential `Agent` calls across messages run sequentially.\n\n```\n\u2705 One message containing 3 Agent tool calls \u2192 all 3 run in parallel\n\u274c Three messages, one Agent call each \u2192 all 3 run sequentially\n```\n\nWhen dispatching N parallel agents, emit all N tool calls in one block.\n\n## Subagent Dynamics\n\nSpawned subagents auto-load `using-kisune`, which has `<SUBAGENT-STOP>` \u2014 the subagent skips the bootstrap dance and runs your assignment directly. Implications for your prompt:\n\n- The subagent will NOT auto-invoke other kisune skills unless you tell it to.\n- The subagent has NO conversation memory \u2014 your prompt must be self-contained.\n- If you want the subagent to follow TDD or use `completion-validation`, say so explicitly.\n\n## Prompt Construction\n\nBrief the agent like a smart colleague who walked into the room \u2014 they have not seen your conversation, do not know what you've tried, do not know why this matters.\n\nA good dispatch prompt has four parts:\n\n1. **Goal** \u2014 one sentence on what to accomplish\n2. **Context** \u2014 relevant file paths, error messages, prior attempts, why this matters\n3. **Constraints** \u2014 what NOT to change; scope boundaries\n4. **Expected output** \u2014 what the agent should report back, in what shape\n\n```markdown\nInvestigate why src/auth/middleware.ts:42 throws \"token not found\"\non valid sessions.\n\nContext: Started after PR #312 merged the session-cookie refactor.\nFailing path: GET /api/me with valid cookie \u2192 401. Repro: tests/integration/auth.test.ts case \"valid session returns user\".\n\nConstraints: Do NOT modify production code. Identify root cause only.\nYou may add console.log in tests.\n\nReturn: Root cause in 1-2 sentences, the exact line(s) responsible,\nand a proposed fix (do not apply it).\n```\n\n## When \"Independent\" Turns Out Wrong\n\nMid-flight, you may notice agent A and agent B are converging on the same root cause (shared utility, same schema column, same race). When this happens:\n\n1. **Stop further work** \u2014 if either agent has already returned, do not commit those changes blind.\n2. **Consolidate** \u2014 open a single new investigation that covers both problems together.\n3. **Re-dispatch only after** the shared root cause is understood; the new agents must not overlap on the now-shared edit surface.\n\nSunk-cost fallacy: \"the agents are already running, let them finish.\" Resist. Conflicting edits cost more to untangle than to abort.\n\n## After Agents Return\n\nFor each returned agent:\n\n1. Read the summary critically \u2014 agent reports describe intent, not necessarily reality.\n2. **Verify via diff/state, not the report.** Run `git status`, `git diff`, read the changed files. (See `completion-validation` for the discipline gate before claiming \"the agent succeeded\".)\n3. Check for cross-agent conflicts (same file edited twice, same dependency added differently).\n4. Run the full test suite once integrated \u2014 independent fixes can still combine into a regression.\n\n**Partial failure (1 of N fails):** Do not silently drop the failed agent's task. Either (a) re-dispatch it with the lessons learned from siblings, (b) take it on yourself if it now needs full-system context, or (c) report the partial state honestly: \"2 of 3 fixed, the third needs further investigation\". Never claim the whole batch succeeded when one stream failed.\n\n## Common Mistakes\n\n| \u274c | \u2705 |\n|---|---|\n| \"Fix all the failing tests\" (too broad) | \"Fix the 3 failures in src/agents/abort.test.ts\" (focused scope) |\n| No context, just a goal | Paste error messages, file:line, repro steps |\n| No constraints | \"Do not change production code\" / \"Tests only\" |\n| \"Fix it\" (vague output) | \"Return root cause + line numbers + proposed fix\" |\n| Dispatch 4 agents on one feature | Sequential single agent for cohesive work |\n| Trust agent's \"all tests pass\" | Verify via git diff + re-run suite yourself |\n| One Agent call per message | All N Agent calls in one message \u2192 real parallelism |\n\n## When NOT to Spawn\n\n- **Scoped lookups already known**: use `Read` / `Grep` directly, not an agent.\n- **One-shot tool execution**: don't wrap a single `Bash` call in an agent.\n- **Short reactive tasks**: if the next action is dictated by what you just read, do it yourself.\n- **Anything where you'd give the agent the same context you already have**: dispatching adds latency without isolation benefits.\n\n## Integration With Other Kisune Skills\n\n- **`using-kisune`** \u2014 defines the `<SUBAGENT-STOP>` semantics that let dispatched agents skip the bootstrap.\n- **`completion-validation`** \u2014 the verification gate after an agent returns. \"Agent said success\" is not evidence; check the diff.\n- **`brainstorming`** \u2014 if the dispatch decision itself is non-obvious (independent vs not?), brainstorm before dispatching.\n- **`spec-driven-implementation`** \u2014 for Full-mode features, do NOT shard task execution across agents unless tasks are explicitly independent in the plan.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "spawn-agents",
-    "description": "Use when facing 2+ independent problems (different test files, unrelated bugs, separate subsystems) that can be investigated in parallel without shared state \u2014 covers the dispatch decision, the actual Claude Code parallelism mechanism, prompt construction, and integration after agents return"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

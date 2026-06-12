@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031446",
   "name": "castai-common-errors",
   "slug": "castai-common-errors",
   "description": "Diagnose and fix CAST AI agent, API, and autoscaler errors.",
   "content": "# CAST AI Common Errors\n\n## Overview\n\nDiagnostic guide for the 10 most common CAST AI issues, covering agent connectivity, API errors, autoscaler failures, and node provisioning problems.\n\n## Prerequisites\n\n- `kubectl` access to the cluster\n- `CASTAI_API_KEY` configured\n- Access to CAST AI console for log correlation\n\n## Error Reference\n\n### 1. Agent Pod CrashLoopBackOff\n\n```bash\nkubectl get pods -n castai-agent\nkubectl logs -n castai-agent deployment/castai-agent --tail=50\n```\n\n**Causes and fixes:**\n\n- **Invalid API key**: Regenerate at console.cast.ai > API\n- **Wrong provider**: Set `--set provider=eks|gke|aks` correctly in Helm\n- **RBAC missing**: Apply the required ClusterRole and ClusterRoleBinding\n- **Network blocked**: Ensure outbound HTTPS to `api.cast.ai` is allowed\n\n### 2. Agent Shows \"Disconnected\" in Console\n\n```bash\n# Check agent heartbeat\nkubectl logs -n castai-agent deployment/castai-agent | grep -i \"heartbeat\\|connect\\|error\"\n\n# Verify network connectivity from inside the cluster\nkubectl run castai-debug --image=curlimages/curl --rm -it --restart=Never -- \\\n  curl -s -o /dev/null -w \"%{http_code}\" https://api.cast.ai/v1/kubernetes/external-clusters\n```\n\n**Fix**: Restart the agent pod: `kubectl rollout restart deployment/castai-agent -n castai-agent`\n\n### 3. API Returns 401 Unauthorized\n\n```bash\n# Test API key\ncurl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"X-API-Key: ${CASTAI_API_KEY}\" \\\n  https://api.cast.ai/v1/kubernetes/external-clusters\n# Should return 200, not 401\n```\n\n**Fix**: Generate a new API key at console.cast.ai > API > API Access Keys.\n\n### 4. Nodes Not Scaling Up (Unschedulable Pods)\n\n```bash\n# Check for pending pods\nkubectl get pods --all-namespaces --field-selector=status.phase=Pending\n\n# Verify unschedulable pods policy is enabled\ncurl -s -H \"X-API-Key: ${CASTAI_API_KEY}\" \\\n  \"https://api.cast.ai/v1/kubernetes/clusters/${CASTAI_CLUSTER_ID}/policies\" \\\n  | jq '.unschedulablePods'\n```\n\n**Causes:**\n\n- `unschedulablePods.enabled` is `false` -- enable it\n- Cluster limits reached -- increase `clusterLimits.cpu.maxCores`\n- No matching node template -- check constraints match pod requirements\n\n### 5. Nodes Not Scaling Down (Empty Nodes)\n\n```bash\n# Check node downscaler configuration\ncurl -s -H \"X-API-Key: ${CASTAI_API_KEY}\" \\\n  \"https://api.cast.ai/v1/kubernetes/clusters/${CASTAI_CLUSTER_ID}/policies\" \\\n  | jq '.nodeDownscaler'\n```\n\n**Causes:**\n\n- `nodeDownscaler.enabled` is `false`\n- Pods with `PodDisruptionBudget` blocking eviction\n- DaemonSet-only nodes with system pods preventing drain\n- Delay too high -- reduce `emptyNodes.delaySeconds`\n\n### 6. Spot Instance Fallback Not Working\n\n```bash\n# Check spot configuration\ncurl -s -H \"X-API-Key: ${CASTAI_API_KEY}\" \\\n  \"https://api.cast.ai/v1/kubernetes/clusters/${CASTAI_CLUSTER_ID}/policies\" \\\n  | jq '.spotInstances'\n```\n\n**Fix**: Enable `spotDiversityEnabled: true` and set `spotDiversityPriceIncreaseLimitPercent` to 20-30 for better availability.\n\n### 7. Evictor Too Aggressive\n\nSymptoms: Pods being evicted too frequently, service disruption.\n\n```bash\nkubectl get events --field-selector reason=Evicted -A --sort-by=.lastTimestamp | tail -20\n```\n\n**Fix**: Increase evictor cycle interval or switch to non-aggressive mode:\n\n```bash\nhelm upgrade castai-evictor castai-helm/castai-evictor \\\n  -n castai-agent \\\n  --set castai.apiKey=\"${CASTAI_API_KEY}\" \\\n  --set castai.clusterID=\"${CASTAI_CLUSTER_ID}\" \\\n  --set evictor.aggressiveMode=false \\\n  --set evictor.cycleInterval=600\n```\n\n### 8. Terraform State Drift\n\n```bash\nterraform plan -var-file=environments/prod.tfvars\n# If drift detected:\nterraform refresh -var-file=environments/prod.tfvars\n```\n\n**Fix**: Avoid mixing Terraform and console-based policy changes. Pick one source of truth.\n\n### 9. Helm Chart Version Mismatch\n\n```bash\n# Check installed versions\nhelm list -n castai-agent\nhelm search repo castai-helm --versions | head -10\n\n# Update to latest\nhelm repo update\nhelm upgrade castai-agent castai-helm/castai-agent -n castai-agent \\\n  --reuse-values\n```\n\n### 10. Workload Autoscaler Not Recommending\n\n```bash\nkubectl logs -n castai-agent deployment/castai-workload-autoscaler --tail=50\n```\n\n**Causes:**\n\n- Insufficient metrics data (wait 24h)\n- Missing annotation `autoscaling.cast.ai/enabled: \"true\"`\n- Workload autoscaler pod not running\n\n## Escalation Path\n\n1. Collect debug info: Helm releases, agent logs, cluster events\n2. Check https://status.cast.ai for platform issues\n3. Contact support with cluster ID and screenshots\n\n## Resources\n\n- [CAST AI Troubleshooting](https://docs.cast.ai/docs/casti-ai-components)\n- [CAST AI Status](https://status.cast.ai)\n- [Autoscaler Checklist](https://docs.cast.ai/docs/autoscaler-checklist)\n\n## Next Steps\n\nFor comprehensive diagnostics, see `castai-debug-bundle`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "castai-common-errors",
-    "description": "Diagnose and fix CAST AI agent, API, and autoscaler errors.",
-    "allowed-tools": "Read, Bash(kubectl:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

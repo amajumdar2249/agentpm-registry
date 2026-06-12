@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031922",
   "name": "figma-observability",
   "slug": "figma-observability",
   "description": "Set up monitoring, metrics, and alerting for Figma API integrations.",
   "content": "# Figma Observability\n\n## Overview\n\nMonitor Figma REST API health with custom metrics, structured logging, and alerts. Track request latency, error rates, rate limit headroom, and cache hit rates.\n\n## Prerequisites\n\n- Prometheus or compatible metrics backend (or use OpenTelemetry)\n- Structured logging (pino, winston)\n- Alerting system (PagerDuty, Slack, OpsGenie)\n\n## Instructions\n\n### Step 1: Instrumented Figma Client\n\n```typescript\n// Wrap every Figma API call with metrics and logging\nclass InstrumentedFigmaClient {\n  private metrics = {\n    requests: 0,\n    errors: 0,\n    rateLimits: 0,\n    totalLatencyMs: 0,\n  };\n\n  async request<T>(path: string, token: string): Promise<T> {\n    const start = performance.now();\n    const endpoint = path.replace(/[a-zA-Z0-9]{15,}/, ':key'); // normalize\n\n    try {\n      const res = await fetch(`https://api.figma.com${path}`, {\n        headers: { 'X-Figma-Token': token },\n      });\n\n      const latencyMs = performance.now() - start;\n      this.metrics.requests++;\n      this.metrics.totalLatencyMs += latencyMs;\n\n      // Log every request with structured data\n      console.log(JSON.stringify({\n        service: 'figma',\n        endpoint,\n        status: res.status,\n        latencyMs: Math.round(latencyMs),\n        rateLimit: {\n          remaining: res.headers.get('X-RateLimit-Remaining'),\n          type: res.headers.get('X-Figma-Rate-Limit-Type'),\n        },\n      }));\n\n      if (res.status === 429) {\n        this.metrics.rateLimits++;\n        const retryAfter = parseInt(res.headers.get('Retry-After') || '60');\n        throw new FigmaRateLimitError(retryAfter);\n      }\n\n      if (!res.ok) {\n        this.metrics.errors++;\n        throw new FigmaApiError(res.status, await res.text());\n      }\n\n      return res.json();\n    } catch (error) {\n      if (!(error instanceof FigmaApiError)) {\n        this.metrics.errors++;\n        console.error(JSON.stringify({\n          service: 'figma',\n          endpoint,\n          error: error instanceof Error ? error.message : 'Unknown',\n          latencyMs: Math.round(performance.now() - start),\n        }));\n      }\n      throw error;\n    }\n  }\n\n  getMetrics() {\n    return {\n      ...this.metrics,\n      avgLatencyMs: this.metrics.requests > 0\n        ? Math.round(this.metrics.totalLatencyMs / this.metrics.requests)\n        : 0,\n      errorRate: this.metrics.requests > 0\n        ? (this.metrics.errors / this.metrics.requests * 100).toFixed(1) + '%'\n        : '0%',\n    };\n  }\n}\n```\n\n### Step 2: Prometheus Metrics\n\n```typescript\nimport { Registry, Counter, Histogram, Gauge } from 'prom-client';\n\nconst registry = new Registry();\n\nconst figmaRequests = new Counter({\n  name: 'figma_api_requests_total',\n  help: 'Total Figma API requests',\n  labelNames: ['endpoint', 'status'],\n  registers: [registry],\n});\n\nconst figmaLatency = new Histogram({\n  name: 'figma_api_request_duration_seconds',\n  help: 'Figma API request duration in seconds',\n  labelNames: ['endpoint'],\n  buckets: [0.1, 0.25, 0.5, 1, 2, 5, 10],\n  registers: [registry],\n});\n\nconst figmaRateLimitRemaining = new Gauge({\n  name: 'figma_rate_limit_remaining',\n  help: 'Remaining Figma API rate limit',\n  registers: [registry],\n});\n\nconst figmaCacheHits = new Counter({\n  name: 'figma_cache_hits_total',\n  help: 'Figma cache hits vs misses',\n  labelNames: ['result'], // 'hit' or 'miss'\n  registers: [registry],\n});\n\n// Expose /metrics endpoint\napp.get('/metrics', async (req, res) => {\n  res.set('Content-Type', registry.contentType);\n  res.send(await registry.metrics());\n});\n```\n\n### Step 3: Alert Rules\n\n```yaml\n# prometheus-alerts.yml\ngroups:\n  - name: figma\n    rules:\n      - alert: FigmaHighErrorRate\n        expr: |\n          rate(figma_api_requests_total{status=~\"4..|5..\"}[5m])\n          / rate(figma_api_requests_total[5m]) > 0.05\n        for: 5m\n        labels: { severity: warning }\n        annotations:\n          summary: \"Figma API error rate > 5% for 5 minutes\"\n\n      - alert: FigmaRateLimited\n        expr: figma_rate_limit_remaining < 5\n        for: 1m\n        labels: { severity: warning }\n        annotations:\n          summary: \"Figma rate limit nearly exhausted\"\n\n      - alert: FigmaHighLatency\n        expr: |\n          histogram_quantile(0.95,\n            rate(figma_api_request_duration_seconds_bucket[5m])\n          ) > 5\n        for: 5m\n        labels: { severity: warning }\n        annotations:\n          summary: \"Figma API P95 latency > 5 seconds\"\n\n      - alert: FigmaAuthFailure\n        expr: figma_api_requests_total{status=\"403\"} > 0\n        for: 1m\n        labels: { severity: critical }\n        annotations:\n          summary: \"Figma auth failures detected (possible expired PAT)\"\n```\n\n### Step 4: Health Check with Details\n\n```typescript\nasync function figmaHealthCheck(): Promise<{\n  status: 'healthy' | 'degraded' | 'unhealthy';\n  details: Record<string, any>;\n}> {\n  const start = Date.now();\n\n  try {\n    const res = await fetch('https://api.figma.com/v1/me', {\n      headers: { 'X-Figma-Token': process.env.FIGMA_PAT! },\n      signal: AbortSignal.timeout(5000),\n    });\n\n    const latencyMs = Date.now() - start;\n    const remaining = res.headers.get('X-RateLimit-Remaining');\n\n    return {\n      status: res.ok ? (latencyMs > 3000 ? 'degraded' : 'healthy') : 'degraded',\n      details: {\n        authenticated: res.ok,\n        latencyMs,\n        rateLimitRemaining: remaining ? parseInt(remaining) : null,\n        planTier: res.headers.get('X-Figma-Plan-Tier'),\n      },\n    };\n  } catch {\n    return {\n      status: 'unhealthy',\n      details: { authenticated: false, latencyMs: Date.now() - start },\n    };\n  }\n}\n```\n\n## Output\n\n- Instrumented client logging every Figma API call\n- Prometheus metrics for requests, latency, rate limits, cache\n- Alert rules for error rate, rate limits, latency, auth failures\n- Health check endpoint with Figma connectivity details\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| High cardinality | Too many label values | Normalize endpoint paths |\n| Alert storms | Threshold too low | Tune `for` duration and thresholds |\n| Missing rate limit headers | Not all endpoints return them | Handle null values gracefully |\n| Metrics not scraping | Wrong port or path | Verify Prometheus scrape config |\n\n## Resources\n\n- [Prometheus Best Practices](https://prometheus.io/docs/practices/naming/)\n- [OpenTelemetry JS SDK](https://opentelemetry.io/docs/languages/js/)\n- [Figma Rate Limits](https://developers.figma.com/docs/rest-api/rate-limits/)\n\n## Next Steps\n\nFor incident response, see `figma-incident-runbook`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "figma-observability",
-    "description": "Set up monitoring, metrics, and alerting for Figma API integrations.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

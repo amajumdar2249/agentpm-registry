@@ -1,14 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000021161",
   "name": "compound-docs",
   "slug": "compound-docs-3",
   "description": "Capture solved problems as searchable documentation with pattern detection. This skill auto-triggers when users confirm a fix worked (\"that worked\", \"it's fixed\", \"working now\") or manually via /compound command.",
   "content": "\n# compound-docs\n\n> Each documented solution compounds your team's knowledge. The first time \n> you solve a problem takes research. Document it, and the next occurrence \n> takes minutes. Knowledge compounds.\n\nThis skill is inspired by [Every.to's compound-engineering plugin](https://github.com/EveryInc/compound-engineering-plugin).\n\n## Auto-Invoke Triggers\n\nThis skill auto-triggers when the user says:\n- \"that worked\"\n- \"it's fixed\"\n- \"working now\"\n- \"problem solved\"\n- \"that did it\"\n\nManual command: `/compound`\n\n## Workflow\n\n### Step 1: Detect Trigger\n\nWhen a trigger phrase is detected or `/compound` is invoked:\n\n1. Confirm the problem is actually solved (not still in progress)\n2. Check if the fix is worth documenting\n\n**Skip documentation for trivial fixes:**\n- Simple typos\n- Obvious syntax errors (missing semicolon, bracket)\n- Single-line fixes that were immediately obvious\n\nIf skipping, briefly explain why: \"This was a simple typo fix - skipping documentation.\"\n\n### Step 2: Gather Context\n\nRead [schema.yaml](schema.yaml) to get valid enum values, then extract from the conversation:\n\n| Field | Required | Description |\n|-------|----------|-------------|\n| Symptom | Yes | Error message or observable behavior |\n| Category | Yes | From schema.yaml `category.values` (or add new) |\n| Component | No | From schema.yaml `component.values` (or add new) |\n| Root cause | No | From schema.yaml `root_cause.values` (or add new) |\n| Solution | Yes | The fix that worked |\n| Prevention | No | How to avoid this in the future |\n\n**If a value doesn't exist in schema.yaml:**\n1. Add the new value to the appropriate enum in `schema.yaml`\n2. If it's a new category, create the directory: `mkdir -p {output_dir}/{new-category}`\n\n**If critical info is missing, ask:**\n\n```\nTo document this fix, I need a few details:\n\n1. Category: What type of issue was this?\n   [list current values from schema.yaml]\n   Or suggest a new category if none fit\n```\n\n### Step 3: Check for Similar Issues\n\nBefore creating a new doc, search for similar existing issues:\n\n1. **Keyword match** - Search `{output_dir}/` for error message fragments or key symptom phrases\n2. **File path match** - Check if the same files are involved in existing docs\n3. **Import/dependency match** - Check if the same libraries or modules are mentioned\n\n```bash\n# Example searches\ngrep -rl \"ErrorMessage\" docs/solutions/\ngrep -l \"path/to/file\" docs/solutions/**/*.md\n```\n\n**If potential matches found:**\n\n```\nFound potentially related issues:\n- docs/solutions/integration/api-timeout-20250102.md\n- docs/solutions/integration/auth-header-missing-20250105.md\n\nAre any of these the same or related issue? (y/n)\n```\n\nIf related, add to the `related` field in frontmatter.\n\n### Step 4: Create Documentation\n\n**Validate against schema.yaml:**\n1. Read schema.yaml for current valid enum values\n2. Ensure all required fields are present\n3. Ensure enum values exist (or add them first)\n\n**Generate filename:**\n- Format: `{sanitized-symptom}-{YYYYMMDD}.md`\n- Sanitize: lowercase, replace spaces with hyphens, remove special chars, truncate to 80 chars\n\n**Create file at:** `{output_dir}/{category}/{filename}`\n\n**Ensure directory exists:**\n```bash\nmkdir -p {output_dir}/{category}\n```\n\n**Use the Solution Doc Template below.**\n\n### Step 5: Pattern Promotion\n\nAfter creating the doc, check if this issue has occurred multiple times.\n\n**If similar issues >= threshold (default: 2):**\n\n```\nThis issue has occurred {N} times:\n- {link to issue 1}\n- {link to issue 2}\n- {link to current issue}\n\nPromote to patterns.md? This surfaces it prominently for future sessions.\n1. Yes - Add to patterns\n2. No - Keep as regular doc only\n```\n\n**If yes:** Append to `{output_dir}/patterns.md` using the Pattern Template below.\n\n## Solution Doc Template\n\n```markdown\n---\ndate: {YYYY-MM-DD}\ncategory: {category}\nsymptoms:\n  - {symptom 1}\n  - {symptom 2}\ncomponent: {component}\nroot_cause: {root_cause}\ntags: [{keyword1}, {keyword2}]\nrelated: []\n---\n\n# {Problem Title}\n\n## Problem\n\n{1-2 sentence description of what went wrong}\n\n## Symptoms\n\n- {What you observed - error messages, behavior, etc.}\n\n## What Didn't Work\n\n- {Attempted solution 1} - {Why it failed}\n- {Attempted solution 2} - {Why it failed}\n\n## Solution\n\n{Description of the fix}\n\n```{language}\n# Before (broken)\n{code before}\n\n# After (fixed)\n{code after}\n```\n\n## Why This Works\n\n{Technical explanation of the root cause and why the solution addresses it}\n\n## Prevention\n\n{How to avoid this in the future - tests, linting rules, patterns to follow}\n```\n\n## Pattern Template\n\nWhen adding to `patterns.md`:\n\n```markdown\n## {Pattern Name}\n\n**Occurrences:** {N} times ({link1}, {link2}, ...)\n\n### WRONG\n\n```{language}\n{code that causes the problem}\n```\n\n### CORRECT\n\n```{language}\n{code that fixes it}\n```\n\n**Why:** {Technical explanation}\n\n**When this applies:** {Context or conditions when this pattern is relevant}\n```\n\n## Integration\n\n### Reference in AGENTS.md\n\nAdd to your project's AGENTS.md to ensure patterns are checked:\n\n```markdown\n## Required Reading\n\nBefore making changes, review known patterns:\n- [Solution Patterns](docs/solutions/patterns.md)\n```\n\n### Consuming Solutions\n\nOther workflows can discover and apply documented solutions:\n\n**Search by keyword:**\n```bash\ngrep -rl \"keyword\" docs/solutions/\n```\n\n**Search by category:**\n```bash\nls docs/solutions/deployment/\n```\n\n**Search by tag:**\n```bash\ngrep -l \"tags:.*docker\" docs/solutions/**/*.md\n```\n\n`patterns.md` is the primary integration point - check it first for critical patterns before making changes.\n\n## Example Scenario\n\n**User:** \"That worked! The Docker build was failing because of the cache issue.\"\n\n**Agent response:**\n\n```\nGreat! Let me document this fix.\n\n**Reading schema.yaml...**\nCurrent categories: developer-experience, deployment, ui, integration, performance, testing\nCurrent components: (none yet)\nCurrent root_causes: (none yet)\n\n**Gathering context...**\n\nFrom our conversation:\n- Symptom: Docker build failing with \"layer not found\" error\n- Category: deployment\n- Component: docker (adding to schema.yaml)\n- Root cause: stale-cache (adding to schema.yaml)\n- Solution: Added `--no-cache` flag and updated base image tag\n- Prevention: Pin base image versions, use `docker system prune` periodically\n\n**Updating schema.yaml...**\nAdded 'docker' to component.values\nAdded 'stale-cache' to root_cause.values\n\n**Checking for similar issues...**\nNo related issues found.\n\n**Creating documentation...**\nCreated: docs/solutions/deployment/docker-layer-not-found-20250106.md\n\nDocumentation complete.\n```\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "compound-docs",
-    "description": "Capture solved problems as searchable documentation with pattern detection. This skill auto-triggers when users confirm a fix worked (\"that worked\", \"it's fixed\", \"working now\") or manually via /compound command.",
-    "version": "0.1.0-beta",
-    "license": "MIT",
-    "compatibility": "opencode"
+  "author": "agentpm",
+  "version": "0.1.0-beta",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000026476",
   "name": "using-gc",
   "slug": "using-gc-3",
   "description": "Run AgentOps on the Gas City (gc) substrate; gc is a guided dependency, not wrapped by ao.",
   "content": "# Running AgentOps on Gas City (gc)\n\n> **This guide GUIDES agents on the `gc` CLI \u2014 exactly like the bd protocol guides them on `bd`.** `ao` does NOT wrap `gc`; `gc` is a guided out-of-session dependency. AgentOps is the *opinions* (the rpi/evolve loops, the ratchet rules, the skill corpus, the `.agents/` context compiler); Gas City is the *substrate* (controller/supervisor, Orders, the bead/dolt queue, the Event Bus, runtime providers, mayor/worker agents). The seam: `gc` (orchestration) invokes `ao` (the loop) as a subprocess.\n\n**When to use gc.** In-session, you run the loop yourself (`$rpi`, `$evolve`) \u2014 you do not need gc. Reach for gc when you want the loop to run **out of session**: scheduled maintenance, autonomous bead drain, a long-lived team-lead agent that dispatches work and drives PRs to merge. The reference pack at `packs/agentops/` is the canonical AgentOps-on-GC config. North-star framing: `docs/3.0.md`.\n\n## gc Availability Pattern\n\ngc is an **optional, out-of-session** dependency. Skills must degrade gracefully when it is absent.\n\n```bash\nif command -v gc &>/dev/null; then\n  # Out-of-session orchestration available \u2014 see the dispatch loop below.\nelse\n  echo \"Note: gc not installed. Run the loop in-session with $rpi or $evolve.\"\n  # Fallback: drive the loop yourself; gc adds out-of-session orchestration only.\nfi\n```\n\n## gc Primitives (the vocabulary)\n\n| Primitive | What it is | AgentOps mapping |\n|-----------|-----------|------------------|\n| **City** / `city.toml` | The top-level deployment \u2014 workspace, daemon, bead/session/mail providers, pack imports | The reference City *is* `city.toml` + `[imports.agentops]`. Every other block is substrate consumption. See `references/reference-city.md`. |\n| **Rig** | A code workspace the City manages (one repo / worktree root) | The repo whose beads get worked. `gc rig add <path>` registers it. |\n| **Pack** | A bundle of agents + formulas + orders + overlay shipped into a City | `packs/agentops/` \u2014 the only opinion is two agents + thin orders. |\n| **Agent** | A named, scheduled session the supervisor spawns | **mayor** (city-scoped, always-on team lead) + **refinery** (rig-scoped, on-demand worker). |\n| **Order** | A trigger (cooldown / cron / event) that fires a formula or exec command | Cron/exec maintenance Orders; the reference dispatch Order (`bead-dispatch`). |\n| **Formula** | A multi-step workflow an Order or `gc sling` routes to a pool | THIN one-step dispatch formulas (`rpi-dispatch`, `evolve-dispatch`). |\n| **Mayor** | Team-lead agent: orchestrate / merge / notify, human on the loop | Owns the merge gate (CI-green is the signal); never owns the loop's insides. |\n| **Refinery (worker)** | Rig-scoped worker the pool scales under bead pressure | Runs the WHOLE `ao rpi` loop on one bead as a single invocable unit. |\n\n**THE governing boundary (THIN-SEAM).** GC dispatches the *whole* `ao rpi` loop; it never sees the loop's insides. The loop's internal steps (research \u2192 plan \u2192 implement \u2192 validate) and its ratchet rules (no-self-grade, fresh-agent-on-failure, knowledge\u2192constraints) live INSIDE AgentOps, behind the single command `ao rpi`. There is deliberately no `mol-rpi-cycle` 4-step GC formula \u2014 that would duplicate the loop shape across the seam and pit GC's `check.max_attempts` retry against AgentOps's fresh-agent-on-failure invariant.\n\n## The AgentOps-on-GC workflow (end to end)\n\n### 1. Init the City\n\n```bash\ngc start <path-to-city-dir>          # boots controller + supervisor + always-on mayor\ngc rig add <path-to-your-repo>       # register the rig whose beads get worked\n```\n\nThe City's `[beads] provider = \"bd\"` consumes the **same `bd`/dolt store** standalone `bd` uses \u2014 `gc bd` and `bd` share one tracker (one issue prefix per served DB). Do NOT import a dolt-managing pack: `provider` is pure client config, not a managed server (the 1,478-flap guard \u2014 see `references/reference-city.md`).\n\n### 2. The mayor-driven dispatch loop (the honest path today)\n\nA long-lived **mayor** runs `bd ready`, slings the next bead to a **refinery** worker, and the worker runs `ao rpi <bead>`:\n\n```bash\n# Mayor: find ready work and route it to the worker pool.\ngc bd ready --json\nTARGET_RIG=\"${GC_RIG:-}\"\ngc sling \"${TARGET_RIG:+$TARGET_RIG/}refinery\" <bead-id>   # route the RAW bead to a worker\n\n# Refinery: run the WHOLE loop \u2014 ONE command.\nao rpi <bead-id>                                           # research\u2192plan\u2192implement\u2192validate\n\n# When ao rpi lands green, hand the bead back to the mayor for merge:\nBRANCH=$(git rev-parse --abbrev-ref HEAD)\ngc bd update <bead-id> --status=open --assignee=\"mayor\" \\\n  --set-metadata branch=\"$BRANCH\" --set-metadata verdict=PASS \\\n  --notes \"ao rpi green \u2014 verdict under .agents/\"\ngc mail send mayor/ -s \"READY-TO-MERGE <bead-id>\" -m \"rpi cycle green; ready to merge.\"\n```\n\nThe mayor owns the merge gate: CI-green is the merge signal. There is **no human merge gate in the autonomous loop**; the human is *on* the loop, not *in* it. Full walkthrough: `references/mayor-dispatch-loop.md`.\n\n### 3. The outer loop (evolve cadence)\n\nOn a cadence (cron Order \u2192 `evolve-dispatch`), the mayor runs `ao evolve`: it selects next-best work and drives a wave of `ao rpi` cycles toward a `GOALS.md` directive, then post-mortems at the session-scope threshold. evolve's *cadence* is GC orchestration; evolve's *logic* stays inside `ao evolve`.\n\n### 4. Cron `exec` Orders for maintenance\n\n| Order | Trigger | Runs |\n|-------|---------|------|\n| `compile-corpus` | cooldown 6h | `ao compile` \u2014 recompile the `.agents/` corpus (Mine \u2192 Grow \u2192 Defrag \u2192 Lint) |\n| `maturity-scan` | cron 07:00 | `ao maturity --scan` \u2014 refresh inject decay-ranking / find stale entries |\n\nSee `packs/agentops/orders/` for the order definitions.\n\n## HONEST gap: order-auto-dispatch is upstream-GC, not turnkey here (soc-5jwah)\n\nThe `bead-dispatch` cooldown Order CANNOT bind a ready bead to `rpi-dispatch` on its own: GC Orders have **no per-fire variable-binding mechanism**, so the formula's required `issue` var has no value and the order self-fails:\n\n```text\norder.failed  msg=variable validation failed: - variable \"issue\" is required\n```\n\n- **Works today (proven):** the City is gc-parse-valid; controller/supervisor/Order-engine/mayor come up; the skills overlay lands in the spawned workdir; `ao inject` / `ao validate --gate` run there. The seam-correct manual path \u2014 `gc sling <rig>/refinery <bead>` routing a RAW bead to a worker that runs `ao rpi <bead>` \u2014 succeeds. **The honest dispatch path is MAYOR-DRIVEN.**\n- **Not turnkey:** order-level *autonomous* dispatch needs the upstream GC var-binding capability (an **upstream Gas City contribution**, soc-5jwah), not an AgentOps feature. `bead-dispatch.toml` ships as a labeled REFERENCE. Do NOT read \"gc-parse-valid\" as \"autonomous-dispatch-functional.\"\n\n**Operator posture:** accept what GC offers today and grow with it. Mayor-driven dispatch is the shipped capability; order-auto-dispatch arrives with the upstream GC work.\n\n## References\n\n- [references/reference-city.md](references/reference-city.md) \u2014 anatomy of the reference City (substrate consumption, the `[imports.agentops]` opinion seam, the dolt 1,478-flap guard, single-prefix posture) and the pack layout.\n- [references/mayor-dispatch-loop.md](references/mayor-dispatch-loop.md) \u2014 the mayor\u2194refinery dispatch + merge handoff in full, the THIN-SEAM boundary, the outer evolve loop, and the order-auto-dispatch gap.\n- `references/using-gc.feature` \u2014 executable spec: an agent runs the reference City end-to-end with guided gc commands.\n\n## Issue Tracking (shared with gc)\n\ngc consumes the same `bd`/dolt tracker, so the bead protocol is identical whether you call `bd` or `gc bd`:\n\n```bash\ngc bd ready              # unblocked issues (same store as `bd ready`)\ngc bd update <id> ...    # claim / hand off / set merge metadata\ngc bd prime              # protocol refresher inside a gc-spawned worker\n```\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "using-gc",
-    "description": "Run AgentOps on the Gas City (gc) substrate; gc is a guided dependency, not wrapped by ao."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

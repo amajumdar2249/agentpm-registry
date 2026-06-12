@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031544",
   "name": "clerk-common-errors",
   "slug": "clerk-common-errors",
   "description": "Troubleshoot common Clerk errors and issues.",
   "content": "# Clerk Common Errors\n\n## Overview\n\nDiagnose and resolve common Clerk authentication errors. Organized by error category with root cause analysis and fix code.\n\n## Prerequisites\n\n- Clerk SDK installed\n- Access to Clerk Dashboard for configuration verification\n- Browser developer tools for client-side debugging\n\n## Instructions\n\n### Error Category 1: Configuration Errors\n\n**`Clerk: Missing publishableKey`**\n\n```typescript\n// Cause: ClerkProvider not receiving key\n// Fix: Ensure env var is set and accessible\n// .env.local\nNEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_...\n\n// Verify in code:\nconsole.log('PK:', process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY) // Should not be undefined\n```\n\n**`ClerkProvider must wrap your application`**\n\n```typescript\n// Cause: Clerk hook used outside provider\n// Fix: Wrap root layout with ClerkProvider\n// app/layout.tsx\nimport { ClerkProvider } from '@clerk/nextjs'\n\nexport default function RootLayout({ children }: { children: React.ReactNode }) {\n  return (\n    <ClerkProvider>\n      <html><body>{children}</body></html>\n    </ClerkProvider>\n  )\n}\n```\n\n### Error Category 2: Authentication Errors\n\n**`form_identifier_not_found`**\n\n```typescript\n// Cause: Email not registered in Clerk instance\n// Fix: Check correct Clerk instance (dev vs prod) and user exists\n// Diagnostic:\nimport { createClerkClient } from '@clerk/backend'\nconst clerk = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY! })\nconst users = await clerk.users.getUserList({ emailAddress: ['user@example.com'] })\nconsole.log('User found:', users.totalCount > 0)\n```\n\n**`form_password_incorrect`**\n\n```typescript\n// Cause: Wrong password or user set up with OAuth only\n// Fix: Check auth strategy in Clerk Dashboard\n// User may need password reset:\n// Dashboard > Users > Select user > Authentication > Reset password\n```\n\n**`session_exists` (Error during sign-in)**\n\n```typescript\n// Cause: User already has active session\n// Fix: Sign out first or redirect\n'use client'\nimport { useAuth } from '@clerk/nextjs'\nimport { redirect } from 'next/navigation'\n\nexport default function SignInPage() {\n  const { isSignedIn } = useAuth()\n  if (isSignedIn) redirect('/dashboard')\n  // ... render sign-in form\n}\n```\n\n### Error Category 3: Middleware Errors\n\n**Infinite redirect loop**\n\n```typescript\n// Cause: Sign-in page not in public routes\n// Fix: Add auth pages to public route matcher\nimport { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server'\n\nconst isPublicRoute = createRouteMatcher([\n  '/sign-in(.*)',  // Must include sign-in\n  '/sign-up(.*)',  // Must include sign-up\n  '/',\n  '/api/webhooks(.*)',\n])\n\nexport default clerkMiddleware(async (auth, req) => {\n  if (!isPublicRoute(req)) await auth.protect()\n})\n```\n\n**`auth() was called but Clerk middleware was not detected`**\n\n```typescript\n// Cause: middleware.ts not in correct location or matcher not matching\n// Fix: Ensure middleware.ts is at project root (not inside app/ or src/)\n\n// Verify matcher includes the route:\nexport const config = {\n  matcher: [\n    '/((?!_next|[^?]*\\\\.(?:html?|css|js(?!on)|jpe?g|webp|png|gif|svg|ttf|woff2?|ico|csv|docx?|xlsx?|zip|webmanifest)).*)',\n    '/(api|trpc)(.*)',\n  ],\n}\n```\n\n### Error Category 4: Server/Client Component Errors\n\n**`useUser()` in Server Component**\n\n```typescript\n// Error: Hooks can only be called inside a Client Component\n// Fix: Use auth()/currentUser() server-side, useUser() client-side\n\n// Server Component (no 'use client'):\nimport { currentUser } from '@clerk/nextjs/server'\nexport default async function Page() {\n  const user = await currentUser()\n  return <div>{user?.firstName}</div>\n}\n\n// Client Component (with 'use client'):\n'use client'\nimport { useUser } from '@clerk/nextjs'\nexport function Profile() {\n  const { user } = useUser()\n  return <div>{user?.firstName}</div>\n}\n```\n\n**Hydration mismatch with auth state**\n\n```typescript\n// Cause: Server renders unauthenticated, client has session\n// Fix: Use ClerkLoaded or check isLoaded before rendering auth-dependent UI\n'use client'\nimport { useUser } from '@clerk/nextjs'\n\nexport function SafeAuthUI() {\n  const { user, isLoaded } = useUser()\n  if (!isLoaded) return <div>Loading...</div> // Prevent hydration mismatch\n  return <div>{user ? `Hello ${user.firstName}` : 'Not signed in'}</div>\n}\n```\n\n### Error Category 5: Webhook Errors\n\n**`Invalid signature` on webhook endpoint**\n\n```typescript\n// Cause: CLERK_WEBHOOK_SECRET mismatch or body parsing issue\n// Fix 1: Verify secret matches Dashboard > Webhooks > Signing Secret\n// Fix 2: Read raw body, don't use JSON middleware before verification\n\n// Next.js App Router (correct):\nexport async function POST(req: Request) {\n  const body = await req.text() // Use text(), not json()\n  const wh = new Webhook(process.env.CLERK_WEBHOOK_SECRET!)\n  const evt = wh.verify(body, { /* svix headers */ })\n}\n\n// Express (correct):\napp.post('/webhooks', express.raw({ type: 'application/json' }), handler)\n// NOT: app.post('/webhooks', express.json(), handler) // This breaks signature\n```\n\n## Output\n\n- Identified error category and root cause\n- Working fix code for each common error\n- Diagnostic steps for verification\n\n## Error Handling\n\n| Error | Cause | Quick Fix |\n|-------|-------|-----------|\n| `Missing publishableKey` | Env var not set | Add `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` to `.env.local` |\n| `auth() not detected` | Middleware missing/misplaced | Move `middleware.ts` to project root |\n| Redirect loop | Auth pages not public | Add sign-in/sign-up to `isPublicRoute` matcher |\n| Hydration mismatch | Server/client state differs | Guard with `isLoaded` check |\n| Webhook invalid signature | Body parsed before verify | Use `req.text()` not `req.json()` before `wh.verify()` |\n\n## Examples\n\n### Quick Diagnostic Checklist\n\n```bash\n# 1. Check Clerk packages are installed\nnpm list @clerk/nextjs 2>/dev/null\n\n# 2. Verify env vars are set\nnode -e \"console.log('PK:', !!process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY, 'SK:', !!process.env.CLERK_SECRET_KEY)\"\n\n# 3. Test API connectivity\ncurl -s -o /dev/null -w \"%{http_code}\" -H \"Authorization: Bearer $CLERK_SECRET_KEY\" https://api.clerk.com/v1/users?limit=1\n\n# 4. Check middleware exists at root\nls middleware.ts 2>/dev/null && echo \"Found\" || echo \"Missing - create middleware.ts at project root\"\n```\n\n## Resources\n\n- [Clerk Error Reference](https://clerk.com/docs/errors/overview)\n- [Clerk Debugging Guide](https://clerk.com/docs/troubleshooting/overview)\n- [Clerk Discord Community](https://clerk.com/discord)\n\n## Next Steps\n\nProceed to `clerk-debug-bundle` for comprehensive debugging tools.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clerk-common-errors",
-    "description": "Troubleshoot common Clerk errors and issues.",
-    "allowed-tools": "Read, Write, Edit, Grep, Bash(npm:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032666",
   "name": "mistral-security-basics",
   "slug": "mistral-security-basics",
   "description": "Apply Mistral AI security best practices for secrets, prompt injection,",
   "content": "# Mistral Security Basics\n\n## Overview\n\nSecurity practices for Mistral AI integrations: API key management, prompt injection defense, output sanitization, content moderation with `mistral-moderation-latest`, request logging without secrets, and key rotation.\n\n## Prerequisites\n\n- Mistral API key provisioned\n- Understanding of OWASP LLM Top 10 risks\n- Secret management infrastructure\n\n## Instructions\n\n### Step 1: API Key Management\n\n```python\nimport os\n\n# NEVER: api_key = \"sk-abc123\"\n\n# Development \u2014 env vars\napi_key = os.environ.get(\"MISTRAL_API_KEY\")\nif not api_key:\n    raise RuntimeError(\"MISTRAL_API_KEY not set\")\n\n# Production \u2014 secret manager\nfrom google.cloud import secretmanager\n\ndef get_api_key() -> str:\n    client = secretmanager.SecretManagerServiceClient()\n    response = client.access_secret_version(\n        name=\"projects/my-project/secrets/mistral-api-key/versions/latest\"\n    )\n    return response.payload.data.decode(\"UTF-8\")\n```\n\n### Step 2: Prompt Injection Defense\n\n```typescript\nfunction sanitizeUserInput(input: string): string {\n  // Strip common injection patterns\n  const patterns = [\n    /ignore (?:previous|all|above) instructions/gi,\n    /you are now/gi,\n    /system prompt/gi,\n    /\\boverride\\b/gi,\n    /\\bforget\\b.*\\binstructions\\b/gi,\n  ];\n\n  let sanitized = input;\n  for (const pattern of patterns) {\n    sanitized = sanitized.replace(pattern, '[FILTERED]');\n  }\n\n  // Limit length to prevent context stuffing\n  return sanitized.slice(0, 4000);\n}\n\nfunction buildSafeMessages(system: string, userInput: string) {\n  return [\n    { role: 'system', content: system },\n    {\n      role: 'user',\n      content: `<user_query>\\n${sanitizeUserInput(userInput)}\\n</user_query>`,\n    },\n  ];\n}\n```\n\n### Step 3: Content Moderation with Mistral API\n\n```typescript\nimport { Mistral } from '@mistralai/mistralai';\n\nconst client = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });\n\nasync function moderateContent(text: string): Promise<{ safe: boolean; flags: string[] }> {\n  const result = await client.classifiers.moderate({\n    model: 'mistral-moderation-latest',\n    inputs: [text],\n  });\n\n  const categories = result.results[0].categories;\n  const flags = Object.entries(categories)\n    .filter(([, flagged]) => flagged)\n    .map(([category]) => category);\n\n  return { safe: flags.length === 0, flags };\n}\n\n// Gate user input before processing\nasync function safeChatFlow(userInput: string) {\n  const inputCheck = await moderateContent(userInput);\n  if (!inputCheck.safe) {\n    throw new Error(`Input flagged: ${inputCheck.flags.join(', ')}`);\n  }\n\n  const response = await client.chat.complete({\n    model: 'mistral-small-latest',\n    messages: [{ role: 'user', content: userInput }],\n    safePrompt: true, // Built-in safety system prompt\n  });\n\n  const output = response.choices?.[0]?.message?.content ?? '';\n  const outputCheck = await moderateContent(output);\n  if (!outputCheck.safe) {\n    return 'I cannot provide that response.';\n  }\n\n  return output;\n}\n```\n\n### Step 4: Output Sanitization\n\n```typescript\nfunction sanitizeOutput(response: string): string {\n  let cleaned = response;\n\n  // Remove leaked system prompts\n  cleaned = cleaned.replace(/(?:system prompt|instructions):?\\s*.*/gi, '[REDACTED]');\n\n  // Remove script tags (XSS prevention)\n  cleaned = cleaned.replace(/<script[^>]*>[\\s\\S]*?<\\/script>/gi, '');\n\n  // Remove PII patterns\n  cleaned = cleaned.replace(/\\b\\d{3}-\\d{2}-\\d{4}\\b/g, '[SSN]');\n  cleaned = cleaned.replace(/\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z]{2,}\\b/gi, '[EMAIL]');\n\n  return cleaned;\n}\n```\n\n### Step 5: Request Logging Without Secrets\n\n```typescript\nfunction logRequest(model: string, messages: any[], response: any): void {\n  // Log metadata ONLY \u2014 never log content (may contain PII)\n  console.log(JSON.stringify({\n    timestamp: new Date().toISOString(),\n    model,\n    messageCount: messages.length,\n    inputChars: messages.reduce((sum, m) => sum + (m.content?.length ?? 0), 0),\n    outputChars: response.choices?.[0]?.message?.content?.length ?? 0,\n    usage: {\n      promptTokens: response.usage?.promptTokens,\n      completionTokens: response.usage?.completionTokens,\n    },\n    // NEVER log: API keys, message content, user identifiers\n  }));\n}\n```\n\n### Step 6: API Key Rotation\n\n```typescript\nclass KeyRotator {\n  private keys: string[];\n  private current = 0;\n  private lastRotated = Date.now();\n  private readonly rotationIntervalMs = 3_600_000; // 1 hour\n\n  constructor(keys: string[]) {\n    if (keys.length === 0) throw new Error('At least one API key required');\n    this.keys = keys;\n  }\n\n  getKey(): string {\n    if (Date.now() - this.lastRotated > this.rotationIntervalMs) {\n      this.rotate();\n    }\n    return this.keys[this.current];\n  }\n\n  reportAuthFailure(): void {\n    console.error(`Key ${this.current} failed auth, rotating`);\n    this.rotate();\n  }\n\n  private rotate(): void {\n    this.current = (this.current + 1) % this.keys.length;\n    this.lastRotated = Date.now();\n  }\n}\n```\n\n## Security Audit Checklist\n\n```python\ndef audit_mistral_security():\n    checks = {\n        \"api_key_from_env\": bool(os.environ.get(\"MISTRAL_API_KEY\")),\n        \"gitignore_has_env\": \".env\" in open(\".gitignore\").read() if os.path.exists(\".gitignore\") else False,\n        \"no_hardcoded_keys\": True,  # scan src/ for patterns\n        \"moderation_enabled\": True,  # verify in code\n        \"output_sanitization\": True,  # verify in code\n        \"audit_logging\": True,  # verify in code\n    }\n    passed = all(checks.values())\n    return {\"passed\": passed, \"checks\": checks}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Key in logs | Logging full request | Log metadata only |\n| Prompt injection | Unsanitized user input | Filter + XML-wrap user content |\n| PII in responses | Model generating PII | Sanitize output + use moderation |\n| Key compromise | Hardcoded or leaked | Use secret manager, rotate immediately |\n| XSS via output | Model generating HTML/JS | Strip script tags before rendering |\n\n## Resources\n\n- [Mistral Guardrails](https://docs.mistral.ai/capabilities/guardrailing/)\n- [Mistral Moderation API](https://docs.mistral.ai/api/endpoint/moderations/)\n- [OWASP LLM Top 10](https://owasp.org/www-project-top-10-for-large-language-model-applications/)\n\n## Output\n\n- API key management via secret managers\n- Prompt injection defense layer\n- Content moderation with `mistral-moderation-latest`\n- Output sanitization pipeline\n- Secure audit logging\n- Key rotation automation\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "mistral-security-basics",
-    "description": "Apply Mistral AI security best practices for secrets, prompt injection,",
-    "allowed-tools": "Read, Write, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

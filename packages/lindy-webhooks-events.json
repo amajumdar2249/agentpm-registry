@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032494",
   "name": "lindy-webhooks-events",
   "slug": "lindy-webhooks-events",
   "description": "Configure Lindy AI webhook triggers, callback patterns, and event handling.",
   "content": "# Lindy Webhooks & Events\n\n## Overview\n\nLindy supports webhooks in two directions: **Inbound** (Webhook Received trigger\nwakes an agent) and **Outbound** (HTTP Request action calls your API). This skill\ncovers both patterns, plus the callback pattern for async two-way communication.\n\n## Prerequisites\n\n- Lindy account with active agents\n- HTTPS endpoint for receiving callbacks (if using outbound/callback patterns)\n- Completed `lindy-install-auth` setup\n\n## Webhook Architecture\n\n```\nINBOUND (your system triggers Lindy):\n[Your App] --POST--> https://public.lindy.ai/api/v1/webhooks/<id>\n                         \u2193\n                    [Lindy Agent Wakes Up]\n                         \u2193\n                    [Processes with LLM]\n                         \u2193\n                    [Executes Actions]\n\nOUTBOUND (Lindy calls your system):\n[Lindy Agent] --HTTP Request action--> https://your-api.com/endpoint\n                                            \u2193\n                                       [Your Handler]\n\nCALLBACK (two-way async):\n[Your App] --POST with callbackUrl--> [Lindy Agent]\n                                          \u2193\n[Your App] <--POST to callbackUrl-- [Lindy: Send POST to Callback]\n```\n\n## Instructions\n\n### Step 1: Create Webhook Received Trigger\n\n1. In your agent, click the trigger node\n2. Select **Webhook Received**\n3. Lindy generates a unique URL:\n\n   ```\n   https://public.lindy.ai/api/v1/webhooks/<unique-id>\n   ```\n\n4. Click **Generate Secret** \u2014 copy immediately (shown only once)\n5. Configure follow-up processing mode:\n   - **Process in workflow**: Handle in current workflow\n   - **Spawn separate task**: Each webhook creates a new task\n   - **Discard follow-ups**: Ignore subsequent requests while processing\n\n### Step 2: Access Webhook Data in Workflow\n\nReference incoming webhook data in any subsequent action field:\n\n| Variable | Description | Example |\n|----------|-------------|---------|\n| `{{webhook_received.request.body}}` | Full JSON payload | `{\"event\": \"order.created\", ...}` |\n| `{{webhook_received.request.body.event}}` | Specific field | `\"order.created\"` |\n| `{{webhook_received.request.headers}}` | All HTTP headers | `{\"content-type\": \"application/json\"}` |\n| `{{webhook_received.request.query}}` | URL query params | `{\"source\": \"stripe\"}` |\n\n### Step 3: Implement Webhook Sender\n\n```typescript\n// webhook-sender.ts \u2014 Trigger Lindy agents from your application\ninterface LindyWebhookPayload {\n  event: string;\n  data: Record<string, unknown>;\n  callbackUrl?: string;\n  metadata?: Record<string, unknown>;\n}\n\nasync function triggerLindy(payload: LindyWebhookPayload): Promise<void> {\n  const response = await fetch(process.env.LINDY_WEBHOOK_URL!, {\n    method: 'POST',\n    headers: {\n      'Authorization': `Bearer ${process.env.LINDY_WEBHOOK_SECRET}`,\n      'Content-Type': 'application/json',\n    },\n    body: JSON.stringify(payload),\n  });\n\n  if (!response.ok) {\n    throw new Error(`Lindy webhook failed: ${response.status}`);\n  }\n}\n\n// Usage examples:\nawait triggerLindy({\n  event: 'customer.support_request',\n  data: { email: 'user@co.com', subject: 'Billing question', body: '...' },\n});\n\nawait triggerLindy({\n  event: 'lead.qualified',\n  data: { name: 'Jane Doe', company: 'Acme', score: 85 },\n  callbackUrl: 'https://api.yourapp.com/lindy/callback',\n});\n```\n\n### Step 4: Implement Callback Receiver\n\nWhen you include a `callbackUrl` in your webhook payload, the agent can respond\nusing the **Send POST Request to Callback** action:\n\n```typescript\n// callback-receiver.ts\nimport express from 'express';\n\nconst app = express();\napp.use(express.json());\n\n// Receive Lindy agent results\napp.post('/lindy/callback', (req, res) => {\n  // Verify authenticity\n  const auth = req.headers.authorization;\n  if (auth !== `Bearer ${process.env.LINDY_WEBHOOK_SECRET}`) {\n    return res.status(401).json({ error: 'Unauthorized' });\n  }\n\n  // Respond immediately (Lindy expects a quick response)\n  res.json({ received: true });\n\n  // Process async\n  handleCallback(req.body);\n});\n\nasync function handleCallback(data: any) {\n  console.log('Lindy callback:', data);\n\n  // Example: Agent analyzed a support ticket\n  const { classification, sentiment, draft_response, confidence } = data;\n\n  if (confidence > 0.9) {\n    await sendAutoResponse(draft_response);\n  } else {\n    await escalateToHuman(data);\n  }\n}\n```\n\n### Step 5: Configure HTTP Request Action (Outbound)\n\nFor Lindy agents that call your API as an action step:\n\n1. Add action: **HTTP Request**\n2. Configure:\n   - **Method**: POST (or GET, PUT, DELETE)\n   - **URL**: `https://api.yourapp.com/endpoint`\n   - **Headers** (Set Manually):\n\n     ```\n     Content-Type: application/json\n     Authorization: Bearer {{your_api_key}}\n     ```\n\n   - **Body** (AI Prompt mode):\n\n     ```\n     Send the analysis result as JSON with fields:\n     classification, sentiment, summary\n     Based on: {{previous_step.result}}\n     ```\n\n### Step 6: Add Trigger Filters\n\nPrevent unnecessary agent triggers:\n\n```\nFilter: body.event equals \"order.created\"\n  AND body.data.amount greater_than 100\n```\n\nThis ensures the agent only processes high-value orders, saving credits.\n\n## Event Patterns\n\n### Pattern: Webhook + Slack Notification\n\n```\nWebhook Received \u2192 Condition (classify event type)\n  \u2192 \"billing\" \u2192 Search KB \u2192 Draft Reply \u2192 Send Email + Slack Alert\n  \u2192 \"technical\" \u2192 Agent Step (investigate) \u2192 Create Ticket \u2192 Slack Alert\n  \u2192 \"other\" \u2192 Forward to team inbox\n```\n\n### Pattern: Webhook + Callback\n\n```\nWebhook Received (with callbackUrl) \u2192 Process Data \u2192 Run Code\n  \u2192 Send POST Request to Callback (returns results to caller)\n```\n\n### Pattern: Webhook + Multi-Agent\n\n```\nWebhook Received \u2192 Agent Send Message (to Research Lindy)\n  \u2192 Research Lindy completes \u2192 Agent Send Message (to Writer Lindy)\n  \u2192 Writer Lindy completes \u2192 Send Email with final output\n```\n\n## Monitoring Triggers\n\nLindy provides built-in monitoring triggers:\n\n- **Task Completed**: Fires when an agent completes a task\n- Use this to build observability pipelines: Agent completes \u2192 log to sheet \u2192 alert on failures\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| 401 on webhook send | Wrong or missing Bearer token | Verify secret matches Generate Secret value |\n| Webhook URL returns 404 | Agent deleted or URL changed | Re-copy URL from agent trigger settings |\n| Callback not received | callbackUrl unreachable | Ensure HTTPS, public endpoint, no firewall |\n| Duplicate processing | Webhook retried | Implement idempotency with event IDs |\n| Payload too large | Body exceeds limit | Reduce payload size, send references not data |\n\n## Security\n\n- Always use HTTPS for webhook URLs\n- Generate and verify webhook secrets on every request\n- Rotate secrets every 90 days\n- Log all webhook attempts (including rejected ones)\n- Rate limit your webhook sender to prevent flooding\n\n## Resources\n\n- [Webhooks Documentation](https://docs.lindy.ai/skills/by-lindy/webhooks)\n- [Webhook Triggers Academy](https://www.lindy.ai/academy-lessons/webhook-triggers)\n- [Calling Any API](https://www.lindy.ai/academy-lessons/calling-any-api)\n\n## Next Steps\n\nProceed to `lindy-performance-tuning` for agent optimization.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "lindy-webhooks-events",
-    "description": "Configure Lindy AI webhook triggers, callback patterns, and event handling.",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

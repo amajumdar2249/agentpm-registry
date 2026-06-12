@@ -1,15 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000039319",
   "name": "moai-harness-learner",
   "slug": "moai-harness-learner-4",
   "description": "Harness learning subsystem coordinator. Produces Tier 4 auto-update proposal payloads consumed by the orchestrator (which surfaces them via AskUserQuestion) and orchestrates Apply/Rollback flows. Triggers when harness learning proposals are pending or learning lifecycle management is needed.",
   "content": "\n# moai-harness-learner\n\n<!-- @MX:NOTE: [AUTO] V3R4 contract \u2014 this skill body is preserved unchanged per SPEC-V3R4-HARNESS-001 \u00a710 exclusion #10 (text annotation only, no behavioral change). The 4-tier observation/heuristic/rule/auto_update ladder defined here is preserved verbatim under REQ-HRN-FND-011. The orchestrator-only AskUserQuestion contract is asserted by REQ-HRN-FND-015 (cross-reference: .claude/rules/moai/core/agent-common-protocol.md \u00a7 User Interaction Boundary). The downstream replacement of the frequency-count classifier with an embedding-cluster algorithm is deferred to SPEC-V3R4-HARNESS-003. -->\n\nCoordinator skill for the Harness Learning Subsystem (SPEC-V3R3-HARNESS-LEARNING-001, superseded by SPEC-V3R4-HARNESS-001 as the active V3R4 foundation; this V3R3 SPEC's 4-tier ladder is preserved unchanged).\nProduces Tier 4 auto-update proposal payloads consumed by the MoAI orchestrator; the orchestrator surfaces them to the user via AskUserQuestion and orchestrates Apply/Rollback flows. Canonical contract: `.claude/rules/moai/core/askuser-protocol.md \u00a7 Orchestrator-Subagent Boundary` (CONST-V3R5-001/002/003).\n\n## Quick Reference\n\n**Role**: Orchestrator-side bridge between CLI (`moai harness`) and AskUserQuestion.\n\n**Key constraint** [HARD]: `moai harness apply` returns a JSON payload representing a Tier 4 auto-update proposal. This skill produces the payload; the orchestrator surfaces it via `AskUserQuestion`. The CLI itself does NOT prompt the user. Canonical contract: `.claude/rules/moai/core/askuser-protocol.md \u00a7 Orchestrator-Subagent Boundary`.\n\n**Common triggers**:\n- `moai harness status` \u2014 check tier distribution and pending proposals\n- `moai harness apply` \u2014 load next pending proposal (returns JSON payload)\n- `moai harness rollback <date>` \u2014 restore snapshot\n- `moai harness disable` \u2014 set learning.enabled: false\n\n**Workflow**:\n1. Run `moai harness status` to inspect state.\n2. Run `moai harness apply` to get the proposal payload.\n3. Hand payload to the orchestrator for `AskUserQuestion` surfacing (approve / reject).\n4. On approve: write approval to proposals dir and signal CLI to proceed.\n5. On reject: remove proposal file (no changes applied).\n\n---\n\n## Implementation Guide\n\n### Step 1: Status Check\n\n```bash\nmoai harness status --project-root <project_root>\n```\n\nOutput includes:\n- `enabled` state\n- Tier distribution (observation / heuristic / rule / auto_update)\n- Rate limit window status\n- Number of pending proposals\n\n### Step 2: Fetch Proposal Payload\n\n```bash\nmoai harness apply --project-root <project_root>\n```\n\nThe command outputs a JSON block with:\n- `id` \u2014 proposal identifier\n- `target_path` \u2014 file to be modified\n- `field_key` \u2014 `description` or `triggers`\n- `new_value` \u2014 proposed new content\n- `pattern_key` \u2014 what triggered this proposal\n- `observation_count` \u2014 how many times this pattern was observed\n\n### Step 3: Produce structured payload for orchestrator consumption\n\n[HARD] This skill produces a structured payload representing the Tier 4 auto-update proposal; the MoAI orchestrator surfaces it via `AskUserQuestion`. Canonical contract: `.claude/rules/moai/core/askuser-protocol.md \u00a7 Orchestrator-Subagent Boundary`.\n\n**Payload schema** (REQ-HLF-002):\n\n- `proposal_id` \u2014 proposal identifier\n- `target_path` \u2014 file to be modified\n- `field_key` \u2014 `description` or `triggers`\n- `current_value` \u2014 existing content (for diff context)\n- `new_value` \u2014 proposed new content\n- `observation_count` \u2014 pattern observation count\n- `confidence` \u2014 auto-update confidence score (0.0\u20131.0)\n- `recommended_action` \u2014 `approve` (default) | `reject` | `inspect` | `defer`\n\nThe skill emits this payload as its tool output. The orchestrator reads the payload, preloads `AskUserQuestion` via `ToolSearch(query: \"select:AskUserQuestion\")`, and surfaces the four-option decision (approve / reject / inspect / defer) to the user. On user approval, the orchestrator re-delegates to this skill with `action=apply`; on rejection, `action=skip`. The \"(\uad8c\uc7a5)\" recommendation suffix and per-option descriptions are constructed by the orchestrator from the payload's `recommended_action` field per `askuser-protocol.md \u00a7 Socratic Interview Structure`.\n\n### Step 4: On Approve\n\nThe skill applies the change by invoking the safety pipeline directly. Since the CLI `apply` only surfaces the payload (not executes), the actual write happens via the harness package's `Apply()` function, gated by the 5-Layer Safety Pipeline.\n\nFor the coordinator skill, the simplest flow is:\n1. User selects \"approve\"\n2. Write `approved: true` to `.moai/harness/proposals/<id>.decision`\n3. Run `moai harness apply --execute` (if the CLI supports it) or call the harness API directly.\n\n### Step 5: On Reject\n\n1. Delete `.moai/harness/proposals/<id>.json`\n2. Confirm deletion to user.\n\n### Rollback Flow\n\n```bash\n# List available snapshots\nls .moai/harness/learning-history/snapshots/\n\n# Rollback to a specific snapshot\nmoai harness rollback 2026-04-27T00-00-00.000000000Z --project-root <project_root>\n```\n\n### Disable Learning\n\n```bash\nmoai harness disable --project-root <project_root>\n```\n\nSets `learning.enabled: false` in `.moai/config/sections/harness.yaml`.\nComments and key ordering are preserved (YAML round-trip).\n\n---\n\n## Works Well With\n\n- `moai-meta-harness` \u2014 generates the `moai-harness-*` skills that are targets of auto-updates\n- `moai-workflow-tdd` \u2014 TDD cycle generates events that feed into the observer\n- `moai-foundation-quality` \u2014 quality gates run after auto-updates to validate correctness\n\n## Safety Architecture Reference\n\nThe 5-Layer Safety Pipeline (L1 Frozen Guard \u2192 L2 Canary Check \u2192 L3 Contradiction Detector \u2192 L4 Rate Limiter \u2192 L5 Human Oversight) protects every Tier 4 auto-update:\n\n| Layer | Guard | Action on violation |\n|-------|-------|---------------------|\n| L1 | Frozen Guard | Block \u2014 FROZEN paths are never modified |\n| L2 | Canary Check | Block \u2014 if effectiveness drops >0.10 |\n| L3 | Contradiction Detector | Block \u2014 if trigger conflicts arise |\n| L4 | Rate Limiter | Block \u2014 max 3 per week, 24h cooldown |\n| L5 | Human Oversight | Orchestrator surfaces user-approval via AskUserQuestion (this skill emits payload) |\n\n[HARD] L1 Frozen paths (never auto-modified at runtime):\n- `.claude/agents/{core,expert,meta,harness}/**`\n- `.claude/skills/moai-*/**`\n- `.claude/rules/moai/**`\n- `.moai/project/brand/**`\n\nOnly user-area skills (`.claude/skills/moai-harness-*/`) are valid auto-update targets.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "moai-harness-learner",
-    "description": "Harness learning subsystem coordinator. Produces Tier 4 auto-update proposal payloads consumed by the orchestrator (which surfaces them via AskUserQuestion) and orchestrates Apply/Rollback flows. Triggers when harness learning proposals are pending or learning lifecycle management is needed.",
-    "triggers": "",
-    "- keyword": "\uc790\ub3d9 \uc5c5\ub370\uc774\ud2b8",
-    "allowed-tools": "Bash,Read,Write,Edit",
-    "user-invocable": "false"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

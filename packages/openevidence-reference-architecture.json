@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032788",
   "name": "openevidence-reference-architecture",
   "slug": "openevidence-reference-architecture",
   "description": "Reference Architecture for OpenEvidence.",
   "content": "# OpenEvidence Reference Architecture\n\n## Overview\n\nProduction architecture for clinical decision support integrations with OpenEvidence. Designed for healthcare platforms needing evidence-based query processing, citation-backed clinical answers, and full audit logging for regulatory compliance. Key design drivers: HIPAA-compliant data handling, deterministic citation pipelines for clinical accuracy, query audit trails for malpractice risk mitigation, and sub-second response times for point-of-care workflows where clinicians need answers during patient encounters.\n\n## Architecture Diagram\n\n```\nClinician UI \u2500\u2500\u2192 API Gateway (auth + HIPAA) \u2500\u2500\u2192 Query Service \u2500\u2500\u2192 OpenEvidence API\n                        \u2193                            \u2193             /query\n                   Audit Logger \u2500\u2500\u2192 Audit DB    Cache (Redis)      /citations\n                        \u2193                            \u2193\n                   Analytics \u2500\u2500\u2192 Usage Dashboard  Citation Store \u2500\u2500\u2192 Evidence DB\n```\n\n## Service Layer\n\n```typescript\nclass ClinicalQueryService {\n  constructor(private oe: OpenEvidenceClient, private cache: CacheLayer, private audit: AuditLogger) {}\n\n  async queryEvidence(query: ClinicalQuery): Promise<EvidenceResponse> {\n    await this.audit.log({ type: 'query_submitted', clinicianId: query.clinicianId, queryText: query.text, timestamp: new Date() });\n    const cacheKey = `evidence:${this.hashQuery(query.text)}`;\n    const cached = await this.cache.get(cacheKey);\n    if (cached) { await this.audit.log({ type: 'cache_hit', cacheKey }); return cached; }\n    const response = await this.oe.query(query.text, { specialty: query.specialty });\n    await this.storeCitations(response.citations);\n    await this.cache.set(cacheKey, response, CACHE_CONFIG.evidence.ttl);\n    await this.audit.log({ type: 'query_completed', citationCount: response.citations.length });\n    return response;\n  }\n\n  async getCitationChain(citationId: string): Promise<Citation[]> {\n    return this.evidenceDb.getCitationWithReferences(citationId);\n  }\n}\n```\n\n## Caching Strategy\n\n```typescript\nconst CACHE_CONFIG = {\n  evidence:   { ttl: 86400, prefix: 'evidence' },  // 24 hr \u2014 clinical evidence changes slowly\n  citations:  { ttl: 604800, prefix: 'cite' },     // 7 days \u2014 published citations are stable\n  queryHist:  { ttl: 3600, prefix: 'qhist' },      // 1 hr \u2014 recent query dedup for same clinician\n  guidelines: { ttl: 43200, prefix: 'guide' },      // 12 hr \u2014 clinical guidelines update infrequently\n  audit:      { ttl: 0, prefix: 'audit' },          // never cached \u2014 every audit entry must persist\n};\n// New guideline publication events invalidate evidence cache for affected specialties\n```\n\n## Event Pipeline\n\n```typescript\nclass ClinicalEventPipeline {\n  private queue = new Bull('clinical-events', { redis: process.env.REDIS_URL });\n\n  async onQueryCompleted(event: QueryCompletedEvent): Promise<void> {\n    await this.queue.add('process', event, { attempts: 5, backoff: { type: 'exponential', delay: 2000 } });\n  }\n\n  async processQueryEvent(event: QueryCompletedEvent): Promise<void> {\n    await this.updateUsageAnalytics(event.clinicianId, event.specialty);\n    if (event.feedbackScore !== undefined) await this.logFeedback(event);\n    await this.checkGuidelineAlignment(event);  // Flag if answer diverges from current guidelines\n  }\n}\n```\n\n## Data Model\n\n```typescript\ninterface ClinicalQuery    { clinicianId: string; text: string; specialty: string; patientContext?: string; urgency: 'routine' | 'urgent'; }\ninterface EvidenceResponse { answer: string; confidence: number; citations: Citation[]; specialty: string; responseTimeMs: number; }\ninterface Citation         { id: string; title: string; journal: string; year: number; doi: string; relevanceScore: number; evidenceLevel: 'I' | 'II' | 'III' | 'IV' | 'V'; }\ninterface AuditEntry       { id: string; type: string; clinicianId: string; timestamp: Date; queryText?: string; citationCount?: number; ipAddress: string; }\n```\n\n## Scaling Considerations\n\n- Separate audit write path from query path \u2014 audit logging must never slow clinical responses\n- Cache evidence responses aggressively \u2014 same clinical questions recur across clinicians\n- Partition audit DB by month for compliance retention windows and query performance\n- Use read replicas for analytics dashboard; primary DB reserved for audit writes\n- Rate-limit per clinician to prevent abuse while ensuring genuine clinical queries are never blocked\n\n## Error Handling\n\n| Component | Failure Mode | Recovery |\n|-----------|-------------|----------|\n| Evidence query | OpenEvidence API timeout | Serve cached response if available, degrade to \"consult specialist\" message |\n| Audit logging | Audit DB write failure | Buffer to local WAL, retry with dead-letter queue \u2014 never drop audit entries |\n| Citation retrieval | DOI resolution failure | Return citation metadata without full text link, flag for manual review |\n| Cache layer | Redis connection lost | Bypass cache, query API directly, alert ops for cache restoration |\n| HIPAA compliance | Unauthorized access attempt | Immediate block, audit log, alert security team, preserve evidence |\n\n## Resources\n\n- [OpenEvidence Platform](https://www.openevidence.com)\n- [OpenEvidence for Clinicians](https://www.openevidence.com/about)\n\n## Next Steps\n\nSee `openevidence-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "openevidence-reference-architecture",
-    "description": "Reference Architecture for OpenEvidence.",
-    "Trigger": "openevidence reference architecture\".",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

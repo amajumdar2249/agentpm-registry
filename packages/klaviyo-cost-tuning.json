@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032364",
   "name": "klaviyo-cost-tuning",
   "slug": "klaviyo-cost-tuning",
   "description": "Optimize Klaviyo costs through plan selection, contact management, and",
   "content": "# Klaviyo Cost Tuning\n\n## Overview\n\nOptimize Klaviyo costs through active profile management, list hygiene, event sampling, and API usage monitoring. Klaviyo bills primarily by **active profiles** and **message volume**, not API calls.\n\n## Prerequisites\n\n- Access to Klaviyo billing dashboard\n- Understanding of active profile definition\n- `klaviyo-api` SDK for programmatic management\n\n## Klaviyo Pricing Model\n\nKlaviyo bills based on **active profiles** (contacts who have received or been targeted by marketing), not API requests.\n\n| Component | How It's Billed | Cost Driver |\n|-----------|----------------|-------------|\n| Email | Per active profile tier | Number of marketable profiles |\n| SMS | Per message sent + carrier fees | Message volume |\n| Push | Included with email plan | N/A |\n| API calls | Free (rate limited, not billed) | N/A |\n| Reviews | Per request volume | Review request sends |\n\n### Email Pricing Tiers (Approximate)\n\n| Active Profiles | Monthly Cost |\n|----------------|-------------|\n| 0 - 250 | Free |\n| 251 - 500 | $20/mo |\n| 501 - 1,000 | $30/mo |\n| 1,001 - 1,500 | $45/mo |\n| 1,501 - 5,000 | $60-$100/mo |\n| 5,001 - 10,000 | $100-$150/mo |\n| 10,001 - 25,000 | $150-$375/mo |\n| 25,001+ | Custom pricing |\n\n> **Key insight:** Reducing **active profiles** has the biggest cost impact. Cleaning suppressed/unengaged contacts directly reduces your bill.\n\n## Instructions\n\n### Step 1: Audit Active Profile Count\n\n```typescript\nimport { ApiKeySession, ProfilesApi, SegmentsApi } from 'klaviyo-api';\n\nconst session = new ApiKeySession(process.env.KLAVIYO_PRIVATE_KEY!);\nconst profilesApi = new ProfilesApi(session);\n\n// Count total profiles\nlet totalProfiles = 0;\nlet cursor: string | undefined;\ndo {\n  const response = await profilesApi.getProfiles({\n    pageCursor: cursor,\n    fieldsProfile: ['email'],  // Minimal fields for speed\n  });\n  totalProfiles += response.body.data.length;\n  const nextLink = response.body.links?.next;\n  cursor = nextLink ? new URL(nextLink).searchParams.get('page[cursor]') || undefined : undefined;\n} while (cursor);\n\nconsole.log(`Total profiles: ${totalProfiles}`);\n```\n\n### Step 2: Identify Unengaged Profiles\n\n```typescript\n// Find profiles that haven't opened/clicked in 180+ days\n// Create a segment in Klaviyo for this, then query it\nconst segmentsApi = new SegmentsApi(session);\n\nconst segments = await segmentsApi.getSegments({\n  filter: 'equals(name,\"Unengaged 180+ Days\")',\n});\n\nif (segments.body.data.length > 0) {\n  const segmentId = segments.body.data[0].id;\n  const unengaged = await segmentsApi.getSegmentProfiles({\n    id: segmentId,\n    fieldsProfile: ['email', 'created'],\n  });\n  console.log(`Unengaged profiles: ${unengaged.body.data.length}+`);\n}\n```\n\n### Step 3: Suppress Unengaged Contacts\n\n```typescript\n// Move unengaged profiles to a suppressed list (removes from active count)\nimport { ListsApi, ListEnum, ProfileEnum } from 'klaviyo-api';\n\nconst listsApi = new ListsApi(session);\n\n// Option 1: Unsubscribe (profile stays but isn't marketable = not billed)\nawait profilesApi.unsubscribeProfiles({\n  data: {\n    type: 'profile-subscription-bulk-delete-job',\n    attributes: {\n      profiles: {\n        data: unengagedEmails.map(email => ({\n          type: ProfileEnum.Profile,\n          attributes: {\n            email,\n            subscriptions: {\n              email: { marketing: { consent: 'UNSUBSCRIBED' } },\n            },\n          },\n        })),\n      },\n    },\n    relationships: {\n      list: { data: { type: ListEnum.List, id: 'MAIN_LIST_ID' } },\n    },\n  },\n});\n\n// Option 2: Suppress via profile update (add to global suppression)\nfor (const email of unengagedEmails) {\n  await profilesApi.createOrUpdateProfile({\n    data: {\n      type: ProfileEnum.Profile,\n      attributes: {\n        email,\n        properties: { suppressedAt: new Date().toISOString(), suppressReason: 'unengaged-180d' },\n      },\n    },\n  });\n}\n```\n\n### Step 4: Event Sampling for Non-Critical Tracking\n\n```typescript\n// Not all events need to be tracked -- sample non-critical ones\nfunction shouldTrackEvent(eventName: string, samplingRates: Record<string, number>): boolean {\n  const rate = samplingRates[eventName] ?? 1.0;  // Default: track everything\n  return Math.random() < rate;\n}\n\nconst samplingConfig = {\n  'Placed Order': 1.0,       // Always track (revenue attribution)\n  'Started Checkout': 1.0,   // Always track (cart abandonment)\n  'Viewed Product': 0.25,    // 25% sample (high volume, less critical)\n  'Page View': 0.1,          // 10% sample (very high volume)\n};\n\n// Before tracking\nif (shouldTrackEvent('Viewed Product', samplingConfig)) {\n  await eventsApi.createEvent({ /* ... */ });\n}\n```\n\n### Step 5: API Usage Monitor\n\n```typescript\n// Track API call volume to detect runaway processes\nclass KlaviyoUsageTracker {\n  private callCount = 0;\n  private readonly startTime = Date.now();\n\n  track(): void {\n    this.callCount++;\n    // Warn if approaching steady rate limit\n    const elapsedMinutes = (Date.now() - this.startTime) / 60000;\n    const ratePerMinute = this.callCount / Math.max(elapsedMinutes, 1);\n\n    if (ratePerMinute > 500) {\n      console.warn(`[Klaviyo] High API rate: ${Math.round(ratePerMinute)} req/min (limit: 700)`);\n    }\n  }\n\n  getStats(): { totalCalls: number; ratePerMinute: number } {\n    const elapsedMinutes = (Date.now() - this.startTime) / 60000;\n    return {\n      totalCalls: this.callCount,\n      ratePerMinute: Math.round(this.callCount / Math.max(elapsedMinutes, 1)),\n    };\n  }\n}\n\nexport const usageTracker = new KlaviyoUsageTracker();\n```\n\n## Cost Reduction Checklist\n\n- [ ] Suppress profiles unengaged >180 days\n- [ ] Remove hard-bounced email addresses\n- [ ] Audit and merge duplicate profiles\n- [ ] Use double opt-in to reduce fake signups\n- [ ] Sample high-volume, low-value events\n- [ ] Batch API calls instead of individual requests\n- [ ] Cache frequently-read data (segments, lists)\n- [ ] Use sparse fieldsets to reduce transfer size\n- [ ] Review SMS sending -- highest per-message cost\n- [ ] Set up sunset flow (auto-suppress after N days unengaged)\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Unexpected bill increase | Unengaged profiles grew | Run suppression script |\n| SMS costs spiking | Flow sending to full list | Add engaged-only segment filter |\n| Duplicate profiles | Multiple identify calls | Merge duplicates, use `createOrUpdateProfile` |\n| API rate limits hit | Bulk operations | Use queue with concurrency control |\n\n## Resources\n\n- [Klaviyo Pricing](https://www.klaviyo.com/pricing)\n- [Understanding Active Profiles](https://help.klaviyo.com/hc/en-us/articles/115005077967)\n- [Sunset Flow Best Practices](https://help.klaviyo.com/hc/en-us/articles/360002360091)\n- [Data Privacy API](https://developers.klaviyo.com/en/reference/data_privacy_api_overview)\n\n## Next Steps\n\nFor architecture patterns, see `klaviyo-reference-architecture`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "klaviyo-cost-tuning",
-    "description": "Optimize Klaviyo costs through plan selection, contact management, and",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

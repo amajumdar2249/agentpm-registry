@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031719",
   "name": "customerio-common-errors",
   "slug": "customerio-common-errors",
   "description": "Diagnose and fix Customer.io common errors.",
   "content": "# Customer.io Common Errors\n\n## Overview\n\nDiagnose and fix the most frequent Customer.io integration errors: API status codes, SDK exceptions, delivery failures, campaign trigger issues, and transactional message problems.\n\n## Prerequisites\n\n- Access to Customer.io dashboard\n- API credentials configured\n- Access to application logs\n\n## HTTP Status Code Reference\n\n| Code | Meaning | Retryable | Action |\n|------|---------|-----------|--------|\n| `200` | Success | N/A | No action needed |\n| `400` | Bad Request | No | Fix request payload \u2014 see details below |\n| `401` | Unauthorized | No | Check API credentials |\n| `403` | Forbidden | No | API key lacks permission for this endpoint |\n| `404` | Not Found | No | Check endpoint URL or resource ID |\n| `408` | Request Timeout | Yes | Retry with backoff |\n| `422` | Unprocessable Entity | No | Validation error \u2014 check required fields |\n| `429` | Rate Limited | Yes | Back off, respect `Retry-After` header |\n| `500` | Internal Server Error | Yes | Retry with exponential backoff |\n| `503` | Service Unavailable | Yes | Check status.customer.io, retry later |\n\n## Instructions\n\n### Error 1: Authentication Failures (401/403)\n\n```typescript\n// WRONG \u2014 mixing up API key types\nimport { TrackClient, APIClient, RegionUS } from \"customerio-node\";\n\n// Track API uses Site ID + Track API Key (Basic Auth)\nconst cio = new TrackClient(siteId, trackApiKey, { region: RegionUS });\n\n// App API uses App API Key (Bearer Auth) \u2014 DIFFERENT key\nconst api = new APIClient(appApiKey, { region: RegionUS });\n\n// Common mistake: using Track API key for App API client\n// const api = new APIClient(trackApiKey); // WRONG \u2014 will get 401\n```\n\n**Fix:** Verify you're using the right key type. Track API credentials are under \"Tracking API Key\" in Settings. App API key is under \"App API Key\" \u2014 it's a separate bearer token.\n\n### Error 2: Timestamp Format (400)\n\n```typescript\n// WRONG \u2014 Customer.io expects Unix seconds, not milliseconds\nawait cio.identify(\"user-1\", {\n  created_at: Date.now(),              // 1704067200000 \u2014 TOO LARGE\n});\n\n// CORRECT \u2014 divide by 1000\nawait cio.identify(\"user-1\", {\n  created_at: Math.floor(Date.now() / 1000),  // 1704067200\n});\n```\n\nCustomer.io silently accepts millisecond timestamps but interprets them as dates thousands of years in the future, breaking segment conditions and campaign triggers.\n\n### Error 3: Events Not Triggering Campaigns\n\n```typescript\n// WRONG \u2014 event name doesn't match dashboard\nawait cio.track(\"user-1\", { name: \"SignedUp\", data: {} });\n// Dashboard expects: \"signed_up\" (case-sensitive)\n\n// CORRECT \u2014 exact match, snake_case\nawait cio.track(\"user-1\", { name: \"signed_up\", data: {} });\n```\n\n**Checklist:**\n\n1. Event name is case-sensitive \u2014 must match dashboard trigger exactly\n2. User must be identified before tracking (call `identify()` first)\n3. Campaign must be **Active** (not Draft or Paused)\n4. User must match campaign's audience filter/segment\n5. User must not be suppressed\n\n### Error 4: Transactional Message Failures (422)\n\n```typescript\nimport { APIClient, SendEmailRequest, RegionUS } from \"customerio-node\";\n\nconst api = new APIClient(process.env.CUSTOMERIO_APP_API_KEY!, {\n  region: RegionUS,\n});\n\n// Common 422 errors:\n// 1. Wrong transactional_message_id\nconst request = new SendEmailRequest({\n  to: \"user@example.com\",\n  transactional_message_id: \"999\",     // Must exist in dashboard\n  message_data: { name: \"Jane\" },\n  identifiers: { id: \"user-123\" },\n});\n\n// 2. Missing required message_data fields\n// If template uses {{ data.reset_url }}, message_data must include reset_url\n\n// 3. Invalid email address\n// \"to\" must be a valid email format\n```\n\n### Error 5: Rate Limiting (429)\n\n```typescript\n// Implement backoff when you hit 429\nasync function withBackoff<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {\n  for (let i = 0; i <= maxRetries; i++) {\n    try {\n      return await fn();\n    } catch (err: any) {\n      if (err.statusCode === 429 && i < maxRetries) {\n        // Respect Retry-After header if present, otherwise exponential backoff\n        const retryAfter = err.headers?.[\"retry-after\"];\n        const delay = retryAfter\n          ? parseInt(retryAfter) * 1000\n          : Math.pow(2, i) * 1000 + Math.random() * 500;\n        console.warn(`Rate limited. Retrying in ${delay}ms...`);\n        await new Promise((r) => setTimeout(r, delay));\n        continue;\n      }\n      throw err;\n    }\n  }\n  throw new Error(\"Max retries exceeded\");\n}\n\n// Usage\nawait withBackoff(() => cio.identify(\"user-1\", { email: \"user@example.com\" }));\n```\n\n### Error 6: EU Region Mismatch\n\n```typescript\n// WRONG \u2014 EU account hitting US endpoint\nconst cio = new TrackClient(siteId, apiKey, { region: RegionUS });\n// Returns 401 because credentials are for EU workspace\n\n// CORRECT\nimport { RegionEU } from \"customerio-node\";\nconst cio = new TrackClient(siteId, apiKey, { region: RegionEU });\n```\n\n### Error 7: User Not Receiving Email\n\n**Diagnostic checklist:**\n\n1. Does the user have an `email` attribute? (Check People > user profile)\n2. Is the user suppressed? (Check suppression list)\n3. Has the email bounced before? (Check user Activity tab)\n4. Is the campaign Active? (Check Campaigns list)\n5. Does the user match the segment? (Check segment membership)\n6. Is the sending domain verified? (Settings > Sending Domains)\n\n## Diagnostic Commands\n\n```bash\n# Test Track API authentication\ncurl -s -w \"\\nHTTP %{http_code}\\n\" \\\n  -u \"$CUSTOMERIO_SITE_ID:$CUSTOMERIO_TRACK_API_KEY\" \\\n  -X PUT \"https://track.customer.io/api/v1/customers/test-diag\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"email\":\"diag@example.com\"}'\n\n# Test App API authentication\ncurl -s -w \"\\nHTTP %{http_code}\\n\" \\\n  -H \"Authorization: Bearer $CUSTOMERIO_APP_API_KEY\" \\\n  \"https://api.customer.io/v1/campaigns\"\n\n# Check Customer.io status\ncurl -s \"https://status.customer.io/api/v2/status.json\" | python3 -m json.tool\n```\n\n## Error Handling Pattern\n\n```typescript\n// Centralized error handler for Customer.io operations\nasync function safeCioCall<T>(\n  operation: string,\n  fn: () => Promise<T>\n): Promise<T | null> {\n  try {\n    return await fn();\n  } catch (err: any) {\n    const code = err.statusCode ?? err.status ?? \"unknown\";\n    console.error(`CIO ${operation} failed [${code}]:`, err.message);\n\n    // Alert on auth errors \u2014 likely misconfiguration\n    if (code === 401 || code === 403) {\n      console.error(\"AUTH ERROR: Check API credentials immediately\");\n    }\n\n    // Don't crash the app for tracking failures\n    return null;\n  }\n}\n\n// Usage \u2014 never crashes your app\nawait safeCioCall(\"identify\", () =>\n  cio.identify(\"user-1\", { email: \"user@example.com\" })\n);\n```\n\n## Resources\n\n- [Track API Error Reference](https://docs.customer.io/integrations/api/track/)\n- [Common Transactional API Errors](https://docs.customer.io/journeys/transactional-api-common-api-errors/)\n- [Common Broadcast Errors](https://docs.customer.io/journeys/api-triggered-errors/)\n- [Customer.io Status Page](https://status.customer.io/)\n\n## Next Steps\n\nAfter resolving errors, proceed to `customerio-debug-bundle` for comprehensive debug reports.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "customerio-common-errors",
-    "description": "Diagnose and fix Customer.io common errors.",
-    "Trigger": "customer.io error\", \"customer.io not working\",",
-    "allowed-tools": "Read, Grep, Bash(curl:*), Bash(npx:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

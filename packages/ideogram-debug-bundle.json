@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032270",
   "name": "ideogram-debug-bundle",
   "slug": "ideogram-debug-bundle",
   "description": "Collect Ideogram debug evidence for support tickets and troubleshooting.",
   "content": "# Ideogram Debug Bundle\n\n## Current State\n\n!`node --version 2>/dev/null || echo 'N/A'`\n!`python3 --version 2>/dev/null || echo 'N/A'`\n!`echo \"IDEOGRAM_API_KEY set: ${IDEOGRAM_API_KEY:+YES}${IDEOGRAM_API_KEY:-NO}\"`\n\n## Overview\n\nCollect diagnostic information for Ideogram API issues. Produces a tarball with environment details, API connectivity tests, request/response samples, and redacted configuration -- suitable for attaching to support tickets.\n\n## Prerequisites\n\n- `IDEOGRAM_API_KEY` environment variable set\n- `curl` and `tar` available\n- Permission to collect environment info\n\n## Instructions\n\n### Step 1: Full Debug Bundle Script\n\n```bash\n#!/bin/bash\nset -euo pipefail\n\nBUNDLE_DIR=\"ideogram-debug-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE_DIR\"\n\ncat > \"$BUNDLE_DIR/summary.txt\" <<HEADER\n=== Ideogram Debug Bundle ===\nGenerated: $(date -u +%Y-%m-%dT%H:%M:%SZ)\nHostname: $(hostname)\nHEADER\n\n# --- Environment ---\n{\n  echo \"--- Runtime ---\"\n  echo \"Node: $(node --version 2>/dev/null || echo 'not installed')\"\n  echo \"Python: $(python3 --version 2>/dev/null || echo 'not installed')\"\n  echo \"OS: $(uname -srm)\"\n  echo \"\"\n  echo \"--- Ideogram Config ---\"\n  echo \"API Key: ${IDEOGRAM_API_KEY:+SET (length=${#IDEOGRAM_API_KEY})}${IDEOGRAM_API_KEY:-NOT SET}\"\n} >> \"$BUNDLE_DIR/summary.txt\"\n\n# --- API Connectivity Test ---\n{\n  echo \"\"\n  echo \"--- API Test (Legacy Generate) ---\"\n  RESPONSE=$(curl -s -w \"\\nHTTP_STATUS:%{http_code}\\nTIME_TOTAL:%{time_total}\" \\\n    -X POST https://api.ideogram.ai/generate \\\n    -H \"Api-Key: ${IDEOGRAM_API_KEY:-missing}\" \\\n    -H \"Content-Type: application/json\" \\\n    -d '{\"image_request\":{\"prompt\":\"debug test\",\"model\":\"V_2_TURBO\",\"magic_prompt_option\":\"OFF\"}}' \\\n    2>&1 || echo \"CURL_FAILED\")\n  echo \"$RESPONSE\" | grep -E \"HTTP_STATUS|TIME_TOTAL|error\" || true\n  echo \"$RESPONSE\" | head -5 > \"$BUNDLE_DIR/api-response-sample.json\"\n} >> \"$BUNDLE_DIR/summary.txt\"\n\n# --- DNS Resolution ---\n{\n  echo \"\"\n  echo \"--- DNS & Network ---\"\n  echo \"DNS resolve: $(nslookup api.ideogram.ai 2>/dev/null | grep -A1 'Name:' | tail -1 || echo 'nslookup unavailable')\"\n  echo \"TLS test: $(curl -s -o /dev/null -w '%{ssl_verify_result}' https://api.ideogram.ai/ 2>/dev/null || echo 'failed')\"\n} >> \"$BUNDLE_DIR/summary.txt\"\n\n# --- Local Configuration (redacted) ---\nif [ -f .env ]; then\n  sed 's/=.*/=***REDACTED***/' .env > \"$BUNDLE_DIR/env-redacted.txt\"\nfi\n\n# --- Package versions ---\n{\n  echo \"\"\n  echo \"--- Dependencies ---\"\n  npm list --depth=0 2>/dev/null || echo \"No package.json found\"\n  pip freeze 2>/dev/null | grep -i ideogram || echo \"No Python ideogram packages\"\n} >> \"$BUNDLE_DIR/summary.txt\"\n\n# --- Package ---\ntar -czf \"$BUNDLE_DIR.tar.gz\" \"$BUNDLE_DIR\"\nrm -rf \"$BUNDLE_DIR\"\necho \"Bundle created: $BUNDLE_DIR.tar.gz\"\necho \"Contents: summary.txt, api-response-sample.json, env-redacted.txt\"\n```\n\n### Step 2: Quick One-Line Diagnostics\n\n```bash\nset -euo pipefail\n# Test API key validity\ncurl -s -o /dev/null -w \"Status: %{http_code} | Time: %{time_total}s\\n\" \\\n  -X POST https://api.ideogram.ai/generate \\\n  -H \"Api-Key: $IDEOGRAM_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"image_request\":{\"prompt\":\"test\",\"model\":\"V_2_TURBO\",\"magic_prompt_option\":\"OFF\"}}'\n\n# Test V3 endpoint\ncurl -s -o /dev/null -w \"V3 Status: %{http_code}\\n\" \\\n  -X POST https://api.ideogram.ai/v1/ideogram-v3/generate \\\n  -H \"Api-Key: $IDEOGRAM_API_KEY\" \\\n  -F \"prompt=test\" -F \"rendering_speed=FLASH\"\n```\n\n### Step 3: Request Logging Wrapper\n\n```typescript\n// Add to your client for capturing failed requests\nasync function debuggableRequest(url: string, init: RequestInit) {\n  const start = Date.now();\n  const response = await fetch(url, init);\n  const elapsed = Date.now() - start;\n\n  if (!response.ok) {\n    const body = await response.text();\n    console.error(JSON.stringify({\n      timestamp: new Date().toISOString(),\n      url,\n      method: init.method,\n      status: response.status,\n      elapsed_ms: elapsed,\n      error: body.slice(0, 500),\n      // Redact API key from headers\n      headers: Object.fromEntries(\n        Object.entries(init.headers ?? {}).map(([k, v]) =>\n          [k, k.toLowerCase() === \"api-key\" ? \"***REDACTED***\" : v]\n        )\n      ),\n    }, null, 2));\n    throw new Error(`Ideogram ${response.status}: ${body}`);\n  }\n\n  return response;\n}\n```\n\n## Sensitive Data Handling\n\n**ALWAYS REDACT before sharing:**\n\n- API keys and tokens\n- `.env` file values\n- PII in prompts\n- File paths containing usernames\n\n**Safe to include:**\n\n- HTTP status codes and error messages\n- Request timing and latency\n- Runtime versions (Node, Python)\n- Package dependency versions\n\n## Error Handling\n\n| Item | Purpose | Included |\n|------|---------|----------|\n| API key status | Auth verification | SET/NOT SET only |\n| HTTP status code | Error classification | Full code |\n| Response time | Latency diagnosis | Seconds |\n| DNS resolution | Network diagnosis | IP only |\n| Package versions | Compatibility check | Version strings |\n\n## Output\n\n- `ideogram-debug-YYYYMMDD-HHMMSS.tar.gz` containing:\n  - `summary.txt` -- environment, API test, DNS, dependencies\n  - `api-response-sample.json` -- truncated API response\n  - `env-redacted.txt` -- configuration with values masked\n\n## Resources\n\n- [Ideogram API Overview](https://developer.ideogram.ai/ideogram-api/api-overview)\n- Enterprise support: `partnership@ideogram.ai`\n\n## Next Steps\n\nFor rate limit issues, see `ideogram-rate-limits`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "ideogram-debug-bundle",
-    "description": "Collect Ideogram debug evidence for support tickets and troubleshooting.",
-    "allowed-tools": "Read, Bash(curl:*), Bash(tar:*), Bash(node:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

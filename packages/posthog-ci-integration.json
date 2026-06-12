@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032931",
   "name": "posthog-ci-integration",
   "slug": "posthog-ci-integration",
   "description": "Configure PostHog CI/CD with GitHub Actions: unit tests with mocked",
   "content": "# PostHog CI Integration\n\n## Overview\n\nSet up CI/CD pipelines for PostHog integrations. Covers mocked unit tests (no API key needed), integration tests against a PostHog dev project, and deployment annotations that mark releases in your PostHog timeline.\n\n## Prerequisites\n\n- GitHub repository with Actions enabled\n- PostHog dev project API key for integration tests\n- PostHog personal API key for deployment annotations\n- npm/pnpm project with vitest or jest\n\n## Instructions\n\n### Step 1: Configure GitHub Secrets\n\n```bash\nset -euo pipefail\n# Project key for integration tests (phc_... from dev project)\ngh secret set POSTHOG_TEST_KEY --body \"phc_dev_project_key\"\n\n# Personal key for deployment annotations (phx_...)\ngh secret set POSTHOG_PERSONAL_API_KEY --body \"phx_your_personal_key\"\n\n# Project ID for annotations\ngh secret set POSTHOG_PROJECT_ID --body \"12345\"\n```\n\n### Step 2: GitHub Actions Workflow\n\n```yaml\n# .github/workflows/posthog-tests.yml\nname: PostHog Tests\n\non:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n\njobs:\n  unit-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n      - run: npm test -- --coverage\n        # Unit tests use mocked PostHog \u2014 no API key needed\n\n  integration-tests:\n    runs-on: ubuntu-latest\n    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n    needs: unit-tests\n    env:\n      NEXT_PUBLIC_POSTHOG_KEY: ${{ secrets.POSTHOG_TEST_KEY }}\n      POSTHOG_HOST: https://us.i.posthog.com\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n      - run: npm run test:integration\n        timeout-minutes: 5\n\n  annotate-deploy:\n    runs-on: ubuntu-latest\n    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n    needs: integration-tests\n    steps:\n      - name: Create PostHog annotation\n        env:\n          POSTHOG_PERSONAL_API_KEY: ${{ secrets.POSTHOG_PERSONAL_API_KEY }}\n          POSTHOG_PROJECT_ID: ${{ secrets.POSTHOG_PROJECT_ID }}\n        run: |\n          curl -X POST \"https://app.posthog.com/api/projects/$POSTHOG_PROJECT_ID/annotations/\" \\\n            -H \"Authorization: Bearer $POSTHOG_PERSONAL_API_KEY\" \\\n            -H \"Content-Type: application/json\" \\\n            -d \"{\n              \\\"content\\\": \\\"Deploy: ${GITHUB_SHA::8} \u2014 ${GITHUB_EVENT_HEAD_COMMIT_MESSAGE:-$(git log -1 --pretty=%s)}\\\",\n              \\\"date_marker\\\": \\\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\\\",\n              \\\"scope\\\": \\\"project\\\"\n            }\"\n```\n\n### Step 3: Unit Tests with Mocked PostHog\n\n```typescript\n// tests/analytics.test.ts \u2014 runs in CI without any API keys\nimport { describe, it, expect, vi, beforeEach } from 'vitest';\n\nvi.mock('posthog-node', () => ({\n  PostHog: vi.fn().mockImplementation(() => ({\n    capture: vi.fn(),\n    identify: vi.fn(),\n    getFeatureFlag: vi.fn().mockResolvedValue('control'),\n    isFeatureEnabled: vi.fn().mockResolvedValue(true),\n    getAllFlags: vi.fn().mockResolvedValue({ 'new-feature': true }),\n    flush: vi.fn().mockResolvedValue(undefined),\n    shutdown: vi.fn().mockResolvedValue(undefined),\n  })),\n}));\n\nimport { PostHog } from 'posthog-node';\n\ndescribe('PostHog Analytics', () => {\n  let ph: InstanceType<typeof PostHog>;\n\n  beforeEach(() => {\n    vi.clearAllMocks();\n    ph = new PostHog('phc_test');\n  });\n\n  it('captures events with required properties', () => {\n    ph.capture({\n      distinctId: 'user-1',\n      event: 'subscription_started',\n      properties: { plan: 'pro', interval: 'annual' },\n    });\n\n    expect(ph.capture).toHaveBeenCalledWith(\n      expect.objectContaining({\n        event: 'subscription_started',\n        properties: expect.objectContaining({ plan: 'pro' }),\n      })\n    );\n  });\n\n  it('evaluates feature flags with default fallback', async () => {\n    const enabled = await ph.isFeatureEnabled('new-feature', 'user-1');\n    expect(enabled).toBe(true);\n  });\n\n  it('gets multivariate flag variant', async () => {\n    const variant = await ph.getFeatureFlag('experiment', 'user-1');\n    expect(variant).toBe('control');\n  });\n});\n```\n\n### Step 4: Integration Tests (Real PostHog Project)\n\n```typescript\n// tests/integration/posthog.test.ts\nimport { describe, it, expect, afterAll } from 'vitest';\nimport { PostHog } from 'posthog-node';\n\nconst KEY = process.env.NEXT_PUBLIC_POSTHOG_KEY;\n\ndescribe.skipIf(!KEY)('PostHog Integration', () => {\n  const ph = new PostHog(KEY!, {\n    host: process.env.POSTHOG_HOST || 'https://us.i.posthog.com',\n    flushAt: 1,\n    flushInterval: 0,\n  });\n\n  afterAll(async () => await ph.shutdown());\n\n  it('captures and flushes an event', async () => {\n    ph.capture({\n      distinctId: `ci-${Date.now()}`,\n      event: 'ci_integration_test',\n      properties: {\n        ci: true,\n        run_id: process.env.GITHUB_RUN_ID || 'local',\n      },\n    });\n    await expect(ph.flush()).resolves.not.toThrow();\n  });\n\n  it('evaluates feature flags', async () => {\n    const flags = await ph.getAllFlags(`ci-${Date.now()}`);\n    expect(typeof flags).toBe('object');\n  });\n\n  it('resolves decide endpoint', async () => {\n    const response = await fetch('https://us.i.posthog.com/decide/?v=3', {\n      method: 'POST',\n      headers: { 'Content-Type': 'application/json' },\n      body: JSON.stringify({ api_key: KEY, distinct_id: 'ci-test' }),\n    });\n    expect(response.status).toBe(200);\n    const data = await response.json();\n    expect(data).toHaveProperty('featureFlags');\n  });\n});\n```\n\n### Step 5: Package Scripts\n\n```json\n{\n  \"scripts\": {\n    \"test\": \"vitest run\",\n    \"test:integration\": \"vitest run tests/integration/\",\n    \"test:coverage\": \"vitest run --coverage\"\n  }\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Integration tests fail in CI | Secret not configured | Run `gh secret set POSTHOG_TEST_KEY` |\n| Tests timeout | PostHog unreachable from CI runner | Increase timeout, add retry |\n| Annotation fails | Wrong personal key | Verify `phx_` key, check project ID |\n| Mock type mismatch | PostHog SDK updated | Update mock to match new SDK exports |\n\n## Output\n\n- Unit test suite with mocked PostHog (runs everywhere, no keys needed)\n- Integration test suite against PostHog dev project (runs on main only)\n- Deployment annotations marking each release in PostHog timeline\n- GitHub Actions workflow with proper secret management\n\n## Resources\n\n- [GitHub Actions Secrets](https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions)\n- [PostHog Annotations API](https://posthog.com/docs/api/annotations)\n- [Vitest Documentation](https://vitest.dev/)\n\n## Next Steps\n\nFor deployment patterns, see `posthog-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "posthog-ci-integration",
-    "description": "Configure PostHog CI/CD with GitHub Actions: unit tests with mocked",
-    "Trigger": "posthog CI\", \"posthog GitHub Actions\", \"posthog automated tests\",",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

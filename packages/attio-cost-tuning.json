@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031365",
   "name": "attio-cost-tuning",
   "slug": "attio-cost-tuning",
   "description": "Optimize Attio API usage costs -- reduce request volume, select the",
   "content": "# Attio Cost Tuning\n\n## Overview\n\nAttio pricing is based on workspace seats, not API calls. However, API rate limits effectively cap throughput, so optimizing request volume improves both performance and cost efficiency. This skill covers practical strategies to reduce unnecessary API calls.\n\n## Attio Pricing Model\n\n| Plan | Price | Key Limits |\n|------|-------|-----------|\n| Free | $0/user/mo | 3 users, basic objects, limited automations |\n| Plus | $29/user/mo | Unlimited objects, lists, advanced reporting |\n| Pro | $59/user/mo | Advanced automations, API access, webhooks |\n| Enterprise | Custom | SSO, audit logs, dedicated support, custom rate limits |\n\n**API access requires Plus plan or higher.** Rate limits are per-workspace, not per-seat.\n\n## Instructions\n\n### Step 1: Audit Current API Usage\n\n```typescript\n// Instrument all API calls to measure usage patterns\nclass AttioUsageTracker {\n  private calls: Array<{\n    method: string;\n    path: string;\n    timestamp: number;\n    durationMs: number;\n    cached: boolean;\n  }> = [];\n\n  async track<T>(\n    method: string,\n    path: string,\n    operation: () => Promise<T>,\n    cached = false\n  ): Promise<T> {\n    const start = Date.now();\n    try {\n      const result = await operation();\n      this.calls.push({\n        method, path, timestamp: start,\n        durationMs: Date.now() - start, cached,\n      });\n      return result;\n    } catch (err) {\n      this.calls.push({\n        method, path, timestamp: start,\n        durationMs: Date.now() - start, cached: false,\n      });\n      throw err;\n    }\n  }\n\n  report(windowMs = 3600_000): {\n    totalCalls: number;\n    cachedCalls: number;\n    topEndpoints: Array<{ path: string; count: number }>;\n  } {\n    const cutoff = Date.now() - windowMs;\n    const recent = this.calls.filter((c) => c.timestamp > cutoff);\n    const cached = recent.filter((c) => c.cached).length;\n\n    const endpointCounts = new Map<string, number>();\n    for (const call of recent) {\n      const key = `${call.method} ${call.path}`;\n      endpointCounts.set(key, (endpointCounts.get(key) || 0) + 1);\n    }\n\n    const topEndpoints = [...endpointCounts.entries()]\n      .sort((a, b) => b[1] - a[1])\n      .slice(0, 10)\n      .map(([path, count]) => ({ path, count }));\n\n    return { totalCalls: recent.length, cachedCalls: cached, topEndpoints };\n  }\n}\n```\n\n### Step 2: Reduce Request Volume\n\n**The five biggest cost/rate-limit savers:**\n\n| Strategy | Reduction | Implementation |\n|----------|-----------|---------------|\n| Cache object schemas | 50-90% of schema reads | Cache `GET /objects` and `/attributes` for 30 min |\n| Batch with `$in` filter | N:1 on lookups | Single query instead of N individual fetches |\n| Use `limit: 500` | 5x fewer pagination requests | Max page size per request |\n| Webhook-driven sync | Eliminate polling | React to changes instead of polling every N seconds |\n| Cache records | 30-80% of record reads | LRU cache with webhook invalidation |\n\n### Step 3: Eliminate Polling with Webhooks\n\n```typescript\n// BAD: Polling every 30 seconds for changes\nsetInterval(async () => {\n  const records = await client.post(\"/objects/people/records/query\", {\n    filter: { updated_at: { $gt: lastCheck.toISOString() } },\n    limit: 500,\n  });\n  for (const record of records.data) await processUpdate(record);\n  lastCheck = new Date();\n}, 30_000);\n// Cost: 2,880 requests/day MINIMUM (even with no changes)\n\n// GOOD: Webhook-driven (0 requests when no changes)\napp.post(\"/webhooks/attio\", async (req, res) => {\n  res.status(200).json({ received: true });\n  const event = req.body;\n  if (event.event_type === \"record.updated\") {\n    const record = await client.get(\n      `/objects/${event.object.api_slug}/records/${event.record.id.record_id}`\n    );\n    await processUpdate(record);\n  }\n});\n// Cost: 1 request per actual change\n```\n\n### Step 4: Smart Caching Tiers\n\n```typescript\nimport { LRUCache } from \"lru-cache\";\n\n// Tier 1: Schema data (changes very rarely)\nconst schemaCache = new LRUCache<string, unknown>({\n  max: 100,\n  ttl: 30 * 60 * 1000, // 30 minutes\n});\n\n// Tier 2: Record data (changes occasionally)\nconst recordCache = new LRUCache<string, unknown>({\n  max: 5000,\n  ttl: 5 * 60 * 1000, // 5 minutes\n});\n\n// Tier 3: List/query results (changes frequently)\nconst queryCache = new LRUCache<string, unknown>({\n  max: 200,\n  ttl: 30 * 1000, // 30 seconds\n});\n\nfunction getCacheForPath(path: string): LRUCache<string, unknown> {\n  if (path.includes(\"/attributes\") || path === \"/objects\") return schemaCache;\n  if (path.includes(\"/records/\") && !path.includes(\"/query\")) return recordCache;\n  return queryCache;\n}\n```\n\n### Step 5: Request Budget Monitor\n\n```typescript\nclass AttioRequestBudget {\n  private requestsToday = 0;\n  private dayStart = this.todayStart();\n  private readonly dailyBudget: number;\n  private readonly warningThreshold: number;\n\n  constructor(dailyBudget = 10_000) {\n    this.dailyBudget = dailyBudget;\n    this.warningThreshold = dailyBudget * 0.8;\n  }\n\n  private todayStart(): number {\n    const d = new Date();\n    d.setHours(0, 0, 0, 0);\n    return d.getTime();\n  }\n\n  recordRequest(): void {\n    const today = this.todayStart();\n    if (today !== this.dayStart) {\n      this.dayStart = today;\n      this.requestsToday = 0;\n    }\n    this.requestsToday++;\n\n    if (this.requestsToday === Math.floor(this.warningThreshold)) {\n      console.warn(`Attio budget warning: ${this.requestsToday}/${this.dailyBudget} requests today`);\n    }\n\n    if (this.requestsToday >= this.dailyBudget) {\n      console.error(`Attio daily budget exceeded: ${this.requestsToday} requests`);\n    }\n  }\n\n  getUsage(): { today: number; budget: number; percentUsed: number } {\n    return {\n      today: this.requestsToday,\n      budget: this.dailyBudget,\n      percentUsed: Math.round((this.requestsToday / this.dailyBudget) * 100),\n    };\n  }\n}\n```\n\n### Step 6: SQL Usage Dashboard\n\nIf you log API calls to a database:\n\n```sql\n-- Daily request volume (last 30 days)\nSELECT\n  DATE(timestamp) AS day,\n  COUNT(*) AS total_requests,\n  COUNT(CASE WHEN cached THEN 1 END) AS cache_hits,\n  ROUND(COUNT(CASE WHEN cached THEN 1 END) * 100.0 / COUNT(*), 1) AS cache_hit_pct,\n  ROUND(AVG(duration_ms), 0) AS avg_latency_ms\nFROM attio_api_log\nWHERE timestamp >= CURRENT_DATE - INTERVAL '30 days'\nGROUP BY DATE(timestamp)\nORDER BY day DESC;\n\n-- Top endpoints by volume (identify optimization targets)\nSELECT\n  method || ' ' || path AS endpoint,\n  COUNT(*) AS calls,\n  ROUND(AVG(duration_ms), 0) AS avg_ms,\n  COUNT(CASE WHEN status = 429 THEN 1 END) AS rate_limited\nFROM attio_api_log\nWHERE timestamp >= CURRENT_DATE - INTERVAL '7 days'\nGROUP BY method, path\nORDER BY calls DESC\nLIMIT 10;\n```\n\n## Cost Optimization Checklist\n\n```\n[ ] Object schema calls cached (30-minute TTL)\n[ ] Record lookups cached (5-minute TTL with webhook invalidation)\n[ ] Polling replaced with webhooks where possible\n[ ] Bulk operations use $in filter (1 request instead of N)\n[ ] Pagination uses limit: 500 (max page size)\n[ ] Unnecessary API calls identified and eliminated\n[ ] Usage monitoring in place with daily budget alerts\n[ ] Cache hit rate > 50% on read-heavy workloads\n```\n\n## Error Handling\n\n| Cost issue | Root cause | Fix |\n|-----------|-----------|-----|\n| High request volume | Polling loop | Switch to webhooks |\n| Low cache hit rate | Short TTL or no cache | Increase TTL, add webhook invalidation |\n| Rate limiting (429s) | Burst without throttling | Add PQueue with intervalCap |\n| N+1 queries | Individual record fetches | Batch with `$in` filter |\n\n## Resources\n\n- [Attio Pricing](https://attio.com/pricing)\n- [Attio Rate Limiting](https://docs.attio.com/rest-api/guides/rate-limiting)\n- [Attio Webhooks Guide](https://docs.attio.com/rest-api/guides/webhooks)\n\n## Next Steps\n\nFor architecture patterns, see `attio-reference-architecture`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "attio-cost-tuning",
-    "description": "Optimize Attio API usage costs -- reduce request volume, select the",
-    "Trigger": "attio cost\", \"attio billing\", \"reduce attio costs\",",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

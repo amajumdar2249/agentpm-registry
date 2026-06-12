@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032280",
   "name": "ideogram-performance-tuning",
   "slug": "ideogram-performance-tuning",
   "description": "Optimize Ideogram API performance with caching, model selection, and",
   "content": "# Ideogram Performance Tuning\n\n## Overview\n\nOptimize Ideogram image generation for speed, cost, and throughput. Key levers: model and rendering speed selection, prompt-based caching, parallel generation with concurrency limits, and CDN delivery of generated assets.\n\n## Performance Baselines\n\n| Model / Speed | Typical Latency | Relative Cost | Quality |\n|---------------|-----------------|---------------|---------|\n| V_2_TURBO | 3-6s | ~$0.05/image | Good |\n| V_2 | 8-15s | ~$0.08/image | High |\n| V3 FLASH | 2-4s | Lowest | Draft |\n| V3 TURBO | 4-8s | Low | Good |\n| V3 DEFAULT | 8-15s | Standard | High |\n| V3 QUALITY | 15-25s | Premium | Highest |\n\n## Instructions\n\n### Step 1: Speed Tiers by Use Case\n\n```typescript\nconst SPEED_CONFIGS = {\n  // Preview / draft mode -- fastest, cheapest\n  preview: {\n    endpoint: \"https://api.ideogram.ai/generate\",\n    model: \"V_2_TURBO\",\n    note: \"3-6s, good enough for iteration\",\n  },\n  // Standard production -- balanced\n  standard: {\n    endpoint: \"https://api.ideogram.ai/generate\",\n    model: \"V_2\",\n    note: \"8-15s, high quality for final assets\",\n  },\n  // V3 with speed control\n  v3_fast: {\n    endpoint: \"https://api.ideogram.ai/v1/ideogram-v3/generate\",\n    rendering_speed: \"TURBO\",\n    note: \"4-8s, V3 quality at faster speed\",\n  },\n  v3_quality: {\n    endpoint: \"https://api.ideogram.ai/v1/ideogram-v3/generate\",\n    rendering_speed: \"QUALITY\",\n    note: \"15-25s, maximum quality\",\n  },\n} as const;\n\nfunction getConfig(tier: keyof typeof SPEED_CONFIGS) {\n  return SPEED_CONFIGS[tier];\n}\n```\n\n### Step 2: Prompt-Based Cache Layer\n\n```typescript\nimport { createHash } from \"crypto\";\nimport { existsSync, readFileSync, writeFileSync, mkdirSync } from \"fs\";\nimport { join } from \"path\";\n\nconst CACHE_DIR = \"./ideogram-cache\";\n\nfunction cacheKey(prompt: string, style: string, aspect: string): string {\n  return createHash(\"sha256\")\n    .update(`${prompt.toLowerCase().trim()}:${style}:${aspect}`)\n    .digest(\"hex\")\n    .slice(0, 16);\n}\n\nasync function cachedGenerate(\n  prompt: string,\n  options: { style_type?: string; aspect_ratio?: string; model?: string } = {}\n) {\n  const style = options.style_type ?? \"AUTO\";\n  const aspect = options.aspect_ratio ?? \"ASPECT_1_1\";\n  const key = cacheKey(prompt, style, aspect);\n  const metaPath = join(CACHE_DIR, `${key}.json`);\n  const imgPath = join(CACHE_DIR, `${key}.png`);\n\n  // Return cached if exists\n  if (existsSync(metaPath) && existsSync(imgPath)) {\n    console.log(`Cache hit: ${key}`);\n    return JSON.parse(readFileSync(metaPath, \"utf-8\"));\n  }\n\n  // Generate and cache\n  const response = await fetch(\"https://api.ideogram.ai/generate\", {\n    method: \"POST\",\n    headers: {\n      \"Api-Key\": process.env.IDEOGRAM_API_KEY!,\n      \"Content-Type\": \"application/json\",\n    },\n    body: JSON.stringify({\n      image_request: {\n        prompt,\n        model: options.model ?? \"V_2\",\n        style_type: style,\n        aspect_ratio: aspect,\n        magic_prompt_option: \"AUTO\",\n      },\n    }),\n  });\n\n  if (!response.ok) throw new Error(`Generate failed: ${response.status}`);\n  const result = await response.json();\n  const image = result.data[0];\n\n  // Download and cache\n  const imgResp = await fetch(image.url);\n  const buffer = Buffer.from(await imgResp.arrayBuffer());\n\n  mkdirSync(CACHE_DIR, { recursive: true });\n  writeFileSync(imgPath, buffer);\n  writeFileSync(metaPath, JSON.stringify({\n    ...image,\n    localPath: imgPath,\n    cachedAt: new Date().toISOString(),\n  }));\n\n  return { ...image, localPath: imgPath };\n}\n```\n\n### Step 3: Parallel Generation with Concurrency Control\n\n```typescript\nimport PQueue from \"p-queue\";\n\n// 8 concurrent (under Ideogram's 10 in-flight limit)\nconst queue = new PQueue({ concurrency: 8 });\n\nasync function parallelGenerate(\n  prompts: string[],\n  options: { style_type?: string; model?: string } = {}\n) {\n  const start = Date.now();\n\n  const results = await Promise.all(\n    prompts.map(prompt =>\n      queue.add(() => cachedGenerate(prompt, options))\n    )\n  );\n\n  const elapsed = ((Date.now() - start) / 1000).toFixed(1);\n  console.log(`Generated ${results.length} images in ${elapsed}s`);\n  console.log(`Throughput: ${(results.length / (elapsed as any)).toFixed(2)} img/s`);\n\n  return results;\n}\n\n// Generate 20 images -- queue manages concurrency automatically\nconst prompts = Array.from({ length: 20 }, (_, i) => `Product design variant ${i + 1}`);\nawait parallelGenerate(prompts, { style_type: \"DESIGN\", model: \"V_2_TURBO\" });\n```\n\n### Step 4: CDN Upload for Fast Delivery\n\n```typescript\nimport { S3Client, PutObjectCommand } from \"@aws-sdk/client-s3\";\n\nconst s3 = new S3Client({ region: \"us-east-1\" });\n\nasync function generateWithCDN(prompt: string, options: any = {}) {\n  const result = await cachedGenerate(prompt, options);\n\n  // Upload to S3 for CDN delivery\n  const key = `ideogram/${result.seed}.png`;\n  const buffer = readFileSync(result.localPath);\n\n  await s3.send(new PutObjectCommand({\n    Bucket: process.env.S3_BUCKET!,\n    Key: key,\n    Body: buffer,\n    ContentType: \"image/png\",\n    CacheControl: \"public, max-age=31536000, immutable\",\n  }));\n\n  return {\n    cdnUrl: `https://${process.env.CDN_DOMAIN}/${key}`,\n    seed: result.seed,\n    resolution: result.resolution,\n  };\n}\n```\n\n## Performance Tips\n\n1. **Use TURBO for drafts** -- V_2_TURBO is 2-3x faster than V_2 at lower cost\n2. **Cache by prompt hash** -- identical prompts produce cacheable results\n3. **Batch with num_images** -- 4 images in 1 call is faster than 4 separate calls\n4. **Download immediately** -- URLs expire; download in the same function\n5. **Set CDN headers** -- images are immutable once generated; cache forever\n6. **Use V3 FLASH for previews** -- fastest option for UI thumbnails\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Rate limit 429 | Concurrency too high | Reduce queue concurrency to 5-8 |\n| Slow generation | QUALITY speed or complex prompt | Use TURBO for drafts, simplify prompts |\n| Expired URL | Delayed download | Download immediately in same function |\n| Cache stale | Prompt changed slightly | Normalize prompts before hashing |\n\n## Output\n\n- Speed-tiered configuration for different use cases\n- Prompt-based cache layer preventing duplicate generations\n- Parallel generation with concurrency control\n- CDN integration for fast image delivery\n\n## Resources\n\n- [Ideogram API Reference](https://developer.ideogram.ai/api-reference)\n- [p-queue](https://github.com/sindresorhus/p-queue)\n\n## Next Steps\n\nFor cost optimization, see `ideogram-cost-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "ideogram-performance-tuning",
-    "description": "Optimize Ideogram API performance with caching, model selection, and",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

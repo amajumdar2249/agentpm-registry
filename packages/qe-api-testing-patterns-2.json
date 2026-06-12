@@ -1,13 +1,49 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000041344",
   "name": "qe-api-testing-patterns",
   "slug": "qe-api-testing-patterns-2",
   "description": "Comprehensive API testing patterns including contract testing, REST/GraphQL testing, and integration testing. Use when testing APIs or designing API test strategies.",
   "content": "\n# API Testing Patterns\n\n<default_to_action>\nWhen testing APIs or designing API test strategy:\n1. IDENTIFY testing level: contract, integration, or component\n2. TEST the contract, not implementation (consumer perspective)\n3. VALIDATE auth, input, errors, idempotency, concurrency\n4. AUTOMATE in CI/CD with schema validation\n5. MONITOR production APIs for contract drift\n\n**Quick Pattern Selection:**\n- Microservices \u2192 Consumer-driven contracts (Pact)\n- REST APIs \u2192 CRUD + pagination + filtering tests\n- GraphQL \u2192 Query validation + complexity limits\n- External deps \u2192 Mock with component testing\n- Performance \u2192 Load test critical endpoints\n\n**Critical Success Factors:**\n- APIs are contracts - test from consumer perspective\n- Always test error scenarios, not just happy paths\n- Version your API tests to prevent breaking changes\n</default_to_action>\n\n## Quick Reference Card\n\n### When to Use\n- Testing REST or GraphQL APIs\n- Validating microservice contracts\n- Designing API test strategies\n- Preventing breaking API changes\n\n### Testing Levels\n| Level | Purpose | Dependencies | Speed |\n|-------|---------|--------------|-------|\n| Contract | Provider-consumer agreement | None | Fast |\n| Component | API in isolation | Mocked | Fast |\n| Integration | Real dependencies | Database, services | Slower |\n\n### Critical Test Scenarios\n| Scenario | Must Test | Example |\n|----------|----------|---------|\n| Auth | 401/403 handling | Expired token, wrong user |\n| Input | 400 validation | Missing fields, wrong types |\n| Errors | 500 graceful handling | DB down, timeout |\n| Idempotency | Duplicate prevention | Same idempotency key |\n| Concurrency | Race conditions | Parallel checkout |\n\n### Tools\n- **Contract**: Pact, Spring Cloud Contract\n- **REST**: Supertest, REST-assured, Playwright\n- **Load**: k6, Artillery, JMeter\n\n### Agent Coordination\n- `qe-api-contract-validator`: Validate contracts, detect breaking changes\n- `qe-test-generator`: Generate tests from OpenAPI spec\n- `qe-performance-tester`: Load test endpoints\n- `qe-security-scanner`: API security testing\n\n---\n\n## Contract Testing\n\n**Pattern: Consumer-Driven Contracts**\n```javascript\n// Consumer defines expectations\nconst contract = {\n  request: { method: 'POST', path: '/orders', body: { productId: 'abc', quantity: 2 } },\n  response: { status: 201, body: { orderId: 'string', total: 'number' } }\n};\n\n// Provider must fulfill\ntest('order API meets contract', async () => {\n  const response = await api.post('/orders', { productId: 'abc', quantity: 2 });\n\n  expect(response.status).toBe(201);\n  expect(response.body).toMatchSchema({\n    orderId: expect.any(String),\n    total: expect.any(Number)\n  });\n});\n```\n\n**When:** Microservices, distributed systems, third-party integrations\n\n---\n\n## Critical Test Patterns\n\n### Authentication & Authorization\n```javascript\ndescribe('Auth', () => {\n  it('rejects without token', async () => {\n    expect((await api.get('/orders')).status).toBe(401);\n  });\n\n  it('rejects expired token', async () => {\n    const expired = generateExpiredToken();\n    expect((await api.get('/orders', { headers: { Authorization: `Bearer ${expired}` } })).status).toBe(401);\n  });\n\n  it('blocks cross-user access', async () => {\n    const userAToken = generateToken({ userId: 'A' });\n    expect((await api.get('/orders/user-B-order', { headers: { Authorization: `Bearer ${userAToken}` } })).status).toBe(403);\n  });\n});\n```\n\n### Input Validation\n```javascript\ndescribe('Validation', () => {\n  it('validates required fields', async () => {\n    const response = await api.post('/orders', { quantity: 2 }); // Missing productId\n    expect(response.status).toBe(400);\n    expect(response.body.errors).toContain('productId is required');\n  });\n\n  it('validates types', async () => {\n    expect((await api.post('/orders', { productId: 'abc', quantity: 'two' })).status).toBe(400);\n  });\n\n  it('validates ranges', async () => {\n    expect((await api.post('/orders', { productId: 'abc', quantity: -5 })).status).toBe(400);\n  });\n});\n```\n\n### Idempotency\n```javascript\nit('prevents duplicates with idempotency key', async () => {\n  const key = 'unique-123';\n  const data = { productId: 'abc', quantity: 2 };\n\n  const r1 = await api.post('/orders', data, { headers: { 'Idempotency-Key': key } });\n  const r2 = await api.post('/orders', data, { headers: { 'Idempotency-Key': key } });\n\n  expect(r1.body.orderId).toBe(r2.body.orderId); // Same order\n});\n```\n\n### Concurrency\n```javascript\nit('handles race condition on inventory', async () => {\n  const promises = Array(10).fill().map(() =>\n    api.post('/orders', { productId: 'abc', quantity: 1 })\n  );\n  const responses = await Promise.all(promises);\n  const successful = responses.filter(r => r.status === 201);\n\n  const inventory = await db.inventory.findById('abc');\n  expect(inventory.quantity).toBe(initialQuantity - successful.length);\n});\n```\n\n---\n\n## REST CRUD Pattern\n```javascript\ndescribe('Product CRUD', () => {\n  let productId;\n\n  it('CREATE', async () => {\n    const r = await api.post('/products', { name: 'Widget', price: 10 });\n    expect(r.status).toBe(201);\n    productId = r.body.id;\n  });\n\n  it('READ', async () => {\n    const r = await api.get(`/products/${productId}`);\n    expect(r.body.name).toBe('Widget');\n  });\n\n  it('UPDATE', async () => {\n    const r = await api.put(`/products/${productId}`, { price: 12 });\n    expect(r.body.price).toBe(12);\n  });\n\n  it('DELETE', async () => {\n    expect((await api.delete(`/products/${productId}`)).status).toBe(204);\n    expect((await api.get(`/products/${productId}`)).status).toBe(404);\n  });\n});\n```\n\n---\n\n## Best Practices\n\n### \u2705 Do This\n- Test from consumer perspective\n- Use schema validation (not exact values)\n- Test error scenarios extensively\n- Version API tests\n- Automate in CI/CD\n\n### \u274c Avoid This\n- Testing implementation, not contract\n- Ignoring HTTP semantics (status codes)\n- No negative testing\n- Asserting on field order or extra fields\n- Slow tests (mock external services)\n\n---\n\n## Agent-Assisted API Testing\n\n```typescript\n// Validate contracts\nawait Task(\"Contract Validation\", {\n  spec: 'openapi.yaml',\n  endpoint: '/orders',\n  checkBreakingChanges: true\n}, \"qe-api-contract-validator\");\n\n// Generate tests from spec\nawait Task(\"Generate API Tests\", {\n  spec: 'openapi.yaml',\n  coverage: 'comprehensive',\n  include: ['happy-paths', 'input-validation', 'auth-scenarios', 'error-handling']\n}, \"qe-test-generator\");\n\n// Load test\nawait Task(\"API Load Test\", {\n  endpoint: '/orders',\n  rps: 1000,\n  duration: '5min'\n}, \"qe-performance-tester\");\n\n// Security scan\nawait Task(\"API Security Scan\", {\n  spec: 'openapi.yaml',\n  checks: ['sql-injection', 'xss', 'broken-auth', 'rate-limiting']\n}, \"qe-security-scanner\");\n```\n\n---\n\n## Agent Coordination Hints\n\n### Memory Namespace\n```\naqe/api-testing/\n\u251c\u2500\u2500 contracts/*        - API contract definitions\n\u251c\u2500\u2500 generated-tests/*  - Generated test suites\n\u251c\u2500\u2500 validation/*       - Contract validation results\n\u2514\u2500\u2500 performance/*      - Load test results\n```\n\n### Fleet Coordination\n```typescript\nconst apiFleet = await FleetManager.coordinate({\n  strategy: 'contract-testing',\n  agents: ['qe-api-contract-validator', 'qe-test-generator', 'qe-test-executor'],\n  topology: 'mesh'\n});\n\nawait apiFleet.execute({\n  services: [\n    { name: 'orders-api', consumers: ['checkout-ui', 'admin-api'] },\n    { name: 'payment-api', consumers: ['orders-api'] }\n  ]\n});\n```\n\n---\n\n## Related Skills\n- [agentic-quality-engineering](../agentic-quality-engineering/) - API testing with agents\n- [tdd-london-chicago](../tdd-london-chicago/) - London school for API testing\n- [performance-testing](../performance-testing/) - API load testing\n- [security-testing](../security-testing/) - API security validation\n- [contract-testing](../contract-testing/) - Consumer-driven contracts deep dive\n\n---\n\n## Remember\n\nAPI testing = verifying contracts and behavior, not implementation. Focus on what matters to consumers: correct responses, proper error handling, acceptable performance.\n\n**With Agents:** Agents automate contract validation, generate comprehensive test suites from specs, and monitor production APIs for drift. Use agents to maintain API quality at scale.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "inclusion": "auto",
-    "name": "qe-api-testing-patterns",
-    "description": "Comprehensive API testing patterns including contract testing, REST/GraphQL testing, and integration testing. Use when testing APIs or designing API test strategies.",
-    "tags": "[api, rest, graphql, contract-testing, pact, integration, microservices]"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "[api",
+    "rest",
+    "graphql",
+    "contract-testing",
+    "pact",
+    "integration",
+    "microservices]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

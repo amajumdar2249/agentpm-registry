@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000011733",
   "name": "category-trend-analyzer",
   "slug": "category-trend-analyzer",
   "description": "For each spending category, computes current-period spend, 6-month rolling average, year-over-year delta, and budget variance, then flags categories that are outliers (>1.5x rolling average or >130% of budget). Produces a ranked list of categories that grew, shrank, or stayed flat, plus the top transactions driving each outlier. Use for monthly spending reviews, identifying lifestyle creep, evaluating budget adherence, or when user mentions category trends, spending changes, budget variance, or outlier spend.",
   "content": "\n# Category Trend Analyzer\n\n## Table of Contents\n- [Overview](#overview)\n- [Input contract](#input-contract)\n- [Workflow](#workflow)\n- [Outlier rules](#outlier-rules)\n- [Output contract](#output-contract)\n- [Guardrails](#guardrails)\n\n## Overview\n\nThe point of categorizing transactions is to see, every month, what changed. This skill computes the comparative numbers \u2014 current vs. rolling, current vs. budget, current vs. same-month-last-year \u2014 for every category, identifies outliers, and surfaces the transactions that drive them. It refuses to flag noise: small categories below a materiality floor are excluded.\n\n## Input contract\n\nThe caller provides:\n\n- `transactions` \u2014 at least 13 months of categorized transactions.\n- `budget` \u2014 `budget.json` with target per category.\n- `period_start`, `period_end` \u2014 the current period (typically a calendar month).\n- `materiality_floor_cents` \u2014 default `5000` ($50). Categories with current spend below this are summarized but not flagged.\n- `outlier_thresholds` \u2014 defaults: `{ rolling_multiple: 1.5, budget_pct: 130 }`.\n\n## Workflow\n\n```\nTrend Analysis Progress:\n- [ ] Step 1: Roll up transactions by category for the current period\n- [ ] Step 2: Roll up the prior 6 calendar months by category\n- [ ] Step 3: Roll up the same-month-last-year by category\n- [ ] Step 4: Compute deltas and percent changes\n- [ ] Step 5: Apply outlier rules\n- [ ] Step 6: Identify driver transactions for each outlier\n- [ ] Step 7: Emit ranked list and totals\n```\n\n### Step 1 \u2014 Current period totals\n\nFor each `category` and `category.subcategory`, sum spend (negative `amount_cents`) over `[period_start, period_end]`. Exclude:\n- `income.*`\n- `savings_investment.*`\n- `financial.transfers_internal`\n\nThese are not spending. They're tracked separately for the cash-flow and savings views.\n\n### Step 2 \u2014 Rolling 6-month average\n\nFor each category, sum spend in each of the prior 6 calendar months, then take the mean. Use **calendar month** anchoring, not trailing 180 days, so a \"monthly\" comparison matches user intuition.\n\nIf fewer than 3 prior months exist, mark `rolling_avg_confidence: low` and only flag outliers above the budget threshold (skip the rolling-multiple test).\n\n### Step 3 \u2014 Year-over-year\n\nSum the same calendar month, one year prior. If absent (less than a year of data), set `yoy_delta_cents: null`.\n\n### Step 4 \u2014 Compute deltas\n\n| Metric | Formula |\n|---|---|\n| `vs_rolling_pct` | `(current \u2212 rolling_avg) / rolling_avg \u00d7 100` |\n| `vs_budget_pct` | `current / budget \u00d7 100` (only if budget exists) |\n| `vs_yoy_pct` | `(current \u2212 yoy) / yoy \u00d7 100` |\n\n### Step 5 \u2014 Outlier rules\n\nA category is an outlier when **any** of:\n\n- `vs_rolling_pct \u2265 (rolling_multiple \u2212 1) \u00d7 100` (default \u2265 50% above 6-month average) AND `current_cents \u2265 materiality_floor_cents`.\n- `vs_budget_pct \u2265 budget_pct` (default \u2265 130% of budget) AND budget exists.\n- `current_cents \u2265 2 \u00d7 rolling_avg_cents` AND `current_cents \u2265 materiality_floor_cents` \u2192 severity `high` (real-time alert per the spending-analyst spec).\n\nEach outlier carries:\n- `severity` \u2014 `high` (\u2265 2\u00d7 rolling), `medium` (\u2265 1.5\u00d7 rolling or \u2265 130% budget), `low` (above materiality but inside thresholds \u2014 surfaced for context only).\n- `reason` \u2014 which rule fired.\n\n### Step 6 \u2014 Drivers\n\nFor each outlier, identify the top 3\u20135 transactions ranked by absolute amount, descending. These are the \"what drove the outlier\" lines for the briefing.\n\nIf a single transaction explains > 60% of the outlier, mark it `single_driver: true` so the analyst can phrase the explanation correctly (\"you spent $850 at IKEA \u2014 one trip \u2014 vs. average of $120 in home maintenance\").\n\n### Step 7 \u2014 Ranking\n\nRank outliers by `dollar_impact_cents = |current_cents \u2212 rolling_avg_cents|`. Largest dollar movers first; small-percentage-large-dollar matters more than large-percentage-small-dollar.\n\n## Outlier rules\n\nConcrete examples:\n\n| Current | Rolling 6mo avg | Budget | Outcome |\n|---|---|---|---|\n| $1,200 groceries | $850 | $900 | medium \u2014 1.41\u00d7 rolling, 133% of budget |\n| $3,400 travel | $300 | $400 | high \u2014 11.3\u00d7 rolling, but materiality satisfied |\n| $42 hobbies | $20 | $30 | not flagged (below materiality $50) |\n| $850 home maintenance | $120 | $150 | high \u2014 7.1\u00d7 rolling, single-driver IKEA trip |\n| $1,800 restaurants | $1,200 | \u2014 | medium \u2014 1.5\u00d7 rolling, no budget set |\n| $3,200 utilities (Aug) | $2,100 | $2,400 | medium \u2014 heat wave, 1.5\u00d7 rolling, 133% of budget; YoY +5% so seasonal not lifestyle |\n\n## Output contract\n\n```json\n{\n  \"period\": { \"start\": \"2026-04-01\", \"end\": \"2026-04-30\" },\n  \"totals\": {\n    \"spend_cents\": 624800,\n    \"spend_cents_vs_rolling\": 78400,\n    \"spend_cents_vs_budget\": -25200,\n    \"categories_above_floor\": 18,\n    \"outliers_count\": 3\n  },\n  \"categories\": [\n    {\n      \"category\": \"food\",\n      \"subcategory\": \"groceries\",\n      \"current_cents\": 102000,\n      \"rolling_avg_cents\": 85000,\n      \"yoy_cents\": 92000,\n      \"budget_cents\": 90000,\n      \"vs_rolling_pct\": 20.0,\n      \"vs_budget_pct\": 113.3,\n      \"vs_yoy_pct\": 10.9,\n      \"severity\": \"low\",\n      \"outlier\": false\n    },\n    {\n      \"category\": \"travel\",\n      \"subcategory\": null,\n      \"current_cents\": 340000,\n      \"rolling_avg_cents\": 30000,\n      \"yoy_cents\": 18000,\n      \"budget_cents\": 40000,\n      \"vs_rolling_pct\": 1033.3,\n      \"vs_budget_pct\": 850.0,\n      \"vs_yoy_pct\": 1788.9,\n      \"severity\": \"high\",\n      \"outlier\": true,\n      \"reasons\": [\"above_rolling_multiple_2x\", \"above_budget_threshold\"],\n      \"drivers\": [\n        { \"tx_id\": \"tx_20260408_002\", \"amount_cents\": -312000,\n          \"merchant\": \"Delta Air Lines\", \"single_driver\": true,\n          \"share_of_outlier_pct\": 91.8 }\n      ]\n    }\n  ],\n  \"rankings\": {\n    \"biggest_growers\": [\"travel\", \"home_maintenance\", \"restaurants\"],\n    \"biggest_shrinkers\": [\"entertainment\", \"transportation.gas\"]\n  }\n}\n```\n\n## Guardrails\n\n- **Materiality first.** Don't flag a $20 hobbies overage. The user's attention is the scarcest resource.\n- **Don't double-count subcategories and parents.** Choose a level \u2014 top-level for the headline, subcategory for the drill-down. The spending-analyst agent decides which to show.\n- **Annual lumpy categories** (`auto_insurance`, `property_tax`, `home_insurance`) routinely trigger 10\u00d7+ outliers in their billing month. Skip flagging when the spike matches the merchant's annual cadence in `recurring.json`. Use the seasonal-calendar sub-signal from the spending-analyst agent.\n- **Negative outliers are not always bad.** A category that drops to zero may signal a missed bill (utility autopay broken). Flag both directions, but with different framing.\n- **Do not classify the cause** in this skill (\"she got a raise\" / \"kid started camp\"). Surface the data; the analyst agent provides the narrative.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "category-trend-analyzer",
-    "description": "For each spending category, computes current-period spend, 6-month rolling average, year-over-year delta, and budget variance, then flags categories that are outliers (>1.5x rolling average or >130% of budget). Produces a ranked list of categories that grew, shrank, or stayed flat, plus the top transactions driving each outlier. Use for monthly spending reviews, identifying lifestyle creep, evaluating budget adherence, or when user mentions category trends, spending changes, budget variance, or outlier spend."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

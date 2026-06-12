@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032265",
   "name": "ideogram-common-errors",
   "slug": "ideogram-common-errors",
   "description": "Diagnose and fix Ideogram API errors and exceptions.",
   "content": "# Ideogram Common Errors\n\n## Overview\n\nQuick reference for the most common Ideogram API errors, their root causes, and proven fixes. All Ideogram endpoints return standard HTTP status codes with JSON error bodies.\n\n## Prerequisites\n\n- Ideogram API key configured\n- Access to request/response logs\n- `curl` available for manual testing\n\n## Error Reference\n\n### 401 -- Authentication Failed\n\n```\nHTTP 401 Unauthorized\n```\n\n**Cause:** Missing, invalid, or revoked API key.\n\n**Fix:**\n\n```bash\nset -euo pipefail\n# Verify the key is set and not empty\necho \"Key length: ${#IDEOGRAM_API_KEY}\"\n\n# Test auth directly\ncurl -s -o /dev/null -w \"%{http_code}\" \\\n  -X POST https://api.ideogram.ai/generate \\\n  -H \"Api-Key: $IDEOGRAM_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"image_request\":{\"prompt\":\"test\",\"model\":\"V_2_TURBO\"}}'\n```\n\n**Common mistakes:**\n\n- Using `Authorization: Bearer` instead of `Api-Key` header\n- Whitespace or newlines in the key string\n- Key was regenerated in dashboard but not updated in `.env`\n\n---\n\n### 422 -- Safety Check Failed\n\n```json\n{\"error\": \"Prompt or provided image failed the safety checks\"}\n```\n\n**Cause:** Prompt text or uploaded image triggered Ideogram's content filter.\n\n**Fix:**\n\n- Remove brand names, celebrity names, or trademarked terms\n- Avoid violent, sexual, or politically sensitive content\n- Remove explicit references to real people\n- Rephrase with neutral descriptors\n\n```typescript\n// Pre-screen prompts before sending to API\nconst FLAGGED_PATTERNS = [\n  /\\b(coca.?cola|nike|apple|disney)\\b/i,\n  /\\b(celebrity|politician|president)\\b/i,\n];\n\nfunction isPromptSafe(prompt: string): boolean {\n  return !FLAGGED_PATTERNS.some(p => p.test(prompt));\n}\n```\n\n---\n\n### 429 -- Rate Limited\n\n```\nHTTP 429 Too Many Requests\n```\n\n**Cause:** More than 10 in-flight requests (default limit).\n\n**Fix:**\n\n```typescript\nasync function rateLimitedGenerate(prompt: string) {\n  const maxRetries = 5;\n  for (let attempt = 0; attempt < maxRetries; attempt++) {\n    try {\n      return await generateImage(prompt);\n    } catch (err: any) {\n      if (err.status !== 429) throw err;\n      const delay = 1000 * Math.pow(2, attempt) + Math.random() * 500;\n      console.warn(`Rate limited. Retry in ${delay.toFixed(0)}ms`);\n      await new Promise(r => setTimeout(r, delay));\n    }\n  }\n  throw new Error(\"Rate limit retries exhausted\");\n}\n```\n\n---\n\n### 400 -- Bad Request\n\n```json\n{\"error\": \"Invalid input\"}\n```\n\n**Cause:** Invalid parameter values in request body.\n\n**Common issues:**\n\n| Parameter | Wrong | Correct |\n|-----------|-------|---------|\n| aspect_ratio | `\"16:9\"` | `\"ASPECT_16_9\"` (legacy) or `\"16x9\"` (V3) |\n| style_type | `\"realistic\"` | `\"REALISTIC\"` (uppercase enum) |\n| model | `\"v2\"` | `\"V_2\"` (underscore + uppercase) |\n| num_images | `10` | `1`-`4` (max 4 per request) |\n| resolution | Used with `aspect_ratio` | Use one or the other, not both |\n\n---\n\n### 402 -- Insufficient Credits\n\n```\nHTTP 402 Payment Required\n```\n\n**Cause:** API credit balance is depleted.\n\n**Fix:**\n\n1. Log into [ideogram.ai](https://ideogram.ai) > Settings > API Beta\n2. Check current balance and top-up settings\n3. Increase auto top-up amount or manually add credits\n4. Default: auto top-up $20 when balance drops below $10\n\n---\n\n### Expired Image URL\n\n```\nHTTP 403 or 404 when downloading generated image\n```\n\n**Cause:** Ideogram image URLs are temporary (expire after ~1 hour).\n\n**Fix:**\n\n```typescript\n// ALWAYS download immediately after generation\nasync function generateAndSave(prompt: string): Promise<string> {\n  const result = await generateImage(prompt);\n  const imageUrl = result.data[0].url;\n\n  // Download within seconds, not later\n  const response = await fetch(imageUrl);\n  if (!response.ok) throw new Error(`Image download failed: ${response.status}`);\n\n  const buffer = Buffer.from(await response.arrayBuffer());\n  const path = `./images/gen-${result.data[0].seed}.png`;\n  writeFileSync(path, buffer);\n  return path;\n}\n```\n\n---\n\n### Mask Size Mismatch (Edit Endpoint)\n\n```json\n{\"error\": \"Invalid input\"}\n```\n\n**Cause:** Mask image dimensions do not match source image dimensions.\n\n**Fix:**\n\n```bash\nset -euo pipefail\n# Check dimensions match\nidentify source.png  # e.g., 1024x1024\nidentify mask.png    # Must also be 1024x1024\n\n# Resize mask to match source\nconvert mask.png -resize 1024x1024! mask-resized.png\n```\n\n---\n\n### Multipart Form Errors (V3 Endpoints)\n\n**Cause:** V3 endpoints (`/v1/ideogram-v3/*`) require multipart form data, not JSON.\n\n**Fix:**\n\n```typescript\n// WRONG for V3 endpoints:\nfetch(url, { body: JSON.stringify({...}), headers: { \"Content-Type\": \"application/json\" } });\n\n// CORRECT for V3 endpoints:\nconst form = new FormData();\nform.append(\"prompt\", \"...\");\nform.append(\"aspect_ratio\", \"1x1\");\nfetch(url, { body: form, headers: { \"Api-Key\": key } });\n// Do NOT set Content-Type -- FormData handles the boundary\n```\n\n## Quick Diagnostic Script\n\n```bash\nset -euo pipefail\necho \"=== Ideogram Diagnostics ===\"\necho \"API Key set: ${IDEOGRAM_API_KEY:+YES}\"\necho \"Key length: ${#IDEOGRAM_API_KEY}\"\n\n# Test connectivity\nSTATUS=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n  -X POST https://api.ideogram.ai/generate \\\n  -H \"Api-Key: $IDEOGRAM_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"image_request\":{\"prompt\":\"test circle\",\"model\":\"V_2_TURBO\",\"magic_prompt_option\":\"OFF\"}}')\n\necho \"API Response: $STATUS\"\ncase $STATUS in\n  200) echo \"OK: Auth and generation working\" ;;\n  401) echo \"ERROR: Invalid API key\" ;;\n  402) echo \"ERROR: Insufficient credits\" ;;\n  422) echo \"ERROR: Safety filter (try different prompt)\" ;;\n  429) echo \"ERROR: Rate limited (wait and retry)\" ;;\n  *)   echo \"ERROR: Unexpected status $STATUS\" ;;\nesac\n```\n\n## Error Handling\n\n| Error | HTTP | Root Cause | Fix |\n|-------|------|-----------|-----|\n| Auth failed | 401 | Bad `Api-Key` header | Verify key, check header name |\n| Safety filter | 422 | Flagged prompt/image | Rephrase prompt |\n| Rate limited | 429 | >10 in-flight requests | Exponential backoff |\n| Bad params | 400 | Wrong enum values | Use exact enum strings |\n| No credits | 402 | Balance depleted | Top up in dashboard |\n| URL expired | 403/404 | Late download | Download immediately |\n\n## Output\n\n- Identified error root cause\n- Applied fix with verification\n- Diagnostic output confirming resolution\n\n## Resources\n\n- [Ideogram API Reference](https://developer.ideogram.ai/api-reference)\n- [API Overview](https://developer.ideogram.ai/ideogram-api/api-overview)\n\n## Next Steps\n\nFor comprehensive debugging, see `ideogram-debug-bundle`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "ideogram-common-errors",
-    "description": "Diagnose and fix Ideogram API errors and exceptions.",
-    "allowed-tools": "Read, Grep, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

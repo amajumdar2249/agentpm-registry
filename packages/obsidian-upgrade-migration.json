@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032749",
   "name": "obsidian-upgrade-migration",
   "slug": "obsidian-upgrade-migration",
   "description": "Migrate Obsidian plugins between API versions and handle breaking changes.",
   "content": "# Obsidian Upgrade Migration\n\n## Current State\n\n!`npm list 2>/dev/null | head -20`\n!`cat manifest.json 2>/dev/null || echo 'No manifest.json in cwd'`\n\n## Overview\n\nUpgrade an Obsidian plugin between versions: migrate persisted settings with version checks, replace deprecated API calls, update `manifest.json` `minAppVersion`, and test across Obsidian releases.\n\n## Prerequisites\n\n- Existing Obsidian plugin with source code\n- Current `manifest.json` and `versions.json`\n- Access to [Obsidian changelog](https://obsidian.md/changelog) and [breaking changes docs](https://docs.obsidian.md/Plugins/Releasing/Breaking+changes)\n- Node.js 18+ with npm or pnpm\n\n## Instructions\n\n### Step 1: Audit Current Version Compatibility\n\nCheck what your plugin currently targets and what the user's Obsidian version requires:\n\n```bash\n# Current plugin target\necho \"=== manifest.json ===\"\ncat manifest.json | python3 -c \"\nimport json, sys\nm = json.load(sys.stdin)\nprint(f\\\"Plugin: {m['id']} v{m['version']}\\\")\nprint(f\\\"minAppVersion: {m['minAppVersion']}\\\")\n\"\n\n# Current obsidian type definitions\necho \"=== obsidian package version ===\"\nnpm ls obsidian 2>/dev/null || echo \"Not found in node_modules\"\n\n# Check versions.json for version history\necho \"=== versions.json ===\"\ncat versions.json 2>/dev/null | python3 -m json.tool || echo \"No versions.json\"\n```\n\n### Step 2: Update the Obsidian Type Definitions\n\n```bash\n# Update to latest obsidian types\nnpm install obsidian@latest --save-dev\n\n# Check what changed\nnpm diff obsidian 2>/dev/null | head -100\n```\n\nThen check for TypeScript errors against the new types:\n\n```bash\nnpx tsc --noEmit 2>&1 | head -50\n```\n\nEvery error here is a breaking change you need to address.\n\n### Step 3: Settings Migration with Version Tracking\n\nImplement a version-aware `loadData()` pattern so existing users' settings survive upgrades:\n\n```typescript\ninterface PluginSettings {\n  _version: number; // Internal schema version\n  // v1 fields\n  enabled: boolean;\n  // v2 fields (added in plugin v2.0.0)\n  syncInterval: number;\n  // v3 fields (added in plugin v3.0.0)\n  theme: 'light' | 'dark' | 'system';\n}\n\nconst CURRENT_SETTINGS_VERSION = 3;\n\nconst DEFAULT_SETTINGS: PluginSettings = {\n  _version: CURRENT_SETTINGS_VERSION,\n  enabled: true,\n  syncInterval: 300,\n  theme: 'system',\n};\n\nasync loadSettings(): Promise<PluginSettings> {\n  const raw = await this.loadData();\n  if (!raw) return { ...DEFAULT_SETTINGS };\n\n  const version = raw._version ?? 1;\n  let settings = { ...raw };\n\n  // v1 -> v2: add syncInterval\n  if (version < 2) {\n    settings.syncInterval = DEFAULT_SETTINGS.syncInterval;\n    console.log('[your-plugin] Migrated settings v1 -> v2');\n  }\n\n  // v2 -> v3: add theme, rename old field\n  if (version < 3) {\n    settings.theme = DEFAULT_SETTINGS.theme;\n    // Rename deprecated field\n    if ('darkMode' in settings) {\n      settings.theme = settings.darkMode ? 'dark' : 'light';\n      delete settings.darkMode;\n    }\n    console.log('[your-plugin] Migrated settings v2 -> v3');\n  }\n\n  settings._version = CURRENT_SETTINGS_VERSION;\n  await this.saveData(settings); // Persist the migration\n  return settings as PluginSettings;\n}\n```\n\n### Step 4: Replace Deprecated API Calls\n\nCommon deprecations and their replacements:\n\n**Vault API changes:**\n\n```typescript\n// DEPRECATED: vault.modify with string path\nawait this.app.vault.modify(filePath, content);\n// REPLACEMENT: use TFile object\nconst file = this.app.vault.getAbstractFileByPath(filePath);\nif (file instanceof TFile) {\n  await this.app.vault.modify(file, content);\n}\n\n// DEPRECATED: vault.create returns void in older versions\nthis.app.vault.create(path, content);\n// REPLACEMENT: returns TFile, handle it\nconst newFile = await this.app.vault.create(path, content);\n```\n\n**Event registration changes:**\n\n```typescript\n// DEPRECATED: workspace.on('file-open') with old signature\nthis.app.workspace.on('file-open', (file) => { ... });\n// REPLACEMENT: use registerEvent for proper cleanup\nthis.registerEvent(\n  this.app.workspace.on('file-open', (file) => { ... })\n);\n```\n\n**Editor API (CodeMirror 5 to 6 migration):**\n\n```typescript\n// DEPRECATED: accessing CM5 editor instance\nconst cm = (editor as any).cm;\ncm.getValue(); // CM5\n\n// REPLACEMENT: use Obsidian's Editor interface\nconst content = editor.getValue();\nconst cursor = editor.getCursor();\neditor.replaceRange(text, cursor);\n\n// For CM6-specific features, use EditorView extension:\nimport { EditorView, ViewPlugin } from '@codemirror/view';\n\nthis.registerEditorExtension(\n  ViewPlugin.fromClass(class {\n    constructor(view: EditorView) {\n      // CM6 view access\n    }\n  })\n);\n```\n\n**FileManager changes:**\n\n```typescript\n// DEPRECATED: processFrontMatter sync signature\nthis.app.fileManager.processFrontMatter(file, (fm) => {\n  fm.tags = ['updated'];\n});\n// REPLACEMENT: async signature (Obsidian 1.4+)\nawait this.app.fileManager.processFrontMatter(file, (fm) => {\n  fm.tags = ['updated'];\n});\n```\n\n### Step 5: Update manifest.json\n\nBump `minAppVersion` to the lowest Obsidian version that supports all APIs you use:\n\n```json\n{\n  \"id\": \"your-plugin\",\n  \"name\": \"Your Plugin\",\n  \"version\": \"3.0.0\",\n  \"minAppVersion\": \"1.5.0\",\n  \"description\": \"...\",\n  \"author\": \"...\",\n  \"isDesktopOnly\": false\n}\n```\n\nUpdate `versions.json` to map your plugin version to the minimum Obsidian version:\n\n```json\n{\n  \"1.0.0\": \"0.15.0\",\n  \"2.0.0\": \"1.0.0\",\n  \"3.0.0\": \"1.5.0\"\n}\n```\n\n### Step 6: Test Across Obsidian Versions\n\nBuild and verify:\n\n```bash\n# Clean build\nrm -rf dist node_modules/.cache\nnpm install\nnpm run build\n\n# Check for type errors\nnpx tsc --noEmit\n\n# Check bundle for leftover deprecated calls\ngrep -rn 'cm\\.getValue\\|processFrontMatter.*sync\\|vault\\.modify.*string' src/ || echo \"No deprecated patterns found\"\n```\n\nManual testing checklist:\n\n1. Install plugin on the `minAppVersion` you declared -- confirm it loads without errors\n2. Install on latest Obsidian -- confirm full functionality\n3. Test settings migration: copy a `data.json` from an older version into the plugin directory, reload, verify settings are preserved and upgraded\n4. Open Developer Console (Ctrl+Shift+I) and check for deprecation warnings\n\n### Step 7: Handle the Release\n\n```bash\n# Update version in package.json and manifest.json\nnpm version major  # or minor/patch\n\n# Ensure versions.json includes the new mapping\npython3 -c \"\nimport json\nv = json.load(open('versions.json'))\nm = json.load(open('manifest.json'))\nv[m['version']] = m['minAppVersion']\njson.dump(v, open('versions.json', 'w'), indent=2)\nprint(f\\\"Added {m['version']} -> {m['minAppVersion']}\\\")\n\"\n\n# Build the release artifacts\nnpm run build\n```\n\n## Output\n\n- Updated `manifest.json` with correct `minAppVersion`\n- Updated `versions.json` with new version mapping\n- Settings migration code that handles all previous schema versions\n- All deprecated API calls replaced with current equivalents\n- Clean `tsc --noEmit` with no type errors\n- Tested on minimum and latest Obsidian versions\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `Property does not exist on type 'Plugin'` | API removed in newer `obsidian` types | Check changelog for replacement API |\n| `Cannot find module 'obsidian'` | Types not installed | `npm install obsidian@latest --save-dev` |\n| Settings lost after upgrade | No migration logic for `_version` jump | Add migration step for each version gap |\n| `TypeError: x is not a function` at runtime | API exists in types but not in user's Obsidian | Lower `minAppVersion` or add runtime version check |\n| Plugin loads but features missing | Feature flag not migrated | Check settings migration covers all paths |\n\n## Examples\n\n**Simple version bump**: Plugin works fine on new Obsidian, just need to update `minAppVersion`. Run Step 1 to audit, Step 5 to update manifest, Step 6 to verify.\n\n**CodeMirror 5 to 6 migration**: Plugin uses `editor.cm` for custom decorations. Replace CM5 `Decoration` with CM6 `EditorView` extensions per Step 4. This is the most common large migration.\n\n**Settings schema change**: Plugin v2 renamed `darkMode: boolean` to `theme: 'light' | 'dark' | 'system'`. Add migration in Step 3 that maps the old boolean to the new enum, preserving user preference.\n\n## Resources\n\n- [Obsidian Changelog](https://obsidian.md/changelog)\n- [Obsidian API Breaking Changes](https://docs.obsidian.md/Plugins/Releasing/Breaking+changes)\n- [Obsidian Developer Docs](https://docs.obsidian.md/Plugins)\n- [Obsidian Plugin API Types](https://github.com/obsidianmd/obsidian-api)\n- [CodeMirror 6 Migration](https://codemirror.net/docs/migration/)\n\n## Next Steps\n\nFor CI/CD to automate release testing, see `obsidian-ci-integration`. For multi-environment testing, see `obsidian-multi-env-setup`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "obsidian-upgrade-migration",
-    "description": "Migrate Obsidian plugins between API versions and handle breaking changes.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

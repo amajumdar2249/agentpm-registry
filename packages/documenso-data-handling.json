@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031794",
   "name": "documenso-data-handling",
   "slug": "documenso-data-handling",
   "description": "Handle document data, signatures, and PII in Documenso integrations.",
   "content": "# Documenso Data Handling\n\n## Overview\n\nBest practices for handling documents, signatures, and PII in Documenso integrations. Covers downloading signed PDFs, data retention, GDPR compliance, and secure storage. Note: Documenso cloud stores documents in PostgreSQL by default; self-hosted gives you full control.\n\n## Prerequisites\n\n- Understanding of data protection regulations (GDPR, CCPA)\n- Secure storage infrastructure (S3, GCS, or local encrypted storage)\n- Completed `documenso-install-auth` setup\n\n## Document Lifecycle\n\n```\nDRAFT \u2500\u2500send()\u2500\u2500\u2192 PENDING \u2500\u2500all sign\u2500\u2500\u2192 COMPLETED\n                      \u2502\n                      \u251c\u2500\u2500reject()\u2500\u2500\u2192 REJECTED\n                      \u2514\u2500\u2500cancel()\u2500\u2500\u2192 CANCELLED\n\nData handling implications:\n- DRAFT: mutable, can delete freely\n- PENDING: immutable document, but status changes\n- COMPLETED: signed PDF available for download, archive\n- REJECTED/CANCELLED: cleanup candidate\n```\n\n## Instructions\n\n### Step 1: Download Signed Documents\n\n```typescript\nimport { Documenso } from \"@documenso/sdk-typescript\";\nimport { writeFile } from \"node:fs/promises\";\n\nconst client = new Documenso({ apiKey: process.env.DOCUMENSO_API_KEY! });\n\nasync function downloadSignedPdf(documentId: number, outputPath: string) {\n  // Verify document is completed\n  const doc = await client.documents.getV0(documentId);\n  if (doc.status !== \"COMPLETED\") {\n    throw new Error(`Document ${documentId} is ${doc.status}, not COMPLETED`);\n  }\n\n  // Download via v1 REST API (SDK may not expose download directly)\n  const res = await fetch(\n    `https://app.documenso.com/api/v1/documents/${documentId}/download`,\n    { headers: { Authorization: `Bearer ${process.env.DOCUMENSO_API_KEY}` } }\n  );\n  if (!res.ok) throw new Error(`Download failed: ${res.status}`);\n\n  const buffer = Buffer.from(await res.arrayBuffer());\n  await writeFile(outputPath, buffer);\n  console.log(`Saved signed PDF: ${outputPath} (${buffer.length} bytes)`);\n}\n```\n\n### Step 2: PII Handling\n\n```typescript\n// Identify PII in Documenso data\ninterface RecipientPII {\n  email: string;    // PII \u2014 must be protected\n  name: string;     // PII \u2014 must be protected\n  role: string;     // Not PII\n  signingStatus: string; // Not PII\n}\n\n// Sanitize before logging\nfunction sanitizeForLogging(payload: any): any {\n  const sanitized = { ...payload };\n  if (sanitized.recipients) {\n    sanitized.recipients = sanitized.recipients.map((r: any) => ({\n      ...r,\n      email: r.email.replace(/^(.{2}).*(@.*)$/, \"$1***$2\"),\n      name: \"[REDACTED]\",\n    }));\n  }\n  return sanitized;\n}\n\n// Usage: safe to log\nconsole.log(\"Webhook received:\", JSON.stringify(sanitizeForLogging(payload)));\n// Output: { email: \"ja***@example.com\", name: \"[REDACTED]\" }\n```\n\n### Step 3: Data Retention Policy\n\n```typescript\n// src/retention/documenso-cleanup.ts\nimport { Documenso } from \"@documenso/sdk-typescript\";\n\ninterface RetentionPolicy {\n  draftMaxAgeDays: number;      // Delete abandoned drafts\n  completedArchiveDays: number; // Archive completed docs\n  retainCompletedDays: number;  // Keep completed in Documenso\n}\n\nconst POLICY: RetentionPolicy = {\n  draftMaxAgeDays: 30,\n  completedArchiveDays: 7,    // Archive to S3 within 7 days\n  retainCompletedDays: 365,   // Keep in Documenso for 1 year\n};\n\nasync function enforceRetention(client: Documenso) {\n  const { documents } = await client.documents.findV0({ page: 1, perPage: 100 });\n  const now = Date.now();\n\n  for (const doc of documents) {\n    const ageDays = (now - new Date(doc.createdAt).getTime()) / (1000 * 60 * 60 * 24);\n\n    // Delete old drafts\n    if (doc.status === \"DRAFT\" && ageDays > POLICY.draftMaxAgeDays) {\n      await client.documents.deleteV0(doc.id);\n      console.log(`Deleted abandoned draft: ${doc.title} (${ageDays.toFixed(0)} days old)`);\n    }\n\n    // Archive completed documents\n    if (doc.status === \"COMPLETED\" && ageDays > POLICY.completedArchiveDays) {\n      await archiveToS3(doc.id, doc.title);\n      console.log(`Archived: ${doc.title}`);\n    }\n  }\n}\n```\n\n### Step 4: GDPR Data Subject Requests\n\n```typescript\n// Handle GDPR access and erasure requests\nasync function handleDataSubjectRequest(\n  client: Documenso,\n  type: \"access\" | \"erasure\",\n  subjectEmail: string\n) {\n  const { documents } = await client.documents.findV0({ page: 1, perPage: 100 });\n\n  // Find all documents involving this person\n  const subjectDocs = documents.filter((doc: any) =>\n    doc.recipients?.some((r: any) => r.email === subjectEmail)\n  );\n\n  if (type === \"access\") {\n    // Return all data associated with this person\n    return {\n      documentsCount: subjectDocs.length,\n      documents: subjectDocs.map((d: any) => ({\n        title: d.title,\n        status: d.status,\n        createdAt: d.createdAt,\n        role: d.recipients.find((r: any) => r.email === subjectEmail)?.role,\n      })),\n    };\n  }\n\n  if (type === \"erasure\") {\n    // Delete/anonymize where legally permissible\n    // Note: completed, signed documents may need to be retained for legal compliance\n    const deletable = subjectDocs.filter((d: any) => d.status === \"DRAFT\");\n    for (const doc of deletable) {\n      await client.documents.deleteV0(doc.id);\n    }\n    return {\n      deleted: deletable.length,\n      retained: subjectDocs.length - deletable.length,\n      retainedReason: \"Completed documents retained for legal compliance\",\n    };\n  }\n}\n```\n\n### Step 5: Secure Storage for Downloaded PDFs\n\n```typescript\nimport { S3Client, PutObjectCommand } from \"@aws-sdk/client-s3\";\nimport crypto from \"crypto\";\n\nconst s3 = new S3Client({ region: \"us-east-1\" });\n\nasync function archiveToS3(documentId: number, title: string) {\n  // Download signed PDF\n  const res = await fetch(\n    `https://app.documenso.com/api/v1/documents/${documentId}/download`,\n    { headers: { Authorization: `Bearer ${process.env.DOCUMENSO_API_KEY}` } }\n  );\n  const buffer = Buffer.from(await res.arrayBuffer());\n\n  // Upload with server-side encryption\n  const key = `signed-documents/${documentId}-${Date.now()}.pdf`;\n  await s3.send(new PutObjectCommand({\n    Bucket: process.env.ARCHIVE_BUCKET!,\n    Key: key,\n    Body: buffer,\n    ContentType: \"application/pdf\",\n    ServerSideEncryption: \"aws:kms\",\n    Metadata: {\n      documentId: String(documentId),\n      title,\n      archivedAt: new Date().toISOString(),\n      checksum: crypto.createHash(\"sha256\").update(buffer).digest(\"hex\"),\n    },\n  }));\n\n  console.log(`Archived to s3://${process.env.ARCHIVE_BUCKET}/${key}`);\n}\n```\n\n## Data Classification\n\n| Data Type | Classification | Retention | Handling |\n|-----------|---------------|-----------|----------|\n| Signed PDF | Legal record | Per regulation (often 7+ years) | Encrypted archive |\n| Recipient email/name | PII | Duration of business relationship | Sanitize in logs |\n| API keys | Secret | Active use only | Secret manager, never logged |\n| Webhook payloads | Contains PII | 30 days max | Anonymize after processing |\n| Audit trail | Compliance record | Per regulation | Immutable storage |\n\n## Error Handling\n\n| Data Issue | Cause | Solution |\n|------------|-------|----------|\n| Download failed | Document not COMPLETED | Check status before download |\n| Storage permission denied | Wrong bucket policy | Verify IAM permissions |\n| GDPR request incomplete | Pagination not handled | Iterate all pages of documents |\n| Retention job failed | API error during deletion | Retry with backoff, log failures |\n\n## Resources\n\n- [GDPR Requirements](https://gdpr.eu/)\n- [Documenso Self-Hosting](https://docs.documenso.com/developers/self-hosting)\n- [AWS S3 Server-Side Encryption](https://docs.aws.amazon.com/AmazonS3/latest/userguide/serv-side-encryption.html)\n\n## Next Steps\n\nFor enterprise RBAC, see `documenso-enterprise-rbac`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "documenso-data-handling",
-    "description": "Handle document data, signatures, and PII in Documenso integrations.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

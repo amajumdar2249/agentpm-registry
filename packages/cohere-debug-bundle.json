@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031645",
   "name": "cohere-debug-bundle",
   "slug": "cohere-debug-bundle",
   "description": "Collect Cohere debug evidence for support tickets and troubleshooting.",
   "content": "# Cohere Debug Bundle\n\n## Overview\n\nCollect all diagnostic information needed to resolve Cohere API v2 issues. Generates a support-ready bundle with environment info, request/response logs, and SDK version data.\n\n## Prerequisites\n\n- `cohere-ai` SDK installed\n- Access to application logs\n- `curl` and `jq` available\n\n## Instructions\n\n### Step 1: Create Debug Bundle Script\n\n```bash\n#!/bin/bash\n# cohere-debug-bundle.sh\nset -euo pipefail\n\nBUNDLE_DIR=\"cohere-debug-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE_DIR\"\n\necho \"=== Cohere Debug Bundle ===\" > \"$BUNDLE_DIR/summary.txt\"\necho \"Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\n```\n\n### Step 2: Collect Environment and SDK Info\n\n```bash\n# Runtime versions\necho \"--- Runtime ---\" >> \"$BUNDLE_DIR/summary.txt\"\nnode --version >> \"$BUNDLE_DIR/summary.txt\" 2>&1 || echo \"Node.js: not found\" >> \"$BUNDLE_DIR/summary.txt\"\npython3 --version >> \"$BUNDLE_DIR/summary.txt\" 2>&1 || echo \"Python: not found\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# SDK version\necho \"--- SDK ---\" >> \"$BUNDLE_DIR/summary.txt\"\nnpm list cohere-ai 2>/dev/null >> \"$BUNDLE_DIR/summary.txt\" || echo \"cohere-ai: not installed (npm)\" >> \"$BUNDLE_DIR/summary.txt\"\npip show cohere 2>/dev/null | grep Version >> \"$BUNDLE_DIR/summary.txt\" || echo \"cohere: not installed (pip)\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# API key status (never log the actual key)\necho \"--- Auth ---\" >> \"$BUNDLE_DIR/summary.txt\"\nif [ -n \"${CO_API_KEY:-}\" ]; then\n  echo \"CO_API_KEY: SET (${#CO_API_KEY} chars, starts with ${CO_API_KEY:0:4}...)\" >> \"$BUNDLE_DIR/summary.txt\"\nelse\n  echo \"CO_API_KEY: NOT SET\" >> \"$BUNDLE_DIR/summary.txt\"\nfi\n```\n\n### Step 3: Test API Connectivity\n\n```bash\necho \"--- API Connectivity ---\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# Test each endpoint\nfor endpoint in chat embed rerank classify; do\n  STATUS=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n    -X POST \"https://api.cohere.com/v2/$endpoint\" \\\n    -H \"Authorization: Bearer ${CO_API_KEY:-invalid}\" \\\n    -H \"Content-Type: application/json\" \\\n    -d '{}' 2>/dev/null || echo \"UNREACHABLE\")\n  echo \"$endpoint: HTTP $STATUS\" >> \"$BUNDLE_DIR/summary.txt\"\ndone\n\n# Check service status\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"--- Service Status ---\" >> \"$BUNDLE_DIR/summary.txt\"\ncurl -s https://status.cohere.com/api/v2/status.json 2>/dev/null | \\\n  python3 -c \"import sys,json; d=json.load(sys.stdin); print(f'Status: {d[\\\"status\\\"][\\\"description\\\"]}')\" \\\n  >> \"$BUNDLE_DIR/summary.txt\" 2>/dev/null || echo \"Status page: unreachable\" >> \"$BUNDLE_DIR/summary.txt\"\n```\n\n### Step 4: Capture Request/Response Debug\n\n```typescript\n// Add to your app for temporary debug logging\nimport { CohereClientV2, CohereError } from 'cohere-ai';\nimport fs from 'fs';\n\nconst debugLog: Array<{\n  timestamp: string;\n  endpoint: string;\n  model?: string;\n  status: 'success' | 'error';\n  durationMs: number;\n  error?: string;\n  tokensUsed?: { input: number; output: number };\n}> = [];\n\nasync function debugWrappedCall<T>(\n  endpoint: string,\n  model: string | undefined,\n  fn: () => Promise<T>\n): Promise<T> {\n  const start = Date.now();\n  try {\n    const result = await fn();\n    debugLog.push({\n      timestamp: new Date().toISOString(),\n      endpoint,\n      model,\n      status: 'success',\n      durationMs: Date.now() - start,\n    });\n    return result;\n  } catch (err) {\n    debugLog.push({\n      timestamp: new Date().toISOString(),\n      endpoint,\n      model,\n      status: 'error',\n      durationMs: Date.now() - start,\n      error: err instanceof CohereError\n        ? `${err.statusCode}: ${err.message}`\n        : String(err),\n    });\n    throw err;\n  }\n}\n\n// Dump log to file\nfunction exportDebugLog(path: string) {\n  fs.writeFileSync(path, JSON.stringify(debugLog, null, 2));\n}\n```\n\n### Step 5: Package and Redact\n\n```bash\n# Collect application logs (redacted)\ngrep -i \"cohere\\|CohereError\\|CO_API_KEY\" /var/log/app/*.log 2>/dev/null | \\\n  sed 's/Bearer [^ ]*/Bearer ***REDACTED***/g' | \\\n  tail -100 > \"$BUNDLE_DIR/app-logs.txt\"\n\n# Package bundle\ntar -czf \"$BUNDLE_DIR.tar.gz\" \"$BUNDLE_DIR\"\necho \"Bundle: $BUNDLE_DIR.tar.gz ($(du -h \"$BUNDLE_DIR.tar.gz\" | cut -f1))\"\nrm -rf \"$BUNDLE_DIR\"\n```\n\n## Bundle Contents\n\n| File | Contents | Sensitive? |\n|------|----------|-----------|\n| `summary.txt` | Runtime, SDK version, API key status, connectivity | No |\n| `app-logs.txt` | Recent Cohere-related log lines (redacted) | Redacted |\n| `debug-log.json` | Request timing, errors, token usage | No |\n\n**Always redact:** API keys, bearer tokens, PII in request bodies. **Safe to include:** Error messages, HTTP status codes, SDK versions, timing data.\n\n## Quick One-Liner Diagnostics\n\n```bash\n# Full diagnostic in one command\necho \"Node: $(node -v 2>/dev/null || echo N/A) | SDK: $(npm list cohere-ai 2>/dev/null | grep cohere || echo N/A) | Key: ${CO_API_KEY:+SET} | API: $(curl -s -o /dev/null -w '%{http_code}' -H \"Authorization: Bearer ${CO_API_KEY:-x}\" https://api.cohere.com/v2/chat -H 'Content-Type: application/json' -d '{}' 2>/dev/null)\"\n```\n\n## Error Handling\n\n| Item | Purpose |\n|------|---------|\n| SDK version | Identify version-specific bugs |\n| API key status | Auth configuration issues |\n| Endpoint connectivity | Network/firewall problems |\n| Request timing | Latency and timeout diagnosis |\n| Error codes | Classify issue type (4xx vs 5xx) |\n\n## Resources\n\n- [Cohere Status Page](https://status.cohere.com)\n- [Cohere Error Codes](https://docs.cohere.com/reference/errors)\n- [Cohere Support](https://support.cohere.com)\n\n## Next Steps\n\nFor rate limit issues, see `cohere-rate-limits`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "cohere-debug-bundle",
-    "description": "Collect Cohere debug evidence for support tickets and troubleshooting.",
-    "allowed-tools": "Read, Bash(grep:*), Bash(curl:*), Bash(tar:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

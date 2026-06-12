@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032589",
   "name": "maintainx-incident-runbook",
   "slug": "maintainx-incident-runbook",
   "description": "Manage incident response for MaintainX integration failures.",
   "content": "# MaintainX Incident Runbook\n\n## Overview\n\nStep-by-step procedures for responding to MaintainX integration incidents, from detection through resolution and post-mortem.\n\n## Prerequisites\n\n- Access to monitoring dashboards\n- MaintainX admin API credentials\n- On-call contact list\n\n## Severity Classification\n\n| Severity | Definition | Response Time |\n|----------|-----------|---------------|\n| **SEV-1** | Complete integration failure, no work orders processing | 15 min |\n| **SEV-2** | Partial failure, some endpoints degraded | 1 hour |\n| **SEV-3** | Performance degradation, slow responses | 4 hours |\n| **SEV-4** | Non-critical feature broken, workaround available | Next business day |\n\n## Instructions\n\n### Step 1: Immediate Triage (First 5 Minutes)\n\n```bash\n#!/bin/bash\necho \"=== MaintainX Incident Triage ===\"\necho \"Time: $(date -u)\"\n\n# Check MaintainX API status\necho -e \"\\n--- API Health ---\"\nfor endpoint in users workorders assets locations; do\n  CODE=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n    \"https://api.getmaintainx.com/v1/$endpoint?limit=1\" \\\n    -H \"Authorization: Bearer $MAINTAINX_API_KEY\")\n  echo \"  /$endpoint: HTTP $CODE\"\ndone\n\n# Check your integration service\necho -e \"\\n--- Integration Service ---\"\ncurl -s http://localhost:3000/health | jq . 2>/dev/null || echo \"  Service unreachable\"\n\n# Check recent error logs\necho -e \"\\n--- Recent Errors (last 10 min) ---\"\n# Adjust for your log system:\n# journalctl -u maintainx-sync --since \"10 min ago\" --no-pager | grep -i error | tail -10\n```\n\n### Step 2: Determine Root Cause\n\n| Symptom | Likely Cause | Check |\n|---------|-------------|-------|\n| All endpoints return 401 | API key expired | `echo ${#MAINTAINX_API_KEY}` and test with curl |\n| All endpoints return 5xx | MaintainX platform outage | Check [status.getmaintainx.com](https://status.getmaintainx.com) |\n| 429 on all requests | Rate limit exceeded | Review request volume in last hour |\n| Specific endpoint 404 | API path changed | Check [MaintainX changelog](https://developer.maintainx.com) |\n| Timeouts | Network issue | `curl -w \"Total: %time_total seconds\" ...` |\n| Your service crashes | Application error | Check container logs, OOM, disk space |\n\n### Step 3: Apply Mitigation\n\n**API Key Expired (SEV-1)**:\n\n```bash\n# Generate new key: MaintainX > Settings > Integrations > New Key\n# Update in production:\n# GCP Secret Manager:\necho -n \"NEW_KEY_HERE\" | gcloud secrets versions add maintainx-api-key --data-file=-\n# Restart service to pick up new key:\ngcloud run services update maintainx-integration --region us-central1 --no-traffic\n```\n\n**Rate Limited (SEV-2)**:\n\n```typescript\n// Immediately reduce request volume\n// 1. Enable emergency rate limiting\nprocess.env.MAINTAINX_MAX_REQUESTS_PER_SEC = '1';\n// 2. Disable non-critical sync jobs\nawait disableScheduledJobs(['asset-sync', 'report-generator']);\n// 3. Keep only critical work order processing\n```\n\n**MaintainX Platform Outage (SEV-1)**:\n\n```typescript\n// Switch to queue-based processing\n// Buffer all outgoing requests for replay after recovery\nconst queue: Array<{ method: string; path: string; body: any }> = [];\n\nfunction bufferRequest(method: string, path: string, body?: any) {\n  queue.push({ method, path, body });\n  console.log(`Buffered: ${method} ${path} (queue size: ${queue.length})`);\n}\n\n// When MaintainX recovers, replay buffered requests\nasync function replayQueue(client: MaintainXClient) {\n  console.log(`Replaying ${queue.length} buffered requests...`);\n  for (const req of queue) {\n    await withRetry(() => client.request(req.method, req.path, req.body));\n  }\n  queue.length = 0;\n}\n```\n\n### Step 4: Verify Resolution\n\n```bash\n# Run full health check\ncurl -s http://localhost:3000/health | jq .\n\n# Verify data flow\necho \"Work orders created in last hour:\"\ncurl -s \"https://api.getmaintainx.com/v1/workorders?createdAtGte=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)&limit=5\" \\\n  -H \"Authorization: Bearer $MAINTAINX_API_KEY\" | jq '.workOrders | length'\n\n# Check for data gaps\necho \"Checking sync state...\"\ncat .maintainx-sync-state.json 2>/dev/null || echo \"No sync state file found\"\n```\n\n### Step 5: Post-Incident Documentation\n\n```markdown\n## Incident Report Template\n\n**Date**: YYYY-MM-DD\n**Severity**: SEV-X\n**Duration**: X hours Y minutes\n**Impact**: [What was affected - e.g., \"work order sync halted for 2 hours\"]\n\n### Timeline\n- HH:MM - Alert triggered\n- HH:MM - Triage started\n- HH:MM - Root cause identified\n- HH:MM - Mitigation applied\n- HH:MM - Full recovery confirmed\n\n### Root Cause\n[Technical explanation]\n\n### Resolution\n[What was done to fix it]\n\n### Action Items\n- [ ] Implement [specific improvement]\n- [ ] Add monitoring for [gap found]\n- [ ] Update runbook with [lesson learned]\n```\n\n## Output\n\n- Incident triaged and severity classified\n- Root cause identified using diagnostic steps\n- Mitigation applied (key rotation, rate reduction, or request buffering)\n- Recovery verified with health checks and data flow validation\n- Post-incident report documented\n\n## Error Handling\n\n| Scenario | Immediate Action |\n|----------|-----------------|\n| Total API failure | Buffer requests, check status page, escalate |\n| Intermittent 500s | Enable retry logic, reduce request rate |\n| Data sync gap | Note gap window, schedule backfill after recovery |\n| Webhook delivery failure | Fall back to polling, queue missed events |\n\n## Resources\n\n- [MaintainX Status Page](https://status.getmaintainx.com)\n- [MaintainX API Reference](https://developer.maintainx.com/reference)\n- [MaintainX Help Center](https://help.getmaintainx.com)\n\n## Next Steps\n\nFor data handling patterns, see `maintainx-data-handling`.\n\n## Examples\n\n**Automated alerting on integration health**:\n\n```typescript\n// Check health every 5 minutes, alert on failure\nimport cron from 'node-cron';\n\ncron.schedule('*/5 * * * *', async () => {\n  try {\n    const res = await fetch('http://localhost:3000/health');\n    const health = await res.json();\n    if (health.status !== 'healthy') {\n      await sendPagerDutyAlert({\n        severity: 'critical',\n        summary: `MaintainX integration degraded: ${JSON.stringify(health.checks)}`,\n      });\n    }\n  } catch {\n    await sendPagerDutyAlert({\n      severity: 'critical',\n      summary: 'MaintainX integration service unreachable',\n    });\n  }\n});\n```\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "maintainx-incident-runbook",
-    "description": "Manage incident response for MaintainX integration failures.",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Bash(npm:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

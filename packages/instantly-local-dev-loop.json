@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032300",
   "name": "instantly-local-dev-loop",
   "slug": "instantly-local-dev-loop",
   "description": "Configure Instantly.ai local development with mock server and test workflows.",
   "content": "# Instantly Local Dev Loop\n\n## Overview\n\nSet up a local development workflow for Instantly integrations. Instantly provides a mock server at `https://developer.instantly.ai/_mock/api/v2/` for testing without sending real emails or consuming API limits. This skill covers mock server usage, integration testing, and local webhook development.\n\n## Prerequisites\n\n- Completed `instantly-install-auth` setup\n- Node.js 18+ with TypeScript\n- A separate Instantly API key for dev/test (recommended)\n\n## Instructions\n\n### Step 1: Configure Dev Environment\n\n```typescript\n// src/config.ts\nimport \"dotenv/config\";\n\ninterface Config {\n  baseUrl: string;\n  apiKey: string;\n  useMock: boolean;\n}\n\nexport function getConfig(): Config {\n  const useMock = process.env.INSTANTLY_USE_MOCK === \"true\";\n  return {\n    baseUrl: useMock\n      ? \"https://developer.instantly.ai/_mock/api/v2\"\n      : process.env.INSTANTLY_BASE_URL || \"https://api.instantly.ai/api/v2\",\n    apiKey: process.env.INSTANTLY_API_KEY || \"\",\n    useMock,\n  };\n}\n```\n\n```bash\n# .env.development\nINSTANTLY_API_KEY=your-dev-api-key\nINSTANTLY_BASE_URL=https://api.instantly.ai/api/v2\nINSTANTLY_USE_MOCK=true\n\n# .env.production\nINSTANTLY_API_KEY=your-prod-api-key\nINSTANTLY_BASE_URL=https://api.instantly.ai/api/v2\nINSTANTLY_USE_MOCK=false\n```\n\n### Step 2: Build a Testable API Client\n\n```typescript\n// src/instantly.ts\nimport { getConfig } from \"./config\";\n\nconst config = getConfig();\n\nexport async function instantly<T = unknown>(\n  path: string,\n  options: RequestInit = {}\n): Promise<T> {\n  const url = `${config.baseUrl}${path}`;\n  const res = await fetch(url, {\n    ...options,\n    headers: {\n      \"Content-Type\": \"application/json\",\n      Authorization: `Bearer ${config.apiKey}`,\n      ...options.headers,\n    },\n  });\n\n  if (res.status === 429) {\n    const retryAfter = parseInt(res.headers.get(\"retry-after\") || \"2\", 10);\n    console.warn(`Rate limited. Retrying in ${retryAfter}s...`);\n    await new Promise((r) => setTimeout(r, retryAfter * 1000));\n    return instantly<T>(path, options);\n  }\n\n  if (!res.ok) {\n    const body = await res.text();\n    throw new InstantlyError(res.status, path, body);\n  }\n\n  return res.json() as Promise<T>;\n}\n\nclass InstantlyError extends Error {\n  constructor(\n    public status: number,\n    public path: string,\n    public body: string\n  ) {\n    super(`Instantly API ${status} on ${path}: ${body}`);\n    this.name = \"InstantlyError\";\n  }\n}\n```\n\n### Step 3: Write Integration Tests\n\n```typescript\n// tests/instantly.test.ts\nimport { describe, it, expect, beforeAll } from \"vitest\";\nimport { instantly } from \"../src/instantly\";\n\ndescribe(\"Instantly API Integration\", () => {\n  it(\"should list campaigns\", async () => {\n    const campaigns = await instantly<Array<{ id: string; name: string }>>(\n      \"/campaigns?limit=5\"\n    );\n    expect(Array.isArray(campaigns)).toBe(true);\n  });\n\n  it(\"should list email accounts\", async () => {\n    const accounts = await instantly<Array<{ email: string }>>(\n      \"/accounts?limit=5\"\n    );\n    expect(Array.isArray(accounts)).toBe(true);\n  });\n\n  it(\"should create and delete a lead list\", async () => {\n    const list = await instantly<{ id: string; name: string }>(\n      \"/lead-lists\",\n      {\n        method: \"POST\",\n        body: JSON.stringify({ name: `test-list-${Date.now()}` }),\n      }\n    );\n    expect(list.id).toBeDefined();\n    expect(list.name).toContain(\"test-list-\");\n\n    // Clean up\n    await instantly(`/lead-lists/${list.id}`, { method: \"DELETE\" });\n  });\n\n  it(\"should handle 401 on bad key\", async () => {\n    const res = await fetch(\"https://api.instantly.ai/api/v2/campaigns?limit=1\", {\n      headers: { Authorization: \"Bearer invalid-key\" },\n    });\n    expect(res.status).toBe(401);\n  });\n});\n```\n\n### Step 4: Local Webhook Testing with ngrok\n\n```bash\nset -euo pipefail\n# Start your webhook server locally\n# In terminal 1:\nnpx tsx src/webhook-server.ts  # listens on port 3000\n\n# In terminal 2 \u2014 expose with ngrok:\nngrok http 3000\n\n# Register the ngrok URL as a webhook\ncurl -X POST https://api.instantly.ai/api/v2/webhooks \\\n  -H \"Authorization: Bearer $INSTANTLY_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"name\": \"Local Dev Webhook\",\n    \"target_hook_url\": \"https://abc123.ngrok.io/webhooks/instantly\",\n    \"event_type\": \"all_events\"\n  }'\n```\n\n```typescript\n// src/webhook-server.ts \u2014 minimal local webhook receiver\nimport express from \"express\";\n\nconst app = express();\napp.use(express.json());\n\napp.post(\"/webhooks/instantly\", (req, res) => {\n  console.log(\"Webhook received:\", JSON.stringify(req.body, null, 2));\n  res.status(200).json({ received: true });\n});\n\napp.listen(3000, () => console.log(\"Webhook server on http://localhost:3000\"));\n```\n\n### Step 5: Test Webhook Delivery\n\n```typescript\n// After registering the webhook, test it via API\nasync function testWebhook(webhookId: string) {\n  await instantly(`/webhooks/${webhookId}/test`, { method: \"POST\" });\n  console.log(\"Test webhook fired \u2014 check your local server logs\");\n}\n```\n\n## Project Structure\n\n```\ninstantly-integration/\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 config.ts           # Environment-aware config\n\u2502   \u251c\u2500\u2500 instantly.ts         # API client with retry\n\u2502   \u2514\u2500\u2500 webhook-server.ts   # Local webhook receiver\n\u251c\u2500\u2500 tests/\n\u2502   \u2514\u2500\u2500 instantly.test.ts   # Integration tests\n\u251c\u2500\u2500 .env.development         # Dev config (mock mode)\n\u251c\u2500\u2500 .env.production          # Prod config\n\u251c\u2500\u2500 package.json\n\u2514\u2500\u2500 tsconfig.json\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Mock returns unexpected data | Mock schema mismatch | Check mock docs at developer.instantly.ai |\n| `ECONNREFUSED` on localhost | Webhook server not running | Start it before registering webhook |\n| Tests passing locally, failing in CI | Different env vars | Ensure CI uses `.env.development` |\n| ngrok tunnel expired | Free tier 2-hour limit | Restart ngrok or upgrade |\n\n## Resources\n\n- [Instantly Mock Server](https://developer.instantly.ai/_mock/api/v2/)\n- [Instantly API v2 Docs](https://developer.instantly.ai/)\n- [ngrok Quick Start](https://ngrok.com/docs/getting-started/)\n\n## Next Steps\n\nFor production SDK patterns, see `instantly-sdk-patterns`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "instantly-local-dev-loop",
-    "description": "Configure Instantly.ai local development with mock server and test workflows.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031957",
   "name": "firecrawl-cost-tuning",
   "slug": "firecrawl-cost-tuning",
   "description": "Optimize Firecrawl costs through crawl limits, format selection, caching,",
   "content": "# Firecrawl Cost Tuning\n\n## Overview\n\nFirecrawl charges credits per operation: 1 credit per scrape, 1 per crawled page, 1 per map call, and variable credits for extract (LLM usage). An unbounded crawl on a large site can consume thousands of credits in minutes. This skill covers concrete techniques to reduce credit consumption by 50-80%.\n\n## Credit Cost Table\n\n| Operation | Credits | Notes |\n|-----------|---------|-------|\n| `scrapeUrl` | 1 | Per page, any format |\n| `crawlUrl` | 1 per page | Each discovered page costs 1 credit |\n| `mapUrl` | 1 | Regardless of URLs returned |\n| `batchScrapeUrls` | 1 per URL | Same as individual scrape |\n| `extract` | 5+ | LLM processing adds cost |\n\n## Instructions\n\n### Step 1: Always Set Crawl Limits\n\n```typescript\nimport FirecrawlApp from \"@mendable/firecrawl-js\";\n\nconst firecrawl = new FirecrawlApp({\n  apiKey: process.env.FIRECRAWL_API_KEY!,\n});\n\n// BAD: no limit \u2014 could crawl 100K pages\nawait firecrawl.crawlUrl(\"https://docs.large-project.org\");\n// Cost: potentially 100,000+ credits\n\n// GOOD: bounded crawl\nawait firecrawl.crawlUrl(\"https://docs.large-project.org\", {\n  limit: 50,               // max 50 pages\n  maxDepth: 2,             // only 2 levels deep\n  includePaths: [\"/api/*\"], // only API docs\n  excludePaths: [\"/blog/*\", \"/changelog/*\"],\n  scrapeOptions: { formats: [\"markdown\"] },\n});\n// Cost: max 50 credits\n```\n\n### Step 2: Use Scrape for Known URLs Instead of Crawl\n\n```typescript\n// If you know which pages you need, don't crawl \u2014 scrape them directly\nconst targetUrls = [\n  \"https://docs.example.com/api/auth\",\n  \"https://docs.example.com/api/users\",\n  \"https://docs.example.com/api/billing\",\n];\n\n// Cost: 3 credits (one per page)\nconst results = await firecrawl.batchScrapeUrls(targetUrls, {\n  formats: [\"markdown\"],\n});\n\n// vs crawling the whole docs site: potentially 500+ credits\n```\n\n### Step 3: Map First, Then Selective Scrape\n\n```typescript\n// Map costs 1 credit and returns up to 30K URLs\nconst map = await firecrawl.mapUrl(\"https://docs.example.com\");\n// Cost: 1 credit\n\n// Filter to only what you need\nconst apiDocs = (map.links || []).filter(url => url.includes(\"/api/\"));\nconsole.log(`${map.links?.length} total URLs, only ${apiDocs.length} are API docs`);\n\n// Scrape only relevant pages\nconst results = await firecrawl.batchScrapeUrls(apiDocs.slice(0, 20), {\n  formats: [\"markdown\"],\n});\n// Cost: 1 (map) + 20 (scrape) = 21 credits\n// vs blind crawl: could be 500+ credits\n```\n\n### Step 4: Cache to Prevent Re-Scraping\n\n```typescript\nimport { createHash } from \"crypto\";\n\nconst cache = new Map<string, { content: string; timestamp: number }>();\nconst CACHE_TTL = 24 * 3600 * 1000; // 24 hours\n\nasync function cachedScrape(url: string): Promise<string> {\n  const key = createHash(\"md5\").update(url).digest(\"hex\");\n  const cached = cache.get(key);\n\n  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {\n    return cached.content; // Free \u2014 no API call\n  }\n\n  const result = await firecrawl.scrapeUrl(url, { formats: [\"markdown\"] });\n  if (result.markdown) {\n    cache.set(key, { content: result.markdown, timestamp: Date.now() });\n  }\n  return result.markdown || \"\";\n}\n// Typical savings: 50-80% credit reduction for recurring scrapes\n```\n\n### Step 5: Monitor Credit Consumption\n\n```bash\nset -euo pipefail\n# Check current credit balance\ncurl -s https://api.firecrawl.dev/v1/team/credits \\\n  -H \"Authorization: Bearer $FIRECRAWL_API_KEY\" | jq .\n```\n\n```typescript\n// Daily credit tracker\nclass CreditBudget {\n  private dailyLimit: number;\n  private usage = new Map<string, number>();\n\n  constructor(dailyLimit = 1000) {\n    this.dailyLimit = dailyLimit;\n  }\n\n  canAfford(estimatedCredits: number): boolean {\n    const today = new Date().toISOString().split(\"T\")[0];\n    const used = this.usage.get(today) || 0;\n    return used + estimatedCredits <= this.dailyLimit;\n  }\n\n  record(credits: number) {\n    const today = new Date().toISOString().split(\"T\")[0];\n    this.usage.set(today, (this.usage.get(today) || 0) + credits);\n  }\n\n  remaining(): number {\n    const today = new Date().toISOString().split(\"T\")[0];\n    return this.dailyLimit - (this.usage.get(today) || 0);\n  }\n}\n\nconst budget = new CreditBudget(1000);\n\n// Before each crawl\nif (!budget.canAfford(50)) {\n  throw new Error(`Daily credit budget exceeded. ${budget.remaining()} credits left`);\n}\nawait firecrawl.crawlUrl(url, { limit: 50 });\nbudget.record(50);\n```\n\n### Step 6: Choose Minimal Formats\n\n```bash\nset -euo pipefail\n# Cheapest: markdown only (1 credit, fastest)\ncurl -X POST https://api.firecrawl.dev/v1/scrape \\\n  -H \"Authorization: Bearer $FIRECRAWL_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"url\":\"https://example.com\",\"formats\":[\"markdown\"]}'\n\n# Avoid requesting screenshots, rawHtml, or extract unless needed\n# Extract uses LLM calls \u2014 significantly more credits\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `402 Payment Required` | Credits exhausted | Check balance, upgrade plan, or wait for reset |\n| Credits drained by one crawl | No `limit` set | Always set `limit` and `maxDepth` |\n| Duplicate scraping costs | Same URLs scraped daily | Implement URL-keyed caching |\n| High per-page cost | Requesting all formats + extract | Use `formats: [\"markdown\"]` only |\n| Budget overrun | No daily cap | Implement credit budget tracker |\n\n## Cost Optimization Summary\n\n| Technique | Credit Savings |\n|-----------|---------------|\n| Set crawl `limit` | Prevents 100x overages |\n| Map + selective scrape | 50-90% vs blind crawl |\n| Cache repeated scrapes | 50-80% reduction |\n| Markdown-only format | Fastest, no extras |\n| Batch scrape vs individual | Same cost, less overhead |\n\n## Resources\n\n- [Firecrawl Pricing](https://firecrawl.dev/pricing)\n- [Firecrawl Dashboard](https://firecrawl.dev/app)\n- [Rate Limits](https://docs.firecrawl.dev/rate-limits)\n\n## Next Steps\n\nFor reference architecture, see `firecrawl-reference-architecture`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "firecrawl-cost-tuning",
-    "description": "Optimize Firecrawl costs through crawl limits, format selection, caching,",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

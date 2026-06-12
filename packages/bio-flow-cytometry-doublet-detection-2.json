@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000029348",
   "name": "bio-flow-cytometry-doublet-detection",
   "slug": "bio-flow-cytometry-doublet-detection-2",
   "description": "Detect and remove doublets from flow and mass cytometry data. Covers FSC/SSC gating and computational doublet detection methods. Use when filtering out cell aggregates before clustering or quantitative analysis.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: flowCore 2.14+, ggplot2 3.5+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- R: `packageVersion('<pkg>')` then `?function_name` to verify parameters\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Doublet Detection\n\n**\"Remove doublets from my flow cytometry data\"** \u2192 Detect and filter out cell aggregates using FSC-A/FSC-H gating or computational methods before clustering or quantitative analysis.\n- R: `flowCore` rectangular gates on FSC-A vs FSC-H\n\n## FSC-A vs FSC-H Gating (Standard Method)\n\n```r\nlibrary(flowCore)\nlibrary(ggcyto)\n\n# Load data\nfs <- read.flowSet(list.files('data/', pattern = '\\\\.fcs$', full.names = TRUE))\n\n# FSC-A vs FSC-H for doublet discrimination\n# Singlets fall on diagonal, doublets have higher FSC-A for given FSC-H\n\n# Manual rectangular gate\nsinglet_gate <- rectangleGate(\n    filterId = 'singlets',\n    'FSC-A' = c(50000, 250000),\n    'FSC-H' = c(50000, 250000)\n)\n\n# Or use polygon gate for diagonal\nsinglet_polygon <- polygonGate(\n    filterId = 'singlets',\n    .gate = data.frame(\n        'FSC-A' = c(50000, 250000, 250000, 50000),\n        'FSC-H' = c(40000, 200000, 260000, 60000)\n    )\n)\n\n# Apply gate\nsinglets <- Subset(fs, singlet_gate)\n\n# Visualize\nautoplot(fs[[1]], 'FSC-A', 'FSC-H') + geom_gate(singlet_gate)\n```\n\n## Automated Singlet Gating with flowDensity\n\n```r\nlibrary(flowDensity)\n\n# Automatic singlet gate\nsinglet_result <- flowDensity(\n    fs[[1]],\n    channels = c('FSC-A', 'FSC-H'),\n    position = c(TRUE, TRUE),\n    gates = c(NA, NA)\n)\n\n# Get gated population\nsinglets <- getflowFrame(singlet_result)\n\n# Percentage singlets\npct_singlets <- nrow(singlets) / nrow(fs[[1]]) * 100\ncat('Singlets:', round(pct_singlets, 1), '%\\n')\n```\n\n## flowAI Quality Control\n\n```r\nlibrary(flowAI)\n\n# flowAI performs comprehensive QC including:\n# - Flow rate anomaly detection\n# - Signal acquisition anomaly detection\n# - Dynamic range anomaly detection\n\n# Run flowAI\nfs_qc <- flow_auto_qc(\n    fs,\n    folder_results = 'flowAI_results',\n    fcs_QC = TRUE,\n    fcs_highQ = TRUE\n)\n\n# Results include singlet detection based on flow rate stability\n```\n\n## FSC-A/FSC-W Method (Width Parameter)\n\n```r\n# Some instruments provide FSC-W (width) instead of FSC-H\n# FSC-A = FSC-H \u00d7 FSC-W\n# Doublets have higher width\n\nif ('FSC-W' %in% colnames(fs[[1]])) {\n    singlet_gate_w <- rectangleGate(\n        filterId = 'singlets',\n        'FSC-A' = c(50000, 250000),\n        'FSC-W' = c(50000, 100000)  # Lower width = singlets\n    )\n\n    singlets <- Subset(fs, singlet_gate_w)\n}\n```\n\n## Ratio-Based Doublet Detection\n\n```r\n# Calculate FSC-A/FSC-H ratio\n# Singlets have ratio close to constant (based on pulse geometry)\n# Doublets have elevated ratio\n\ncalculate_fsc_ratio <- function(ff) {\n    fsc_a <- exprs(ff)[, 'FSC-A']\n    fsc_h <- exprs(ff)[, 'FSC-H']\n\n    ratio <- fsc_a / (fsc_h + 1)  # Add small value to avoid division by zero\n    return(ratio)\n}\n\n# Add ratio as derived parameter\nfor (i in 1:length(fs)) {\n    ratio <- calculate_fsc_ratio(fs[[i]])\n    fs[[i]] <- cbind2(fs[[i]], ratio)\n    colnames(fs[[i]])[ncol(fs[[i]])] <- 'FSC_ratio'\n}\n\n# Gate on ratio\nratio_cutoff <- quantile(exprs(fs[[1]])[, 'FSC_ratio'], 0.95)\nsinglet_gate_ratio <- rectangleGate(filterId = 'singlets', 'FSC_ratio' = c(0, ratio_cutoff))\n```\n\n## SSC-Based Doublet Detection\n\n```r\n# For cell types where FSC doesn't discriminate well,\n# use SSC-A vs SSC-H additionally\n\nssc_singlet_gate <- rectangleGate(\n    filterId = 'ssc_singlets',\n    'SSC-A' = c(10000, 200000),\n    'SSC-H' = c(10000, 200000)\n)\n\n# Combine FSC and SSC gates\ncombined_gate <- singlet_gate & ssc_singlet_gate\nsinglets <- Subset(fs, combined_gate)\n```\n\n## CyTOF Doublet Detection\n\n```r\nlibrary(CATALYST)\n\n# For CyTOF data, use DNA channels or event length\n\n# DNA-based doublet detection (if DNA channels present)\n# Doublets have ~2x DNA content\nsce <- prepData(fs, panel, md)\n\n# If Event_length channel exists\nif ('Event_length' %in% rownames(sce)) {\n    event_length <- assay(sce)['Event_length', ]\n    singlet_idx <- event_length < quantile(event_length, 0.95)\n\n    sce_singlets <- sce[, singlet_idx]\n    cat('Removed', sum(!singlet_idx), 'doublets based on event length\\n')\n}\n\n# DNA intercalator method\nif (all(c('DNA1', 'DNA2') %in% rownames(sce))) {\n    dna_total <- assay(sce)['DNA1', ] + assay(sce)['DNA2', ]\n    dna_cutoff <- quantile(dna_total, 0.95)\n\n    singlet_idx <- dna_total < dna_cutoff\n    sce_singlets <- sce[, singlet_idx]\n}\n```\n\n## CATALYST Workflow with Doublet Removal\n\n**Goal:** Detect and remove cell doublets from a CyTOF/flow dataset using a regression-based approach on scatter parameters.\n\n**Approach:** Model the expected FSC-A vs FSC-H relationship for singlets with linear regression, classify events with large residuals (above the 95th percentile) as doublets, and filter them out.\n\n```r\nlibrary(CATALYST)\n\n# Load and prepare data\nsce <- prepData(fs, panel, md, transform = TRUE, cofactor = 5)\n\n# Remove doublets using marker-based method\nsce <- filterSCE(sce, !is_doublet(sce))\n\n# Custom doublet detection based on FSC\nfsc_a <- colData(sce)$FSC_A\nfsc_h <- colData(sce)$FSC_H\n\n# Model expected singlet relationship\nfit <- lm(fsc_a ~ fsc_h)\nresiduals <- abs(fsc_a - predict(fit))\nthreshold <- quantile(residuals, 0.95)\n\n# Mark doublets\ncolData(sce)$doublet <- residuals > threshold\nsce_singlets <- sce[, !colData(sce)$doublet]\n\ncat('Doublet rate:', round(mean(colData(sce)$doublet) * 100, 1), '%\\n')\n```\n\n## Batch Processing\n\n```r\n# Process all samples\ndetect_doublets <- function(ff, method = 'fsc') {\n    if (method == 'fsc') {\n        fsc_a <- exprs(ff)[, 'FSC-A']\n        fsc_h <- exprs(ff)[, 'FSC-H']\n\n        fit <- lm(fsc_a ~ fsc_h)\n        residuals <- abs(fsc_a - predict(fit))\n        threshold <- quantile(residuals, 0.95)\n\n        singlet_idx <- residuals <= threshold\n    } else if (method == 'ratio') {\n        ratio <- exprs(ff)[, 'FSC-A'] / (exprs(ff)[, 'FSC-H'] + 1)\n        singlet_idx <- ratio < quantile(ratio, 0.95)\n    }\n\n    return(ff[singlet_idx, ])\n}\n\n# Apply to all samples\nfs_singlets <- fsApply(fs, detect_doublets, method = 'fsc')\n\n# Report\ndoublet_rates <- sapply(1:length(fs), function(i) {\n    1 - nrow(fs_singlets[[i]]) / nrow(fs[[i]])\n})\ncat('Mean doublet rate:', round(mean(doublet_rates) * 100, 1), '%\\n')\n```\n\n## Visualization\n\n```r\nlibrary(ggplot2)\n\n# Extract data for plotting\nplot_data <- data.frame(\n    FSC_A = exprs(fs[[1]])[, 'FSC-A'],\n    FSC_H = exprs(fs[[1]])[, 'FSC-H']\n)\n\n# Calculate doublet status\nfit <- lm(FSC_A ~ FSC_H, data = plot_data)\nplot_data$residual <- abs(plot_data$FSC_A - predict(fit))\nplot_data$doublet <- plot_data$residual > quantile(plot_data$residual, 0.95)\n\n# Plot\nggplot(plot_data, aes(x = FSC_H, y = FSC_A, color = doublet)) +\n    geom_point(alpha = 0.3, size = 0.5) +\n    scale_color_manual(values = c('gray', 'red')) +\n    theme_bw() +\n    labs(title = 'Doublet Detection', x = 'FSC-H', y = 'FSC-A')\nggsave('doublet_detection.png', width = 8, height = 6)\n```\n\n## Related Skills\n\nWorkflow order: cytometry-qc \u2192 doublet-detection \u2192 bead-normalization \u2192 clustering\n\n- cytometry-qc - Run first: identify flow rate and signal issues\n- bead-normalization - Run after: correct remaining instrument drift\n- fcs-handling - Load FCS files\n- gating-analysis - Manual gating workflows\n- clustering-phenotyping - Downstream analysis after doublet removal\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-flow-cytometry-doublet-detection",
-    "description": "Detect and remove doublets from flow and mass cytometry data. Covers FSC/SSC gating and computational doublet detection methods. Use when filtering out cell aggregates before clustering or quantitative analysis.",
-    "tool_type": "r",
-    "primary_tool": "flowCore"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

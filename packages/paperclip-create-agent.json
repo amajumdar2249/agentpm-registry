@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000044308",
   "name": "paperclip-create-agent",
   "slug": "paperclip-create-agent",
   "description": ">",
   "content": "\n# Paperclip Create Agent Skill\n\nUse this skill when you are asked to hire/create an agent.\n\n## Preconditions\n\nYou need either:\n\n- board access, or\n- agent permission `can_create_agents=true` in your company\n\nIf you do not have this permission, escalate to your CEO or board.\n\n## Workflow\n\n### 1. Confirm identity and company context\n\n```sh\ncurl -sS \"$PAPERCLIP_API_URL/api/agents/me\" \\\n  -H \"Authorization: Bearer $PAPERCLIP_API_KEY\"\n```\n\n### 2. Discover adapter configuration for this Paperclip instance\n\n```sh\ncurl -sS \"$PAPERCLIP_API_URL/llms/agent-configuration.txt\" \\\n  -H \"Authorization: Bearer $PAPERCLIP_API_KEY\"\n\n# Then the specific adapter you plan to use, e.g. claude_local:\ncurl -sS \"$PAPERCLIP_API_URL/llms/agent-configuration/claude_local.txt\" \\\n  -H \"Authorization: Bearer $PAPERCLIP_API_KEY\"\n```\n\n### 3. Compare existing agent configurations\n\n```sh\ncurl -sS \"$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/agent-configurations\" \\\n  -H \"Authorization: Bearer $PAPERCLIP_API_KEY\"\n```\n\nNote naming, icon, reporting-line, and adapter conventions the company already follows.\n\n### 4. Choose the instruction source (required)\n\nThis is the single most important decision for hire quality. Pick exactly one path:\n\n- **Exact template** \u2014 the role matches an entry in the template index. Use the matching file under `references/agents/` as the starting point.\n- **Adjacent template** \u2014 no exact match, but an existing template is close (for example, a \"Backend Engineer\" hire adapted from `coder.md`, or a \"Content Designer\" adapted from `uxdesigner.md`). Copy the closest template and adapt deliberately: rename the role, rewrite the role charter, swap domain lenses, and remove sections that do not fit.\n- **Generic fallback** \u2014 no template is close. Use the baseline role guide to construct a new `AGENTS.md` from scratch, filling in each recommended section for the specific role.\n\nTemplate index and when-to-use guidance:\n`skills/paperclip-create-agent/references/agent-instruction-templates.md`\n\nGeneric fallback for no-template hires:\n`skills/paperclip-create-agent/references/baseline-role-guide.md`\n\nState which path you took in your hire-request comment so the board can see the reasoning.\n\n### 5. Discover allowed agent icons\n\n```sh\ncurl -sS \"$PAPERCLIP_API_URL/llms/agent-icons.txt\" \\\n  -H \"Authorization: Bearer $PAPERCLIP_API_KEY\"\n```\n\n### 6. Draft the new hire config\n\n- role / title / name\n- icon (required in practice; pick from `/llms/agent-icons.txt`)\n- reporting line (`reportsTo`)\n- adapter type\n- `desiredSkills` from the company skill library when this role needs installed skills on day one\n- if any `desiredSkills` or adapter settings expand browser access, external-system reach, filesystem scope, or secret-handling capability, justify each one in the hire comment\n- adapter and runtime config aligned to this environment\n- leave timer heartbeats off by default; only set `runtimeConfig.heartbeat.enabled=true` with an `intervalSec` when the role genuinely needs scheduled recurring work or the user explicitly asked for it\n- if the role may handle private advisories or sensitive disclosures, confirm a confidential workflow exists first (dedicated skill or documented manual process)\n- capabilities\n- managed instructions bundle (`AGENTS.md`) for adapters that support it; avoid durable `promptTemplate` config\n- for coding or execution agents, include the Paperclip execution contract: start actionable work in the same heartbeat; do not stop at a plan unless planning was requested; leave durable progress with a clear next action; use child issues for long or parallel delegated work instead of polling; mark blocked work with owner/action; respect budget, pause/cancel, approval gates, and company boundaries\n- instruction text such as `AGENTS.md` built from step 4; for local managed-bundle adapters, send this as top-level `instructionsBundle.files[\"AGENTS.md\"]`. Do not set `adapterConfig.promptTemplate` or `bootstrapPromptTemplate` for new agents.\n- source issue linkage (`sourceIssueId` or `sourceIssueIds`) when this hire came from an issue\n\n### 7. Review the draft against the quality checklist\n\nBefore submitting, walk the draft-review checklist end-to-end and fix any item that does not pass:\n`skills/paperclip-create-agent/references/draft-review-checklist.md`\n\n### 8. Submit hire request\n\n```sh\ncurl -sS -X POST \"$PAPERCLIP_API_URL/api/companies/$PAPERCLIP_COMPANY_ID/agent-hires\" \\\n  -H \"Authorization: Bearer $PAPERCLIP_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"name\": \"CTO\",\n    \"role\": \"cto\",\n    \"title\": \"Chief Technology Officer\",\n    \"icon\": \"crown\",\n    \"reportsTo\": \"<ceo-agent-id>\",\n    \"capabilities\": \"Owns technical roadmap, architecture, staffing, execution\",\n    \"desiredSkills\": [\"vercel-labs/agent-browser/agent-browser\"],\n    \"adapterType\": \"codex_local\",\n    \"adapterConfig\": {\"cwd\": \"/abs/path/to/repo\", \"model\": \"o4-mini\"},\n    \"instructionsBundle\": {\"files\": {\"AGENTS.md\": \"You are the CTO...\"}},\n    \"runtimeConfig\": {\"heartbeat\": {\"enabled\": false, \"wakeOnDemand\": true}},\n    \"sourceIssueId\": \"<issue-id>\"\n  }'\n```\n\n### 9. Handle governance state\n\n- if the response has `approval`, the hire is `pending_approval`\n- monitor and discuss on the approval thread\n- when the board approves, you will be woken with `PAPERCLIP_APPROVAL_ID`; read linked issues and close/comment follow-up\n\n```sh\ncurl -sS \"$PAPERCLIP_API_URL/api/approvals/<approval-id>\" \\\n  -H \"Authorization: Bearer $PAPERCLIP_API_KEY\"\n\ncurl -sS -X POST \"$PAPERCLIP_API_URL/api/approvals/<approval-id>/comments\" \\\n  -H \"Authorization: Bearer $PAPERCLIP_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"body\":\"## CTO hire request submitted\\n\\n- Approval: [<approval-id>](/approvals/<approval-id>)\\n- Pending agent: [<agent-ref>](/agents/<agent-url-key-or-id>)\\n- Source issue: [<issue-ref>](/issues/<issue-identifier-or-id>)\\n\\nUpdated prompt and adapter config per board feedback.\"}'\n```\n\nIf the approval already exists and needs manual linking to the issue:\n\n```sh\ncurl -sS -X POST \"$PAPERCLIP_API_URL/api/issues/<issue-id>/approvals\" \\\n  -H \"Authorization: Bearer $PAPERCLIP_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"approvalId\":\"<approval-id>\"}'\n```\n\nAfter approval is granted, run this follow-up loop:\n\n```sh\ncurl -sS \"$PAPERCLIP_API_URL/api/approvals/$PAPERCLIP_APPROVAL_ID\" \\\n  -H \"Authorization: Bearer $PAPERCLIP_API_KEY\"\n\ncurl -sS \"$PAPERCLIP_API_URL/api/approvals/$PAPERCLIP_APPROVAL_ID/issues\" \\\n  -H \"Authorization: Bearer $PAPERCLIP_API_KEY\"\n```\n\nFor each linked issue, either:\n- close it if the approval resolved the request, or\n- comment in markdown with links to the approval and next actions.\n\n## References\n\n- Template index and how to apply a template: `skills/paperclip-create-agent/references/agent-instruction-templates.md`\n- Individual role templates: `skills/paperclip-create-agent/references/agents/`\n- Generic baseline role guide (no-template fallback): `skills/paperclip-create-agent/references/baseline-role-guide.md`\n- Pre-submit draft-review checklist: `skills/paperclip-create-agent/references/draft-review-checklist.md`\n- Endpoint payload shapes and full examples: `skills/paperclip-create-agent/references/api-reference.md`\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "paperclip-create-agent",
-    "description": ">"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

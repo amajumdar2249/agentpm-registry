@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031579",
   "name": "clickhouse-local-dev-loop",
   "slug": "clickhouse-local-dev-loop",
   "description": "Run ClickHouse locally with Docker, configure test fixtures, and iterate",
   "content": "# ClickHouse Local Dev Loop\n\n## Overview\n\nRun ClickHouse in Docker for local development with fast schema iteration,\nseed data, and integration testing using vitest.\n\n## Prerequisites\n\n- Docker or Docker Compose installed\n- Node.js 18+ with `@clickhouse/client`\n\n## Instructions\n\n### Step 1: Docker Compose Setup\n\n```yaml\n# docker-compose.yml\nservices:\n  clickhouse:\n    image: clickhouse/clickhouse-server:latest\n    ports:\n      - \"8123:8123\"   # HTTP interface\n      - \"9000:9000\"   # Native TCP (clickhouse-client CLI)\n    volumes:\n      - clickhouse-data:/var/lib/clickhouse\n      - ./init-db:/docker-entrypoint-initdb.d  # Auto-run SQL on first start\n    environment:\n      CLICKHOUSE_USER: default\n      CLICKHOUSE_PASSWORD: dev_password\n      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1  # Enable SQL-based user management\n    ulimits:\n      nofile:\n        soft: 262144\n        hard: 262144\n\nvolumes:\n  clickhouse-data:\n```\n\n```bash\ndocker compose up -d\n# Verify: curl http://localhost:8123/ping   \u2192 \"Ok.\\n\"\n```\n\n### Step 2: Init Script (Auto-Run on First Start)\n\n```sql\n-- init-db/001-schema.sql\nCREATE DATABASE IF NOT EXISTS app;\n\nCREATE TABLE IF NOT EXISTS app.events (\n    event_id    UUID DEFAULT generateUUIDv4(),\n    event_type  LowCardinality(String),\n    user_id     UInt64,\n    properties  String,     -- JSON string\n    created_at  DateTime DEFAULT now()\n)\nENGINE = MergeTree()\nORDER BY (event_type, created_at)\nPARTITION BY toYYYYMM(created_at);\n```\n\n### Step 3: Seed Data Script\n\n```typescript\n// scripts/seed.ts\nimport { createClient } from '@clickhouse/client';\n\nconst client = createClient({\n  url: 'http://localhost:8123',\n  username: 'default',\n  password: 'dev_password',\n  database: 'app',\n});\n\nconst events = Array.from({ length: 1000 }, (_, i) => ({\n  event_type: ['page_view', 'click', 'signup', 'purchase'][i % 4],\n  user_id: Math.floor(Math.random() * 100) + 1,\n  properties: JSON.stringify({ index: i }),\n  created_at: new Date(Date.now() - Math.random() * 86400000 * 30)\n    .toISOString()\n    .replace('T', ' ')\n    .slice(0, 19),\n}));\n\nawait client.insert({ table: 'events', values: events, format: 'JSONEachRow' });\nconsole.log(`Seeded ${events.length} events`);\nawait client.close();\n```\n\n### Step 4: Project Structure\n\n```\nmy-clickhouse-app/\n\u251c\u2500\u2500 docker-compose.yml\n\u251c\u2500\u2500 init-db/\n\u2502   \u2514\u2500\u2500 001-schema.sql\n\u251c\u2500\u2500 scripts/\n\u2502   \u2514\u2500\u2500 seed.ts\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 db.ts              # Client singleton\n\u2502   \u2514\u2500\u2500 queries.ts          # Named query functions\n\u251c\u2500\u2500 tests/\n\u2502   \u251c\u2500\u2500 setup.ts            # Test lifecycle (truncate tables)\n\u2502   \u2514\u2500\u2500 events.test.ts\n\u251c\u2500\u2500 .env.local              # Local creds (git-ignored)\n\u251c\u2500\u2500 .env.example\n\u2514\u2500\u2500 package.json\n```\n\n### Step 5: Client Singleton\n\n```typescript\n// src/db.ts\nimport { createClient, ClickHouseClient } from '@clickhouse/client';\n\nlet client: ClickHouseClient | null = null;\n\nexport function getClient(): ClickHouseClient {\n  if (!client) {\n    client = createClient({\n      url: process.env.CLICKHOUSE_HOST ?? 'http://localhost:8123',\n      username: process.env.CLICKHOUSE_USER ?? 'default',\n      password: process.env.CLICKHOUSE_PASSWORD ?? 'dev_password',\n      database: process.env.CLICKHOUSE_DATABASE ?? 'app',\n    });\n  }\n  return client;\n}\n```\n\n### Step 6: Integration Testing with Vitest\n\n```typescript\n// tests/setup.ts\nimport { getClient } from '../src/db';\nimport { beforeEach, afterAll } from 'vitest';\n\nbeforeEach(async () => {\n  const client = getClient();\n  // TRUNCATE is lightweight \u2014 drops parts without logging\n  await client.command({ query: 'TRUNCATE TABLE IF EXISTS app.events' });\n});\n\nafterAll(async () => {\n  await getClient().close();\n});\n```\n\n```typescript\n// tests/events.test.ts\nimport { describe, it, expect } from 'vitest';\nimport { getClient } from '../src/db';\n\ndescribe('ClickHouse events', () => {\n  it('inserts and queries events', async () => {\n    const client = getClient();\n\n    await client.insert({\n      table: 'events',\n      values: [\n        { event_type: 'test', user_id: 1, properties: '{}' },\n        { event_type: 'test', user_id: 2, properties: '{}' },\n      ],\n      format: 'JSONEachRow',\n    });\n\n    const rs = await client.query({\n      query: 'SELECT count() AS cnt FROM events',\n      format: 'JSONEachRow',\n    });\n    const [row] = await rs.json<{ cnt: string }>();\n    expect(Number(row.cnt)).toBe(2);\n  });\n});\n```\n\n### Step 7: Package Scripts\n\n```json\n{\n  \"scripts\": {\n    \"dev\": \"tsx watch src/index.ts\",\n    \"db:up\": \"docker compose up -d\",\n    \"db:down\": \"docker compose down\",\n    \"db:reset\": \"docker compose down -v && docker compose up -d\",\n    \"db:seed\": \"tsx scripts/seed.ts\",\n    \"db:shell\": \"docker exec -it $(docker compose ps -q clickhouse) clickhouse-client --password dev_password\",\n    \"test\": \"vitest\",\n    \"test:watch\": \"vitest --watch\"\n  }\n}\n```\n\n## Useful CLI Commands\n\n```bash\n# Interactive SQL shell\ndocker exec -it <container> clickhouse-client --password dev_password\n\n# Run a query from host via HTTP\ncurl 'http://localhost:8123/?query=SELECT+count()+FROM+app.events'\n\n# Check running queries\ncurl 'http://localhost:8123/?query=SELECT+*+FROM+system.processes+FORMAT+PrettyCompact'\n\n# Watch merges\ncurl 'http://localhost:8123/?query=SELECT+*+FROM+system.merges+FORMAT+PrettyCompact'\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `Connection refused :8123` | Container not running | `docker compose up -d` |\n| `READONLY` | User lacks write perms | Set `CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1` |\n| `Too many parts` | Tiny frequent inserts | Batch inserts or increase `parts_to_throw_insert` |\n| `Memory limit exceeded` | Large query on small container | Add `--memory 4g` to Docker |\n\n## Resources\n\n- [ClickHouse Docker Image](https://hub.docker.com/r/clickhouse/clickhouse-server)\n- [clickhouse-client CLI](https://clickhouse.com/docs/interfaces/cli)\n- [Vitest Documentation](https://vitest.dev/)\n\n## Next Steps\n\nSee `clickhouse-sdk-patterns` for production-ready client patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clickhouse-local-dev-loop",
-    "description": "Run ClickHouse locally with Docker, configure test fixtures, and iterate",
-    "Trigger": "clickhouse local dev\", \"clickhouse docker\", \"clickhouse dev environment\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(docker:*), Bash(docker-compose:*),",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

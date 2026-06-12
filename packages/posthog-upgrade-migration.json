@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032953",
   "name": "posthog-upgrade-migration",
   "slug": "posthog-upgrade-migration",
   "description": "Upgrade posthog-js and posthog-node SDKs with breaking change detection.",
   "content": "# PostHog Upgrade & Migration\n\n## Current State\n\n!`npm list posthog-js posthog-node 2>/dev/null | grep posthog || echo 'No PostHog SDK found'`\n\n## Overview\n\nUpgrade posthog-js and posthog-node SDKs safely. Covers version compatibility, breaking changes between major versions (notably the v5 sendFeatureFlags change in posthog-node), and a systematic upgrade procedure.\n\n## Prerequisites\n\n- PostHog SDK currently installed\n- Git for branching\n- Test suite covering PostHog integration\n- Staging environment for validation\n\n## Instructions\n\n### Step 1: Audit Current Versions\n\n```bash\nset -euo pipefail\n# Check installed versions\necho \"=== posthog-js ===\"\nnpm list posthog-js 2>/dev/null || echo \"Not installed\"\necho \"=== posthog-node ===\"\nnpm list posthog-node 2>/dev/null || echo \"Not installed\"\necho \"=== Python posthog ===\"\npip3 show posthog 2>/dev/null | grep Version || echo \"Not installed\"\n\n# Check latest available versions\necho \"=== Latest available ===\"\nnpm view posthog-js version 2>/dev/null\nnpm view posthog-node version 2>/dev/null\n```\n\n### Step 2: Review Breaking Changes\n\n**posthog-node v5.x Breaking Changes:**\n\n```typescript\n// BREAKING: sendFeatureFlags no longer automatic with local evaluation\n// Before v5.5.0: feature flags auto-sent with events when using local evaluation\n// After v5.5.0: must explicitly set sendFeatureFlags: true\n\n// Before (implicit, worked in v4.x)\nposthog.capture({\n  distinctId: 'user-1',\n  event: 'page_viewed',\n  // Feature flags were automatically included\n});\n\n// After (v5.5.0+, explicit required)\nposthog.capture({\n  distinctId: 'user-1',\n  event: 'page_viewed',\n  sendFeatureFlags: true, // Must be explicit now\n});\n```\n\n**posthog-js Recent Changes:**\n\n```typescript\n// Autocapture configuration moved to object format\n// Before:\nposthog.init('phc_...', { autocapture: true });\n\n// Current: Fine-grained autocapture control\nposthog.init('phc_...', {\n  autocapture: {\n    dom_event_allowlist: ['click', 'submit'],\n    element_allowlist: ['a', 'button', 'form', 'input'],\n    css_selector_allowlist: ['.track-click'],\n    url_ignorelist: ['/health', '/api/internal'],\n  },\n});\n\n// before_send replaces older event filtering approaches\nposthog.init('phc_...', {\n  before_send: (event) => {\n    // Return null to drop event, or modified event\n    if (event.event === '$pageview' && event.properties?.$current_url?.includes('/admin')) {\n      return null; // Don't track admin pages\n    }\n    return event;\n  },\n});\n```\n\n### Step 3: Upgrade Procedure\n\n```bash\nset -euo pipefail\n# Create upgrade branch\ngit checkout -b upgrade/posthog-sdks\n\n# Upgrade posthog-node\nnpm install posthog-node@latest\n# Check for type errors\nnpx tsc --noEmit 2>&1 | grep -i posthog || echo \"No PostHog type errors\"\n\n# Upgrade posthog-js\nnpm install posthog-js@latest\n# Check for type errors\nnpx tsc --noEmit 2>&1 | grep -i posthog || echo \"No PostHog type errors\"\n\n# Run tests\nnpm test\n\n# If Python\npip install --upgrade posthog\n```\n\n### Step 4: Search for Deprecated Patterns\n\n```bash\nset -euo pipefail\n# Find files using PostHog\ngrep -rn \"posthog\\|PostHog\" --include=\"*.ts\" --include=\"*.tsx\" --include=\"*.js\" src/ | \\\n  grep -v node_modules | grep -v \".d.ts\"\n\n# Check for patterns that may need updating\necho \"=== Checking for deprecated patterns ===\"\n\n# Old import style (posthog-node v3 and earlier)\ngrep -rn \"from 'posthog-node'\" --include=\"*.ts\" src/ && echo \"Import style: current\" || true\n\n# Direct API key in code (should be env var)\ngrep -rn \"phc_\\|phx_\" --include=\"*.ts\" --include=\"*.tsx\" src/ && \\\n  echo \"WARNING: Hardcoded API key found\" || echo \"No hardcoded keys\"\n\n# Check for sendFeatureFlags usage\ngrep -rn \"sendFeatureFlags\" --include=\"*.ts\" src/ || \\\n  echo \"NOTE: No explicit sendFeatureFlags \u2014 verify if needed after v5.5.0 upgrade\"\n```\n\n### Step 5: Validate in Staging\n\n```typescript\n// Post-upgrade validation script\nimport { PostHog } from 'posthog-node';\n\nasync function validateUpgrade() {\n  const ph = new PostHog(process.env.NEXT_PUBLIC_POSTHOG_KEY!, {\n    host: 'https://us.i.posthog.com',\n    personalApiKey: process.env.POSTHOG_PERSONAL_API_KEY,\n  });\n\n  const checks = {\n    capture: false,\n    flags: false,\n    identify: false,\n  };\n\n  try {\n    // Test capture\n    ph.capture({ distinctId: 'upgrade-test', event: 'sdk_upgrade_validated' });\n    checks.capture = true;\n\n    // Test feature flags\n    const flags = await ph.getAllFlags('upgrade-test');\n    checks.flags = typeof flags === 'object';\n\n    // Test identify\n    ph.identify({ distinctId: 'upgrade-test', properties: { upgraded: true } });\n    checks.identify = true;\n\n    await ph.flush();\n  } catch (error) {\n    console.error('Validation failed:', error);\n  } finally {\n    await ph.shutdown();\n  }\n\n  console.log('Upgrade validation:', checks);\n  const allPassed = Object.values(checks).every(Boolean);\n  process.exit(allPassed ? 0 : 1);\n}\n\nvalidateUpgrade();\n```\n\n### Step 6: Rollback if Needed\n\n```bash\nset -euo pipefail\n# Pin to previous version\nnpm install posthog-node@4.2.1 --save-exact\nnpm install posthog-js@1.150.0 --save-exact\n\n# Verify rollback\nnpm test\n```\n\n## Version Compatibility\n\n| Package | Node.js Requirement | Key Notes |\n|---------|-------------------|-----------|\n| posthog-node 5.x | 20+ | `sendFeatureFlags` must be explicit |\n| posthog-node 4.x | 18+ | `sendFeatureFlags` was automatic with local eval |\n| posthog-js latest | Modern browsers | `before_send` for event filtering, object-based autocapture |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Type errors after upgrade | API changed | Check changelog, update types |\n| Flags not sent with events | v5.5.0 change | Add `sendFeatureFlags: true` |\n| Autocapture config ignored | Old boolean format | Migrate to object-based autocapture config |\n| Test failures | Mock structure changed | Update mocks to match new SDK exports |\n\n## Output\n\n- Upgraded PostHog SDK to latest version\n- Deprecated patterns identified and fixed\n- All tests passing with new version\n- Rollback procedure documented\n\n## Resources\n\n- [posthog-node Changelog](https://github.com/PostHog/posthog-node/releases)\n- [posthog-js Changelog](https://github.com/PostHog/posthog-js/releases)\n- [PostHog Migration Guides](https://posthog.com/docs/migrate)\n\n## Next Steps\n\nFor CI integration during upgrades, see `posthog-ci-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "posthog-upgrade-migration",
-    "description": "Upgrade posthog-js and posthog-node SDKs with breaking change detection.",
-    "Trigger": "upgrade posthog\", \"posthog breaking changes\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(git:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

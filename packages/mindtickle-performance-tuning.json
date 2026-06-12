@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032613",
   "name": "mindtickle-performance-tuning",
   "slug": "mindtickle-performance-tuning",
   "description": "Optimize MindTickle API integration performance with caching, bulk progress",
   "content": "# MindTickle Performance Tuning\n\n## Overview\n\nMindTickle's API serves sales enablement data across courses, quizzes, and analytics \u2014 enterprise deployments tracking thousands of reps make bulk progress queries and report generation the primary bottlenecks. This skill covers caching learner data, batching progress operations, and handling rate limits during high-volume training campaigns.\n\n## Instructions\n\n1. Implement Redis caching (or in-memory Map for development) with TTLs matching data volatility\n2. Use offset-based pagination for user and course lists to avoid incomplete result sets\n3. Queue incoming completion webhooks through Redis to handle campaign burst traffic\n4. Wrap all API calls with the rate limit handler before deploying to production\n\n## Prerequisites\n\n- MindTickle API key with admin or integration scope\n- Redis instance for caching learner progress and report data\n- Node.js 18+ with native fetch\n- Webhook endpoint configured for course/quiz completion events\n\n## Caching Strategy\n\n```typescript\nimport Redis from \"ioredis\";\n\nconst redis = new Redis(process.env.REDIS_URL);\n\n// Course catalog changes rarely \u2014 cache 30 minutes\n// User progress updates frequently during campaigns \u2014 cache 2 minutes\nconst TTL = { courses: 1800, progress: 120, reports: 600, users: 900 } as const;\n\nasync function getCachedCourses(orgId: string): Promise<MindTickleCourse[]> {\n  const key = `mt:courses:${orgId}`;\n  const cached = await redis.get(key);\n  if (cached) return JSON.parse(cached);\n\n  const courses = await mindtickleApi.listCourses(orgId);\n  await redis.setex(key, TTL.courses, JSON.stringify(courses));\n  return courses;\n}\n\nasync function getCachedProgress(userId: string, courseId: string): Promise<UserProgress> {\n  const key = `mt:progress:${userId}:${courseId}`;\n  const cached = await redis.get(key);\n  if (cached) return JSON.parse(cached);\n\n  const progress = await mindtickleApi.getUserProgress(userId, courseId);\n  await redis.setex(key, TTL.progress, JSON.stringify(progress));\n  return progress;\n}\n```\n\n## Batch Operations\n\n```typescript\nimport pLimit from \"p-limit\";\n\nconst limit = pLimit(6); // MindTickle allows moderate concurrency\n\n// Bulk fetch progress for all reps in a training campaign\nasync function batchFetchTeamProgress(\n  userIds: string[],\n  courseId: string\n): Promise<UserProgress[]> {\n  return Promise.all(\n    userIds.map((uid) => limit(() => getCachedProgress(uid, courseId)))\n  );\n}\n\n// Paginate through all users in an organization\nasync function fetchAllUsers(orgId: string): Promise<MindTickleUser[]> {\n  const users: MindTickleUser[] = [];\n  let offset = 0;\n  const pageSize = 200;\n\n  do {\n    const page = await mindtickleApi.listUsers(orgId, { offset, limit: pageSize });\n    users.push(...page.users);\n    offset += pageSize;\n    if (page.users.length < pageSize) break;\n  } while (true);\n\n  return users;\n}\n```\n\n## Connection Pooling\n\n```typescript\nimport { Agent } from \"undici\";\n\nconst mindtickleAgent = new Agent({\n  connect: { timeout: 8_000 }, // Report endpoints can be slow\n  keepAliveTimeout: 30_000,\n  keepAliveMaxTimeout: 60_000,\n  pipelining: 1,\n  connections: 10, // Persistent pool for MindTickle API\n});\n\nasync function mindtickleApiFetch(path: string, init?: RequestInit): Promise<Response> {\n  return fetch(`https://api.mindtickle.com/v2${path}`, {\n    ...init,\n    // @ts-expect-error undici dispatcher\n    dispatcher: mindtickleAgent,\n    headers: { Authorization: `Token ${process.env.MINDTICKLE_API_KEY}`, ...init?.headers },\n  });\n}\n```\n\n## Rate Limit Management\n\n```typescript\nasync function withRateLimit<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {\n  for (let attempt = 0; attempt <= maxRetries; attempt++) {\n    try {\n      return await fn();\n    } catch (err: any) {\n      if (err.status === 429) {\n        const retryAfter = parseInt(err.headers?.[\"retry-after\"] ?? \"10\", 10);\n        const backoff = retryAfter * 1000 * Math.pow(2, attempt);\n        console.warn(`MindTickle rate limited. Retrying in ${backoff}ms (attempt ${attempt + 1})`);\n        await new Promise((r) => setTimeout(r, backoff));\n        continue;\n      }\n      throw err;\n    }\n  }\n  throw new Error(\"MindTickle API: max retries exceeded\");\n}\n```\n\n## Monitoring & Metrics\n\n```typescript\nimport { Counter, Histogram } from \"prom-client\";\n\nconst mtApiLatency = new Histogram({\n  name: \"mindtickle_api_duration_seconds\",\n  help: \"MindTickle API call latency\",\n  labelNames: [\"endpoint\", \"status\"],\n  buckets: [0.1, 0.5, 1, 2, 5, 10], // Reports can take 5-10s\n});\n\nconst mtCacheHits = new Counter({\n  name: \"mindtickle_cache_hits_total\",\n  help: \"Cache hits for MindTickle course and progress data\",\n  labelNames: [\"cache_type\"], // courses | progress | reports | users\n});\n\nconst mtWebhookLatency = new Histogram({\n  name: \"mindtickle_webhook_processing_seconds\",\n  help: \"Time to process MindTickle completion webhooks\",\n  buckets: [0.01, 0.05, 0.1, 0.25, 0.5],\n});\n```\n\n## Performance Checklist\n\n- [ ] Cache TTLs set: courses 30min, progress 2min, reports 10min, users 15min\n- [ ] Batch size optimized (200 users per page, 6 concurrent progress fetches)\n- [ ] Offset-based pagination for user and course lists\n- [ ] Connection pooling via undici Agent with 8s timeout for reports\n- [ ] Rate limit retry with exponential backoff in place\n- [ ] Webhook processor handles burst completions without backpressure\n- [ ] Monitoring dashboards tracking API latency, cache hits, and webhook processing time\n\n## Error Handling\n\n| Issue | Cause | Fix |\n|-------|-------|-----|\n| Report generation timeouts | Analytics queries over large date ranges | Limit date range to 30 days, cache reports for 10min |\n| Stale progress data during live training | Reps complete modules but dashboard shows old state | Invalidate progress cache on completion webhook |\n| Webhook processing backpressure | Training campaign triggers 1000+ completions in minutes | Queue webhooks in Redis, process with worker at controlled rate |\n| 429 during bulk progress export | Fetching progress for all reps across all courses | Reduce concurrency to 3 and add 500ms delay between course batches |\n| Incomplete user list pagination | Offset math error causes skipped or duplicate users | Always check `page.users.length < pageSize` as termination condition |\n\n## Output\n\nAfter applying these optimizations, expect:\n\n- Course catalog queries under 50ms (cached) vs 300ms+ (uncached)\n- Team progress batch fetches completing in seconds instead of minutes\n- Webhook processing sustained at 100+ completions/second without backpressure\n\n## Examples\n\n```typescript\n// Full optimized team progress fetch \u2014 cache + rate limit + batching\nconst users = await fetchAllUsers(\"org-123\");\nconst progress = await batchFetchTeamProgress(\n  users.map((u) => u.id),\n  \"course-onboarding-2026\"\n);\n\n// Alternative: use background refresh for reports instead of on-demand generation\nconst report = await getCachedReport(\"quarterly-readiness\", { backgroundRefresh: true });\n```\n\n## Resources\n\n- [MindTickle Integration Platform](https://www.mindtickle.com/platform/integrations/)\n\n## Next Steps\n\nSee `mindtickle-reference-architecture`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "mindtickle-performance-tuning",
-    "description": "Optimize MindTickle API integration performance with caching, bulk progress",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

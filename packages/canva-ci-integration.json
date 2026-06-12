@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031417",
   "name": "canva-ci-integration",
   "slug": "canva-ci-integration",
   "description": "Configure CI/CD pipelines for Canva Connect API integrations with GitHub",
   "content": "# Canva CI Integration\n\n## Overview\n\nSet up CI/CD pipelines for Canva Connect API integrations. Uses MSW mock server for unit tests and real API calls for integration tests.\n\n## Instructions\n\n### Step 1: GitHub Actions Workflow\n\n```yaml\n# .github/workflows/canva-integration.yml\nname: Canva Integration Tests\n\non:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n\njobs:\n  unit-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n      - run: npm test -- --coverage\n        # Unit tests use MSW mocks \u2014 no real API calls\n\n  integration-tests:\n    runs-on: ubuntu-latest\n    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n    needs: unit-tests\n    env:\n      CANVA_CLIENT_ID: ${{ secrets.CANVA_CLIENT_ID }}\n      CANVA_CLIENT_SECRET: ${{ secrets.CANVA_CLIENT_SECRET }}\n      CANVA_ACCESS_TOKEN: ${{ secrets.CANVA_ACCESS_TOKEN }}\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n\n      - name: Verify Canva API connectivity\n        run: |\n          HTTP_CODE=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n            -H \"Authorization: Bearer $CANVA_ACCESS_TOKEN\" \\\n            \"https://api.canva.com/rest/v1/users/me\")\n          if [ \"$HTTP_CODE\" != \"200\" ]; then\n            echo \"Canva API check failed: HTTP $HTTP_CODE\"\n            exit 1\n          fi\n\n      - name: Run integration tests\n        run: npm run test:integration\n```\n\n### Step 2: Configure Secrets\n\n```bash\n# Store OAuth credentials as GitHub secrets\ngh secret set CANVA_CLIENT_ID --body \"OCAxxxxxxxxxxxxxxxx\"\ngh secret set CANVA_CLIENT_SECRET --body \"xxxxxxxxxxxxxxxx\"\n\n# For integration tests, store a long-lived access token\n# (refresh it periodically via a separate workflow or manually)\ngh secret set CANVA_ACCESS_TOKEN --body \"cnvat_xxxxxxxxxxxxxxxx\"\n```\n\n### Step 3: Unit Tests with MSW Mocks\n\n```typescript\n// tests/unit/designs.test.ts\nimport { describe, it, expect, beforeAll, afterAll } from 'vitest';\nimport { canvaMockServer } from '../mocks/canva-server';\n\nbeforeAll(() => canvaMockServer.listen());\nafterAll(() => canvaMockServer.close());\n\ndescribe('Design CRUD', () => {\n  it('should create a design', async () => {\n    const res = await fetch('https://api.canva.com/rest/v1/designs', {\n      method: 'POST',\n      headers: { 'Authorization': 'Bearer mock-token', 'Content-Type': 'application/json' },\n      body: JSON.stringify({\n        design_type: { type: 'custom', width: 1080, height: 1080 },\n        title: 'CI Test Design',\n      }),\n    });\n    expect(res.ok).toBe(true);\n    const data = await res.json();\n    expect(data.design.id).toBeDefined();\n  });\n});\n```\n\n### Step 4: Integration Tests\n\n```typescript\n// tests/integration/canva-api.test.ts\nimport { describe, it, expect } from 'vitest';\n\nconst TOKEN = process.env.CANVA_ACCESS_TOKEN;\n\ndescribe.skipIf(!TOKEN)('Canva Connect API', () => {\n  it('should authenticate and return user identity', async () => {\n    const res = await fetch('https://api.canva.com/rest/v1/users/me', {\n      headers: { 'Authorization': `Bearer ${TOKEN}` },\n    });\n    expect(res.status).toBe(200);\n    const data = await res.json();\n    expect(data.team_user.user_id).toBeDefined();\n  });\n\n  it('should list designs', async () => {\n    const res = await fetch('https://api.canva.com/rest/v1/designs?limit=1', {\n      headers: { 'Authorization': `Bearer ${TOKEN}` },\n    });\n    expect(res.status).toBe(200);\n    const data = await res.json();\n    expect(data.items).toBeInstanceOf(Array);\n  });\n});\n```\n\n### Step 5: Token Refresh Workflow\n\n```yaml\n# .github/workflows/refresh-canva-token.yml\nname: Refresh Canva Token\n\non:\n  schedule:\n    - cron: '0 */3 * * *'  # Every 3 hours (tokens expire in ~4 hours)\n\njobs:\n  refresh:\n    runs-on: ubuntu-latest\n    steps:\n      - name: Refresh Canva access token\n        run: |\n          BASIC_AUTH=$(echo -n \"${{ secrets.CANVA_CLIENT_ID }}:${{ secrets.CANVA_CLIENT_SECRET }}\" | base64)\n          RESPONSE=$(curl -s -X POST \"https://api.canva.com/rest/v1/oauth/token\" \\\n            -H \"Authorization: Basic $BASIC_AUTH\" \\\n            -H \"Content-Type: application/x-www-form-urlencoded\" \\\n            -d \"grant_type=refresh_token&refresh_token=${{ secrets.CANVA_REFRESH_TOKEN }}\")\n\n          NEW_ACCESS=$(echo \"$RESPONSE\" | jq -r '.access_token')\n          NEW_REFRESH=$(echo \"$RESPONSE\" | jq -r '.refresh_token')\n\n          if [ \"$NEW_ACCESS\" != \"null\" ]; then\n            gh secret set CANVA_ACCESS_TOKEN --body \"$NEW_ACCESS\"\n            gh secret set CANVA_REFRESH_TOKEN --body \"$NEW_REFRESH\"\n            echo \"Token refreshed successfully\"\n          else\n            echo \"Token refresh failed: $RESPONSE\"\n            exit 1\n          fi\n        env:\n          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Integration test 401 | Token expired | Run refresh workflow or re-authorize |\n| Secret not found | Missing `gh secret set` | Add secret via CLI |\n| Mock not matching | URL mismatch | Verify full `api.canva.com/rest/v1` prefix |\n| Rate limited in CI | Parallel test runs | Serialize integration tests |\n\n## Resources\n\n- [GitHub Actions](https://docs.github.com/en/actions)\n- [Canva API Reference](https://www.canva.dev/docs/connect/api-reference/)\n- [MSW for API Mocking](https://mswjs.io/)\n\n## Next Steps\n\nFor deployment patterns, see `canva-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "canva-ci-integration",
-    "description": "Configure CI/CD pipelines for Canva Connect API integrations with GitHub",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

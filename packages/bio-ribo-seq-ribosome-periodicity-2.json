@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000029509",
   "name": "bio-ribo-seq-ribosome-periodicity",
   "slug": "bio-ribo-seq-ribosome-periodicity-2",
   "description": "Validate Ribo-seq data quality by checking 3-nucleotide periodicity and calculating P-site offsets. Use when assessing library quality or determining read offsets for downstream analysis.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: matplotlib 3.8+, numpy 1.26+, pysam 0.22+, scipy 1.12+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Ribosome Periodicity Analysis\n\n**\"Check if my Ribo-seq data shows triplet periodicity\"** \u2192 Validate Ribo-seq library quality by verifying 3-nucleotide translocation patterns and calculating P-site offsets from metagene profiles.\n- Python: `plastid` for P-site offset calculation and metagene analysis\n\n## 3-Nucleotide Periodicity\n\n**Goal:** Verify that Ribo-seq reads exhibit the expected 3-nucleotide translocation pattern characteristic of active translation.\n\n**Approach:** Load P-site mapped reads and compute metagene profiles around start codons to check for triplet periodicity.\n\nRibosomes move 3 nucleotides per codon. Good Ribo-seq data shows strong periodicity:\n\n```python\nfrom plastid import BAMGenomeArray, FivePrimeMapFactory, GenomicSegment\nimport numpy as np\nimport matplotlib.pyplot as plt\n\n# Load aligned reads\nalignments = BAMGenomeArray('riboseq.bam', mapping=FivePrimeMapFactory())\n\n# Get metagene around start codons\n# Expect strong 3-nt periodicity\n```\n\n## Calculate P-site Offset\n\n**Goal:** Determine the optimal P-site offset from the 5' end of ribosome footprints for accurate codon-level positioning.\n\n**Approach:** Run metagene analysis around annotated start codons and identify the offset that aligns the signal peak with the AUG position.\n\n```python\nfrom plastid import metagene_analysis\n\n# The P-site offset varies by read length\n# Typically 12-15 nt from 5' end for 28-30 nt reads\n\ndef determine_psite_offset(bam_path, annotation_file):\n    '''Determine optimal P-site offset from metagene analysis'''\n    from plastid import GTF2_TranscriptAssembler, BAMGenomeArray\n\n    # Load annotations\n    transcripts = list(GTF2_TranscriptAssembler(annotation_file))\n\n    # Load reads\n    alignments = BAMGenomeArray(bam_path, mapping=FivePrimeMapFactory())\n\n    # Metagene around start codons\n    # Peak should align with start codon position\n    metagene_data = metagene_analysis(\n        transcripts,\n        alignments,\n        upstream=50,\n        downstream=100\n    )\n\n    return metagene_data\n```\n\n## Metagene Plots\n\n**Goal:** Visualize the metagene profile around start codons with frame-colored bars and a periodicity power spectrum.\n\n**Approach:** Plot read counts by reading frame and compute FFT to confirm a dominant period of 3 nucleotides.\n\n```python\ndef plot_metagene(metagene_data, offset=12):\n    '''Plot metagene profile around start codon'''\n    fig, axes = plt.subplots(1, 2, figsize=(12, 5))\n\n    # Frame 0, 1, 2 around start codon\n    positions = np.arange(-50, 100)\n\n    # Plot by frame\n    for frame in range(3):\n        frame_positions = positions[positions % 3 == frame]\n        counts = metagene_data[positions % 3 == frame]\n        axes[0].bar(frame_positions, counts, alpha=0.7, label=f'Frame {frame}')\n\n    axes[0].set_xlabel('Position relative to start codon')\n    axes[0].set_ylabel('Normalized counts')\n    axes[0].legend()\n    axes[0].axvline(0, color='red', linestyle='--', label='Start')\n\n    # Periodicity\n    from scipy.fft import fft\n    fft_result = np.abs(fft(metagene_data))\n    freq = np.fft.fftfreq(len(metagene_data))\n\n    axes[1].plot(1/freq[1:len(freq)//2], fft_result[1:len(freq)//2])\n    axes[1].set_xlabel('Period (nt)')\n    axes[1].set_ylabel('Power')\n    axes[1].axvline(3, color='red', linestyle='--')\n\n    plt.tight_layout()\n    plt.savefig('periodicity.pdf')\n```\n\n## Assess by Read Length\n\n**Goal:** Evaluate 3-nucleotide periodicity strength for each read length to identify the most informative footprint sizes.\n\n**Approach:** Group reads by query length, compute periodicity score per group, and retain lengths with strong triplet signal.\n\n```python\ndef periodicity_by_length(bam_path, annotation_file):\n    '''Calculate periodicity score for each read length'''\n    import pysam\n\n    # Group reads by length\n    reads_by_length = {}\n    with pysam.AlignmentFile(bam_path, 'rb') as bam:\n        for read in bam:\n            if not read.is_unmapped:\n                length = read.query_length\n                if length not in reads_by_length:\n                    reads_by_length[length] = []\n                reads_by_length[length].append(read)\n\n    # Calculate periodicity for each length\n    # Good lengths show strong 3-nt periodicity\n    results = {}\n    for length, reads in reads_by_length.items():\n        if len(reads) > 1000:  # Need sufficient reads\n            periodicity = calculate_periodicity(reads, annotation_file)\n            results[length] = periodicity\n\n    return results\n```\n\n## P-site Offset Table\n\nCommon P-site offsets by read length (5' end mapping):\n\n| Read Length | P-site Offset |\n|-------------|---------------|\n| 28 nt | 12 |\n| 29 nt | 12 |\n| 30 nt | 13 |\n| 31 nt | 13 |\n| 32 nt | 14 |\n\n## Validate with RiboCode\n\n**Goal:** Run an automated periodicity and ORF detection pipeline as an independent validation of data quality.\n\n**Approach:** Execute RiboCode's one-step command, which internally assesses periodicity and generates diagnostic plots.\n\n```bash\n# RiboCode includes periodicity analysis\nRiboCode_onestep \\\n    -g annotation.gtf \\\n    -r riboseq.bam \\\n    -f genome.fa \\\n    -o output_dir\n\n# Check output for periodicity plots\n```\n\n## Related Skills\n\n- riboseq-preprocessing - Generate aligned BAM\n- orf-detection - Uses P-site offsets\n- translation-efficiency - Requires proper positioning\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-ribo-seq-ribosome-periodicity",
-    "description": "Validate Ribo-seq data quality by checking 3-nucleotide periodicity and calculating P-site offsets. Use when assessing library quality or determining read offsets for downstream analysis.",
-    "tool_type": "python",
-    "primary_tool": "Plastid"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

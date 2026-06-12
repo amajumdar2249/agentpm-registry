@@ -1,16 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000019318",
   "name": "setup-webhook",
   "slug": "setup-webhook",
   "description": "Configure Vapi server URLs and webhooks to receive real-time call events, transcripts, tool calls, and end-of-call reports. Use when setting up webhook endpoints, building tool servers, or integrating Vapi events into your application.",
   "content": "\n# Vapi Webhook / Server URL Setup\n\nConfigure server URLs to receive real-time events from Vapi during calls \u2014 transcripts, tool calls, status changes, and end-of-call reports.\n\n> **Setup:** Ensure `VAPI_API_KEY` is set. See the `setup-api-key` skill if needed.\n\n## Overview\n\nVapi uses \"Server URLs\" (webhooks) to communicate with your application. Unlike traditional one-way webhooks, Vapi server URLs support bidirectional communication \u2014 your server can respond with data that affects the call.\n\n## Where to Set Server URLs\n\n### On an Assistant\n\n```bash\ncurl -X PATCH https://api.vapi.ai/assistant/{id} \\\n  -H \"Authorization: Bearer $VAPI_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"serverUrl\": \"https://your-server.com/vapi/webhook\",\n    \"serverUrlSecret\": \"your-webhook-secret\"\n  }'\n```\n\n### On a Phone Number\n\n```bash\ncurl -X PATCH https://api.vapi.ai/phone-number/{id} \\\n  -H \"Authorization: Bearer $VAPI_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"serverUrl\": \"https://your-server.com/vapi/webhook\"\n  }'\n```\n\n### At the Organization Level\n\nSet a default server URL in the Vapi Dashboard under **Settings > Server URL**.\n\nPriority order: Tool server URL > Assistant server URL > Phone Number server URL > Organization server URL.\n\n## Event Types\n\n| Event | Description | Expects Response? |\n|-------|-------------|-------------------|\n| `assistant-request` | Request for dynamic assistant config | Yes \u2014 return assistant config |\n| `tool-calls` | Assistant is calling a tool | Yes \u2014 return tool results |\n| `status-update` | Call status changed | No |\n| `transcript` | Real-time transcript update | No |\n| `end-of-call-report` | Call completed with summary | No |\n| `hang` | Assistant failed to respond | No |\n| `speech-update` | Speech activity detected | No |\n\n## Webhook Server Example (Express.js)\n\n```typescript\nimport express from \"express\";\nimport crypto from \"crypto\";\n\nconst app = express();\napp.use(express.json());\n\napp.post(\"/vapi/webhook\", (req, res) => {\n  const { message } = req.body;\n\n  switch (message.type) {\n    case \"assistant-request\":\n      // Dynamically configure the assistant based on the caller\n      res.json({\n        assistant: {\n          name: \"Dynamic Assistant\",\n          firstMessage: `Hello ${message.call.customer?.name || \"there\"}!`,\n          model: {\n            provider: \"openai\",\n            model: \"gpt-4.1\",\n            messages: [\n              { role: \"system\", content: \"You are a helpful assistant.\" },\n            ],\n          },\n          voice: { provider: \"vapi\", voiceId: \"Elliot\" },\n          transcriber: { provider: \"deepgram\", model: \"nova-3\", language: \"en\" },\n        },\n      });\n      break;\n\n    case \"tool-calls\":\n      // Handle tool calls from the assistant\n      const results = message.toolCallList.map((toolCall: any) => ({\n        toolCallId: toolCall.id,\n        result: handleToolCall(toolCall.name, toolCall.arguments),\n      }));\n      res.json({ results });\n      break;\n\n    case \"end-of-call-report\":\n      // Process the call report\n      console.log(\"Call ended:\", {\n        callId: message.call.id,\n        duration: message.durationSeconds,\n        cost: message.cost,\n        summary: message.summary,\n        transcript: message.transcript,\n      });\n      res.json({});\n      break;\n\n    case \"status-update\":\n      console.log(\"Call status:\", message.status);\n      res.json({});\n      break;\n\n    case \"transcript\":\n      console.log(`[${message.role}]: ${message.transcript}`);\n      res.json({});\n      break;\n\n    default:\n      res.json({});\n  }\n});\n\nfunction handleToolCall(name: string, args: any): string {\n  // Implement your tool logic here\n  return `Result for ${name}`;\n}\n\napp.listen(3000, () => console.log(\"Webhook server running on port 3000\"));\n```\n\n## Webhook Server Example (Python / Flask)\n\n```python\nfrom flask import Flask, request, jsonify\n\napp = Flask(__name__)\n\n@app.route(\"/vapi/webhook\", methods=[\"POST\"])\ndef vapi_webhook():\n    data = request.json\n    message = data.get(\"message\", {})\n    msg_type = message.get(\"type\")\n\n    if msg_type == \"assistant-request\":\n        return jsonify({\n            \"assistant\": {\n                \"name\": \"Dynamic Assistant\",\n                \"firstMessage\": \"Hello! How can I help?\",\n                \"model\": {\n                    \"provider\": \"openai\",\n                    \"model\": \"gpt-4.1\",\n                    \"messages\": [\n                        {\"role\": \"system\", \"content\": \"You are a helpful assistant.\"}\n                    ],\n                },\n                \"voice\": {\"provider\": \"vapi\", \"voiceId\": \"Elliot\"},\n                \"transcriber\": {\"provider\": \"deepgram\", \"model\": \"nova-3\", \"language\": \"en\"},\n            }\n        })\n\n    elif msg_type == \"tool-calls\":\n        results = []\n        for tool_call in message.get(\"toolCallList\", []):\n            results.append({\n                \"toolCallId\": tool_call[\"id\"],\n                \"result\": f\"Handled {tool_call['name']}\",\n            })\n        return jsonify({\"results\": results})\n\n    elif msg_type == \"end-of-call-report\":\n        print(f\"Call ended: {message['call']['id']}\")\n        print(f\"Summary: {message.get('summary')}\")\n\n    return jsonify({})\n\nif __name__ == \"__main__\":\n    app.run(port=3000)\n```\n\n## Webhook Authentication\n\nVerify webhook authenticity using the secret:\n\n```typescript\nfunction verifyWebhook(req: express.Request, secret: string): boolean {\n  const signature = req.headers[\"x-vapi-signature\"] as string;\n  if (!signature || !secret) return false;\n\n  const payload = JSON.stringify(req.body);\n  const expected = crypto\n    .createHmac(\"sha256\", secret)\n    .update(payload)\n    .digest(\"hex\");\n\n  return crypto.timingSafeEqual(\n    Buffer.from(signature),\n    Buffer.from(expected)\n  );\n}\n```\n\n## Local Development\n\nUse the Vapi CLI to forward webhooks to your local server:\n\n```bash\n# Install the CLI\ncurl -sSL https://vapi.ai/install.sh | bash\n\n# Forward events to local server\nvapi listen --forward-to localhost:3000/vapi/webhook\n```\n\nOr use ngrok:\n\n```bash\nngrok http 3000\n# Copy the ngrok URL and set it as your server URL\n```\n\n## End-of-Call Report Fields\n\nThe `end-of-call-report` event includes:\n\n| Field | Description |\n|-------|-------------|\n| `call` | Full call object with metadata |\n| `transcript` | Complete conversation transcript |\n| `summary` | AI-generated call summary |\n| `recordingUrl` | URL to the call recording |\n| `durationSeconds` | Call duration |\n| `cost` | Total call cost |\n| `costBreakdown` | Breakdown by component (STT, LLM, TTS, transport) |\n| `messages` | Array of all conversation messages |\n\n## References\n\n- [Server URL Events](references/webhook-events.md) \u2014 All event types with payload schemas\n- [Vapi Server URL Docs](https://docs.vapi.ai/server-url) \u2014 Official documentation\n- [Local Development](https://docs.vapi.ai/server-url/developing-locally) \u2014 Testing webhooks locally\n\n## Additional Resources\n\nThis skills repository includes a **Vapi documentation MCP server** (`vapi-docs`) that gives your AI agent access to the full Vapi knowledge base. Use the `searchDocs` tool to look up anything beyond what this skill covers \u2014 advanced configuration, troubleshooting, SDK details, and more.\n\n**Auto-configured:** If you cloned or installed these skills, the MCP server is already configured via `.mcp.json` (Claude Code), `.cursor/mcp.json` (Cursor), or `.vscode/mcp.json` (VS Code Copilot).\n\n**Manual setup:** If your agent doesn't auto-detect the config, run:\n```bash\nclaude mcp add vapi-docs -- npx -y mcp-remote https://docs.vapi.ai/_mcp/server\n```\n\nSee the [README](../README.md#vapi-documentation-server-mcp) for full setup instructions across all supported agents.\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "setup-webhook",
-    "description": "Configure Vapi server URLs and webhooks to receive real-time call events, transcripts, tool calls, and end-of-call reports. Use when setting up webhook endpoints, building tool servers, or integrating Vapi events into your application.",
-    "license": "MIT",
-    "compatibility": "Requires internet access and a Vapi API key (VAPI_API_KEY).",
-    "metadata": "",
-    "author": "vapi",
-    "version": "1.0"
+  "author": "vapi",
+  "version": "1.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

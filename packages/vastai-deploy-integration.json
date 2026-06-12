@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033444",
   "name": "vastai-deploy-integration",
   "slug": "vastai-deploy-integration",
   "description": "Deploy ML training jobs and inference services on Vast.ai GPU cloud.",
   "content": "# Vast.ai Deploy Integration\n\n## Overview\n\nDeploy ML training jobs and inference services on Vast.ai GPU cloud. Covers Docker image optimization, automated provisioning scripts, data transfer strategies, and deployment automation.\n\n## Prerequisites\n\n- Vast.ai CLI authenticated\n- Docker image published to a registry\n- Training/inference code tested locally\n\n## Instructions\n\n### Step 1: Optimized Docker Image\n\n```dockerfile\n# Dockerfile.vastai \u2014 optimized for fast pulls on Vast.ai\nFROM pytorch/pytorch:2.2.0-cuda12.1-cudnn8-runtime\n\n# Install dependencies in a single layer\nCOPY requirements.txt /tmp/\nRUN pip install --no-cache-dir -r /tmp/requirements.txt && rm /tmp/requirements.txt\n\n# Copy application code\nCOPY src/ /workspace/src/\nCOPY scripts/ /workspace/scripts/\n\nWORKDIR /workspace\nCMD [\"python\", \"src/train.py\"]\n```\n\n```bash\n# Build and push\ndocker build -t ghcr.io/yourorg/training:v1 -f Dockerfile.vastai .\ndocker push ghcr.io/yourorg/training:v1\n```\n\n### Step 2: Automated Deployment Script\n\n```python\n#!/usr/bin/env python3\n\"\"\"deploy.py \u2014 Automated Vast.ai deployment with monitoring.\"\"\"\nimport subprocess, json, time, argparse, sys\n\ndef deploy(args):\n    # Search for matching offer\n    query = (f\"num_gpus={args.gpus} gpu_name={args.gpu} \"\n             f\"reliability>{args.reliability} dph_total<={args.max_price} \"\n             f\"disk_space>={args.disk} rentable=true\")\n\n    offers = json.loads(subprocess.run(\n        [\"vastai\", \"search\", \"offers\", query, \"--order\", \"dph_total\",\n         \"--raw\", \"--limit\", \"5\"],\n        capture_output=True, text=True, check=True).stdout)\n\n    if not offers:\n        print(f\"ERROR: No offers matching: {query}\", file=sys.stderr)\n        sys.exit(1)\n\n    offer = offers[0]\n    print(f\"Selected: {offer['gpu_name']} ${offer['dph_total']:.3f}/hr \"\n          f\"(ID: {offer['id']})\")\n\n    # Create instance\n    cmd = [\"vastai\", \"create\", \"instance\", str(offer[\"id\"]),\n           \"--image\", args.image, \"--disk\", str(args.disk)]\n    if args.onstart:\n        cmd.extend([\"--onstart-cmd\", args.onstart])\n\n    result = json.loads(subprocess.run(\n        cmd, capture_output=True, text=True, check=True).stdout)\n    instance_id = result[\"new_contract\"]\n    print(f\"Instance {instance_id} provisioning...\")\n\n    # Wait for running\n    for _ in range(30):\n        info = json.loads(subprocess.run(\n            [\"vastai\", \"show\", \"instance\", str(instance_id), \"--raw\"],\n            capture_output=True, text=True).stdout)\n        if info.get(\"actual_status\") == \"running\":\n            print(f\"READY: ssh -p {info['ssh_port']} root@{info['ssh_host']}\")\n            return instance_id, info\n        time.sleep(10)\n\n    raise TimeoutError(\"Instance did not start\")\n\nif __name__ == \"__main__\":\n    parser = argparse.ArgumentParser()\n    parser.add_argument(\"--gpu\", default=\"RTX_4090\")\n    parser.add_argument(\"--gpus\", type=int, default=1)\n    parser.add_argument(\"--image\", required=True)\n    parser.add_argument(\"--disk\", type=int, default=50)\n    parser.add_argument(\"--max-price\", type=float, default=0.50)\n    parser.add_argument(\"--reliability\", type=float, default=0.95)\n    parser.add_argument(\"--onstart\", default=\"\")\n    deploy(parser.parse_args())\n```\n\n### Step 3: Data Transfer Strategies\n\n```bash\n# Small datasets (<5GB): SCP directly\nscp -P $PORT ./data.tar.gz root@$HOST:/workspace/\n\n# Large datasets (>5GB): Use rsync with compression\nrsync -avz --progress -e \"ssh -p $PORT\" ./data/ root@$HOST:/workspace/data/\n\n# Very large datasets: Pre-stage on cloud storage\nssh -p $PORT root@$HOST \"wget -q https://storage.example.com/dataset.tar.gz -O /workspace/data.tar.gz\"\n```\n\n### Step 4: Health Check After Deploy\n\n```bash\nssh -p $PORT -o StrictHostKeyChecking=no root@$HOST << 'CHECK'\necho \"=== Deploy Health Check ===\"\nnvidia-smi --query-gpu=name,memory.total --format=csv,noheader\npython -c \"import torch; print(f'CUDA: {torch.cuda.is_available()}')\"\ndf -h /workspace | tail -1\necho \"=== Ready ===\"\nCHECK\n```\n\n## Output\n\n- Optimized Docker image for fast Vast.ai pulls\n- Automated deployment script with GPU/price selection\n- Data transfer patterns (SCP, rsync, cloud storage)\n- Post-deploy health check verification\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Docker pull timeout | Image too large (>10GB) | Use multi-stage builds; minimize image layers |\n| Disk space exhausted | Insufficient disk allocation | Increase `--disk` parameter |\n| SSH timeout after deploy | Instance still loading image | Wait longer or use smaller base image |\n| CUDA version mismatch | Image CUDA > host CUDA | Filter offers by `cuda_max_good` |\n\n## Resources\n\n- [Vast.ai Instance Creation](https://docs.vast.ai/api-reference/instances/create-instance)\n- [Docker Best Practices](https://docs.docker.com/develop/develop-images/dockerfile_best-practices/)\n\n## Next Steps\n\nFor event-driven workflows, see `vastai-webhooks-events`.\n\n## Examples\n\n**One-command deploy**: `python deploy.py --gpu A100 --image ghcr.io/org/train:v1 --max-price 2.00 --disk 100`\n\n**Multi-GPU deploy**: Set `--gpus 4` and `--gpu H100_SXM` for distributed training with `torchrun`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "vastai-deploy-integration",
-    "description": "Deploy ML training jobs and inference services on Vast.ai GPU cloud.",
-    "allowed-tools": "Read, Write, Edit, Bash(vastai:*), Bash(docker:*), Bash(ssh:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

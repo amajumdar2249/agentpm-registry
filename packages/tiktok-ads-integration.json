@@ -1,20 +1,46 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000008305",
   "name": "tiktok-ads-integration",
   "slug": "tiktok-ads-integration",
   "description": "Launch TikTok ad campaigns for ecommerce with Events API server-side tracking, Spark Ads, catalog sync, and shopping ads for product discovery",
   "content": "\n# TikTok Ads Integration\n\n## Overview\n\nTikTok is a primary discovery channel for ecommerce, particularly for fashion, beauty, home, and consumer goods. Reliable attribution requires pairing the browser-based TikTok Pixel with the server-side Events API (EAPI) \u2014 similar to Meta's CAPI approach. For Shopify, WooCommerce, and BigCommerce, the official TikTok integrations install both Pixel and EAPI automatically. Custom implementation only belongs in the Custom/Headless section.\n\n## When to Use This Skill\n\n- When launching TikTok as a new paid acquisition channel\n- When TikTok Pixel is under-reporting conversions and you need Events API\n- When setting up Product Shopping Ads or Video Shopping Ads\n- When boosting organic creator content as Spark Ads\n- When syncing your product catalog for Dynamic Showcase Ads\n\n## Core Instructions\n\n### Step 1: Connect your platform to TikTok\n\n| Platform | Integration Method | Pixel + EAPI | Catalog Sync |\n|----------|--------------------|-------------|-------------|\n| **Shopify** | TikTok for Shopify (official app) | Yes (built-in) | Yes (automatic) |\n| **WooCommerce** | TikTok for WooCommerce plugin | Yes (built-in) | Yes (automatic) |\n| **BigCommerce** | TikTok channel in Channel Manager | Yes (built-in) | Yes (automatic) |\n| **Custom / Headless** | TikTok Pixel JS + Events API REST | Manual implementation | Manual feed generation |\n\n### Step 2: Set up TikTok Ads\n\n---\n\n#### Shopify\n\n1. Go to **Shopify Admin \u2192 Sales Channels \u2192 + \u2192 TikTok**\n2. Install TikTok for Shopify and connect your TikTok Business account and Ad account\n3. Under **Pixel & Events**, select **Maximum Data Sharing** \u2014 this enables server-side Events API alongside the browser Pixel\n4. Shopify automatically:\n   - Installs the TikTok Pixel on all pages\n   - Fires ViewContent, AddToCart, InitiateCheckout, and CompletePayment events\n   - Sends the same events via EAPI from Shopify's servers\n   - Syncs your product catalog to TikTok Catalog Manager for Shopping Ads\n5. Go to **TikTok Ads Manager \u2192 Assets \u2192 Events** and check your Pixel's event quality score \u2014 aim for 7+/10\n6. Check catalog sync status in **TikTok Business Center \u2192 Catalogs**\n\n---\n\n#### WooCommerce\n\n1. Install **TikTok for WooCommerce** from the WordPress plugin directory (official TikTok plugin)\n2. Go to **WooCommerce \u2192 TikTok \u2192 Connect** and sign in with your TikTok Business account\n3. Enable **Enhanced Matching** (EAPI) under the data sharing settings\n4. The plugin syncs your WooCommerce product catalog to TikTok Catalog Manager automatically\n5. Verify events in **TikTok Events Manager \u2192 Data Sources \u2192 [Your Pixel]**\n\n---\n\n#### BigCommerce\n\n1. Go to **BigCommerce Admin \u2192 Channel Manager \u2192 Add a Channel \u2192 TikTok**\n2. Connect your TikTok Business account and Ad account\n3. Enable server-side event tracking during setup\n4. BigCommerce syncs your product catalog to TikTok automatically\n5. Check product sync status in **Channel Manager \u2192 TikTok \u2192 Products**\n\n---\n\n#### Custom / Headless\n\nFor headless stores, install both the browser Pixel and server-side Events API:\n\n**Browser Pixel (add to `<head>` on every page):**\n```javascript\nttq.load('YOUR_PIXEL_ID');\nttq.page();\n\n// Product page\nttq.track('ViewContent', {\n  content_id: product.sku,\n  content_type: 'product',\n  content_name: product.name,\n  value: product.price,\n  currency: 'USD',\n});\n\n// Purchase \u2014 pass event_id for deduplication with Events API\nconst purchaseEventId = `purchase-${order.id}`;\nttq.track('CompletePayment', {\n  content_id: order.lineItems.map(i => i.sku).join(','),\n  value: order.subtotal,\n  currency: order.currencyCode,\n  order_id: order.id,\n}, { event_id: purchaseEventId });\n```\n\n**Server-side Events API (send from your order webhook):**\n```typescript\nasync function trackTikTokPurchase(order: Order, req: Request) {\n  const eventId = `purchase-${order.id}`; // MUST match Pixel event_id for deduplication\n  const { createHash } = await import('crypto');\n  const sha256 = (val: string) => createHash('sha256').update(val.toLowerCase().trim()).digest('hex');\n\n  await fetch(\n    `https://business-api.tiktok.com/open_api/v1.3/pixel/track/?business_id=${process.env.TIKTOK_BUSINESS_ID}`,\n    {\n      method: 'POST',\n      headers: {\n        'Content-Type': 'application/json',\n        'Access-Token': process.env.TIKTOK_ACCESS_TOKEN!,\n      },\n      body: JSON.stringify({\n        data: [{\n          pixel_code: process.env.TIKTOK_PIXEL_ID,\n          event: 'CompletePayment',\n          event_id: eventId,\n          event_time: Math.floor(Date.now() / 1000),\n          user: {\n            email: sha256(order.customerEmail),\n            phone_number: sha256(order.customerPhone?.replace(/\\D/g, '') ?? ''),\n            ip: req.ip,\n            user_agent: req.headers['user-agent'],\n            ttclid: req.cookies['ttclid'], // TikTok click ID \u2014 strongest attribution signal\n          },\n          properties: {\n            value: order.subtotal,\n            currency: order.currencyCode,\n            contents: order.lineItems.map(i => ({ content_id: i.sku, content_type: 'product' })),\n            order_id: order.id,\n          },\n          page: { url: `${process.env.STORE_URL}/checkout/thank-you` },\n        }],\n      }),\n    }\n  );\n}\n```\n\n### Step 3: Build your TikTok campaign structure\n\nIn **TikTok Ads Manager**, build a three-tier campaign structure:\n\n**Campaign 1: Prospecting \u2014 Video Shopping Ads**\n- Objective: Product Sales\n- Ad Group audience: Broad (target country, age 18\u201345, no interest targeting)\n- Bidding: Lowest Cost (let the algorithm learn for the first 2 weeks)\n- Ads: Video Shopping Ads \u2014 TikTok auto-generates product videos from your catalog, or upload your own UGC-style vertical videos\n- Budget: 60% of total TikTok budget\n\n**Campaign 2: Retargeting \u2014 Engaged Users**\n- Objective: Conversions\n- Ad Group 1: Viewed product in last 7 days but did not add to cart\n  - Custom Audience: Website Event \u2192 ViewContent, last 7 days\n- Ad Group 2: Added to cart but did not purchase (last 3 days)\n  - Custom Audience: AddToCart, last 3 days; exclude CompletePayment\n- Ads: Dynamic product ads showing the specific product the viewer engaged with\n- Budget: 30% of total TikTok budget\n\n**Campaign 3: Spark Ads \u2014 Boost Organic Content**\n- Objective: Conversions\n- Use Spark Ads to boost your top-performing organic TikTok posts or authorized creator posts\n- Spark Ads outperform most polished brand content because the social proof (likes, comments) carries over\n- Budget: 10% of total TikTok budget\n\n### Step 4: Set up Spark Ads (boosting organic content)\n\n1. In TikTok Ads Manager, go to **Assets \u2192 Creative \u2192 Spark Ads**\n2. To boost your own organic posts: search for the post URL and request authorization\n3. To boost creator posts: the creator must grant Spark Ad authorization via TikTok's authorization process \u2014 they go to **Creator Tools \u2192 TikTok for Business** and generate an authorization code\n4. Authorization codes are valid for 30 days \u2014 plan renewal into your workflow\n\n### Step 5: Measure TikTok Ads performance\n\n| Metric | Target | Where to Find |\n|--------|--------|---------------|\n| Pixel Event Quality Score | 7+/10 | TikTok Events Manager \u2192 Pixel |\n| Video play rate (2s) | > 25% | Ads Manager \u2192 Campaign Analytics |\n| Click-through rate | > 1% | Ads Manager |\n| Cost per Purchase | Your target CPA | Ads Manager \u2192 Conversions |\n| ROAS | > 2\u00d7 for broad / > 4\u00d7 for retargeting | Ads Manager \u2192 Revenue |\n\n## Best Practices\n\n- **Use Maximum Data Sharing** in Shopify/WooCommerce TikTok integration settings \u2014 this enables EAPI and is the most important single setting for attribution quality\n- **Pass `ttclid` in all EAPI events** \u2014 capture the TikTok click ID from landing page URLs (`?ttclid=xxx`) and store in a cookie; it is the strongest attribution signal after iOS 14\n- **Use 9:16 vertical video exclusively** \u2014 horizontal or square ads significantly underperform in TikTok's full-screen feed\n- **Refresh creatives every 3\u20134 weeks** \u2014 TikTok audiences fatigue faster than Meta; plan a continuous creative pipeline\n- **Start with Lowest Cost bidding** \u2014 before you have enough conversion data for Cost Cap bidding, Lowest Cost generates the purchase history the algorithm needs\n- **Exclude recent purchasers (30 days) from prospecting** \u2014 upload a customer list as a custom audience exclusion in all prospecting ad sets\n\n## Common Pitfalls\n\n| Problem | Solution |\n|---------|----------|\n| Double-counting purchases in Events Manager | Ensure `event_id` in Pixel and Events API match exactly for the same event |\n| Catalog feed rejections | Check that `price` format is `\"XX.XX USD\"` (space between amount and currency code is required) |\n| Low match rate in Events Manager | Send `ttclid`, `ip`, and `user_agent` in addition to hashed email for maximum attribution |\n| High CPMs but low click-through rate | First 2 seconds of video must be visually arresting \u2014 no logo cards or slow product reveal intros |\n| Spark Ad authorization expired | Request new auth codes every 30 days; set calendar reminders for creator-authorized content |\n\n## Related Skills\n\n- @meta-ads-integration\n- @tiktok-shop-integration\n- @google-ads-ecommerce\n- @ugc-campaign-management\n- @marketing-attribution-dashboard\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "tiktok-ads-integration",
-    "description": "Launch TikTok ad campaigns for ecommerce with Events API server-side tracking, Spark Ads, catalog sync, and shopping ads for product discovery",
-    "category": "marketing-growth",
-    "risk": "safe",
-    "source": "curated",
-    "date_added": "2026-03-12",
-    "tags": "[tiktok, tiktok-ads, spark-ads, social-advertising]",
-    "triggers": "[\"set up TikTok ads\", \"implement TikTok pixel\", \"create TikTok shopping ads\"]",
-    "tools": "[claude-code, cursor, gemini-cli, copilot, codex-cli]",
-    "platforms": "[shopify, woocommerce, bigcommerce, custom]",
-    "difficulty": "advanced"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "marketing-growth",
+  "tags": [
+    "[tiktok",
+    "tiktok-ads",
+    "spark-ads",
+    "social-advertising]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

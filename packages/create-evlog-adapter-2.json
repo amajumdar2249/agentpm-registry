@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000030247",
   "name": "create-evlog-adapter",
   "slug": "create-evlog-adapter-2",
   "description": "Create a new built-in evlog adapter to send wide events to an external observability platform. Use when adding a new drain adapter (e.g., for Datadog, Sentry, Loki, Elasticsearch, etc.) to the evlog package. Covers source code, build config, package exports, tests, and all documentation.",
   "content": "\n# Create evlog Adapter\n\nAdd a new built-in adapter to evlog. Every adapter follows the same architecture and is built on the public toolkit primitives in `evlog/toolkit` \u2014 so a community adapter has the same shape as a built-in one.\n\n## PR Title\n\nRecommended format for the pull request title:\n\n```\nfeat: add {name} adapter\n```\n\nThe exact wording may vary depending on the adapter (e.g., `feat: add OTLP adapter`, `feat: add Axiom drain adapter`), but it should always follow the `feat:` conventional commit prefix.\n\n## Touchpoints Checklist\n\n| # | File | Action |\n|---|------|--------|\n| 1 | `packages/evlog/src/adapters/{name}.ts` | Create adapter source (built on `defineHttpDrain` from `../shared/drain`) |\n| 2 | `packages/evlog/tsdown.config.ts` | Add build entry |\n| 3 | `packages/evlog/package.json` | Add `exports` + `typesVersions` entries |\n| 4 | `packages/evlog/test/adapters/{name}.test.ts` | Create tests |\n| 5 | `apps/docs/content/4.adapters/{n}.{name}.md` | Create adapter doc page (before `custom.md`) |\n| 6 | `apps/docs/content/4.adapters/1.overview.md` | Add adapter to overview (links, card, env vars) |\n| 7 | `skills/review-logging-patterns/SKILL.md` | Add adapter row in the Drain Adapters table |\n| 8 | Renumber `custom.md` | Ensure `custom.md` stays last after the new adapter |\n\n**Important**: Do NOT consider the task complete until all 8 touchpoints have been addressed.\n\n## Naming Conventions\n\nUse these placeholders consistently:\n\n| Placeholder | Example (Datadog) | Usage |\n|-------------|-------------------|-------|\n| `{name}` | `datadog` | File names, import paths, env var suffix |\n| `{Name}` | `Datadog` | PascalCase in function/interface names |\n| `{NAME}` | `DATADOG` | SCREAMING_CASE in env var prefixes |\n\nStandard option naming (use these exact names):\n\n| Concept | Standard option name |\n|---------|---------------------|\n| Bearer-style API secret | `apiKey` |\n| Base URL of the ingest API | `endpoint` |\n| Service identifier | `serviceName` |\n| Request timeout (ms) | `timeout` |\n\nIf a service historically used a different name (`token`, `sourceToken`, \u2026) keep it as a deprecated alias \u2014 see Axiom and Better Stack for the pattern.\n\n## Step 1: Adapter Source \u2014 built on `defineHttpDrain`\n\nCreate `packages/evlog/src/adapters/{name}.ts`. Read [references/adapter-template.md](references/adapter-template.md) for the full annotated template.\n\nThe contract is now `defineHttpDrain<TConfig>({ resolve, encode })`. You only ship two pieces of logic:\n\n1. **`resolve()`** \u2014 produce a fully-resolved config or `null` to skip. Use `resolveAdapterConfig` for the standard precedence (overrides \u2192 `runtimeConfig.evlog.{name}` \u2192 `runtimeConfig.{name}` \u2192 `NUXT_{NAME}_*` \u2192 `{NAME}_*`).\n2. **`encode(events, config)`** \u2014 produce `{ url, headers, body }` for a batch of events (or `null` to skip). HTTP transport, retries, timeout, and error logging are handled by `defineHttpDrain`.\n\nKey rules:\n\n- **Single factory.** Export one `create{Name}Drain(overrides?: Partial<{Name}Config>)`. No dual-API factories: if a service has multiple ingest modes (logs vs events), expose them via a `mode` option (see PostHog).\n- **No HTTP code in the adapter.** Don't call `fetch` directly \u2014 let `defineHttpDrain` do it. If your service truly needs custom transport (e.g. binary envelopes), use `defineDrain` and call `httpPost` from `evlog/toolkit`.\n- **No bespoke config resolution.** Always go through `resolveAdapterConfig`. If you need to support a deprecated alias (`token` \u2192 `apiKey`), include both in the `ConfigField[]` and fall through in `resolve()`.\n- **Exported converters.** If the service needs a specific event shape, export a `to{Name}Event()` (or `buildPayload()`) helper so it can be tested independently.\n\n## Step 2: Build Config\n\nAdd a build entry in `packages/evlog/tsdown.config.ts` alongside the existing adapters:\n\n```typescript\n'adapters/{name}': 'src/adapters/{name}.ts',\n```\n\nPlace it after the last adapter entry in `tsdown.config.ts` (follow existing ordering in that file).\n\n## Step 3: Package Exports\n\nIn `packages/evlog/package.json`, add two entries:\n\n**In `exports`** (after the last adapter, currently `./posthog`):\n\n```json\n\"./{name}\": {\n  \"types\": \"./dist/adapters/{name}.d.mts\",\n  \"import\": \"./dist/adapters/{name}.mjs\"\n}\n```\n\n**In `typesVersions[\"*\"]`** (after the last adapter):\n\n```json\n\"{name}\": [\n  \"./dist/adapters/{name}.d.mts\"\n]\n```\n\n## Step 4: Tests\n\nCreate `packages/evlog/test/adapters/{name}.test.ts`.\n\nRead [references/test-template.md](references/test-template.md) for the full annotated template.\n\nRequired test categories:\n\n1. URL construction (default + custom endpoint)\n2. Headers (auth, content-type, service-specific)\n3. Request body format (JSON structure matches service API)\n4. Skip behavior when `apiKey` (or required field) is missing\n5. Batch operations\n6. Deprecated alias still works (when applicable)\n\n## Step 5: Adapter Documentation Page\n\nCreate `apps/docs/content/4.adapters/{n}.{name}.md` where `{n}` is the next number before `custom.md` (custom should always be last).\n\nUse the existing Axiom adapter page (`apps/docs/content/4.adapters/2.axiom.md`) as a reference for frontmatter structure, tone, and sections. Key sections: intro, quick setup, configuration (env vars table + priority), advanced usage, querying in the target service, troubleshooting, direct API usage, next steps.\n\n**Important: multi-framework examples.** The Quick Start section must include a `::code-group` with tabs for all supported frameworks (Nuxt/Nitro, Hono, Express, Fastify, Elysia, NestJS, Standalone). Do not only show Nitro examples. See any existing adapter page for the pattern.\n\n## Step 6: Update Adapters Overview Page\n\nEdit `apps/docs/content/4.adapters/1.overview.md` to add the new adapter in **three** places (follow the pattern of existing adapters):\n\n1. **Frontmatter `links` array** \u2014 add a link entry with icon and path\n2. **`::card-group` section** \u2014 add a card block before the Custom card\n3. **Zero-Config Setup `.env` example** \u2014 add the adapter's env vars\n\n## Step 7: Update `skills/review-logging-patterns/SKILL.md`\n\nIn `skills/review-logging-patterns/SKILL.md` (the public skill distributed to users), find the **Drain Adapters** table and add a new row:\n\n```markdown\n| {Name} | `evlog/{name}` | `{NAME}_API_KEY`, `{NAME}_DATASET` (or equivalent) |\n```\n\nFollow the pattern of the existing rows (Axiom, OTLP, PostHog, Sentry, Better Stack).\n\n## Step 8: Renumber `custom.md`\n\nIf the new adapter's number conflicts with `custom.md`, renumber `custom.md` to be the last entry. For example, if the new adapter is `5.{name}.md`, rename `5.custom.md` to `6.custom.md`.\n\n## Verification\n\nAfter completing all steps, run:\n\n```bash\ncd packages/evlog\npnpm run lint\npnpm run typecheck\npnpm run test\npnpm run build\n```\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "create-evlog-adapter",
-    "description": "Create a new built-in evlog adapter to send wide events to an external observability platform. Use when adding a new drain adapter (e.g., for Datadog, Sentry, Loki, Elasticsearch, etc.) to the evlog package. Covers source code, build config, package exports, tests, and all documentation."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

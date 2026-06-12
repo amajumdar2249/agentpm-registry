@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032659",
   "name": "mistral-multi-env-setup",
   "slug": "mistral-multi-env-setup",
   "description": "Configure Mistral AI across development, staging, and production environments.",
   "content": "# Mistral AI Multi-Environment Setup\n\n## Overview\n\nConfigure Mistral AI across development, staging, and production with per-environment API keys, model selection, rate limits, and secret management via GCP Secret Manager, AWS Secrets Manager, or Vault.\n\n## Prerequisites\n\n- Separate Mistral API keys per environment (from [console.mistral.ai](https://console.mistral.ai/))\n- Secret management solution configured\n- CI/CD pipeline with environment variables\n\n## Environment Strategy\n\n| Environment | API Key | Default Model | Rate Limit | Cache |\n|-------------|---------|---------------|------------|-------|\n| Development | Dev key (low quota) | mistral-small-latest | 10 RPM | Off |\n| Staging | Staging key | Same as prod | 60 RPM | On |\n| Production | Prod key (full quota) | Optimized per task | Full RPM | On |\n\n## Instructions\n\n### Step 1: Configuration Structure\n\n```typescript\n// config/mistral/base.ts\nexport interface MistralEnvConfig {\n  apiKey: string;\n  defaultModel: string;\n  timeoutMs: number;\n  maxRetries: number;\n  debug: boolean;\n  cache: { enabled: boolean; ttlMs: number };\n  rateLimits: { rpm: number; tpm: number };\n}\n\nexport const baseConfig: Omit<MistralEnvConfig, 'apiKey'> = {\n  defaultModel: 'mistral-small-latest',\n  timeoutMs: 30_000,\n  maxRetries: 3,\n  debug: false,\n  cache: { enabled: true, ttlMs: 300_000 },\n  rateLimits: { rpm: 60, tpm: 500_000 },\n};\n```\n\n### Step 2: Per-Environment Configs\n\n```typescript\n// config/mistral/environments.ts\nimport { baseConfig, type MistralEnvConfig } from './base.js';\n\nconst configs: Record<string, Partial<MistralEnvConfig>> = {\n  development: {\n    debug: true,\n    cache: { enabled: false, ttlMs: 60_000 },\n    rateLimits: { rpm: 10, tpm: 100_000 },\n  },\n  staging: {\n    cache: { enabled: true, ttlMs: 300_000 },\n  },\n  production: {\n    timeoutMs: 60_000,\n    maxRetries: 5,\n    cache: { enabled: true, ttlMs: 600_000 },\n  },\n};\n\nexport function getMistralConfig(): MistralEnvConfig {\n  const env = detectEnvironment();\n  const envConfig = configs[env] ?? {};\n\n  // API key sourced from environment\n  const apiKeyVar = {\n    development: 'MISTRAL_API_KEY_DEV',\n    staging: 'MISTRAL_API_KEY_STAGING',\n    production: 'MISTRAL_API_KEY',\n  }[env] ?? 'MISTRAL_API_KEY';\n\n  const apiKey = process.env[apiKeyVar] ?? process.env.MISTRAL_API_KEY;\n  if (!apiKey) throw new Error(`Mistral API key not set for ${env} (expected ${apiKeyVar})`);\n\n  return { ...baseConfig, ...envConfig, apiKey } as MistralEnvConfig;\n}\n```\n\n### Step 3: Environment Detection\n\n```typescript\ntype Environment = 'development' | 'staging' | 'production';\n\nfunction detectEnvironment(): Environment {\n  // Explicit override\n  if (process.env.APP_ENV) return process.env.APP_ENV as Environment;\n\n  // Platform-specific detection\n  if (process.env.VERCEL_ENV === 'production') return 'production';\n  if (process.env.VERCEL_ENV === 'preview') return 'staging';\n  if (process.env.CLOUD_RUN_JOB) return 'production';\n  if (process.env.K_SERVICE) return 'production';  // Cloud Run\n\n  // NODE_ENV fallback\n  if (process.env.NODE_ENV === 'production') return 'production';\n  if (process.env.NODE_ENV === 'staging') return 'staging';\n\n  return 'development';\n}\n```\n\n### Step 4: Secret Management\n\n**GCP Secret Manager**\n\n```typescript\nimport { SecretManagerServiceClient } from '@google-cloud/secret-manager';\n\nconst sm = new SecretManagerServiceClient();\n\nasync function getMistralApiKey(env: string): Promise<string> {\n  const [version] = await sm.accessSecretVersion({\n    name: `projects/my-project/secrets/mistral-api-key-${env}/versions/latest`,\n  });\n  return version.payload?.data?.toString() ?? '';\n}\n```\n\n**AWS Secrets Manager**\n\n```typescript\nimport { SecretsManager } from '@aws-sdk/client-secrets-manager';\n\nconst sm = new SecretsManager({ region: 'us-east-1' });\n\nasync function getMistralApiKey(env: string): Promise<string> {\n  const { SecretString } = await sm.getSecretValue({\n    SecretId: `mistral/${env}/api-key`,\n  });\n  return SecretString!;\n}\n```\n\n**GitHub Actions**\n\n```yaml\njobs:\n  deploy-staging:\n    environment: staging\n    env:\n      MISTRAL_API_KEY_STAGING: ${{ secrets.MISTRAL_API_KEY_STAGING }}\n\n  deploy-production:\n    environment: production\n    env:\n      MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY_PROD }}\n```\n\n### Step 5: Environment Isolation Guards\n\n```typescript\nfunction requireEnvironment(required: Environment, operation: string): void {\n  const current = detectEnvironment();\n  if (current !== required) {\n    throw new Error(`\"${operation}\" requires ${required} but running in ${current}`);\n  }\n}\n\n// Protect dangerous operations\nasync function createFineTuningJob(params: any) {\n  requireEnvironment('production', 'createFineTuningJob');\n  // ... fine-tuning logic\n}\n\n// Prevent production data in dev\nasync function processUserData(userId: string) {\n  const env = detectEnvironment();\n  if (env === 'development') {\n    console.warn('Using test data in development');\n    userId = 'test-user-001';\n  }\n  // ... processing logic\n}\n```\n\n### Step 6: Feature Flags by Environment\n\n```typescript\ninterface FeatureFlags {\n  useAgentsAPI: boolean;\n  enableBatchProcessing: boolean;\n  enableVisionModels: boolean;\n  maxConcurrentRequests: number;\n}\n\nconst FLAGS: Record<Environment, FeatureFlags> = {\n  development: {\n    useAgentsAPI: true,\n    enableBatchProcessing: true,\n    enableVisionModels: true,\n    maxConcurrentRequests: 2,\n  },\n  staging: {\n    useAgentsAPI: true,\n    enableBatchProcessing: true,\n    enableVisionModels: true,\n    maxConcurrentRequests: 5,\n  },\n  production: {\n    useAgentsAPI: false,  // Gradual rollout\n    enableBatchProcessing: true,\n    enableVisionModels: true,\n    maxConcurrentRequests: 10,\n  },\n};\n\nexport function getFlags(): FeatureFlags {\n  return FLAGS[detectEnvironment()];\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Wrong environment | Missing `APP_ENV` | Set explicitly in deployment config |\n| Secret not found | Wrong secret path | Verify secret manager and IAM permissions |\n| Cross-env data leak | Missing guards | Add `requireEnvironment()` checks |\n| Config mismatch | Env var naming | Use consistent naming convention |\n\n## Resources\n\n- [GCP Secret Manager](https://cloud.google.com/secret-manager)\n- [AWS Secrets Manager](https://docs.aws.amazon.com/secretsmanager/)\n- [12-Factor App Config](https://12factor.net/config)\n\n## Output\n\n- Multi-environment config with type-safe overrides\n- Environment detection for Vercel, Cloud Run, and K8s\n- Secret management integration (GCP, AWS, GitHub Actions)\n- Environment isolation guards\n- Feature flags per environment\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "mistral-multi-env-setup",
-    "description": "Configure Mistral AI across development, staging, and production environments.",
-    "allowed-tools": "Read, Write, Edit, Bash(gcloud:*), Bash(vault:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

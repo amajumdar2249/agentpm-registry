@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032799",
   "name": "openrouter-data-privacy",
   "slug": "openrouter-data-privacy",
   "description": "Implement data privacy controls for OpenRouter API usage. Use when handling",
   "content": "# OpenRouter Data Privacy\n\n## Overview\n\nWhen sending data through OpenRouter to upstream LLM providers, you're responsible for ensuring prompts don't leak PII inappropriately. OpenRouter itself does not train on API data, but each upstream provider has its own data retention and training policies. This skill covers PII detection and redaction, placeholder substitution, provider selection for privacy, and consent tracking.\n\n## PII Detection and Redaction\n\n```python\nimport re\nfrom dataclasses import dataclass\nfrom typing import Optional\n\n@dataclass\nclass PiiScanResult:\n    clean_text: str\n    findings: list[dict]\n    has_pii: bool\n\nPII_RULES = [\n    (\"email\", r'\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z|a-z]{2,}\\b'),\n    (\"phone\", r'\\b(?:\\+1[-.\\s]?)?\\(?\\d{3}\\)?[-.\\s]?\\d{3}[-.\\s]?\\d{4}\\b'),\n    (\"ssn\", r'\\b\\d{3}-\\d{2}-\\d{4}\\b'),\n    (\"credit_card\", r'\\b(?:\\d{4}[- ]?){3}\\d{4}\\b'),\n    (\"api_key\", r'\\bsk-or-v1-[a-zA-Z0-9]+\\b'),\n    (\"ip_address\", r'\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b'),\n]\n\nREPLACEMENTS = {\n    \"email\": \"[EMAIL]\", \"phone\": \"[PHONE]\", \"ssn\": \"[SSN]\",\n    \"credit_card\": \"[CARD]\", \"api_key\": \"[API_KEY]\", \"ip_address\": \"[IP]\",\n}\n\ndef scan_and_redact(text: str) -> PiiScanResult:\n    \"\"\"Scan text for PII and return redacted version with findings.\"\"\"\n    findings = []\n    clean = text\n    for pii_type, pattern in PII_RULES:\n        matches = re.findall(pattern, clean)\n        for match in matches:\n            findings.append({\"type\": pii_type, \"value_prefix\": match[:4] + \"...\"})\n        clean = re.sub(pattern, REPLACEMENTS[pii_type], clean)\n\n    return PiiScanResult(clean_text=clean, findings=findings, has_pii=len(findings) > 0)\n```\n\n## Placeholder Substitution Pattern\n\n```python\nimport os, uuid\nfrom openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"https://openrouter.ai/api/v1\",\n    api_key=os.environ[\"OPENROUTER_API_KEY\"],\n    default_headers={\"HTTP-Referer\": \"https://my-app.com\", \"X-Title\": \"my-app\"},\n)\n\nclass PrivacyProxy:\n    \"\"\"Replace PII with placeholders before API, restore after.\"\"\"\n\n    def __init__(self):\n        self._map: dict[str, str] = {}\n\n    def anonymize(self, text: str) -> str:\n        \"\"\"Replace PII with unique placeholders.\"\"\"\n        result = scan_and_redact(text)\n        if not result.has_pii:\n            return text\n\n        # Use deterministic placeholders for consistent replacement\n        anonymized = text\n        for pii_type, pattern in PII_RULES:\n            for match in re.finditer(pattern, anonymized):\n                original = match.group()\n                if original not in self._map:\n                    placeholder = f\"[{pii_type.upper()}_{len(self._map)}]\"\n                    self._map[placeholder] = original\n                else:\n                    placeholder = next(k for k, v in self._map.items() if v == original)\n                anonymized = anonymized.replace(original, placeholder, 1)\n        return anonymized\n\n    def deanonymize(self, text: str) -> str:\n        \"\"\"Restore original values from placeholders.\"\"\"\n        result = text\n        for placeholder, original in self._map.items():\n            result = result.replace(placeholder, original)\n        return result\n\n# Usage\nproxy = PrivacyProxy()\nuser_input = \"Contact john@example.com or call 555-123-4567\"\nsafe_input = proxy.anonymize(user_input)\n# safe_input = \"Contact [EMAIL_0] or call [PHONE_1]\"\n\nresponse = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet\",\n    messages=[{\"role\": \"user\", \"content\": safe_input}],\n    max_tokens=200,\n)\n# Restore PII in the response if model referenced it\nresult = proxy.deanonymize(response.choices[0].message.content)\n```\n\n## Provider Selection for Privacy\n\n```python\n# Force specific provider to control data handling\ndef privacy_aware_completion(messages, sensitivity=\"standard\"):\n    \"\"\"Route to appropriate provider based on data sensitivity.\"\"\"\n\n    PRIVACY_CONFIG = {\n        \"public\": {\n            \"model\": \"openai/gpt-4o-mini\",\n            \"provider\": None,  # Any provider OK\n        },\n        \"standard\": {\n            \"model\": \"anthropic/claude-3.5-sonnet\",\n            \"provider\": {\"order\": [\"Anthropic\"], \"allow_fallbacks\": False},\n        },\n        \"sensitive\": {\n            \"model\": \"anthropic/claude-3.5-sonnet\",\n            \"provider\": {\"order\": [\"Anthropic\"], \"allow_fallbacks\": False},\n            # Add PII redaction as mandatory pre-processing\n        },\n    }\n\n    config = PRIVACY_CONFIG.get(sensitivity, PRIVACY_CONFIG[\"standard\"])\n    extra = {}\n    if config[\"provider\"]:\n        extra[\"extra_body\"] = {\"provider\": config[\"provider\"]}\n\n    return client.chat.completions.create(\n        model=config[\"model\"],\n        messages=messages,\n        max_tokens=1024,\n        **extra,\n    )\n```\n\n## Privacy Middleware\n\n```python\nclass PrivacyMiddleware:\n    \"\"\"Enforce privacy policies before every API call.\"\"\"\n\n    def __init__(self, block_on_pii: bool = False, auto_redact: bool = True):\n        self.block_on_pii = block_on_pii\n        self.auto_redact = auto_redact\n\n    def process(self, messages: list[dict]) -> list[dict]:\n        \"\"\"Scan and optionally redact PII from all messages.\"\"\"\n        processed = []\n        for msg in messages:\n            content = msg.get(\"content\", \"\")\n            if isinstance(content, str):\n                result = scan_and_redact(content)\n                if result.has_pii:\n                    if self.block_on_pii:\n                        raise ValueError(f\"PII detected: {[f['type'] for f in result.findings]}\")\n                    if self.auto_redact:\n                        msg = {**msg, \"content\": result.clean_text}\n            processed.append(msg)\n        return processed\n```\n\n## Error Handling\n\n| Error | Cause | Fix |\n|-------|-------|-----|\n| PII detected in prompt | User input contains sensitive data | Auto-redact or block and prompt user to remove |\n| Provider retained data | Using provider with training-on-API-data | Switch to Anthropic or use BYOK |\n| Placeholder in response | Model used placeholder literally | Map it back with `deanonymize()` |\n| False positive PII match | Regex too aggressive | Tune patterns; use NLP-based PII detection for accuracy |\n\n## Enterprise Considerations\n\n- OpenRouter does not train on API data; check each upstream provider's data use policy separately\n- Use `provider.order` + `allow_fallbacks: false` to ensure data only flows to approved providers\n- Implement PII redaction as middleware that runs on every request, not optional per-call\n- For GDPR right-to-erasure: don't log raw prompts -- hash them (SHA-256)\n- Use BYOK for sensitive workloads so data flows directly to the provider under your account\n- Build a data classification system that auto-routes based on sensitivity level\n\n## References\n\n- [Examples](${CLAUDE_SKILL_DIR}/references/examples.md) | [Errors](${CLAUDE_SKILL_DIR}/references/errors.md)\n- [Privacy Policy](https://openrouter.ai/privacy) | [Provider Routing](https://openrouter.ai/docs/features/provider-routing)\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "openrouter-data-privacy",
-    "description": "Implement data privacy controls for OpenRouter API usage. Use when handling",
-    "PII, meeting GDPR/CCPA requirements, or protecting sensitive data in prompts. Triggers": "",
-    "allowed-tools": "Read, Write, Edit, Bash, Grep",
-    "version": "2.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

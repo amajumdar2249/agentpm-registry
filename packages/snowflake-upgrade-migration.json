@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033303",
   "name": "snowflake-upgrade-migration",
   "slug": "snowflake-upgrade-migration",
   "description": "Upgrade Snowflake drivers, handle breaking changes, and migrate between",
   "content": "# Snowflake Upgrade & Migration\n\n## Overview\n\nGuide for upgrading Snowflake driver versions, handling Snowflake behavior change releases, and migrating between editions.\n\n## Prerequisites\n\n- Current driver version identified\n- Test suite available\n- Staging Snowflake account\n- Git for version control\n\n## Instructions\n\n### Step 1: Check Current Versions\n\n```bash\n# Node.js driver\nnpm list snowflake-sdk\nnpm view snowflake-sdk version   # Latest available\n\n# Python connector\npip show snowflake-connector-python\npip index versions snowflake-connector-python 2>/dev/null | head -5\n\n# Snowflake platform version (run in SQL)\n# SELECT CURRENT_VERSION();\n```\n\n### Step 2: Review Snowflake Release Notes\n\n```bash\n# Check Node.js driver changelog\nopen https://github.com/snowflakedb/snowflake-connector-nodejs/blob/master/CHANGELOG.md\n\n# Check Python connector changelog\nopen https://docs.snowflake.com/en/release-notes/clients-drivers/python-connector-2025\n\n# Check Snowflake BCR (Behavior Change Releases)\nopen https://docs.snowflake.com/en/release-notes/bcr-bundles\n```\n\n### Step 3: Upgrade on a Branch\n\n```bash\n# Node.js\ngit checkout -b chore/upgrade-snowflake-sdk\nnpm install snowflake-sdk@latest\nnpm test\n\n# Python\ngit checkout -b chore/upgrade-snowflake-connector\npip install --upgrade snowflake-connector-python\npytest\n```\n\n### Step 4: Handle Common Breaking Changes\n\n**Node.js Driver Changes (1.x to 2.x+):**\n\n```typescript\n// Old: Synchronous configure\n// snowflake.configure({ logLevel: 'DEBUG' });\n\n// New: Same API but check for removed options\nimport snowflake from 'snowflake-sdk';\nsnowflake.configure({\n  logLevel: process.env.NODE_ENV === 'development' ? 'DEBUG' : 'WARN',\n  // insecureConnect removed in newer versions \u2014 use proper certs\n});\n\n// connectAsync added in later versions\nconst conn = snowflake.createConnection({ /* ... */ });\nawait conn.connectAsync();  // Promise-based (if available)\n// Fallback for older versions:\nawait new Promise((resolve, reject) => {\n  conn.connect((err, c) => err ? reject(err) : resolve(c));\n});\n```\n\n**Python Connector Changes:**\n\n```python\n# v3.x: fetch_pandas_all() requires pandas extra\n# pip install \"snowflake-connector-python[pandas]\"\n\n# v3.x: write_pandas() moved to snowflake.connector.pandas_tools\nfrom snowflake.connector.pandas_tools import write_pandas\n\n# v2.x to v3.x: DictCursor import changed\n# Old: from snowflake.connector import DictCursor\n# New:\ncursor = conn.cursor(snowflake.connector.DictCursor)\n\n# Arrow result format (default in newer versions)\nconn = snowflake.connector.connect(\n    # ...\n    arrow_number_to_decimal=True,  # New in 3.x\n)\n```\n\n**Snowflake Platform BCR (Behavior Change Releases):**\n\n```sql\n-- Check which BCR bundles are enabled\nSELECT SYSTEM$SHOW_ACTIVE_BEHAVIOR_CHANGE_BUNDLES();\n\n-- Test a specific BCR before it's mandatory\nALTER ACCOUNT SET BCR_ENABLED = '2024_08';\n\n-- Common BCRs to watch:\n-- Stricter type checking in COPY INTO\n-- Changed NULL handling in aggregations\n-- Modified INFORMATION_SCHEMA view columns\n```\n\n### Step 5: Validate After Upgrade\n\n```typescript\n// src/tests/integration/upgrade-validation.test.ts\ndescribe('Post-upgrade validation', () => {\n  it('should connect with existing credentials', async () => {\n    const conn = createConnection();\n    await connectAsync(conn);\n    expect(conn.getId()).toBeTruthy();\n  });\n\n  it('should execute parameterized queries', async () => {\n    const rows = await query(conn,\n      'SELECT ? AS test_value', [42]\n    );\n    expect(rows[0].TEST_VALUE).toBe(42);\n  });\n\n  it('should stream large results', async () => {\n    let count = 0;\n    for await (const row of streamQuery(conn,\n      'SELECT SEQ4() AS n FROM TABLE(GENERATOR(ROWCOUNT => 10000))'\n    )) {\n      count++;\n    }\n    expect(count).toBe(10000);\n  });\n\n  it('should handle errors correctly', async () => {\n    await expect(\n      query(conn, 'SELECT * FROM nonexistent_table_xyz')\n    ).rejects.toThrow(/does not exist/);\n  });\n});\n```\n\n### Step 6: Rollback Procedure\n\n```bash\n# Node.js \u2014 pin exact version\nnpm install snowflake-sdk@1.9.0 --save-exact\n\n# Python \u2014 pin exact version\npip install snowflake-connector-python==3.6.0\n\n# Git rollback\ngit checkout main -- package-lock.json package.json\nnpm ci\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `connectAsync is not a function` | Old SDK version | Use callback-based `connect()` |\n| `Arrow deserialization error` | Arrow format mismatch | Set `arrow_number_to_decimal` |\n| `BCR behavior change` | New Snowflake release | Test BCR bundle in staging first |\n| `ImportError: pandas` | Missing pandas extra | Install with `[pandas]` extra |\n| `SSL certificate error` | Driver TLS change | Update CA bundle, don't use `insecureConnect` |\n\n## Resources\n\n- [Node.js Driver Releases](https://github.com/snowflakedb/snowflake-connector-nodejs/releases)\n- [Python Connector Release Notes](https://docs.snowflake.com/en/release-notes/clients-drivers/python-connector-2025)\n- [Behavior Change Bundles](https://docs.snowflake.com/en/release-notes/bcr-bundles)\n\n## Next Steps\n\nFor CI integration during upgrades, see `snowflake-ci-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "snowflake-upgrade-migration",
-    "description": "Upgrade Snowflake drivers, handle breaking changes, and migrate between",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(pip:*), Bash(git:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

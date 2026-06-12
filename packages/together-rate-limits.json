@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033407",
   "name": "together-rate-limits",
   "slug": "together-rate-limits",
   "description": "Together AI rate limits for inference, fine-tuning, and model deployment.",
   "content": "# Together AI Rate Limits\n\n## Overview\n\nTogether AI's OpenAI-compatible inference API enforces per-key rate limits that vary by model tier and operation type. Chat completions and embeddings share a global request quota, while fine-tuning jobs and batch inference have separate concurrency caps. High-throughput workloads like embedding entire document corpora or running evaluations across 100+ prompts require client-side token bucket limiting. Together's batch inference endpoint offers 50% cost savings but has its own queue depth limits that differ from real-time inference.\n\n## Rate Limit Reference\n\n| Endpoint | Limit | Window | Scope |\n|----------|-------|--------|-------|\n| Chat completions | 600 req | 1 minute | Per API key |\n| Embeddings | 300 req | 1 minute | Per API key |\n| Image generation (FLUX) | 60 req | 1 minute | Per API key |\n| Fine-tune jobs (concurrent) | 3 jobs | Rolling | Per API key |\n| Batch inference | 100 req/batch, 10 batches | Rolling | Per API key |\n\n## Rate Limiter Implementation\n\n```typescript\nclass TogetherRateLimiter {\n  private tokens: number;\n  private lastRefill: number;\n  private readonly max: number;\n  private readonly refillRate: number;\n  private queue: Array<{ resolve: () => void }> = [];\n\n  constructor(maxPerMinute: number) {\n    this.max = maxPerMinute;\n    this.tokens = maxPerMinute;\n    this.lastRefill = Date.now();\n    this.refillRate = maxPerMinute / 60_000;\n  }\n\n  async acquire(): Promise<void> {\n    this.refill();\n    if (this.tokens >= 1) { this.tokens -= 1; return; }\n    return new Promise(resolve => this.queue.push({ resolve }));\n  }\n\n  private refill() {\n    const now = Date.now();\n    this.tokens = Math.min(this.max, this.tokens + (now - this.lastRefill) * this.refillRate);\n    this.lastRefill = now;\n    while (this.tokens >= 1 && this.queue.length) {\n      this.tokens -= 1;\n      this.queue.shift()!.resolve();\n    }\n  }\n}\n\nconst chatLimiter = new TogetherRateLimiter(500);  // buffer under 600\nconst embedLimiter = new TogetherRateLimiter(250);\n```\n\n## Retry Strategy\n\n```typescript\nasync function togetherRetry<T>(\n  limiter: TogetherRateLimiter, fn: () => Promise<Response>, maxRetries = 4\n): Promise<T> {\n  for (let attempt = 0; attempt <= maxRetries; attempt++) {\n    await limiter.acquire();\n    const res = await fn();\n    if (res.ok) return res.json();\n    if (res.status === 429) {\n      const retryAfter = parseInt(res.headers.get(\"Retry-After\") || \"5\", 10);\n      const jitter = Math.random() * 2000;\n      await new Promise(r => setTimeout(r, retryAfter * 1000 + jitter));\n      continue;\n    }\n    if (res.status >= 500 && attempt < maxRetries) {\n      await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 1000));\n      continue;\n    }\n    throw new Error(`Together API ${res.status}: ${await res.text()}`);\n  }\n  throw new Error(\"Max retries exceeded\");\n}\n```\n\n## Batch Processing\n\n```typescript\nasync function batchEmbedDocuments(texts: string[], model: string, batchSize = 20) {\n  const results: any[] = [];\n  for (let i = 0; i < texts.length; i += batchSize) {\n    const batch = texts.slice(i, i + batchSize);\n    const result = await togetherRetry(embedLimiter, () =>\n      fetch(\"https://api.together.xyz/v1/embeddings\", {\n        method: \"POST\", headers,\n        body: JSON.stringify({ model, input: batch }),\n      })\n    );\n    results.push(result);\n    if (i + batchSize < texts.length) await new Promise(r => setTimeout(r, 3000));\n  }\n  return results;\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Fix |\n|-------|-------|-----|\n| 429 on chat completions | Exceeded 600 req/min key limit | Use token bucket, avoid burst patterns |\n| 429 on embeddings | Embedding limit is half of chat | Batch inputs (up to 20 texts per request) |\n| Model not found | Wrong model ID string | Verify with `GET /v1/models` endpoint |\n| 503 model overloaded | Popular model at peak demand | Retry with backoff, or use fallback model |\n| Fine-tune 409 | 3 concurrent job limit reached | Wait for running job to complete first |\n\n## Resources\n\n- [Together AI Documentation](https://docs.together.ai/)\n- [API Reference](https://docs.together.ai/reference/chat-completions-1)\n- [Model List](https://docs.together.ai/docs/inference-models)\n\n## Next Steps\n\nSee `together-performance-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "together-rate-limits",
-    "description": "Together AI rate limits for inference, fine-tuning, and model deployment.",
-    "Trigger": "together rate limits\".",
-    "allowed-tools": "Read, Write, Edit, Bash(pip:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

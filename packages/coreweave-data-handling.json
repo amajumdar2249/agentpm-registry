@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031668",
   "name": "coreweave-data-handling",
   "slug": "coreweave-data-handling",
   "description": "Handle training data and model artifacts on CoreWeave persistent storage.",
   "content": "# CoreWeave Data Handling\n\n## Overview\n\nCoreWeave GPU cloud workloads involve large-scale data artifacts: model weights (multi-GB safetensors/GGUF), training datasets (parquet, TFRecord, WebDataset), checkpoint snapshots, and inference cache volumes. Data flows through Kubernetes PersistentVolumeClaims backed by region-specific storage classes. Compliance requires encryption at rest via the storage driver, namespace-scoped RBAC for volume access, and audit logging for any data egress from GPU nodes.\n\n## Data Classification\n\n| Data Type | Sensitivity | Retention | Encryption |\n|-----------|-------------|-----------|------------|\n| Model weights | Medium | Until deprecated | AES-256 at rest |\n| Training datasets | High (may contain PII) | Per data license | AES-256 + TLS in transit |\n| Checkpoint snapshots | Medium | 30 days post-training | AES-256 at rest |\n| Inference cache | Low | Session/TTL | Volume-level encryption |\n| HuggingFace tokens | Critical | Rotate quarterly | K8s Secret + KMS |\n\n## Data Import\n\n```typescript\nimport { KubeConfig, BatchV1Api } from '@kubernetes/client-node';\n\nasync function importDataset(pvcName: string, sourceUrl: string, namespace: string) {\n  const kc = new KubeConfig();\n  kc.loadFromDefault();\n  const batch = kc.makeApiClient(BatchV1Api);\n  const job = {\n    metadata: { name: `import-${Date.now()}`, namespace },\n    spec: { template: { spec: {\n      restartPolicy: 'Never',\n      containers: [{ name: 'loader', image: 'python:3.11-slim',\n        command: ['python3', '-c', `\nimport urllib.request, hashlib\ndest = '/data/dataset.tar.gz'\nurllib.request.urlretrieve('${sourceUrl}', dest)\nprint(f\"SHA256: {hashlib.sha256(open(dest,'rb').read()).hexdigest()}\")`],\n        volumeMounts: [{ name: 'storage', mountPath: '/data' }],\n      }],\n      volumes: [{ name: 'storage', persistentVolumeClaim: { claimName: pvcName } }],\n    }}}\n  };\n  await batch.createNamespacedJob(namespace, { body: job });\n}\n```\n\n## Data Export\n\n```typescript\nasync function exportCheckpoint(pvcName: string, destBucket: string, ns: string) {\n  // Validate export destination is in approved region list\n  const APPROVED_REGIONS = ['us-east-1', 'us-central-1', 'eu-west-1'];\n  const region = destBucket.split('-').slice(0, 3).join('-');\n  if (!APPROVED_REGIONS.some(r => destBucket.includes(r))) {\n    throw new Error(`Export blocked: ${region} not in approved regions`);\n  }\n  // Stream from PVC \u2192 object storage with integrity check\n  const exportCmd = `tar czf - /models | gsutil cp - gs://${destBucket}/export.tar.gz`;\n  console.log(`Exporting from PVC ${pvcName} to ${destBucket}`);\n  return exportCmd;\n}\n```\n\n## Data Validation\n\n```typescript\ninterface ModelArtifact {\n  name: string; format: 'safetensors' | 'gguf' | 'bin' | 'pt';\n  sizeBytes: number; sha256: string;\n}\n\nfunction validateArtifact(artifact: ModelArtifact): string[] {\n  const errors: string[] = [];\n  if (!artifact.name || artifact.name.length > 255) errors.push('Invalid artifact name');\n  if (artifact.sizeBytes <= 0) errors.push('Size must be positive');\n  if (!/^[a-f0-9]{64}$/.test(artifact.sha256)) errors.push('Invalid SHA-256 hash');\n  if (!['safetensors', 'gguf', 'bin', 'pt'].includes(artifact.format)) errors.push(`Unsupported format`);\n  return errors;\n}\n```\n\n## Compliance\n\n- [ ] All PVCs use encrypted storage classes (AES-256 at rest)\n- [ ] HuggingFace and API tokens stored in Kubernetes Secrets with KMS encryption\n- [ ] Namespace-scoped RBAC restricts volume mount access to authorized workloads\n- [ ] Data egress from GPU nodes logged via network policy audit\n- [ ] Training datasets with PII processed only in approved regions (data residency)\n- [ ] Checkpoint retention enforced via CronJob garbage collection (30-day default)\n- [ ] SOC 2 Type II audit trail for all storage provisioning and deletion events\n\n## Error Handling\n\n| Issue | Cause | Fix |\n|-------|-------|-----|\n| PVC pending indefinitely | Storage class unavailable in region | Check `kubectl get sc` and switch to available class |\n| Download job OOMKilled | Dataset exceeds container memory limit | Increase resource limits or use streaming download |\n| Permission denied on volume | RBAC misconfigured for namespace | Verify ServiceAccount has PVC access via RoleBinding |\n| Checksum mismatch after import | Partial transfer or corruption | Re-run import job; enable retry with backoff |\n| Secret not found | KMS key rotation or namespace mismatch | Verify secret exists in target namespace with `kubectl get secret` |\n\n## Resources\n\n- [CoreWeave Storage Docs](https://docs.coreweave.com/storage)\n- [Kubernetes PVC Reference](https://kubernetes.io/docs/concepts/storage/persistent-volumes/)\n\n## Next Steps\n\nSee `coreweave-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "coreweave-data-handling",
-    "description": "Handle training data and model artifacts on CoreWeave persistent storage.",
-    "allowed-tools": "Read, Write, Edit, Bash(kubectl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

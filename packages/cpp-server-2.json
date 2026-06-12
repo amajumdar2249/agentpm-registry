@@ -1,19 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000026751",
   "name": "cpp-server",
   "slug": "cpp-server-2",
   "description": "SpacetimeDB C++ server module SDK reference. Use when writing tables, reducers, or module logic in C++.",
   "content": "\n# SpacetimeDB C++ SDK Reference\n\n## Imports\n\n```cpp\n#include <spacetimedb.h>\nusing namespace SpacetimeDB;\n```\n\n## Tables\n\nRegister structs with macros, then declare as tables:\n\n```cpp\nstruct Entity {\n    uint64_t id;\n    Identity owner;\n    std::string name;\n    bool active;\n};\nSPACETIMEDB_STRUCT(Entity, id, owner, name, active)\nSPACETIMEDB_TABLE(Entity, entity, Public)\nFIELD_PrimaryKeyAutoInc(entity, id)\nFIELD_Index(entity, name)\n```\n\nOptions: `SPACETIMEDB_TABLE(Type, accessor, Public|Private)`\n\nField constraints:\n- `FIELD_PrimaryKey(accessor, field)`: primary key\n- `FIELD_PrimaryKeyAutoInc(accessor, field)`: primary key with auto-increment (use 0 on insert)\n- `FIELD_Unique(accessor, field)`: unique constraint\n- `FIELD_Index(accessor, field)`: btree index (enables `.filter()`)\n\n## Column Types\n\n| C++ type | Notes |\n|----------|-------|\n| `uint8_t` / `uint16_t` / `uint32_t` / `uint64_t` | unsigned integers |\n| `SpacetimeDB::u128` / `SpacetimeDB::u256` | large unsigned integers |\n| `int8_t` / `int16_t` / `int32_t` / `int64_t` | signed integers |\n| `SpacetimeDB::i128` / `SpacetimeDB::i256` | large signed integers |\n| `float` / `double` | floats |\n| `bool` | boolean |\n| `std::string` | text |\n| `std::vector<T>` | list/array |\n| `std::optional<T>` | nullable column |\n| `Identity` | user identity |\n| `ConnectionId` | connection handle |\n| `Timestamp` | server timestamp (microseconds since epoch) |\n| `TimeDuration` | duration in microseconds |\n| `ScheduleAt` | for scheduled tables |\n\n## Indexes\n\n```cpp\n// Single-column:\nFIELD_Index(entity, name)\n// Access: ctx.db[entity_name].filter(\"Alice\")\n\n// Multi-column:\nFIELD_NamedMultiColumnIndex(score, by_player_and_level, player_id, level)\n```\n\nRange queries (requires `#include <spacetimedb/range_queries.h>`):\n```cpp\nctx.db[user_age].filter(range_inclusive(uint8_t(18), uint8_t(65)));\nctx.db[user_age].filter(range_from(uint8_t(18)));\n```\n\n## Reducers\n\nAll reducers return `ReducerResult`. Use `Ok()` or `Err(message)`:\n\n```cpp\nSPACETIMEDB_REDUCER(create_entity, ReducerContext ctx, std::string name) {\n    if (name.empty()) {\n        return Err(\"Name cannot be empty\");\n    }\n    ctx.db[entity].insert(Entity{0, ctx.sender(), name, true});\n    return Ok();\n}\n```\n\n## DB Operations\n\n```cpp\nctx.db[entity].insert(Entity{0, owner, \"Sample\", true});     // Insert (0 for autoInc)\nctx.db[entity_id].find(entityId);                             // Find by PK \u2192 std::optional\nctx.db[entity_identity].find(ctx.sender());                   // Find by unique column\nctx.db[entity_name].filter(\"Alice\");                          // Filter by index \u2192 iterable\nctx.db[entity];                                               // All rows \u2192 iterable (range-for)\nctx.db[entity].count();                                       // Count rows\n\n// Update: find, mutate, update\nif (auto e = ctx.db[entity_id].find(entityId)) {\n    e->name = \"New Name\";\n    ctx.db[entity_id].update(*e);\n}\n\n// Delete by primary key\nctx.db[entity_id].delete_by_key(entityId);\n```\n\nNote: Bracket notation `ctx.db[accessor]` is used for all table access. The accessor name comes from `SPACETIMEDB_TABLE` and `FIELD_*` macros.\n\n## Lifecycle Hooks\n\n```cpp\nSPACETIMEDB_INIT(init, ReducerContext ctx) {\n    LOG_INFO(\"Database initializing...\");\n    return Ok();\n}\n\nSPACETIMEDB_CLIENT_CONNECTED(on_connect, ReducerContext ctx) {\n    LOG_INFO(\"Connected: \" + ctx.sender().to_string());\n    return Ok();\n}\n\nSPACETIMEDB_CLIENT_DISCONNECTED(on_disconnect, ReducerContext ctx) {\n    LOG_INFO(\"Disconnected: \" + ctx.sender().to_string());\n    return Ok();\n}\n```\n\n## Authentication & Timestamps\n\n```cpp\n// Auth: ctx.sender() is the caller's Identity\nif (row.owner != ctx.sender()) {\n    return Err(\"unauthorized\");\n}\n\n// Server timestamps\nctx.db[item].insert(Item{0, ctx.sender(), ctx.timestamp});\n\n// Timestamp arithmetic\nTimestamp later = ctx.timestamp + TimeDuration::from_seconds(10);\n```\n\n## Reducer Context\n\n`ReducerContext` is the single source of sender identity, deterministic time, and deterministic randomness inside a reducer. Always go through `ctx` for these. Standard library clocks and random sources are not available in modules.\n\n```cpp\nctx.db[table]          // Table access (bracket notation)\nctx.sender()           // Caller's Identity\nctx.timestamp          // Invocation timestamp\nctx.connection_id      // std::optional<ConnectionId>\nctx.identity()         // Module's own identity\nctx.rng()              // Deterministic RNG\nctx.sender_auth()      // AuthCtx with JWT claims\n```\n\n## Scheduled Tables\n\n```cpp\nstruct Reminder {\n    uint64_t scheduled_id;\n    ScheduleAt scheduled_at;\n    std::string message;\n};\nSPACETIMEDB_STRUCT(Reminder, scheduled_id, scheduled_at, message)\nSPACETIMEDB_TABLE(Reminder, reminder, Public)\nFIELD_PrimaryKeyAutoInc(reminder, scheduled_id)\nSPACETIMEDB_SCHEDULE(reminder, 1, send_reminder)  // 1 = scheduled_at field index (0-based)\n\nSPACETIMEDB_REDUCER(send_reminder, ReducerContext ctx, Reminder arg) {\n    LOG_INFO(\"Reminder: \" + arg.message);\n    return Ok();\n}\n\n// One-time: fires at a specific time\nctx.db[reminder].insert(Reminder{0, ScheduleAt::time(ctx.timestamp + TimeDuration::from_seconds(10)), \"msg\"});\n// Repeating: fires on an interval\nctx.db[reminder].insert(Reminder{0, ScheduleAt::interval(TimeDuration::from_seconds(5)), \"msg\"});\n```\n\n## Custom Types\n\n```cpp\n// Struct (product type):\nstruct Point { float x; float y; };\nSPACETIMEDB_STRUCT(Point, x, y)\n\n// Enum (sum type):\nSPACETIMEDB_UNIT_TYPE(Active)\nSPACETIMEDB_UNIT_TYPE(Inactive)\nSPACETIMEDB_ENUM(PlayerStatus,\n    (Active, Active),\n    (Inactive, Inactive),\n    (Suspended, std::string)\n)\n```\n\n## Logging\n\n```cpp\nLOG_INFO(\"Message: \" + msg);\nLOG_WARN(\"Warning: \" + msg);\nLOG_ERROR(\"Error: \" + msg);\nLOG_DEBUG(\"Debug: \" + msg);\nLOG_PANIC(\"Fatal: \" + msg);   // terminates reducer\n```\n\n## Complete Example\n\n```cpp\n#include <spacetimedb.h>\nusing namespace SpacetimeDB;\n\nstruct Entity {\n    Identity identity;\n    std::string name;\n    bool active;\n};\nSPACETIMEDB_STRUCT(Entity, identity, name, active)\nSPACETIMEDB_TABLE(Entity, entity, Public)\nFIELD_PrimaryKey(entity, identity)\n\nstruct Record {\n    uint64_t id;\n    Identity owner;\n    uint32_t value;\n    Timestamp created_at;\n};\nSPACETIMEDB_STRUCT(Record, id, owner, value, created_at)\nSPACETIMEDB_TABLE(Record, record, Public)\nFIELD_PrimaryKeyAutoInc(record, id)\n\nSPACETIMEDB_CLIENT_CONNECTED(on_connect, ReducerContext ctx) {\n    if (auto existing = ctx.db[entity_identity].find(ctx.sender())) {\n        existing->active = true;\n        ctx.db[entity_identity].update(*existing);\n    }\n    return Ok();\n}\n\nSPACETIMEDB_CLIENT_DISCONNECTED(on_disconnect, ReducerContext ctx) {\n    if (auto existing = ctx.db[entity_identity].find(ctx.sender())) {\n        existing->active = false;\n        ctx.db[entity_identity].update(*existing);\n    }\n    return Ok();\n}\n\nSPACETIMEDB_REDUCER(create_entity, ReducerContext ctx, std::string name) {\n    if (ctx.db[entity_identity].find(ctx.sender())) {\n        return Err(\"already exists\");\n    }\n    ctx.db[entity].insert(Entity{ctx.sender(), name, true});\n    return Ok();\n}\n\nSPACETIMEDB_REDUCER(add_record, ReducerContext ctx, uint32_t value) {\n    if (!ctx.db[entity_identity].find(ctx.sender())) {\n        return Err(\"not found\");\n    }\n    ctx.db[record].insert(Record{0, ctx.sender(), value, ctx.timestamp});\n    return Ok();\n}\n```\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "cpp-server",
-    "description": "SpacetimeDB C++ server module SDK reference. Use when writing tables, reducers, or module logic in C++.",
-    "license": "Apache-2.0",
-    "metadata": "",
-    "author": "clockworklabs",
-    "version": "2.0",
-    "role": "server",
-    "language": "cpp",
-    "cursor_globs": "**/*.cpp,**/*.h,**/*.hpp",
-    "cursor_always_apply": "true"
+  "author": "clockworklabs",
+  "version": "2.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "Apache-2.0",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

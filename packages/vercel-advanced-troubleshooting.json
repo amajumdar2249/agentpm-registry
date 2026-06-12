@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033485",
   "name": "vercel-advanced-troubleshooting",
   "slug": "vercel-advanced-troubleshooting",
   "description": "Advanced debugging for hard-to-diagnose Vercel issues including cold",
   "content": "# Vercel Advanced Troubleshooting\n\n## Overview\n\nDiagnose hard-to-find Vercel issues: intermittent cold start failures, edge function crashes, region-specific behavior, function bundling problems, and serverless concurrency issues. Uses systematic isolation, request tracing, and Vercel-specific debugging techniques.\n\n## Prerequisites\n\n- Vercel CLI with access to production logs\n- Familiarity with `vercel-common-errors` (standard debugging)\n- `curl` and `jq` for API inspection\n- Access to deployment inspection tools\n\n## Instructions\n\n### Step 1: Request-Level Tracing\n\n```bash\n# Trace a single request through Vercel's edge network\ncurl -v https://yourdomain.com/api/endpoint 2>&1 | grep -E \"x-vercel|cf-ray|age|cache\"\n\n# Key headers to check:\n# x-vercel-id: <region>::<function-id> \u2014 which region served the request\n# x-vercel-cache: HIT/MISS/STALE \u2014 edge cache status\n# x-vercel-execution-region: iad1 \u2014 function execution region\n# age: 45 \u2014 seconds since edge cached the response\n# x-matched-path: /api/endpoint \u2014 routing match result\n```\n\n### Step 2: Cold Start Investigation\n\n```typescript\n// Instrument cold start timing in your function\nlet coldStart = true;\nconst initTime = Date.now();\n\nexport default function handler(req, res) {\n  const isCold = coldStart;\n  coldStart = false;\n\n  const handlerStart = Date.now();\n  // ... your logic ...\n\n  res.setHeader('x-cold-start', String(isCold));\n  res.setHeader('x-init-duration', String(handlerStart - initTime));\n  res.json({\n    coldStart: isCold,\n    initDuration: isCold ? handlerStart - initTime : 0,\n    handlerDuration: Date.now() - handlerStart,\n    region: process.env.VERCEL_REGION,\n  });\n}\n```\n\n```bash\n# Measure cold start frequency over N requests\nfor i in $(seq 1 20); do\n  curl -s https://yourdomain.com/api/endpoint \\\n    | jq '{coldStart, initDuration, region}'\n  sleep 2  # Wait between requests to allow isolate recycling\ndone\n```\n\n### Step 3: Function Bundle Analysis\n\n```bash\n# Check what's being bundled into your function\nvercel inspect https://my-app-xxx.vercel.app\n\n# Check function sizes in the deployment\ncurl -s -H \"Authorization: Bearer $VERCEL_TOKEN\" \\\n  \"https://api.vercel.com/v13/deployments/dpl_xxx\" \\\n  | jq '.functions | to_entries[] | {path: .key, size: .value.size, regions: .value.regions}'\n\n# Locally \u2014 check what @vercel/nft traces for a function\nnpx @vercel/nft print api/heavy-endpoint.ts 2>/dev/null | head -50\n# Shows all files that will be bundled\n\n# Find unexpectedly large dependencies\nnpx @vercel/nft print api/heavy-endpoint.ts 2>/dev/null \\\n  | xargs -I {} du -sh {} 2>/dev/null | sort -rh | head -20\n```\n\n### Step 4: Region-Specific Debugging\n\n```bash\n# Test from different regions to isolate geographic issues\n# Use Vercel's deployment URL with region hints\nfor region in iad1 sfo1 cdg1 hnd1; do\n  echo \"=== Region: $region ===\"\n  curl -s -w \"HTTP %{http_code} | Time: %{time_total}s\\n\" \\\n    -H \"x-vercel-ip-country: US\" \\\n    https://yourdomain.com/api/endpoint\ndone\n\n# Check if the issue is region-dependent\n# If latency varies wildly, check:\n# 1. Function region vs database region (cross-region latency)\n# 2. Edge middleware adding delay\n# 3. External API calls from wrong region\n```\n\n### Step 5: Edge Function Crash Debugging\n\n```typescript\n// Edge functions crash silently on Node.js API usage\n// Common crashes and their symptoms:\n\n// Symptom: EDGE_FUNCTION_INVOCATION_FAILED with no error details\n// Cause: Using Node.js Buffer, fs, crypto.createHash in edge runtime\n\n// Diagnostic: check if imports are edge-compatible\nexport const config = { runtime: 'edge' };\n\nexport default function handler(request: Request) {\n  // This will crash silently:\n  // const hash = require('crypto').createHash('sha256');\n\n  // Use Web Crypto instead:\n  const encoder = new TextEncoder();\n  const data = encoder.encode('test');\n  const hashBuffer = await crypto.subtle.digest('SHA-256', data);\n\n  return Response.json({ ok: true });\n}\n```\n\n```bash\n# Check if a module is edge-compatible\nnpx edge-runtime --eval \"import('your-module')\" 2>&1\n# Errors here mean the module won't work in edge functions\n```\n\n### Step 6: Concurrency and Throttling Debug\n\n```bash\n# Check current function concurrency limits\ncurl -s -H \"Authorization: Bearer $VERCEL_TOKEN\" \\\n  \"https://api.vercel.com/v9/projects/my-app\" \\\n  | jq '{plan: .plan, concurrency: .concurrencyBucketName}'\n\n# Hobby: 10 concurrent, Pro: 1000, Enterprise: 100000\n\n# Load test to find throttling threshold\nnpx autocannon -c 50 -d 10 https://yourdomain.com/api/endpoint\n# Watch for 429 responses indicating FUNCTION_THROTTLED\n```\n\n### Step 7: Systematic Isolation\n\n```\nIssue persists? Isolate systematically:\n\n1. Does it happen on preview deployments?\n   \u2514\u2500\u2500 No \u2192 Production-only env var or domain issue\n\n2. Does it happen with a minimal function?\n   \u2514\u2500\u2500 No \u2192 Issue is in your code, not Vercel platform\n\n3. Does it happen in all regions?\n   \u2514\u2500\u2500 No \u2192 Region-specific infrastructure issue\n\n4. Does it happen with edge runtime?\n   \u2514\u2500\u2500 No \u2192 Node.js-specific issue (cold starts, module compat)\n\n5. Does it happen without middleware?\n   \u2514\u2500\u2500 No \u2192 Middleware is interfering \u2014 check matcher scope\n\n6. Create minimal reproduction:\n   \u2514\u2500\u2500 api/test.ts with only the failing behavior\n   \u2514\u2500\u2500 Deploy standalone and test\n```\n\n### Step 8: Vercel Support Escalation\n\n```bash\n# Collect comprehensive evidence\nmkdir vercel-debug && cd vercel-debug\n\n# Deployment details\nvercel inspect https://yourdomain.com > inspect.txt\nvercel logs https://yourdomain.com --limit=200 > logs.txt\n\n# Request trace\ncurl -v https://yourdomain.com/api/failing-endpoint 2>&1 > curl-trace.txt\n\n# Function analysis\ncurl -s -H \"Authorization: Bearer $VERCEL_TOKEN\" \\\n  \"https://api.vercel.com/v13/deployments/dpl_xxx\" > deployment.json\n\n# Platform status at time of issue\ncurl -s \"https://www.vercel-status.com/api/v2/summary.json\" > status.json\n\ntar czf vercel-debug-$(date +%Y%m%d).tar.gz .\n```\n\n## Output\n\n- Request traced through Vercel's edge network with region and cache data\n- Cold start frequency and duration quantified\n- Function bundle analyzed for size issues\n- Issue isolated to specific layer (edge, runtime, region, middleware)\n- Evidence bundle ready for support escalation\n\n## Error Handling\n\n| Symptom | Likely Cause | Debug Approach |\n|---------|-------------|---------------|\n| Intermittent 500 errors | Cold start + unhandled async | Add global error handler, check init code |\n| Latency spikes every ~15 min | Function isolate recycling (cold start) | Measure with x-cold-start header |\n| Works in preview, fails in prod | Env var scope mismatch | Compare env vars across environments |\n| EDGE_FUNCTION_INVOCATION_FAILED | Node.js API in edge runtime | Check imports for Node.js-only modules |\n| Function works locally, fails deployed | Missing dependency or env var | Run `vercel build` locally, check output |\n\n## Resources\n\n- [Vercel Error Codes](https://vercel.com/docs/errors)\n- [Function Limitations](https://vercel.com/docs/functions/limitations)\n- [Edge Runtime API](https://vercel.com/docs/functions/runtimes/edge)\n- [Vercel Support](https://vercel.com/support)\n- [@vercel/nft](https://github.com/vercel/nft)\n\n## Next Steps\n\nFor load testing and scaling, see `vercel-load-scale`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "vercel-advanced-troubleshooting",
-    "description": "Advanced debugging for hard-to-diagnose Vercel issues including cold",
-    "allowed-tools": "Read, Grep, Bash(vercel:*), Bash(curl:*), Bash(jq:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

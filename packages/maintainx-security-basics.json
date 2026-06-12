@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032600",
   "name": "maintainx-security-basics",
   "slug": "maintainx-security-basics",
   "description": "Configure MaintainX API security, credential management, and access",
   "content": "# MaintainX Security Basics\n\n## Overview\n\nSecure your MaintainX integration with proper credential management, input validation, audit logging, and key rotation procedures.\n\n## Prerequisites\n\n- MaintainX account with admin access\n- Node.js 18+\n- Familiarity with environment variables and secret management\n\n## Instructions\n\n### Step 1: Secure Credential Storage\n\nNever hardcode API keys. Use environment variables or a secret manager.\n\n```bash\n# .env (never committed to git)\nMAINTAINX_API_KEY=mx-prod-key-here\n\n# .gitignore\n.env\n.env.*\n*.key\n```\n\n```typescript\n// src/config.ts - load and validate credentials\nimport 'dotenv/config';\n\nconst REQUIRED_VARS = ['MAINTAINX_API_KEY'] as const;\n\nexport function validateEnv() {\n  const missing = REQUIRED_VARS.filter((v) => !process.env[v]);\n  if (missing.length > 0) {\n    throw new Error(`Missing required env vars: ${missing.join(', ')}`);\n  }\n}\n\nvalidateEnv();\nexport const API_KEY = process.env.MAINTAINX_API_KEY!;\n```\n\n### Step 2: Git Hook to Prevent Secret Commits\n\n```bash\n# Install pre-commit hook\ncat > .git/hooks/pre-commit << 'HOOK'\n#!/bin/bash\n# Block commits containing API keys\nif git diff --cached --diff-filter=ACMR | grep -qiE '(MAINTAINX_API_KEY|Bearer mx-)'; then\n  echo \"ERROR: Potential MaintainX API key detected in staged files.\"\n  echo \"Remove secrets before committing.\"\n  exit 1\nfi\nHOOK\nchmod +x .git/hooks/pre-commit\n```\n\nOr use `gitleaks`:\n\n```bash\nnpx gitleaks detect --source . --no-git\n```\n\n### Step 3: Input Validation\n\nValidate all user input before sending to the MaintainX API:\n\n```typescript\n// src/validation.ts\nimport { z } from 'zod';\n\nconst WorkOrderInput = z.object({\n  title: z.string().min(1).max(500),\n  description: z.string().max(5000).optional(),\n  priority: z.enum(['NONE', 'LOW', 'MEDIUM', 'HIGH']).default('NONE'),\n  status: z.enum(['OPEN', 'IN_PROGRESS', 'ON_HOLD', 'COMPLETED', 'CLOSED']).default('OPEN'),\n  assignees: z.array(z.object({\n    type: z.enum(['USER', 'TEAM']),\n    id: z.number().positive(),\n  })).optional(),\n  assetId: z.number().positive().optional(),\n  locationId: z.number().positive().optional(),\n  dueDate: z.string().datetime().optional(),\n});\n\nexport function validateWorkOrder(input: unknown) {\n  return WorkOrderInput.parse(input);\n}\n\n// Usage\ntry {\n  const validated = validateWorkOrder(userInput);\n  await client.createWorkOrder(validated);\n} catch (err) {\n  if (err instanceof z.ZodError) {\n    console.error('Validation failed:', err.issues);\n  }\n}\n```\n\n### Step 4: Audit Logging\n\n```typescript\n// src/audit-logger.ts\ninterface AuditEntry {\n  timestamp: string;\n  action: string;\n  resource: string;\n  resourceId?: number;\n  userId: string;\n  ip?: string;\n  result: 'success' | 'failure';\n  details?: string;\n}\n\nclass AuditLogger {\n  private entries: AuditEntry[] = [];\n\n  log(entry: Omit<AuditEntry, 'timestamp'>) {\n    const full: AuditEntry = { ...entry, timestamp: new Date().toISOString() };\n    this.entries.push(full);\n    // Structured JSON for log aggregation (ELK, CloudWatch, etc.)\n    console.log(JSON.stringify({ type: 'audit', ...full }));\n  }\n}\n\nexport const audit = new AuditLogger();\n\n// Usage in API wrapper\nasync function createWorkOrderAudited(client: MaintainXClient, input: any, userId: string) {\n  try {\n    const wo = await client.createWorkOrder(input);\n    audit.log({\n      action: 'workorder.create',\n      resource: 'workorder',\n      resourceId: wo.id,\n      userId,\n      result: 'success',\n    });\n    return wo;\n  } catch (err: any) {\n    audit.log({\n      action: 'workorder.create',\n      resource: 'workorder',\n      userId,\n      result: 'failure',\n      details: err.message,\n    });\n    throw err;\n  }\n}\n```\n\n### Step 5: API Key Rotation\n\n```typescript\n// scripts/rotate-key.ts\n// Run quarterly: npx tsx scripts/rotate-key.ts\n\nasync function rotateApiKey() {\n  console.log('=== MaintainX API Key Rotation ===');\n  console.log('1. Go to https://app.getmaintainx.com > Settings > Integrations');\n  console.log('2. Click \"Generate New Key\"');\n  console.log('3. Update the key in your secret manager / .env');\n  console.log('4. Verify with: curl -s -o /dev/null -w \"%{http_code}\" \\\\');\n  console.log('     https://api.getmaintainx.com/v1/users?limit=1 \\\\');\n  console.log('     -H \"Authorization: Bearer NEW_KEY\"');\n  console.log('5. Revoke the old key in MaintainX Settings');\n  console.log('6. Update CI/CD secrets (GitHub Actions, GCP Secret Manager)');\n  console.log('');\n  console.log('Rotation schedule: every 90 days');\n  console.log('Next rotation due:', new Date(Date.now() + 90 * 86400000).toISOString().split('T')[0]);\n}\n\nrotateApiKey();\n```\n\n## Output\n\n- `.env` with API key, protected by `.gitignore`\n- Pre-commit hook blocking secret leaks\n- Zod-based input validation for all API inputs\n- Structured audit logging for compliance\n- Key rotation procedure with verification steps\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Key leaked to git | Committed `.env` or hardcoded key | Rotate immediately, add pre-commit hook |\n| Validation errors | Invalid user input | Use Zod schema to validate before API calls |\n| Audit gaps | Missing log entries | Wrap all API calls with audit logger |\n| Stale key | Key not rotated in > 90 days | Follow rotation procedure in Step 5 |\n\n## Resources\n\n- [MaintainX Security](https://www.getmaintainx.com/security)\n- [OWASP API Security Top 10](https://owasp.org/API-Security/)\n- [gitleaks](https://github.com/gitleaks/gitleaks) -- Secret detection in git repos\n- [Zod](https://zod.dev/) -- TypeScript-first schema validation\n\n## Next Steps\n\nFor production deployment, see `maintainx-prod-checklist`.\n\n## Examples\n\n**Middleware for Express API that validates and audits**:\n\n```typescript\nfunction secureEndpoint(schema: z.ZodSchema) {\n  return async (req: express.Request, res: express.Response, next: express.NextFunction) => {\n    try {\n      req.body = schema.parse(req.body);\n      audit.log({\n        action: req.method + ' ' + req.path,\n        resource: req.path,\n        userId: req.headers['x-user-id'] as string,\n        result: 'success',\n      });\n      next();\n    } catch (err) {\n      res.status(400).json({ error: 'Validation failed', details: (err as z.ZodError).issues });\n    }\n  };\n}\n```\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "maintainx-security-basics",
-    "description": "Configure MaintainX API security, credential management, and access",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

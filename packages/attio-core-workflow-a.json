@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031363",
   "name": "attio-core-workflow-a",
   "slug": "attio-core-workflow-a",
   "description": "Full CRUD on Attio records -- create, read, update, delete, and search",
   "content": "# Attio Records CRUD (Core Workflow A)\n\n## Overview\n\nComplete record lifecycle on the Attio REST API. Records are instances of objects (people, companies, deals, custom). Values are keyed by attribute slug and are always arrays (Attio supports multiselect natively).\n\n## Prerequisites\n\n- `attio-install-auth` completed\n- Scopes: `object_configuration:read`, `record_permission:read`, `record_permission:read-write`\n- Understanding of Attio attribute types (see reference table below)\n\n## Attio Attribute Type Reference\n\n| Type | Slug example | Value format |\n|------|-------------|-------------|\n| `text` | `description` | `\"plain string\"` |\n| `number` | `revenue` | `123456` |\n| `email-address` | `email_addresses` | `\"ada@example.com\"` (string shortcut) |\n| `phone-number` | `phone_numbers` | `{ original_phone_number: \"+14155551234\" }` |\n| `domain` | `domains` | `\"acme.com\"` (string shortcut) |\n| `personal-name` | `name` | `{ first_name, last_name, full_name }` |\n| `location` | `primary_location` | `\"San Francisco, CA\"` (string shortcut) |\n| `record-reference` | `company` | `{ target_object: \"companies\", target_record_id: \"...\" }` |\n| `select` / `status` | `stage` | `{ option: \"qualified\" }` |\n| `currency` | `deal_value` | `{ currency_code: \"USD\", currency_value: 50000 }` |\n| `checkbox` | `is_active` | `true` / `false` |\n| `date` | `close_date` | `\"2025-06-15\"` |\n| `timestamp` | `last_contact` | `\"2025-06-15T14:30:00.000Z\"` |\n| `rating` | `priority` | `4` (integer 1-5) |\n\n## Instructions\n\n### Step 1: Create Records\n\n```typescript\n// Create a person\nconst person = await client.post<{ data: AttioRecord }>(\n  \"/objects/people/records\",\n  {\n    data: {\n      values: {\n        email_addresses: [\"ada@example.com\"],\n        name: [{ first_name: \"Ada\", last_name: \"Lovelace\", full_name: \"Ada Lovelace\" }],\n        phone_numbers: [{ original_phone_number: \"+14155551234\" }],\n        primary_location: [\"London, UK\"],\n        description: [\"Mathematician and first programmer\"],\n      },\n    },\n  }\n);\n\n// Create a company\nconst company = await client.post<{ data: AttioRecord }>(\n  \"/objects/companies/records\",\n  {\n    data: {\n      values: {\n        name: [\"Babbage Analytical Engines\"],\n        domains: [\"babbage.io\"],\n        description: [\"Mechanical computing pioneer\"],\n        primary_location: [\"London, UK\"],\n      },\n    },\n  }\n);\n```\n\n### Step 2: Read a Single Record\n\n```typescript\n// GET /v2/objects/{object_slug}/records/{record_id}\nconst record = await client.get<{ data: AttioRecord }>(\n  `/objects/people/records/${person.data.id.record_id}`\n);\n\n// Access values (always arrays)\nconst fullName = record.data.values.name?.[0]?.full_name;\nconst email = record.data.values.email_addresses?.[0]?.email_address;\n```\n\n### Step 3: Update Records (PATCH vs PUT)\n\n```typescript\n// PATCH: Append to multiselect values\nawait client.patch<{ data: AttioRecord }>(\n  `/objects/people/records/${recordId}`,\n  {\n    data: {\n      values: {\n        email_addresses: [\"ada.new@example.com\"], // Adds to existing emails\n      },\n    },\n  }\n);\n\n// PUT: Overwrite (assert) -- replaces all values for specified attributes\nawait client.put<{ data: AttioRecord }>(\n  `/objects/people/records/${recordId}`,\n  {\n    data: {\n      values: {\n        email_addresses: [\"only-this@example.com\"], // Replaces all emails\n      },\n    },\n  }\n);\n```\n\n### Step 4: Query with Filters and Sorts\n\n```typescript\n// POST /v2/objects/{object}/records/query\nconst results = await client.post<{ data: AttioRecord[] }>(\n  \"/objects/companies/records/query\",\n  {\n    // Shorthand filter (equality check)\n    filter: {\n      domains: \"acme.com\",\n    },\n    limit: 25,\n  }\n);\n\n// Verbose filter with operators\nconst filtered = await client.post<{ data: AttioRecord[] }>(\n  \"/objects/people/records/query\",\n  {\n    filter: {\n      $and: [\n        { email_addresses: { email_address: { $contains: \"example.com\" } } },\n        { name: { last_name: { $eq: \"Lovelace\" } } },\n      ],\n    },\n    sorts: [\n      { attribute: \"created_at\", field: \"created_at\", direction: \"desc\" },\n    ],\n    limit: 50,\n    offset: 0,\n  }\n);\n```\n\n**Available filter operators:** `$eq`, `$not_empty`, `$contains`, `$gt`, `$gte`, `$lt`, `$lte`, `$in`, `$and`, `$or`.\n\n### Step 5: Fuzzy Search Across Objects\n\n```typescript\n// POST /v2/records/search -- searches across all objects\nconst search = await client.post<{ data: AttioRecord[] }>(\n  \"/records/search\",\n  {\n    query: \"Ada Lovelace\",\n    limit: 10,\n  }\n);\n```\n\n### Step 6: Delete a Record\n\n```typescript\n// DELETE /v2/objects/{object}/records/{record_id}\nawait client.delete(`/objects/people/records/${recordId}`);\n```\n\n### Step 7: Link Records via Record-Reference\n\n```typescript\n// Link a person to a company\nawait client.patch<{ data: AttioRecord }>(\n  `/objects/people/records/${personId}`,\n  {\n    data: {\n      values: {\n        company: [{\n          target_object: \"companies\",\n          target_record_id: companyId,\n        }],\n      },\n    },\n  }\n);\n```\n\n## Error Handling\n\n| Error | Status | Cause | Solution |\n|-------|--------|-------|----------|\n| `not_found` | 404 | Invalid object slug or record ID | Verify with `GET /v2/objects` |\n| `validation_error` | 422 | Wrong value format for attribute type | Check attribute type table above |\n| `rate_limit_exceeded` | 429 | Exceeded 10-second sliding window | Honor `Retry-After` header |\n| `conflict` | 409 | Duplicate on unique attribute | Use PUT (assert/upsert) |\n| `insufficient_scopes` | 403 | Missing `record_permission:read-write` | Update token scopes |\n\n## Resources\n\n- [Attio Create Record](https://docs.attio.com/rest-api/endpoint-reference/records/create-a-record)\n- [Attio List Records](https://docs.attio.com/rest-api/endpoint-reference/records/list-records)\n- [Attio Search Records](https://docs.attio.com/rest-api/endpoint-reference/records/search-records)\n- [Attio Filtering and Sorting](https://docs.attio.com/rest-api/how-to/filtering-and-sorting)\n- [Attio Attribute Types](https://docs.attio.com/docs/attribute-types/attribute-types)\n\n## Next Steps\n\nFor list/entry operations (pipelines, boards), see `attio-core-workflow-b`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "attio-core-workflow-a",
-    "description": "Full CRUD on Attio records -- create, read, update, delete, and search",
-    "Trigger": "attio records\", \"attio CRUD\", \"create attio record\",",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

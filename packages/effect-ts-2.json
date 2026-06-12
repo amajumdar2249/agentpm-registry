@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000017378",
   "name": "effect-ts",
   "slug": "effect-ts-2",
   "description": ">",
   "content": "\n# Effect TypeScript Best Practices\n\nEffect is a TypeScript library for building complex, type-safe applications with structured\nerror handling, dependency injection via services/layers, fiber-based concurrency, and\nresource safety.\n\n## When to Apply\n\n- Writing or reviewing TypeScript code that imports from `effect`, `@effect/schema`, or `@effect/platform`\n- Implementing typed error handling with `Effect<Success, Error, Requirements>`\n- Building services and layers for dependency injection\n- Working with Schema for data validation, decoding, and transformation\n- Using fiber-based concurrency (queues, semaphores, PubSub, deferred)\n- Processing data with Stream and Sink\n- Migrating from Promises, fp-ts, neverthrow, or ZIO to Effect\n\n## How to Use\n\nThis skill is organized by domain. Read the relevant reference file for the area you're working in.\n\n### Read First: The Paradigm\n\n**Always read this before diving into API references**, especially when refactoring existing\ncode to use Effect or writing new Effect services:\n\n| Reference | When to Read |\n|-----------|-------------|\n| [**Think in Effect: The Paradigm Shift**](references/getting-paradigm.md) | **Before any other reference.** Mental model shifts, refactoring recipes, anti-patterns, application architecture. Read this to understand HOW to think in Effect \u2014 the other files teach WHAT to type. |\n\n### Core Foundations\n\n| Reference | When to Read |\n|-----------|-------------|\n| [Getting Started](references/getting-started.md) | Creating the Effect type, pipelines, generators, running effects |\n| [Error Management](references/error-management.md) | Typed errors, recovery, retrying, timeouts, sandboxing |\n| [Core Concepts](references/core-concepts.md) | Request batching, configuration management, runtime system |\n\n### Data & Validation\n\n| Reference | When to Read |\n|-----------|-------------|\n| [Data Types](references/data-types.md) | Option, Either, Cause, Chunk, DateTime, Duration, Exit, Data |\n| [Schema Basics](references/schema-basics.md) | Schema intro, basic usage, classes, constructors, effect data types |\n| [Schema Advanced](references/schema-advanced.md) | Transformations, filters, annotations, error formatting, JSON Schema output |\n\n### Architecture & Dependencies\n\n| Reference | When to Read |\n|-----------|-------------|\n| [Requirements Management](references/req-management.md) | Services, Layers, dependency injection, layer memoization |\n| [Resource Management](references/resource-management.md) | Scope, safe resource acquisition/release, caching |\n| [State Management](references/state-management.md) | Ref, SubscriptionRef, SynchronizedRef for concurrent state |\n\n### Concurrency & Streaming\n\n| Reference | When to Read |\n|-----------|-------------|\n| [Concurrency](references/conc-concurrency.md) | Fibers, Deferred, Latch, PubSub, Queue, Semaphore |\n| [Streams and Sinks](references/streams-and-sinks.md) | Creating, consuming, transforming streams; sink operations |\n| [Scheduling](references/sched-scheduling.md) | Built-in schedules, cron, combinators, repetition |\n\n### Platform & Observability\n\n| Reference | When to Read |\n|-----------|-------------|\n| [Platform](references/plat-platform.md) | FileSystem, Command, Terminal, KeyValueStore, Path |\n| [Observability](references/obs-observability.md) | Logging, metrics, tracing, Supervisor |\n| [Testing](references/test-testing.md) | TestClock for time simulation; for service mocking and layer testing, see [Requirements Management](references/req-management.md) |\n\n### Style, AI & Migration\n\n| Reference | When to Read |\n|-----------|-------------|\n| [Code Style](references/code-style.md) | Branded types, pattern matching, dual APIs, guidelines, traits |\n| [AI Integration](references/ai-integration.md) | Effect AI packages for LLM tool use and execution planning |\n| [Micro](references/micro-module.md) | Lightweight Effect alternative for smaller bundles |\n| [Migration Guides](references/migration-guides.md) | Coming from Promises, fp-ts, neverthrow, or ZIO |\n\n## Quick Reference \u2014 Common Patterns\n\n### The Effect Type\n```ts\n//         \u250c\u2500\u2500\u2500 Success type\n//         \u2502        \u250c\u2500\u2500\u2500 Error type\n//         \u2502        \u2502      \u250c\u2500\u2500\u2500 Required dependencies\n//         \u25bc        \u25bc      \u25bc\nEffect<Success, Error, Requirements>\n```\n\n### Creating Effects\n```ts\nimport { Effect } from \"effect\"\n\n// From sync values\nconst succeed = Effect.succeed(42)\nconst fail = Effect.fail(new Error(\"oops\"))\n\n// From sync code that may throw\nconst sync = Effect.try(() => JSON.parse(data))\n\n// From promises\nconst async = Effect.tryPromise(() => fetch(url))\n\n// From generators (recommended for complex flows)\nconst program = Effect.gen(function* () {\n  const user = yield* getUser(id)\n  const todos = yield* getTodos(user.id)\n  return { user, todos }\n})\n```\n\n### Running Effects\n```ts\n// Async (returns Promise)\nEffect.runPromise(program)\n\n// With full Exit information\nEffect.runPromiseExit(program)\n\n// Sync (throws on async)\nEffect.runSync(program)\n```\n\n### Typed Errors\n```ts\nimport { Data, Effect } from \"effect\"\n\nclass NotFound extends Data.TaggedError(\"NotFound\")<{\n  readonly id: string\n}> {}\n\nclass Unauthorized extends Data.TaggedError(\"Unauthorized\")<{}> {}\n\n// Error type is tracked: Effect<User, NotFound | Unauthorized>\nconst getUser = (id: string) =>\n  Effect.gen(function* () {\n    // ...\n  })\n```\n\n### Services and Layers\n```ts\nimport { Context, Effect, Layer } from \"effect\"\n\n// Define a service\nclass UserRepo extends Context.Tag(\"UserRepo\")<\n  UserRepo,\n  { readonly findById: (id: string) => Effect.Effect<User, NotFound> }\n>() {}\n\n// Use in effects \u2014 adds to Requirements channel\nconst program = Effect.gen(function* () {\n  const repo = yield* UserRepo\n  return yield* repo.findById(\"1\")\n})\n\n// Implement with a Layer\nconst UserRepoLive = Layer.succeed(UserRepo, {\n  findById: (id) => Effect.succeed({ id, name: \"Alice\" })\n})\n\n// Provide and run\nprogram.pipe(Effect.provide(UserRepoLive), Effect.runPromise)\n```\n\n### Schema Validation\n```ts\nimport { Schema } from \"effect\"\n\nconst User = Schema.Struct({\n  id: Schema.Number,\n  name: Schema.String,\n  email: Schema.String.pipe(Schema.pattern(/@/))\n})\n\ntype User = typeof User.Type\n\n// Decode (parse + validate)\nconst decode = Schema.decodeUnknownSync(User)\nconst user = decode({ id: 1, name: \"Alice\", email: \"a@b.com\" })\n```\n\n### Pipelines\n```ts\nimport { Effect, pipe } from \"effect\"\n\n// Data-last (pipe style)\nconst result = pipe(\n  getTodos,\n  Effect.map((todos) => todos.filter((t) => !t.done)),\n  Effect.flatMap((active) => sendNotification(active.length)),\n  Effect.catchTag(\"NetworkError\", () => Effect.succeed(\"offline\"))\n)\n\n// Fluent (method style)\nconst result2 = getTodos.pipe(\n  Effect.map((todos) => todos.filter((t) => !t.done)),\n  Effect.flatMap((active) => sendNotification(active.length))\n)\n```\n\n## Gotchas\n\nSee [gotchas.md](gotchas.md) for known failure points.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "effect-ts",
-    "description": ">",
-    "Effect-specific constructs": "Effect.gen generators, Schema.Struct/Schema.Class definitions,"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

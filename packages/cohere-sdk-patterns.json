@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031659",
   "name": "cohere-sdk-patterns",
   "slug": "cohere-sdk-patterns",
   "description": "Apply production-ready Cohere SDK patterns for TypeScript and Python.",
   "content": "# Cohere SDK Patterns\n\n## Overview\n\nProduction-ready patterns for the `cohere-ai` TypeScript SDK (CohereClientV2) and Python `cohere` package. Real model names, real API shapes, real error types.\n\n## Prerequisites\n\n- `cohere-ai` v7+ installed (TypeScript) or `cohere` v5+ (Python)\n- Familiarity with async/await patterns\n- Understanding of Cohere API v2 endpoints\n\n## Instructions\n\n### Pattern 1: Singleton Client with Retry\n\n```typescript\n// src/cohere/client.ts\nimport { CohereClientV2, CohereError, CohereTimeoutError } from 'cohere-ai';\n\nlet instance: CohereClientV2 | null = null;\n\nexport function getCohere(): CohereClientV2 {\n  if (!instance) {\n    if (!process.env.CO_API_KEY) {\n      throw new Error('CO_API_KEY environment variable is required');\n    }\n    instance = new CohereClientV2({\n      token: process.env.CO_API_KEY,\n    });\n  }\n  return instance;\n}\n\nexport async function withRetry<T>(\n  operation: () => Promise<T>,\n  maxRetries = 3,\n  baseDelayMs = 1000\n): Promise<T> {\n  for (let attempt = 1; attempt <= maxRetries; attempt++) {\n    try {\n      return await operation();\n    } catch (err) {\n      if (attempt === maxRetries) throw err;\n\n      // Only retry on rate limits (429) and server errors (5xx)\n      if (err instanceof CohereError) {\n        const status = err.statusCode;\n        if (status && status !== 429 && status < 500) throw err;\n      } else if (!(err instanceof CohereTimeoutError)) {\n        throw err;\n      }\n\n      const delay = baseDelayMs * Math.pow(2, attempt - 1);\n      const jitter = Math.random() * 500;\n      await new Promise(r => setTimeout(r, delay + jitter));\n    }\n  }\n  throw new Error('Unreachable');\n}\n```\n\n### Pattern 2: Type-Safe Chat Wrapper\n\n```typescript\n// src/cohere/chat.ts\nimport { getCohere, withRetry } from './client';\n\ninterface ChatOptions {\n  message: string;\n  systemPrompt?: string;\n  model?: string;\n  maxTokens?: number;\n  temperature?: number;\n  documents?: Array<{ id?: string; data: Record<string, string> }>;\n}\n\nexport async function chat(options: ChatOptions): Promise<string> {\n  const cohere = getCohere();\n\n  const messages: Array<{ role: string; content: string }> = [];\n\n  if (options.systemPrompt) {\n    messages.push({ role: 'system', content: options.systemPrompt });\n  }\n  messages.push({ role: 'user', content: options.message });\n\n  const response = await withRetry(() =>\n    cohere.chat({\n      model: options.model ?? 'command-a-03-2025',\n      messages,\n      maxTokens: options.maxTokens,\n      temperature: options.temperature,\n      documents: options.documents,\n    })\n  );\n\n  return response.message?.content?.[0]?.text ?? '';\n}\n```\n\n### Pattern 3: Streaming Chat\n\n```typescript\n// src/cohere/stream.ts\nexport async function* streamChat(\n  message: string,\n  model = 'command-a-03-2025'\n): AsyncGenerator<string> {\n  const cohere = getCohere();\n\n  const stream = await cohere.chatStream({\n    model,\n    messages: [{ role: 'user', content: message }],\n  });\n\n  for await (const event of stream) {\n    if (event.type === 'content-delta') {\n      const text = event.delta?.message?.content?.text;\n      if (text) yield text;\n    }\n  }\n}\n\n// Usage\nfor await (const chunk of streamChat('Explain RAG in 3 sentences')) {\n  process.stdout.write(chunk);\n}\n```\n\n### Pattern 4: Batch Embedding\n\n```typescript\n// src/cohere/embed.ts\ntype InputType = 'search_document' | 'search_query' | 'classification' | 'clustering';\n\nexport async function embedTexts(\n  texts: string[],\n  inputType: InputType = 'search_document',\n  model = 'embed-v4.0'\n): Promise<number[][]> {\n  const cohere = getCohere();\n\n  // Cohere embed accepts up to 96 texts per call\n  const BATCH_SIZE = 96;\n  const allEmbeddings: number[][] = [];\n\n  for (let i = 0; i < texts.length; i += BATCH_SIZE) {\n    const batch = texts.slice(i, i + BATCH_SIZE);\n    const response = await withRetry(() =>\n      cohere.embed({\n        model,\n        texts: batch,\n        inputType,\n        embeddingTypes: ['float'],\n      })\n    );\n    allEmbeddings.push(...response.embeddings.float);\n  }\n\n  return allEmbeddings;\n}\n```\n\n### Pattern 5: Rerank with Type Safety\n\n```typescript\n// src/cohere/rerank.ts\ninterface RerankResult {\n  text: string;\n  score: number;\n  originalIndex: number;\n}\n\nexport async function rerankDocuments(\n  query: string,\n  documents: string[],\n  topN = 5,\n  model = 'rerank-v3.5'\n): Promise<RerankResult[]> {\n  const cohere = getCohere();\n\n  const response = await withRetry(() =>\n    cohere.rerank({ model, query, documents, topN })\n  );\n\n  return response.results.map(r => ({\n    text: documents[r.index],\n    score: r.relevanceScore,\n    originalIndex: r.index,\n  }));\n}\n```\n\n### Pattern 6: Structured JSON Output\n\n```typescript\nexport async function chatJSON<T>(\n  message: string,\n  schema?: Record<string, unknown>\n): Promise<T> {\n  const cohere = getCohere();\n\n  const response = await cohere.chat({\n    model: 'command-a-03-2025',\n    messages: [{ role: 'user', content: `${message}\\n\\nRespond in valid JSON.` }],\n    responseFormat: schema\n      ? { type: 'json_object', jsonSchema: schema }\n      : { type: 'json_object' },\n  });\n\n  const text = response.message?.content?.[0]?.text ?? '{}';\n  return JSON.parse(text) as T;\n}\n```\n\n## Python Equivalents\n\n```python\nimport cohere\nfrom cohere import ClientV2\n\n# Singleton\n_client: ClientV2 | None = None\n\ndef get_cohere() -> ClientV2:\n    global _client\n    if _client is None:\n        _client = ClientV2()  # reads CO_API_KEY\n    return _client\n\n# Chat\ndef chat(message: str, model: str = \"command-a-03-2025\") -> str:\n    co = get_cohere()\n    response = co.chat(\n        model=model,\n        messages=[{\"role\": \"user\", \"content\": message}],\n    )\n    return response.message.content[0].text\n\n# Embed\ndef embed(texts: list[str], input_type: str = \"search_document\") -> list[list[float]]:\n    co = get_cohere()\n    response = co.embed(\n        model=\"embed-v4.0\",\n        texts=texts,\n        input_type=input_type,\n        embedding_types=[\"float\"],\n    )\n    return response.embeddings.float\n```\n\n## Error Handling\n\n| Error Type | When | Recovery |\n|------------|------|----------|\n| `CohereError` (status 400) | Bad request params | Fix request, do not retry |\n| `CohereError` (status 401) | Invalid API key | Check CO_API_KEY |\n| `CohereError` (status 429) | Rate limited | Retry with backoff |\n| `CohereError` (status 5xx) | Server error | Retry with backoff |\n| `CohereTimeoutError` | Network timeout | Retry with backoff |\n\n## Resources\n\n- [Cohere TypeScript SDK](https://github.com/cohere-ai/cohere-typescript)\n- [Cohere Python SDK](https://github.com/cohere-ai/cohere-python)\n- [API v2 Reference](https://docs.cohere.com/reference/about)\n\n## Next Steps\n\nApply patterns in `cohere-core-workflow-a` for RAG workflows.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "cohere-sdk-patterns",
-    "description": "Apply production-ready Cohere SDK patterns for TypeScript and Python.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

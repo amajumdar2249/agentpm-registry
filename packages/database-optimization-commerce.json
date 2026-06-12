@@ -1,20 +1,50 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000008260",
   "name": "database-optimization-commerce",
   "slug": "database-optimization-commerce",
   "description": "Speed up slow product and order queries with proper indexing, query analysis, read replicas, and search engine offloading strategies",
   "content": "\n# Database Optimization \u2014 Commerce\n\n## Overview\n\nE-commerce databases face distinct query patterns: high-cardinality product filtering (category + price + attributes), session-scoped cart lookups, write-heavy order creation, and read-heavy catalog browsing that must scale to concurrent users. This skill covers identifying slow queries, designing effective indexes for product filtering, partitioning order tables, and routing read traffic to replicas.\n\n## When to Use This Skill\n\n- When product listing pages are slow due to unindexed filter combinations (category + price + brand)\n- When checkout throughput is limited by order insertion latency\n- When read load on the primary database is causing write latency to increase\n- When a slow query log reveals queries doing sequential scans on large tables\n- When planning a database schema for a new custom e-commerce platform\n\n## Core Instructions\n\n### Step 1: Determine your situation\n\nDatabase optimization applies primarily to self-hosted setups. Understand your constraints first:\n\n| Platform | Database Control | What to Optimize |\n|----------|-----------------|-----------------|\n| **Shopify** | None \u2014 Shopify manages all infrastructure | Focus on Liquid template rendering speed, app performance, and Shopify's built-in query optimization via Search & Discovery app |\n| **WooCommerce** | Full \u2014 you manage MySQL/MariaDB on your host | Optimize WooCommerce queries with caching plugins (Redis Object Cache, WP Rocket), add database indexes via WP Optimize plugin, and configure your hosting MySQL settings |\n| **BigCommerce** | None \u2014 BigCommerce manages all infrastructure | Focus on theme performance, image optimization, and reducing third-party app overhead |\n| **Custom / Headless** | Full \u2014 you own PostgreSQL (or MySQL) | Apply all the techniques below; PostgreSQL is assumed in code examples |\n\n### Step 2: Quick wins for WooCommerce (managed WordPress/WooCommerce)\n\nBefore touching database indexes directly, apply these WooCommerce-specific optimizations:\n\n1. **Install Redis Object Cache** (free, wordpress.org):\n   - Your host must support Redis (most managed WordPress hosts \u2014 WP Engine, Kinsta, Cloudways \u2014 do)\n   - Install and activate the plugin; go to **Settings \u2192 Redis** and click **Enable Object Cache**\n   - This caches all WooCommerce database queries in memory, dramatically reducing repeat query times\n\n2. **Install WP-Optimize** (free, wordpress.org):\n   - Go to **WP-Optimize \u2192 Database** and run **Clean database** to remove orphaned order meta, expired transients, and post revisions\n   - WooCommerce stores build up millions of rows of orphaned meta over time \u2014 regular cleanup is essential\n   - Schedule automatic cleanup weekly\n\n3. **Enable the WooCommerce HPOS (High-Performance Order Storage)**:\n   - Go to **WooCommerce \u2192 Settings \u2192 Advanced \u2192 Features**\n   - Enable **High-Performance Order Storage** \u2014 this moves orders from WP post tables to dedicated order tables with proper indexes\n   - Critical for stores with 10,000+ orders\n\n4. **Upgrade to a host with MySQL 8.0+** \u2014 older MySQL versions lack important index improvements; WP Engine, Kinsta, and Cloudways all run MySQL 8.0+\n\n### Step 3: PostgreSQL optimization for custom storefronts\n\n---\n\n#### Identify slow queries\n\n```sql\n-- Enable pg_stat_statements to find the worst offenders\nCREATE EXTENSION IF NOT EXISTS pg_stat_statements;\n\n-- Top 20 slowest queries by total cumulative time\nSELECT\n  round(total_exec_time::numeric, 2) AS total_ms,\n  round(mean_exec_time::numeric, 2) AS mean_ms,\n  calls,\n  round((total_exec_time / sum(total_exec_time) OVER()) * 100, 2) AS pct_of_total,\n  left(query, 200) AS query\nFROM pg_stat_statements\nWHERE calls > 100\nORDER BY total_exec_time DESC\nLIMIT 20;\n\n-- Diagnose a specific slow query\nEXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)\nSELECT p.id, p.name, p.price\nFROM products p\nJOIN product_categories pc ON pc.product_id = p.id\nWHERE pc.category_id = 42\n  AND p.price BETWEEN 1000 AND 5000\n  AND p.status = 'active'\nORDER BY p.created_at DESC\nLIMIT 24;\n-- Look for \"Seq Scan\" on large tables \u2014 this means a missing index\n```\n\n#### Design indexes for product filtering\n\n```sql\n-- Partial index on active products only (smaller, faster)\nCREATE INDEX CONCURRENTLY idx_products_status\n  ON products (status) WHERE status = 'active';\n\nCREATE INDEX CONCURRENTLY idx_products_price\n  ON products (price) WHERE status = 'active';\n\n-- Composite index for the most common filter combination\n-- INCLUDE adds non-key columns for index-only scans (no table heap access)\nCREATE INDEX CONCURRENTLY idx_products_listing\n  ON products (status, brand_id, price, created_at DESC)\n  INCLUDE (name, slug, thumbnail_url);\n\n-- GIN index for flexible JSONB attribute filtering\n-- Enables: attributes @> '{\"color\": \"blue\", \"size\": \"M\"}'\nCREATE INDEX CONCURRENTLY idx_products_attributes\n  ON products USING gin(attributes);\n\n-- ALWAYS index foreign keys (PostgreSQL does NOT do this automatically)\nCREATE INDEX CONCURRENTLY idx_product_categories_product_id\n  ON product_categories (product_id);\nCREATE INDEX CONCURRENTLY idx_order_lines_order_id\n  ON order_lines (order_id);\n```\n\n#### Partition the orders table by date\n\n```sql\n-- Create orders table with range partitioning on created_at\nCREATE TABLE orders (\n  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  customer_id UUID NOT NULL,\n  status      TEXT NOT NULL,\n  total_cents INTEGER NOT NULL,\n  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()\n) PARTITION BY RANGE (created_at);\n\n-- Quarterly partitions\nCREATE TABLE orders_2025_q1 PARTITION OF orders\n  FOR VALUES FROM ('2025-01-01') TO ('2025-04-01');\nCREATE TABLE orders_2025_q2 PARTITION OF orders\n  FOR VALUES FROM ('2025-04-01') TO ('2025-07-01');\n-- (continue for Q3, Q4, 2026...)\n\n-- Indexes on the parent propagate to all partitions\nCREATE INDEX CONCURRENTLY ON orders (customer_id, created_at DESC);\nCREATE INDEX CONCURRENTLY ON orders (status, created_at DESC);\n```\n\n#### Route reads to replicas\n\n```javascript\n// lib/database.js \u2014 two connection pools\nimport { Pool } from 'pg';\n\nconst primaryPool = new Pool({ connectionString: process.env.DATABASE_URL, max: 20 });\nconst replicaPool = new Pool({ connectionString: process.env.DATABASE_REPLICA_URL, max: 50 });\n\nexport const db = {\n  // Writes and anything requiring freshness \u2014 primary\n  async write(sql, params = []) {\n    const result = await primaryPool.query(sql, params);\n    return result.rows;\n  },\n  // Catalog reads \u2014 replica (slight staleness is acceptable)\n  async read(sql, params = []) {\n    const result = await replicaPool.query(sql, params);\n    return result.rows;\n  },\n  // Transactions \u2014 always primary\n  async transaction(fn) {\n    const client = await primaryPool.connect();\n    try {\n      await client.query('BEGIN');\n      const result = await fn(client);\n      await client.query('COMMIT');\n      return result;\n    } catch (e) {\n      await client.query('ROLLBACK');\n      throw e;\n    } finally {\n      client.release();\n    }\n  },\n};\n```\n\n**Route reads correctly:**\n- Catalog pages, product search, order history \u2192 `db.read()` (replica)\n- Cart operations, checkout, inventory decrement \u2192 `db.write()` or `db.transaction()` (primary)\n\n#### Use keyset pagination (never OFFSET for large catalogs)\n\n```sql\n-- OFFSET 10000 reads and discards 10,000 rows \u2014 slow at scale\n-- Use keyset pagination instead: pass the last row's cursor values\n\n-- First page\nSELECT id, name, price, created_at FROM products\nWHERE status = 'active'\nORDER BY created_at DESC, id DESC\nLIMIT 24;\n\n-- Next page (pass last row's created_at and id as cursor)\nSELECT id, name, price, created_at FROM products\nWHERE status = 'active'\n  AND (created_at, id) < ('2025-03-01T12:00:00Z', 'uuid-of-last-row')\nORDER BY created_at DESC, id DESC\nLIMIT 24;\n```\n\n## Best Practices\n\n- **Use `EXPLAIN (ANALYZE, BUFFERS)`** to validate index usage \u2014 `EXPLAIN` alone shows estimates; `ANALYZE` runs the query and shows actuals; \"Seq Scan\" on a large table means a missing index\n- **Create indexes `CONCURRENTLY`** \u2014 without `CONCURRENTLY`, index creation locks the table for writes; always use it in production\n- **Index all foreign keys** \u2014 PostgreSQL does not auto-index foreign keys; `customer_id`, `order_id`, and `product_id` in join tables must be explicitly indexed\n- **Set `work_mem` carefully** \u2014 increasing `work_mem` speeds up sorting but multiplies with connection count; benchmark before raising it\n- **Run `VACUUM ANALYZE` regularly** \u2014 table bloat from dead tuples slows all queries; configure `autovacuum` aggressively on high-write tables like `carts` and `sessions`\n\n## Common Pitfalls\n\n| Problem | Solution |\n|---------|----------|\n| Index not used for multi-column filters | Composite index column order matters: equality columns first (`status`, `brand_id`), range columns last (`price`, `created_at`) |\n| Slow JSONB attribute filtering | Add a GIN index on the full `attributes` column for `@>` containment queries; use expression indexes for range queries on specific JSON keys |\n| Read replica lag causing stale cart data | Route cart reads to primary; only route catalog and order history reads to replica where slight staleness is acceptable |\n| Partition pruning not working | Ensure `WHERE` clause includes the partition key (`created_at`) so PostgreSQL can skip irrelevant partitions |\n| Slow pagination on page 50+ | Replace `OFFSET` with keyset pagination using the last row's values as a cursor |\n\n## Related Skills\n\n- @flash-sale-scaling\n- @monitoring-alerting-commerce\n- @ecommerce-caching\n- @load-testing-commerce\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "database-optimization-commerce",
-    "description": "Speed up slow product and order queries with proper indexing, query analysis, read replicas, and search engine offloading strategies",
-    "category": "infrastructure-performance",
-    "risk": "critical",
-    "source": "curated",
-    "date_added": "2026-03-12",
-    "tags": "[database, postgresql, indexing, query-optimization, read-replica, elasticsearch, pgvector, explain-analyze]",
-    "triggers": "[\"database optimization\", \"product query slow\", \"database performance ecommerce\", \"postgresql indexing\", \"read replica\", \"query optimization commerce\", \"slow catalog queries\"]",
-    "tools": "[claude-code, cursor, gemini-cli, copilot, codex-cli, kiro, opencode]",
-    "platforms": "[shopify, woocommerce, bigcommerce, custom]",
-    "difficulty": "advanced"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "infrastructure-performance",
+  "tags": [
+    "[database",
+    "postgresql",
+    "indexing",
+    "query-optimization",
+    "read-replica",
+    "elasticsearch",
+    "pgvector",
+    "explain-analyze]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

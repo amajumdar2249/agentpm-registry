@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031253",
   "name": "anth-reference-architecture",
   "slug": "anth-reference-architecture",
   "description": "Implement Claude API reference architectures for common use cases.",
   "content": "# Anthropic Reference Architecture\n\n## Overview\n\nThree validated architecture patterns for Claude API integrations: synchronous API gateway, async queue-based processing, and multi-model routing.\n\n## Architecture 1: Sync API Gateway (Simple)\n\n```\nUser \u2192 API Gateway \u2192 Claude Service \u2192 Messages API\n                                     \u2193\n                                   Response \u2192 User\n```\n\n```python\n# Best for: chatbots, interactive tools, low-volume (<100 RPM)\nfrom fastapi import FastAPI\nimport anthropic\n\napp = FastAPI()\nclient = anthropic.Anthropic(max_retries=3, timeout=60.0)\n\n@app.post(\"/chat\")\nasync def chat(prompt: str):\n    msg = client.messages.create(\n        model=\"claude-sonnet-4-20250514\",\n        max_tokens=1024,\n        messages=[{\"role\": \"user\", \"content\": prompt}]\n    )\n    return {\"text\": msg.content[0].text, \"tokens\": msg.usage.output_tokens}\n```\n\n## Architecture 2: Async Queue-Based (Scalable)\n\n```\nUser \u2192 API \u2192 Queue (Redis/SQS) \u2192 Worker Pool \u2192 Messages API\n  \u2191                                                \u2193\n  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 Status/Result \u2190\u2500\u2500 Result Store \u2190\u2500\u2500\u2500\u2518\n```\n\n```python\n# Best for: batch processing, high-volume, background tasks\nfrom redis import Redis\nfrom rq import Queue\nimport anthropic\n\nredis = Redis()\ntask_queue = Queue(\"claude-tasks\", connection=redis)\nresult_store = Redis(db=1)\n\ndef process_task(task_id: str, prompt: str, model: str):\n    client = anthropic.Anthropic()\n    msg = client.messages.create(\n        model=model,\n        max_tokens=1024,\n        messages=[{\"role\": \"user\", \"content\": prompt}]\n    )\n    result_store.setex(f\"result:{task_id}\", 3600, msg.content[0].text)\n\n# Enqueue\nimport uuid\ntask_id = str(uuid.uuid4())\ntask_queue.enqueue(process_task, task_id, prompt, \"claude-sonnet-4-20250514\")\n```\n\n## Architecture 3: Multi-Model Router\n\n```\nUser \u2192 Router \u2192 Haiku    (classify/extract)\n              \u2192 Sonnet   (general/code)\n              \u2192 Opus     (research/complex)\n              \u2192 Batches  (bulk/offline)\n```\n\n```python\nclass ModelRouter:\n    def __init__(self):\n        self.client = anthropic.Anthropic()\n        self.classifier = anthropic.Anthropic()  # Can be same client\n\n    def route_and_execute(self, prompt: str, context: dict) -> str:\n        # Step 1: Classify with Haiku (cheap, fast)\n        classification = self.classifier.messages.create(\n            model=\"claude-haiku-4-20250514\",\n            max_tokens=32,\n            messages=[{\n                \"role\": \"user\",\n                \"content\": f\"Classify this request as: simple|moderate|complex|bulk\\n\\n{prompt[:200]}\"\n            }]\n        )\n        complexity = classification.content[0].text.strip().lower()\n\n        # Step 2: Route to appropriate model\n        model_map = {\n            \"simple\": \"claude-haiku-4-20250514\",\n            \"moderate\": \"claude-sonnet-4-20250514\",\n            \"complex\": \"claude-opus-4-20250514\",\n        }\n        model = model_map.get(complexity, \"claude-sonnet-4-20250514\")\n\n        # Step 3: Execute with selected model\n        msg = self.client.messages.create(\n            model=model,\n            max_tokens=4096,\n            messages=[{\"role\": \"user\", \"content\": prompt}]\n        )\n        return msg.content[0].text\n```\n\n## Project Layout\n\n```\nmy-claude-app/\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 main.py              # FastAPI app\n\u2502   \u251c\u2500\u2500 claude/\n\u2502   \u2502   \u251c\u2500\u2500 client.py         # Singleton + config\n\u2502   \u2502   \u251c\u2500\u2500 router.py         # Model routing logic\n\u2502   \u2502   \u251c\u2500\u2500 tools.py          # Tool definitions\n\u2502   \u2502   \u2514\u2500\u2500 prompts/          # System prompts as files\n\u2502   \u251c\u2500\u2500 workers/\n\u2502   \u2502   \u2514\u2500\u2500 claude_worker.py  # Queue consumer\n\u2502   \u2514\u2500\u2500 middleware/\n\u2502       \u251c\u2500\u2500 rate_limiter.py   # App-level rate limiting\n\u2502       \u2514\u2500\u2500 cost_tracker.py   # Spend monitoring\n\u251c\u2500\u2500 tests/\n\u2502   \u251c\u2500\u2500 unit/                 # Mocked tests\n\u2502   \u2514\u2500\u2500 integration/          # Live API tests\n\u2514\u2500\u2500 config/\n    \u251c\u2500\u2500 .env.development\n    \u251c\u2500\u2500 .env.staging\n    \u2514\u2500\u2500 .env.production\n```\n\n## Error Handling\n\n| Architecture | Failure Mode | Mitigation |\n|-------------|-------------|------------|\n| Sync Gateway | 429/5xx blocks user | Circuit breaker + fallback response |\n| Queue-Based | Worker crashes | Dead-letter queue + retry policy |\n| Multi-Model | Router misclassifies | Default to Sonnet (safest middle) |\n\n## Resources\n\n- [API Overview](https://docs.anthropic.com/en/api/getting-started)\n- [Tool Use](https://docs.anthropic.com/en/docs/build-with-claude/tool-use)\n- [Prompt Caching](https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching)\n\n## Next Steps\n\nFor multi-environment setup, see `anth-multi-env-setup`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "anth-reference-architecture",
-    "description": "Implement Claude API reference architectures for common use cases.",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

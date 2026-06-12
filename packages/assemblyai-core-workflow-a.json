@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031345",
   "name": "assemblyai-core-workflow-a",
   "slug": "assemblyai-core-workflow-a",
   "description": "Execute AssemblyAI primary workflow: async transcription with audio",
   "content": "# AssemblyAI Core Workflow A \u2014 Async Transcription\n\n## Overview\n\nPrimary money-path workflow: submit audio for async transcription with audio intelligence features. The SDK handles file upload (for local files), queues the transcription job, and polls until completion.\n\n## Prerequisites\n\n- `assemblyai` package installed\n- API key configured in `ASSEMBLYAI_API_KEY`\n\n## Instructions\n\n### Step 1: Basic Async Transcription\n\n```typescript\nimport { AssemblyAI } from 'assemblyai';\n\nconst client = new AssemblyAI({\n  apiKey: process.env.ASSEMBLYAI_API_KEY!,\n});\n\n// Remote URL \u2014 SDK queues and polls automatically\nconst transcript = await client.transcripts.transcribe({\n  audio: 'https://example.com/meeting-recording.mp3',\n});\n\nconsole.log(transcript.text);\nconsole.log(`Duration: ${transcript.audio_duration}s`);\nconsole.log(`Words: ${transcript.words?.length}`);\n```\n\n### Step 2: Local File Upload\n\n```typescript\n// The SDK uploads the file and transcribes in one call\nconst transcript = await client.transcripts.transcribe({\n  audio: './recordings/interview.wav',\n});\n\n// Or from a buffer/stream\nimport fs from 'fs';\nconst buffer = fs.readFileSync('./recordings/interview.wav');\nconst transcript2 = await client.transcripts.transcribe({\n  audio: buffer,\n});\n```\n\n### Step 3: Speaker Diarization\n\n```typescript\nconst transcript = await client.transcripts.transcribe({\n  audio: audioUrl,\n  speaker_labels: true,\n  speakers_expected: 3,  // Optional: hint for expected speaker count\n});\n\n// Utterances are grouped by speaker\nfor (const utterance of transcript.utterances ?? []) {\n  console.log(`Speaker ${utterance.speaker}: ${utterance.text}`);\n  // Speaker A: Good morning, thanks for joining.\n  // Speaker B: Happy to be here.\n}\n```\n\n### Step 4: Full Audio Intelligence Stack\n\n```typescript\nconst transcript = await client.transcripts.transcribe({\n  audio: audioUrl,\n\n  // Speaker identification\n  speaker_labels: true,\n\n  // Content analysis\n  sentiment_analysis: true,\n  entity_detection: true,\n  auto_highlights: true,\n  iab_categories: true,       // Topic detection (IAB taxonomy)\n  content_safety: true,        // Flag sensitive content\n  summarization: true,\n  summary_model: 'informative',\n  summary_type: 'bullets',\n\n  // Formatting\n  punctuate: true,\n  format_text: true,\n  language_code: 'en',\n\n  // Word boost for domain terms\n  word_boost: ['AssemblyAI', 'LeMUR', 'transcription'],\n  boost_param: 'high',\n});\n\n// --- Access results ---\n\n// Sentiment per sentence\nfor (const s of transcript.sentiment_analysis_results ?? []) {\n  console.log(`[${s.sentiment}] ${s.text}`);\n  // [POSITIVE] I really enjoyed working on this project.\n}\n\n// Named entities\nfor (const e of transcript.entities ?? []) {\n  console.log(`${e.entity_type}: ${e.text}`);\n  // person_name: John Smith\n  // location: San Francisco\n}\n\n// Auto-highlighted key phrases\nfor (const h of transcript.auto_highlights_result?.results ?? []) {\n  console.log(`\"${h.text}\" (count: ${h.count}, rank: ${h.rank})`);\n}\n\n// IAB content categories\nconst categories = transcript.iab_categories_result?.summary ?? {};\nfor (const [category, relevance] of Object.entries(categories)) {\n  if ((relevance as number) > 0.5) {\n    console.log(`Topic: ${category} (${((relevance as number) * 100).toFixed(0)}%)`);\n  }\n}\n\n// Content safety labels\nfor (const result of transcript.content_safety_labels?.results ?? []) {\n  for (const label of result.labels) {\n    console.log(`Safety: ${label.label} (${(label.confidence * 100).toFixed(0)}%)`);\n  }\n}\n\n// Summary\nconsole.log('Summary:', transcript.summary);\n```\n\n### Step 5: PII Redaction\n\n```typescript\nconst transcript = await client.transcripts.transcribe({\n  audio: audioUrl,\n  redact_pii: true,\n  redact_pii_policies: [\n    'email_address',\n    'phone_number',\n    'person_name',\n    'credit_card_number',\n    'social_security_number',\n    'date_of_birth',\n  ],\n  redact_pii_sub: 'hash',  // Replace PII with hash. Options: 'hash' | 'entity_name'\n  redact_pii_audio: true,  // Also generate redacted audio file\n});\n\n// Text has PII replaced: \"My name is ####\" or \"My name is [PERSON_NAME]\"\nconsole.log(transcript.text);\n\n// Get redacted audio URL (takes extra processing time)\nif (transcript.redact_pii_audio_quality) {\n  const redactedAudio = await client.transcripts.redactedAudio(transcript.id);\n  console.log('Redacted audio URL:', redactedAudio.redacted_audio_url);\n}\n```\n\n### Step 6: Manage Transcripts\n\n```typescript\n// List recent transcripts\nconst page = await client.transcripts.list({ limit: 20 });\nfor (const t of page.transcripts) {\n  console.log(`${t.id} | ${t.status} | ${t.audio_duration}s`);\n}\n\n// Get a specific transcript\nconst existing = await client.transcripts.get('transcript-id');\n\n// Delete a transcript (GDPR compliance)\nawait client.transcripts.delete('transcript-id');\n```\n\n## Supported Audio Formats\n\nMP3, WAV, FLAC, M4A, OGG, WebM, MP4, AAC. Max file size: 5 GB. Max duration: 10 hours (async). The SDK auto-detects format.\n\n## Output\n\n- Complete transcript with word-level timestamps and confidence scores\n- Speaker-labeled utterances (with `speaker_labels: true`)\n- Sentiment analysis, entity detection, key phrases, topic categories\n- PII-redacted text and audio\n- Content safety labels for moderation\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `transcript.status === 'error'` | Corrupted audio or unsupported format | Verify audio file plays locally |\n| `download_url must be accessible` | Private/expired URL | Use a publicly accessible URL or upload locally |\n| `Could not process audio` | File too short (<200ms) or silent | Ensure audio has speech content |\n| `word_boost` has no effect | Misspelled terms or wrong model | Check spelling; word boost works with Best model tier |\n\n## Resources\n\n- [Transcription API Reference](https://www.assemblyai.com/docs/api-reference/transcripts/submit)\n- [Audio Intelligence Models](https://www.assemblyai.com/docs/audio-intelligence)\n- [PII Redaction Guide](https://www.assemblyai.com/docs/audio-intelligence/pii-redaction)\n- [Speaker Diarization](https://www.assemblyai.com/docs/speech-to-text/speaker-diarization)\n\n## Next Steps\n\nFor real-time streaming transcription, see `assemblyai-core-workflow-b`.\nFor LLM-powered analysis of transcripts, see `assemblyai-sdk-patterns` (LeMUR examples).\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "assemblyai-core-workflow-a",
-    "description": "Execute AssemblyAI primary workflow: async transcription with audio",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

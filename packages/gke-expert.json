@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000000764",
   "name": "gke-expert",
   "slug": "gke-expert",
   "description": "Expert guidance for Google Kubernetes Engine (GKE) operations including cluster management, workload deployment, scaling, monitoring, troubleshooting, and optimization. Use when working with GKE clusters, Kubernetes deployments on GCP, container orchestration, or when users need help with kubectl commands, GKE networking, autoscaling, workload identity, or GKE-specific features like Autopilot, Binary Authorization, or Config Sync.",
   "content": "\n# GKE Expert\n\nInitial Assessment\nWhen user requests GKE help, determine:\n\nCluster type: Autopilot or Standard?\nTask: Create, Deploy, Scale, Troubleshoot, or Optimize?\nEnvironment: Dev, Staging, or Production?\n\nQuick Start Workflows\nCreate Cluster\nAutopilot (recommended for most):\nbashgcloud container clusters create-auto CLUSTER_NAME \\\n  --region=REGION \\\n  --release-channel=regular\nStandard (for specific node requirements):\nbashgcloud container clusters create CLUSTER_NAME \\\n  --zone=ZONE \\\n  --num-nodes=3 \\\n  --enable-autoscaling \\\n  --min-nodes=2 \\\n  --max-nodes=10\nAlways authenticate after creation:\nbashgcloud container clusters get-credentials CLUSTER_NAME --region=REGION\nDeploy Application\n\nCreate deployment manifest:\n\nyamlapiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: APP_NAME\nspec:\n  replicas: 3\n  selector:\n    matchLabels:\n      app: APP_NAME\n  template:\n    metadata:\n      labels:\n        app: APP_NAME\n    spec:\n      containers:\n      - name: APP_NAME\n        image: gcr.io/PROJECT_ID/IMAGE:TAG\n        ports:\n        - containerPort: 8080\n        resources:\n          requests:\n            cpu: 100m\n            memory: 128Mi\n          limits:\n            cpu: 500m\n            memory: 512Mi\n\nApply and expose:\n\nbashkubectl apply -f deployment.yaml\nkubectl expose deployment APP_NAME --type=LoadBalancer --port=80 --target-port=8080\nSetup Autoscaling\nHPA for pods:\nbashkubectl autoscale deployment APP_NAME --cpu-percent=70 --min=2 --max=100\nCluster autoscaling (Standard only):\nbashgcloud container clusters update CLUSTER_NAME \\\n  --enable-autoscaling --min-nodes=2 --max-nodes=10 --zone=ZONE\nConfigure Workload Identity\n\nEnable on cluster:\n\nbashgcloud container clusters update CLUSTER_NAME \\\n  --workload-pool=PROJECT_ID.svc.id.goog\n\nLink service accounts:\n\nbash# Create GCP service account\ngcloud iam service-accounts create GSA_NAME\n\n## Create K8s service account\nkubectl create serviceaccount KSA_NAME\n\n# Bind them\ngcloud iam service-accounts add-iam-policy-binding \\\n  GSA_NAME@PROJECT_ID.iam.gserviceaccount.com \\\n  --role roles/iam.workloadIdentityUser \\\n  --member \"serviceAccount:PROJECT_ID.svc.id.goog[default/KSA_NAME]\"\n\n# Annotate K8s SA\nkubectl annotate serviceaccount KSA_NAME \\\n  iam.gke.io/gcp-service-account=GSA_NAME@PROJECT_ID.iam.gserviceaccount.com\nTroubleshooting Guide\nPod Issues\nbash# Pod not starting - check events\nkubectl describe pod POD_NAME\nkubectl get events --field-selector involvedObject.name=POD_NAME\n\n## Common fixes:\n\n### ImagePullBackOff: Check image exists and pull secrets\n### CrashLoopBackOff: kubectl logs POD_NAME --previous\n### Pending: kubectl describe nodes (check resources)\n### OOMKilled: Increase memory limits\nService Issues\nbash# No endpoints\nkubectl get endpoints SERVICE_NAME\nkubectl get pods -l app=APP_NAME  # Check if pods match selector\n\n## Test connectivity\nkubectl run test --image=busybox -it --rm -- wget -O- SERVICE_NAME\nPerformance Issues\nbash# Check resource usage\nkubectl top nodes\nkubectl top pods --all-namespaces\n\n## Find bottlenecks\nkubectl describe resourcequotas\nkubectl describe limitranges\nProduction Patterns\nIngress with HTTPS\nyamlapiVersion: networking.k8s.io/v1\nkind: Ingress\nmetadata:\n  name: APP_NAME-ingress\n  annotations:\n    networking.gke.io/managed-certificates: \"CERT_NAME\"\nspec:\n  rules:\n  - host: example.com\n    http:\n      paths:\n      - path: /\n        pathType: Prefix\n        backend:\n          service:\n            name: APP_NAME\n            port:\n              number: 80\nPod Disruption Budget\nyamlapiVersion: policy/v1\nkind: PodDisruptionBudget\nmetadata:\n  name: APP_NAME-pdb\nspec:\n  minAvailable: 1\n  selector:\n    matchLabels:\n      app: APP_NAME\nSecurity Context\nyamlspec:\n  securityContext:\n    runAsNonRoot: true\n    runAsUser: 1000\n  containers:\n  - name: app\n    securityContext:\n      allowPrivilegeEscalation: false\n      readOnlyRootFilesystem: true\n      capabilities:\n        drop: [\"ALL\"]\nCost Optimization\n\nUse Autopilot for automatic right-sizing\nEnable cluster autoscaling with appropriate limits\nUse Spot VMs for non-critical workloads:\n\nbashgcloud container node-pools create spot-pool \\\n  --cluster=CLUSTER_NAME \\\n  --spot \\\n  --num-nodes=2\n\nSet resource requests/limits appropriately\nUse VPA for recommendations: kubectl describe vpa APP_NAME-vpa\n\nEssential Commands\nbash# Cluster management\ngcloud container clusters list\nkubectl config get-contexts\nkubectl cluster-info\n\n## Deployments\nkubectl rollout status deployment/APP_NAME\nkubectl rollout undo deployment/APP_NAME\nkubectl scale deployment APP_NAME --replicas=5\n\n## Debugging\nkubectl logs -f POD_NAME --tail=50\nkubectl exec -it POD_NAME -- /bin/bash\nkubectl port-forward pod/POD_NAME 8080:80\n\n## Monitoring\nkubectl top nodes\nkubectl top pods\nkubectl get events --sort-by='.lastTimestamp'\n\n## External Documentation\n\nFor detailed documentation beyond this skill:\n- **Official GKE Docs**: https://cloud.google.com/kubernetes-engine/docs\n- **kubectl Reference**: https://kubernetes.io/docs/reference/kubectl/\n- **GKE Best Practices**: https://cloud.google.com/kubernetes-engine/docs/best-practices\n- **Workload Identity**: https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity\n- **GKE Pricing Calculator**: https://cloud.google.com/products/calculator\n\n## Cleanup\nkubectl delete all -l app=APP_NAME\nkubectl drain NODE_NAME --ignore-daemonsets\nAdvanced Topics Reference\n\n## For complex scenarios, consult:\nStateful workloads: Use StatefulSets with persistent volumes\nBatch jobs: Use Jobs/CronJobs with appropriate backoff policies\nMulti-region: Use Multi-cluster Ingress or Traffic Director\nService mesh: Install Anthos Service Mesh for advanced networking\nGitOps: Implement Config Sync or Flux for declarative management\nMonitoring: Integrate with Cloud Monitoring or install Prometheus",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "gke-expert",
-    "description": "Expert guidance for Google Kubernetes Engine (GKE) operations including cluster management, workload deployment, scaling, monitoring, troubleshooting, and optimization. Use when working with GKE clusters, Kubernetes deployments on GCP, container orchestration, or when users need help with kubectl commands, GKE networking, autoscaling, workload identity, or GKE-specific features like Autopilot, Binary Authorization, or Config Sync."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

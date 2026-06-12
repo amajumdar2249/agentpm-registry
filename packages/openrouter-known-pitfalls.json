@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032805",
   "name": "openrouter-known-pitfalls",
   "slug": "openrouter-known-pitfalls",
   "description": "Avoid common OpenRouter integration mistakes and gotchas. Use proactively",
   "content": "# OpenRouter Known Pitfalls\n\n## Overview\n\nA curated list of real-world mistakes developers make when integrating OpenRouter, each with the specific API behavior that causes the problem and the exact fix. These are not theoretical -- they come from production incidents and support requests.\n\n## Pitfall 1: Missing Provider Prefix on Model ID\n\n```python\n# WRONG: Model ID without provider prefix\nresponse = client.chat.completions.create(\n    model=\"gpt-4o\",  # \u2190 Will fail with 400 \"model not found\"\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n)\n\n# RIGHT: Always include provider/model format\nresponse = client.chat.completions.create(\n    model=\"openai/gpt-4o\",  # \u2190 Correct\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n)\n```\n\n## Pitfall 2: No max_tokens = Runaway Costs\n\n```python\n# WRONG: No max_tokens -- model may generate 4000+ tokens\nresponse = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet\",  # $15/1M completion tokens\n    messages=[{\"role\": \"user\", \"content\": \"Write a story\"}],\n    # No max_tokens \u2192 could generate $0.06+ per request\n)\n\n# RIGHT: Always set max_tokens\nresponse = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet\",\n    messages=[{\"role\": \"user\", \"content\": \"Write a story\"}],\n    max_tokens=500,  # \u2190 Caps cost at ~$0.0075\n)\n```\n\n## Pitfall 3: Hardcoded Model IDs Break When Models Are Renamed\n\n```python\n# WRONG: Hardcoded model ID scattered across codebase\n# When \"claude-3-opus\" becomes \"claude-3-opus-20240229\", everything breaks\n\n# RIGHT: Centralize model IDs in config\nMODELS = {\n    \"primary\": \"anthropic/claude-3.5-sonnet\",\n    \"budget\": \"openai/gpt-4o-mini\",\n    \"free\": \"google/gemma-2-9b-it:free\",\n}\n\n# Validate at startup\nimport requests\navailable = {m[\"id\"] for m in requests.get(\"https://openrouter.ai/api/v1/models\").json()[\"data\"]}\nfor name, model_id in MODELS.items():\n    if model_id not in available:\n        print(f\"WARNING: {name} model '{model_id}' not available!\")\n```\n\n## Pitfall 4: Fallbacks Route to Unexpected Providers\n\n```python\n# WRONG: Default allow_fallbacks=True without controlling which providers\nresponse = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet\",\n    messages=[{\"role\": \"user\", \"content\": sensitive_data}],\n    # OpenRouter might fall back to a different provider you didn't approve\n)\n\n# RIGHT: Control fallback behavior explicitly\nresponse = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet\",\n    messages=[{\"role\": \"user\", \"content\": sensitive_data}],\n    extra_body={\n        \"provider\": {\n            \"order\": [\"Anthropic\"],      # Only approved provider\n            \"allow_fallbacks\": False,     # No surprise routing\n        },\n    },\n)\n```\n\n## Pitfall 5: Ignoring the Free Model Daily Limit\n\n```python\n# WRONG: Using free models in production\n# Free models have limits: 50 req/day (no credits), 1000 req/day (with credits)\nresponse = client.chat.completions.create(\n    model=\"google/gemma-2-9b-it:free\",  # Will 429 after daily limit\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n)\n\n# RIGHT: Use free models only for dev/testing\n# Use paid models with credit limits for production\n```\n\n## Pitfall 6: Not Checking Which Model Actually Served the Request\n\n```python\n# WRONG: Assuming the model you requested is the model that responded\nresponse = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet\",\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n)\nprint(response.choices[0].message.content)  # Might be from a fallback model!\n\n# RIGHT: Always check response.model\nresponse = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet\",\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n)\nprint(f\"Served by: {response.model}\")  # Log this for debugging\nif response.model != \"anthropic/claude-3.5-sonnet\":\n    log.warning(f\"Fallback triggered: requested claude-3.5-sonnet, got {response.model}\")\n```\n\n## Pitfall 7: Creating New Client Instance Per Request\n\n```python\n# WRONG: New client per request (new TCP/TLS handshake each time)\nfor prompt in prompts:\n    client = OpenAI(base_url=\"https://openrouter.ai/api/v1\", api_key=key)\n    client.chat.completions.create(...)  # Slow!\n\n# RIGHT: Reuse single client (connection pooling)\nclient = OpenAI(\n    base_url=\"https://openrouter.ai/api/v1\",\n    api_key=os.environ[\"OPENROUTER_API_KEY\"],\n    default_headers={\"HTTP-Referer\": \"https://my-app.com\", \"X-Title\": \"my-app\"},\n)\nfor prompt in prompts:\n    client.chat.completions.create(...)  # Reuses HTTP connection\n```\n\n## Pitfall 8: Storing API Keys in Source Code\n\n```python\n# WRONG: Key in source code\nclient = OpenAI(\n    base_url=\"https://openrouter.ai/api/v1\",\n    api_key=\"sk-or-v1-abc123...\",  # \u2190 Will be committed to git\n)\n\n# RIGHT: Environment variable + secrets manager\nclient = OpenAI(\n    base_url=\"https://openrouter.ai/api/v1\",\n    api_key=os.environ[\"OPENROUTER_API_KEY\"],  # From .env (gitignored) or secrets manager\n)\n```\n\n## Pitfall 9: Not Setting Timeouts\n\n```python\n# WRONG: No timeout -- request hangs forever if model is slow\nclient = OpenAI(base_url=\"https://openrouter.ai/api/v1\", api_key=key)\n\n# RIGHT: Set explicit timeout\nclient = OpenAI(\n    base_url=\"https://openrouter.ai/api/v1\",\n    api_key=os.environ[\"OPENROUTER_API_KEY\"],\n    timeout=30.0,      # 30s per request\n    max_retries=3,     # Retry on 429/5xx\n)\n```\n\n## Pitfall 10: Caching Non-Deterministic Responses\n\n```python\n# WRONG: Caching responses with temperature > 0\n# Each call produces different output, so cache is meaningless\ncache[key] = client.chat.completions.create(\n    model=\"openai/gpt-4o-mini\",\n    messages=msgs,\n    temperature=0.7,  # \u2190 Non-deterministic!\n)\n\n# RIGHT: Only cache with temperature=0\nif temperature == 0:\n    cache[key] = response\n```\n\n## Quick Checklist\n\n```python\nPITFALL_CHECKLIST = [\n    \"Model IDs use provider/model format (e.g., openai/gpt-4o)\",\n    \"max_tokens set on every request\",\n    \"API keys in env vars or secrets manager, never in code\",\n    \"Single client instance reused (not created per request)\",\n    \"Timeout and max_retries configured\",\n    \"response.model checked (may differ from requested model)\",\n    \"Free models NOT used in production\",\n    \"Fallback behavior explicitly controlled for sensitive data\",\n    \"Model IDs centralized in config (not scattered in code)\",\n    \"Only deterministic responses (temp=0) are cached\",\n]\n```\n\n## Error Handling\n\n| Pitfall | Symptom | Quick Fix |\n|---------|---------|-----------|\n| Missing provider prefix | 400 `model not found` | Add `openai/`, `anthropic/`, etc. |\n| No max_tokens | Unexpected high costs | Add `max_tokens` to every call |\n| Hardcoded API key | Key exposed in git history | Rotate key; use env vars |\n| No timeout | Hanging requests | Set `timeout=30.0` |\n| Free model in prod | 429 after 50-1000 requests | Use paid models |\n\n## Enterprise Considerations\n\n- Run the pitfall checklist during code review for any OpenRouter integration PR\n- Add pre-commit hooks that scan for hardcoded `sk-or-v1-` patterns\n- Centralize model IDs in a config file and validate against `/api/v1/models` at startup\n- Log `response.model` on every request to catch unexpected fallbacks\n- Set `max_tokens` as a team-wide policy enforced in your client wrapper\n\n## References\n\n- [Examples](${CLAUDE_SKILL_DIR}/references/examples.md) | [Errors](${CLAUDE_SKILL_DIR}/references/errors.md)\n- [Quickstart](https://openrouter.ai/docs/quickstart) | [API Reference](https://openrouter.ai/docs/api/reference/overview)\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "openrouter-known-pitfalls",
-    "description": "Avoid common OpenRouter integration mistakes and gotchas. Use proactively",
-    "when starting a new integration or reviewing existing code. Triggers": "openrouter",
-    "allowed-tools": "Read, Write, Edit, Bash, Grep",
-    "version": "2.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

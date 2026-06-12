@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031376",
   "name": "attio-security-basics",
   "slug": "attio-security-basics",
   "description": "Secure Attio API integrations -- token scoping, secret management,",
   "content": "# Attio Security Basics\n\n## Overview\n\nAttio access tokens never expire and have no scopes by default. This makes scoping, rotation, and secret management critical. This skill covers practical security controls for Attio REST API integrations.\n\n## Token Properties\n\n| Property | Value |\n|----------|-------|\n| Format | `sk_...` prefix |\n| Expiration | Never (must be manually revoked) |\n| Default scopes | None (you must explicitly add scopes) |\n| Scope granularity | Per-resource read vs read-write |\n| Auth method | `Authorization: Bearer <token>` header |\n\n## Instructions\n\n### Step 1: Apply Least-Privilege Scopes\n\nTokens should have only the scopes needed for their use case:\n\n```\n# Read-only analytics integration\nobject_configuration:read\nrecord_permission:read\n\n# CRM sync (needs write)\nobject_configuration:read\nrecord_permission:read-write\nlist_entry:read-write\n\n# Webhook receiver (just needs to verify, no API calls)\n# No scopes needed -- webhook signature uses a separate secret\n\n# Full admin (avoid in production)\nobject_configuration:read\nrecord_permission:read-write\nlist_entry:read-write\nnote:read-write\ntask:read-write\nuser_management:read\nwebhook:read-write\n```\n\n### Step 2: Environment Variable Management\n\n```bash\n# .env.local (development -- git-ignored)\nATTIO_API_KEY=sk_dev_abc123\n\n# .env.example (committed -- template for team)\nATTIO_API_KEY=sk_your_token_here\n# ATTIO_WEBHOOK_SECRET=whsec_your_secret_here\n\n# .gitignore (mandatory)\n.env\n.env.local\n.env.*.local\n```\n\n**Platform-specific secrets management:**\n\n```bash\n# Vercel\nvercel env add ATTIO_API_KEY production\n\n# Fly.io\nfly secrets set ATTIO_API_KEY=sk_prod_xyz\n\n# Google Cloud (Secret Manager)\necho -n \"sk_prod_xyz\" | gcloud secrets create attio-api-key --data-file=-\n\n# GitHub Actions\ngh secret set ATTIO_API_KEY --body \"sk_prod_xyz\"\n\n# AWS Systems Manager\naws ssm put-parameter --name /app/attio-api-key \\\n  --value \"sk_prod_xyz\" --type SecureString\n```\n\n### Step 3: Token Rotation Procedure\n\nAttio tokens cannot be rotated in-place. You must create a new token and delete the old one.\n\n```bash\n# 1. Generate new token in Settings > Developers > Access tokens\n#    Match the scopes of the old token exactly\n\n# 2. Update the secret in your deployment platform\nvercel env rm ATTIO_API_KEY production\nvercel env add ATTIO_API_KEY production\n# Enter new token value\n\n# 3. Deploy with new token\nvercel --prod\n\n# 4. Verify the new token works\ncurl -s -o /dev/null -w \"%{http_code}\" \\\n  https://api.attio.com/v2/objects \\\n  -H \"Authorization: Bearer ${NEW_TOKEN}\"\n# Should return 200\n\n# 5. Delete old token in Attio dashboard\n# Settings > Developers > Access tokens > Delete\n```\n\n### Step 4: Separate Tokens Per Environment\n\n```typescript\n// config/attio.ts\nfunction getAttioToken(): string {\n  const env = process.env.NODE_ENV || \"development\";\n  const keyMap: Record<string, string> = {\n    development: \"ATTIO_API_KEY_DEV\",\n    staging: \"ATTIO_API_KEY_STAGING\",\n    production: \"ATTIO_API_KEY_PROD\",\n  };\n  const key = process.env[keyMap[env] || \"ATTIO_API_KEY\"];\n  if (!key) throw new Error(`Missing Attio token for ${env}`);\n  return key;\n}\n```\n\n### Step 5: Webhook Signature Verification\n\nAttio webhooks include headers for signature verification:\n\n```typescript\nimport crypto from \"crypto\";\n\nfunction verifyAttioWebhook(\n  rawBody: Buffer,\n  signature: string,\n  timestamp: string,\n  secret: string\n): boolean {\n  // 1. Reject old timestamps (prevent replay attacks)\n  const age = Date.now() - parseInt(timestamp) * 1000;\n  if (age > 300_000) { // 5 minutes\n    console.error(\"Webhook timestamp too old:\", age, \"ms\");\n    return false;\n  }\n\n  // 2. Compute expected signature\n  const payload = `${timestamp}.${rawBody.toString()}`;\n  const expected = crypto\n    .createHmac(\"sha256\", secret)\n    .update(payload)\n    .digest(\"hex\");\n\n  // 3. Timing-safe comparison (prevents timing attacks)\n  try {\n    return crypto.timingSafeEqual(\n      Buffer.from(signature),\n      Buffer.from(expected)\n    );\n  } catch {\n    return false; // Different lengths\n  }\n}\n```\n\n### Step 6: Git Secret Scanning\n\n```bash\n# Pre-commit hook to catch Attio keys\n# .git/hooks/pre-commit or via husky\n#!/bin/bash\nif git diff --cached --diff-filter=ACMR | grep -qE 'sk_[a-zA-Z0-9_]{20,}'; then\n  echo \"ERROR: Attio API key detected in staged changes\"\n  echo \"Remove the key and use environment variables instead\"\n  exit 1\nfi\n```\n\n### Step 7: Security Audit Checklist\n\n```\n[ ] API keys stored in environment variables, not code\n[ ] .env files listed in .gitignore\n[ ] Separate tokens per environment (dev/staging/prod)\n[ ] Minimal scopes per token (least privilege)\n[ ] Webhook signatures validated with timing-safe comparison\n[ ] Replay attack protection (timestamp check) on webhooks\n[ ] Pre-commit hook for secret scanning\n[ ] Token rotation documented and scheduled\n[ ] No tokens in logs, error messages, or client-side code\n[ ] Audit trail: who has which tokens, when created\n```\n\n## Error Handling\n\n| Security issue | Detection | Mitigation |\n|---------------|-----------|------------|\n| Token in git history | `git log -p --all -S 'sk_'` | Rotate immediately, use `git filter-repo` |\n| Over-scoped token | Compare scopes to actual usage | Create new token with minimal scopes |\n| Token shared across envs | Audit env configs | Create separate dev/staging/prod tokens |\n| No webhook verification | Review webhook handler code | Implement signature check above |\n\n## Resources\n\n- [Attio Authentication Guide](https://docs.attio.com/rest-api/guides/authentication)\n- [Attio Access Token Setup](https://attio.com/help/apps/other-apps/generating-an-api-key)\n- [Attio Webhook Security](https://docs.attio.com/rest-api/guides/webhooks)\n\n## Next Steps\n\nFor production deployment, see `attio-prod-checklist`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "attio-security-basics",
-    "description": "Secure Attio API integrations -- token scoping, secret management,",
-    "Trigger": "attio security\", \"attio secrets\", \"secure attio\",",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

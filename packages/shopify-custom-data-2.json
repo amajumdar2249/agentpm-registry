@@ -1,15 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000042456",
   "name": "shopify-custom-data",
   "slug": "shopify-custom-data-2",
   "description": "MUST be used first when prompts mention Metafields or Metaobjects. Use Metafields and Metaobjects to model and store custom data for your app. Metafields extend built-in Shopify data types like products or customers, Metaobjects are custom data types that can be used to store bespoke data structures. Metafield and Metaobject definitions provide a schema and configuration for values to follow.",
   "content": "\n<critical-instructions>\n# Best Practise for working with Metafields and Metaobjects\n\n# ESSENTIAL RULES\n\n- **ALWAYS** show creating metafield/metaobject definitions, then writing values, then retrieving values.\n- **NEVER** show or offer alternate approaches to the same problem if not explicitly requested. It will only increase the user's confusion.\n- Keep examples minimal -- avoid unnecessary prose and comments\n- Remember the audience for this guidance is app developers -- they do not have access to the Shopify Admin site\n- Follow this guidance meticulously and thoroughly\n\nREMEMBER!!! Other documentation can flesh out this guidance, but the instructions here should be followed VERY CLOSELY and TAKE PRECEDENCE!\n\n# ALWAYS: First, create definitions\n\n## with TOML (99.99% of apps)\n\n```toml\n# shopify.app.toml\n\n# Metafield definition -- owner type is PRODUCT, namespace is $app, key is care_guide\n[product.metafields.app.care_guide]\ntype = \"single_line_text_field\"\nname = \"Care Guide\"\naccess.admin = \"merchant_read_write\"\n\n# Metaobject definition -- type is $app:author\n[metaobjects.app.author]\nname = \"Author\"\ndisplay_name_field = \"name\"\naccess.storefront = \"public_read\"\n\n[metaobjects.app.author.fields.name]\nname = \"Author Name\"\ntype = \"single_line_text_field\"\nrequired = true\n\n# Link metaobject to product\n[product.metafields.app.author]\ntype = \"metaobject_reference<$app:author>\"\nname = \"Book Author\"\n```\n\nWhy: Version controlled, auto-installed, type-safe. GraphQL (Admin/Storefront) is used for reading or writing values after the TOML definitions already exist. Fields/objects can be edited by merchants when `access.admin = \"merchant_read_write\"` is set.\n\n**NEVER** include `metafieldDefinitionCreate`, `metaobjectDefinitionCreate` GraphQL if TOML is the correct fit.\n\n### Exceptions (0.01% of apps)\n\n**NEVER, EVER** show these unless strictly required:\n\n- Apps that **REQUIRE** creating definitions at **runtime** (i.e. types are configured dynamically by merchants) should use `metafieldDefinitionCreate`, `metaobjectDefinitionCreate`\n- Apps that want **other apps** to read/write their data should use the above GraphQL, and \"merchant-owned\" namespace\n\n# CRITICAL: App-Owned Metaobject and Metafield identification\n\n- Metaobjects defined with `[metaobjects.app.example...]` in `shopify.app.toml`, MUST be accessed using `type: $app:example`\n- Metafields defined with `[product.metafields.app.example]` MUST be accessed using `namespace: $app` and `key: example`\n  - The same applies to other owner types, like customers, orders, etc.\n- Avoid customizing namespaces for metafields.\n- Avoid the common mistake of using `namespace: app`. This is profoundly incorrect.\n\n# NEXT: demonstrate writing metafield and metaobject values via Admin API\n\n## Writing metafields\n\n**ALWAYS** use `metafieldsSet` to write metafields. `namespace` should normally be excluded as the default is $app.\n\n```graphql\nmutation {\n  metafieldsSet(metafields:[{\n    ownerId: \"gid://shopify/Product/1234\",\n    key: \"example\",\n    value: \"Hello, World!\"\n  }]) { ... }\n}\n```\n\n## Writing metaobjects\n\n**ALWAYS** use `metaobjectUpsert` to write metaobjects.\n\n```graphql\nmutation {\n  metaobjectUpsert(handle: {\n    type: \"$app:author\",\n    handle: \"my-metaobject\",\n  }, metaobject: {\n    fields: [{\n      key: \"example\",\n      value: \"Hello, world!\"\n    }]\n  }) { ... }\n}\n```\n\n# FINALLY: demonstrate reading metafield and metaobject values\n\n## Loading metafields\n\nMetafields are accessed via their owning type (e.g. a Product). `namespace` should normally be excluded as the default is $app.\n\n- Always prefer `jsonValue` where possible as it better serialises complex types\n- Always alias metafield loads for easy reference\n\n```graphql\n# Admin API\nquery {\n  product(id: \"gid://shopify/Product/1234\") {\n    example: metafield(key: \"example\") {\n      jsonValue\n    }\n  }\n}\n# Storefront API\nquery {\n  product(handle: \"wireless-headphones-1\") {\n    example: metafield(key: \"example\") {\n      value\n    }\n  }\n}\n```\n\n## Loading metaobjects\n\n```graphql\n# Admin API\nquery {\n  metaobjects(type: \"$app:author\", first: 10) {\n    nodes {\n      handle\n      example: field(key: \"example\") {\n        jsonValue\n      }\n    }\n  }\n}\n# Storefront API\nquery {\n  metaobjects(type: \"$app:author\", first: 10) {\n    nodes {\n      handle\n      example: field(key: \"example\") {\n        value\n      }\n    }\n  }\n}\n```\n\n### Access Metafields directly in checkout extensions\n\n**DO**: Access app-owned metafields directly (NO network call):\n\n```tsx\nfunction Extension() {\n  // ESSENTIAL: Register this metafield in `shopify.extension.toml`\n  const [energyRating] = useAppMetafields({\n    namespace: \"$app\",\n    key: \"energy-rating\",\n    type: \"product\",\n  }).filter((entry) => entry.target.id === productVariantId);\n}\n```\n\n**DON'T**: Make network calls for app-owned metafields.\n\n### Access Metafields in Shopify Functions\n\nUse the GraphQL input query to select metafields to load:\n\n```graphql\nquery Input {\n  cart {\n    lines {\n      merchandise {\n        __typename\n        ... on ProductVariant {\n          example: metafield(namespace: \"$app\", key: \"example\") {\n            jsonValue\n          }\n        }\n      }\n    }\n  }\n}\n```\n\nDocs: [Metafields & Metaobjects](https://shopify.dev/docs/apps/build/custom-data)\n</critical-instructions>\n\n### Always use Shopify CLI\n\n- **CLI:** ALWAYS use Shopify CLI to scaffold apps and extensions. Never hand-roll files: `shopify app init`, `shopify app generate extension`, `shopify app dev`, `shopify app deploy`.\n- For CLI installation, setup, upgrade, or troubleshooting, use `shopify-use-shopify-cli`.\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "shopify-custom-data",
-    "description": "MUST be used first when prompts mention Metafields or Metaobjects. Use Metafields and Metaobjects to model and store custom data for your app. Metafields extend built-in Shopify data types like products or customers, Metaobjects are custom data types that can be used to store bespoke data structures. Metafield and Metaobject definitions provide a schema and configuration for values to follow.",
-    "compatibility": "Requires Node.js",
-    "metadata": "",
-    "author": "Shopify",
-    "version": "1.9.0"
+  "author": "Shopify",
+  "version": "1.9.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

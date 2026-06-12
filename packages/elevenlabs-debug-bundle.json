@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031818",
   "name": "elevenlabs-debug-bundle",
   "slug": "elevenlabs-debug-bundle",
   "description": "Collect ElevenLabs debug evidence for support tickets and troubleshooting.",
   "content": "# ElevenLabs Debug Bundle\n\n## Overview\n\nCollect all diagnostic information needed for ElevenLabs support tickets. Gathers SDK version, API connectivity, quota status, voice inventory, and model availability while redacting all secrets.\n\n## Prerequisites\n\n- ElevenLabs SDK installed\n- API key configured (to test connectivity)\n- Access to application logs\n\n## Instructions\n\n### Step 1: Create Debug Bundle Script\n\n```bash\n#!/bin/bash\n# elevenlabs-debug-bundle.sh\nset -euo pipefail\n\nBUNDLE_DIR=\"elevenlabs-debug-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE_DIR\"\n\necho \"=== ElevenLabs Debug Bundle ===\" > \"$BUNDLE_DIR/summary.txt\"\necho \"Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# --- Environment ---\necho \"--- Runtime Environment ---\" >> \"$BUNDLE_DIR/summary.txt\"\nnode --version 2>/dev/null >> \"$BUNDLE_DIR/summary.txt\" || echo \"Node.js: not found\" >> \"$BUNDLE_DIR/summary.txt\"\npython3 --version 2>/dev/null >> \"$BUNDLE_DIR/summary.txt\" || echo \"Python: not found\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"OS: $(uname -s) $(uname -r)\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"API Key: ${ELEVENLABS_API_KEY:+SET (${#ELEVENLABS_API_KEY} chars)}\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# --- SDK Versions ---\necho \"--- SDK Versions ---\" >> \"$BUNDLE_DIR/summary.txt\"\nnpm list @elevenlabs/elevenlabs-js 2>/dev/null >> \"$BUNDLE_DIR/summary.txt\" || echo \"JS SDK: not installed\" >> \"$BUNDLE_DIR/summary.txt\"\npip show elevenlabs 2>/dev/null | grep -E \"^(Name|Version)\" >> \"$BUNDLE_DIR/summary.txt\" || echo \"Python SDK: not installed\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# --- API Connectivity ---\necho \"--- API Connectivity ---\" >> \"$BUNDLE_DIR/summary.txt\"\nHTTP_CODE=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n  https://api.elevenlabs.io/v1/user \\\n  -H \"xi-api-key: ${ELEVENLABS_API_KEY:-missing}\" 2>/dev/null || echo \"FAILED\")\necho \"GET /v1/user: HTTP $HTTP_CODE\" >> \"$BUNDLE_DIR/summary.txt\"\n\nDNS_CHECK=$(dig +short api.elevenlabs.io 2>/dev/null | head -1 || echo \"DNS lookup failed\")\necho \"DNS api.elevenlabs.io: $DNS_CHECK\" >> \"$BUNDLE_DIR/summary.txt\"\n\nTLS_CHECK=$(echo | openssl s_client -connect api.elevenlabs.io:443 2>/dev/null | grep -c \"Verify return code: 0\" || echo \"0\")\necho \"TLS valid: $([ \"$TLS_CHECK\" = \"1\" ] && echo \"yes\" || echo \"no\")\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# --- Subscription & Quota ---\nif [ \"$HTTP_CODE\" = \"200\" ]; then\n  echo \"--- Subscription ---\" >> \"$BUNDLE_DIR/summary.txt\"\n  curl -s https://api.elevenlabs.io/v1/user \\\n    -H \"xi-api-key: ${ELEVENLABS_API_KEY}\" | \\\n    jq '{tier: .subscription.tier, character_count: .subscription.character_count, character_limit: .subscription.character_limit, next_reset: .subscription.next_character_count_reset_unix}' \\\n    >> \"$BUNDLE_DIR/summary.txt\" 2>/dev/null\n  echo \"\" >> \"$BUNDLE_DIR/summary.txt\"\n\n  # --- Voice Inventory ---\n  echo \"--- Voice Inventory ---\" >> \"$BUNDLE_DIR/summary.txt\"\n  curl -s https://api.elevenlabs.io/v1/voices \\\n    -H \"xi-api-key: ${ELEVENLABS_API_KEY}\" | \\\n    jq '[.voices[] | {name, voice_id, category}]' \\\n    >> \"$BUNDLE_DIR/summary.txt\" 2>/dev/null\n  echo \"\" >> \"$BUNDLE_DIR/summary.txt\"\n\n  # --- Model Availability ---\n  echo \"--- Available Models ---\" >> \"$BUNDLE_DIR/summary.txt\"\n  curl -s https://api.elevenlabs.io/v1/models \\\n    -H \"xi-api-key: ${ELEVENLABS_API_KEY}\" | \\\n    jq '[.[] | {model_id, name, can_do_text_to_speech, can_do_voice_conversion}]' \\\n    >> \"$BUNDLE_DIR/summary.txt\" 2>/dev/null\nfi\n\n# --- Configuration (redacted) ---\necho \"--- Config (redacted) ---\" >> \"$BUNDLE_DIR/summary.txt\"\nif [ -f .env ]; then\n  sed 's/=.*/=***REDACTED***/' .env >> \"$BUNDLE_DIR/config-redacted.txt\"\nfi\n\n# --- Recent Error Logs ---\necho \"--- Recent Errors ---\" >> \"$BUNDLE_DIR/summary.txt\"\ngrep -ri \"elevenlabs\\|ElevenLabs\\|xi-api-key\" *.log 2>/dev/null | \\\n  sed 's/sk_[a-zA-Z0-9]*/sk_***REDACTED***/g' | \\\n  tail -50 >> \"$BUNDLE_DIR/errors.txt\" 2>/dev/null || echo \"No log files found\" >> \"$BUNDLE_DIR/errors.txt\"\n\n# --- Package Bundle ---\ntar -czf \"$BUNDLE_DIR.tar.gz\" \"$BUNDLE_DIR\"\nrm -rf \"$BUNDLE_DIR\"\necho \"\"\necho \"Bundle created: $BUNDLE_DIR.tar.gz\"\necho \"Review for sensitive data before sharing with support.\"\n```\n\n### Step 2: Programmatic Debug Collection\n\n```typescript\n// src/elevenlabs/debug.ts\nimport { ElevenLabsClient } from \"@elevenlabs/elevenlabs-js\";\n\ninterface DebugReport {\n  timestamp: string;\n  sdk: { package: string; version: string };\n  connectivity: { status: number; latencyMs: number };\n  subscription: { tier: string; used: number; limit: number; resetAt: string } | null;\n  voices: { total: number; cloned: number; premade: number } | null;\n  models: string[] | null;\n  errors: string[];\n}\n\nexport async function collectDebugReport(): Promise<DebugReport> {\n  const client = new ElevenLabsClient();\n  const errors: string[] = [];\n  const report: DebugReport = {\n    timestamp: new Date().toISOString(),\n    sdk: { package: \"@elevenlabs/elevenlabs-js\", version: \"unknown\" },\n    connectivity: { status: 0, latencyMs: 0 },\n    subscription: null,\n    voices: null,\n    models: null,\n    errors,\n  };\n\n  // Test connectivity + get user info\n  const start = Date.now();\n  try {\n    const user = await client.user.get();\n    report.connectivity = { status: 200, latencyMs: Date.now() - start };\n    report.subscription = {\n      tier: user.subscription.tier,\n      used: user.subscription.character_count,\n      limit: user.subscription.character_limit,\n      resetAt: new Date(user.subscription.next_character_count_reset_unix * 1000).toISOString(),\n    };\n  } catch (err: any) {\n    report.connectivity = { status: err.statusCode || 0, latencyMs: Date.now() - start };\n    errors.push(`Auth: ${err.message}`);\n  }\n\n  // Voice inventory\n  try {\n    const { voices } = await client.voices.getAll();\n    report.voices = {\n      total: voices.length,\n      cloned: voices.filter(v => v.category === \"cloned\").length,\n      premade: voices.filter(v => v.category === \"premade\").length,\n    };\n  } catch (err: any) {\n    errors.push(`Voices: ${err.message}`);\n  }\n\n  // Model availability\n  try {\n    const models = await client.models.getAll();\n    report.models = models.map(m => m.model_id);\n  } catch (err: any) {\n    errors.push(`Models: ${err.message}`);\n  }\n\n  return report;\n}\n\n// Usage\nconst report = await collectDebugReport();\nconsole.log(JSON.stringify(report, null, 2));\n```\n\n### Step 3: Submit to Support\n\n1. Run: `bash elevenlabs-debug-bundle.sh` (or the programmatic version)\n2. Review the output for any accidentally included secrets\n3. Open a ticket at https://help.elevenlabs.io\n4. Attach the bundle and describe the issue with:\n   - What you expected to happen\n   - What actually happened\n   - Steps to reproduce\n   - Request IDs from error responses (if available)\n\n## Output\n\n- `elevenlabs-debug-YYYYMMDD-HHMMSS.tar.gz` archive containing:\n  - `summary.txt` \u2014 Environment, SDK, connectivity, quota, voices, models\n  - `config-redacted.txt` \u2014 Configuration with secrets masked\n  - `errors.txt` \u2014 Recent error logs with API keys redacted\n\n## Sensitive Data Handling\n\n**Always redacted automatically:**\n\n- API keys (replaced with `***REDACTED***`)\n- Webhook secrets\n- Any value after `=` in .env files\n\n**Safe to include:**\n\n- Error messages and stack traces\n- SDK/runtime versions\n- Voice IDs and model IDs\n- HTTP status codes and latency\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `jq: command not found` | jq not installed | `apt install jq` or `brew install jq` |\n| HTTP 0 / curl fails | Network issue | Check DNS and firewall |\n| HTTP 401 | Bad API key | Regenerate key at elevenlabs.io |\n| Empty voice list | No voices on account | Normal for new free accounts |\n\n## Resources\n\n- [ElevenLabs Support](https://help.elevenlabs.io)\n- [ElevenLabs Status](https://status.elevenlabs.io)\n- [API Error Reference](https://elevenlabs.io/docs/developers/resources/error-messages)\n\n## Next Steps\n\nFor rate limit issues, see `elevenlabs-rate-limits`. For common errors, see `elevenlabs-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "elevenlabs-debug-bundle",
-    "description": "Collect ElevenLabs debug evidence for support tickets and troubleshooting.",
-    "Trigger": "elevenlabs debug\", \"elevenlabs support bundle\",",
-    "allowed-tools": "Read, Bash(grep:*), Bash(curl:*), Bash(tar:*), Bash(node:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

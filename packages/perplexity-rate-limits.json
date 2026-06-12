@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032896",
   "name": "perplexity-rate-limits",
   "slug": "perplexity-rate-limits",
   "description": "Implement Perplexity rate limiting, backoff, and request queuing.",
   "content": "# Perplexity Rate Limits\n\n## Overview\n\nHandle Perplexity Sonar API rate limits. Perplexity uses a leaky bucket algorithm: burst capacity is available, with tokens refilling continuously at your assigned rate. Rate limits are based on requests per minute (RPM).\n\n## Rate Limit Tiers\n\n| Tier | RPM | Notes |\n|------|-----|-------|\n| Free / Starter | 50 | Default for new API keys |\n| Search API | ~3 req/sec | Per-endpoint limit |\n| Higher tiers | Contact sales | Custom limits available |\n\nRate limits apply per API key, not per model. Using `sonar-pro` counts against the same RPM as `sonar`.\n\n## Prerequisites\n\n- `PERPLEXITY_API_KEY` set\n- Understanding of HTTP 429 responses\n\n## Instructions\n\n### Step 1: Exponential Backoff with Jitter\n\n```typescript\nasync function withExponentialBackoff<T>(\n  operation: () => Promise<T>,\n  config = { maxRetries: 5, baseDelayMs: 1000, maxDelayMs: 30000, jitterMs: 500 }\n): Promise<T> {\n  for (let attempt = 0; attempt <= config.maxRetries; attempt++) {\n    try {\n      return await operation();\n    } catch (error: any) {\n      if (attempt === config.maxRetries) throw error;\n\n      const status = error.status || error.response?.status;\n      // Only retry on 429 (rate limit) and 5xx (server errors)\n      if (status && status !== 429 && status < 500) throw error;\n\n      const exponentialDelay = config.baseDelayMs * Math.pow(2, attempt);\n      const jitter = Math.random() * config.jitterMs;\n      const delay = Math.min(exponentialDelay + jitter, config.maxDelayMs);\n\n      console.warn(`[Perplexity] ${status || \"error\"} \u2014 retry ${attempt + 1}/${config.maxRetries} in ${delay.toFixed(0)}ms`);\n      await new Promise((r) => setTimeout(r, delay));\n    }\n  }\n  throw new Error(\"Unreachable\");\n}\n\n// Usage\nconst result = await withExponentialBackoff(() =>\n  perplexity.chat.completions.create({\n    model: \"sonar\",\n    messages: [{ role: \"user\", content: \"test query\" }],\n  })\n);\n```\n\n### Step 2: Queue-Based Rate Limiting\n\n```typescript\nimport PQueue from \"p-queue\";\n\n// 50 RPM = ~0.83 req/sec. Set intervalCap=1, interval=1200ms for safety.\nconst perplexityQueue = new PQueue({\n  concurrency: 3,\n  interval: 1200,\n  intervalCap: 1,\n});\n\nasync function queuedSearch(query: string, model = \"sonar\") {\n  return perplexityQueue.add(() =>\n    withExponentialBackoff(() =>\n      perplexity.chat.completions.create({\n        model,\n        messages: [{ role: \"user\", content: query }],\n      })\n    )\n  );\n}\n\n// Batch queries are automatically rate-limited\nconst queries = [\"query 1\", \"query 2\", \"query 3\", \"query 4\", \"query 5\"];\nconst results = await Promise.all(queries.map((q) => queuedSearch(q)));\n```\n\n### Step 3: Token Bucket Implementation (No Dependencies)\n\n```typescript\nclass TokenBucket {\n  private tokens: number;\n  private lastRefill: number;\n\n  constructor(\n    private maxTokens: number = 50,\n    private refillRate: number = 50 / 60  // 50 per minute = 0.83/sec\n  ) {\n    this.tokens = maxTokens;\n    this.lastRefill = Date.now();\n  }\n\n  async acquire(): Promise<void> {\n    this.refill();\n    if (this.tokens >= 1) {\n      this.tokens -= 1;\n      return;\n    }\n    // Wait until a token is available\n    const waitMs = (1 / this.refillRate) * 1000;\n    await new Promise((r) => setTimeout(r, waitMs));\n    this.refill();\n    this.tokens -= 1;\n  }\n\n  private refill() {\n    const now = Date.now();\n    const elapsed = (now - this.lastRefill) / 1000;\n    this.tokens = Math.min(this.maxTokens, this.tokens + elapsed * this.refillRate);\n    this.lastRefill = now;\n  }\n\n  get available(): number {\n    this.refill();\n    return Math.floor(this.tokens);\n  }\n}\n\nconst bucket = new TokenBucket(50, 50 / 60);\n\nasync function rateLimitedSearch(query: string) {\n  await bucket.acquire();\n  return perplexity.chat.completions.create({\n    model: \"sonar\",\n    messages: [{ role: \"user\", content: query }],\n  });\n}\n```\n\n### Step 4: Python Rate Limiting\n\n```python\nimport time, asyncio\nfrom collections import deque\n\nclass RateLimiter:\n    def __init__(self, rpm: int = 50):\n        self.rpm = rpm\n        self.window = deque()\n\n    def wait_if_needed(self):\n        now = time.time()\n        # Remove timestamps older than 60 seconds\n        while self.window and self.window[0] < now - 60:\n            self.window.popleft()\n        if len(self.window) >= self.rpm:\n            sleep_time = 60 - (now - self.window[0])\n            time.sleep(max(0, sleep_time))\n        self.window.append(time.time())\n\nlimiter = RateLimiter(rpm=50)\n\ndef rate_limited_search(client, query: str, model: str = \"sonar\"):\n    limiter.wait_if_needed()\n    return client.chat.completions.create(\n        model=model,\n        messages=[{\"role\": \"user\", \"content\": query}],\n    )\n```\n\n## Error Handling\n\n| Signal | Meaning | Action |\n|--------|---------|--------|\n| HTTP 429 | RPM exceeded | Backoff and retry |\n| `Retry-After` header | Seconds until reset | Honor this value exactly |\n| Repeated 429s | Sustained overload | Reduce concurrency or add queue |\n| 429 on burst | Bucket empty | Space requests 1.2s apart |\n\n## Output\n\n- Automatic retry with exponential backoff and jitter\n- Queue-based rate limiting for batch operations\n- Token bucket for fine-grained control\n- Python rate limiter for synchronous code\n\n## Resources\n\n- [Perplexity Rate Limits](https://docs.perplexity.ai/guides/rate-limits)\n- [p-queue Documentation](https://github.com/sindresorhus/p-queue)\n\n## Next Steps\n\nFor security configuration, see `perplexity-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "perplexity-rate-limits",
-    "description": "Implement Perplexity rate limiting, backoff, and request queuing.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

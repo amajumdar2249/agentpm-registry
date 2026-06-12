@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000034471",
   "name": "stripe-list-pagination-previous-attributes",
   "slug": "stripe-list-pagination-previous-attributes-2",
   "description": "|",
   "content": "\n## Quick Reference\n\n| Field | Semantic |\n|--|--|\n| `event.data.previous_attributes` | ONLY the fields that changed; diff the current object against this |\n| `event.data.previous_attributes.amount_refunded` | Previous cumulative refund total \u2014 subtract from `charge.amount_refunded` for per-event delta |\n| `charge.amount_refunded` | CUMULATIVE across all refunds, NEVER per-event |\n| `invoice.lines.has_more` | true -> embedded `data` is page 1; paginate with `starting_after` |\n| `invoice.lines.data.at(-1).id` | The cursor for `starting_after` on the next page |\n| `stripe.invoices.listLineItems(invoice.id, { starting_after })` | Resumes AFTER the cursor \u2014 does NOT re-scan page 1 |\n\n## When to Use This Skill\n\nUse whenever:\n- You read an embedded `.data[]` array from a Stripe object and might need to paginate\n- You compute a \"what changed\" delta from a webhook event\n- You resolve a plan / SKU / entitlement from invoice line items or subscription items\n\n**Related skills:**\n- Where `getRefundDelta` is consumed in the refund handler: `stripe-billing-master:stripe-refund-dispute-lifecycle`\n- Where `resolvedVia` gates email rendering and audit logging: `stripe-billing-master:stripe-credit-audit-trail`\n\n## Pagination scan pattern\n\n```ts\nasync function scanAllLineItems(invoice: Stripe.Invoice): Promise<Stripe.InvoiceLineItem[]> {\n  const items: Stripe.InvoiceLineItem[] = [...invoice.lines.data];\n  let cursor = invoice.lines.data.at(-1)?.id;\n  let hasMore = invoice.lines.has_more;\n\n  while (hasMore && cursor) {\n    const page = await stripe.invoices.listLineItems(invoice.id, {\n      limit: 100,\n      starting_after: cursor,\n    });\n    items.push(...page.data);\n    hasMore = page.has_more;\n    cursor = page.data.at(-1)?.id;\n  }\n  return items;\n}\n```\n\nWithout `starting_after`, `stripe.invoices.listLineItems(invoice.id)` re-fetches page 1 \u2014 the same page you already have embedded in `invoice.lines.data`. The scan loops over identical content until `has_more` never flips, concluding \"no match\" on lines that never got scanned. Always thread the cursor.\n\n> Edge case: if `invoice.lines.data` is empty but `invoice.lines.has_more` is `true` (rare, but Stripe can return this shape when the embedded `limit` is 0), the loop above never executes because `cursor` is `undefined`. In that case, fall through to `stripe.invoices.listLineItems(invoice.id, { limit: 100 })` with no `starting_after` to start a fresh scan.\n\n## `previous_attributes` delta helper\n\n```ts\ntype AmountRefundedChanged = { amount_refunded?: number };\n\nexport function getRefundDelta(event: Stripe.Event, charge: Stripe.Charge): number | null {\n  const prev = (event.data.previous_attributes as AmountRefundedChanged | undefined)?.amount_refunded;\n  if (typeof prev === \"number\") return charge.amount_refunded - prev;\n  return null; // caller falls back to embedded / list / skip-revocation\n}\n```\n\n## Plan resolver with pagination + G6 safety fallback\n\n```ts\nexport async function resolvePlanFromInvoice(invoice: Stripe.Invoice): Promise<{\n  plan: Plan;\n  credits: number;\n  resolvedVia: \"priceMap\" | \"safetyFallback\";\n}> {\n  try {\n    const items = await scanAllLineItems(invoice); // G3 -- paginate first\n    for (const item of items) {\n      const mapped = PRICE_TO_PLAN[item.price?.id ?? \"\"];\n      if (mapped) return { ...mapped, resolvedVia: \"priceMap\" };\n    }\n    logEvent(\"credit_price_resolve_unknown\", { invoiceId: invoice.id, lineCount: items.length });\n    return { plan: \"free\", credits: 0, resolvedVia: \"safetyFallback\" }; // G6\n  } catch (err) {\n    logEvent(\"credit_price_resolve_error\", { invoiceId: invoice.id, err: String(err) });\n    return { plan: \"free\", credits: 0, resolvedVia: \"safetyFallback\" }; // G6\n  }\n}\n```\n\nThe email renderer uses `resolvedVia` to gate plan names on `priceMap` \u2014 never renders \"Welcome to Free\" on the safety-fallback path (G-bonus).\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "stripe-list-pagination-previous-attributes",
-    "description": "|",
-    "PROACTIVELY activate for": "(1) invoice.lines.data / charge.refunds.data / subscription.items.data embedded pagination, (2) starting_after cursor when falling through to list APIs, (3) has_more flag checking, (4) event.data.previous_attributes field semantics (which fields changed between old and new state), (5) Cumulative vs per-event Stripe fields (charge.amount_refunded is cumulative), (6) Delta computation patterns, (7) Plan resolution from invoice line items with pagination, (8) Safety fallback on pagination exhaustion (G6 \u2014 {plan:'free',credits:0}), (9) API error handling mid-scan.",
-    "Provides": "full pagination scan pattern, previous_attributes delta helper, plan resolver with paginated line-item scan."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

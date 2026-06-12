@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032511",
   "name": "linear-performance-tuning",
   "slug": "linear-performance-tuning",
   "description": "Optimize Linear API queries, caching, and batching for performance.",
   "content": "# Linear Performance Tuning\n\n## Overview\n\nOptimize Linear API usage for minimal latency and efficient resource consumption. The three main levers are: (1) query flattening to avoid N+1 and reduce complexity, (2) caching static data with webhook-driven invalidation, and (3) batching mutations into single GraphQL requests.\n\n**Key numbers:**\n\n- Query complexity budget: 250,000 pts/hour, max 10,000 per query\n- Each property: 0.1 pt, each object: 1 pt, connections: multiply by `first`\n- Best practice: sort by `updatedAt` to get fresh data first\n\n## Prerequisites\n\n- Working Linear integration with `@linear/sdk`\n- Understanding of GraphQL query structure\n- Optional: Redis for distributed caching\n\n## Instructions\n\n### Step 1: Eliminate N+1 Queries\n\nThe SDK lazy-loads relations. Accessing `.assignee` on 50 issues makes 50 separate API calls.\n\n```typescript\nimport { LinearClient } from \"@linear/sdk\";\n\nconst client = new LinearClient({ apiKey: process.env.LINEAR_API_KEY! });\n\n// BAD: N+1 \u2014 1 query for issues + 50 for assignees + 50 for states = 101 requests\nconst issues = await client.issues({ first: 50 });\nfor (const i of issues.nodes) {\n  const assignee = await i.assignee;  // API call!\n  const state = await i.state;        // API call!\n  console.log(`${i.identifier}: ${assignee?.name} [${state?.name}]`);\n}\n\n// GOOD: 1 request \u2014 use rawRequest with exact field selection\nconst response = await client.client.rawRequest(`\n  query TeamDashboard($teamId: String!) {\n    team(id: $teamId) {\n      issues(first: 50, orderBy: updatedAt) {\n        nodes {\n          id identifier title priority estimate updatedAt\n          assignee { name email }\n          state { name type }\n          labels { nodes { name color } }\n          project { name }\n        }\n        pageInfo { hasNextPage endCursor }\n      }\n    }\n  }\n`, { teamId: \"team-uuid\" });\n// Complexity: ~50 * (10 fields * 0.1 + 4 objects) = ~275 pts\n```\n\n### Step 2: Cache Static Data\n\nTeams, workflow states, and labels change rarely. Cache them with appropriate TTLs.\n\n```typescript\ninterface CacheEntry<T> {\n  data: T;\n  expiresAt: number;\n}\n\nclass LinearCache {\n  private store = new Map<string, CacheEntry<any>>();\n\n  get<T>(key: string): T | null {\n    const entry = this.store.get(key);\n    if (!entry || Date.now() > entry.expiresAt) {\n      this.store.delete(key);\n      return null;\n    }\n    return entry.data;\n  }\n\n  set<T>(key: string, data: T, ttlSeconds: number): void {\n    this.store.set(key, { data, expiresAt: Date.now() + ttlSeconds * 1000 });\n  }\n\n  invalidate(key: string): void {\n    this.store.delete(key);\n  }\n}\n\nconst cache = new LinearCache();\n\n// Teams: 10 minute TTL (almost never change)\nasync function getTeams(client: LinearClient) {\n  const cached = cache.get<any[]>(\"teams\");\n  if (cached) return cached;\n  const teams = await client.teams();\n  cache.set(\"teams\", teams.nodes, 600);\n  return teams.nodes;\n}\n\n// Workflow states: 30 minute TTL (rarely change)\nasync function getStates(client: LinearClient, teamId: string) {\n  const key = `states:${teamId}`;\n  const cached = cache.get<any[]>(key);\n  if (cached) return cached;\n  const team = await client.team(teamId);\n  const states = await team.states();\n  cache.set(key, states.nodes, 1800);\n  return states.nodes;\n}\n\n// Labels: 10 minute TTL\nasync function getLabels(client: LinearClient) {\n  const cached = cache.get<any[]>(\"labels\");\n  if (cached) return cached;\n  const labels = await client.issueLabels();\n  cache.set(\"labels\", labels.nodes, 600);\n  return labels.nodes;\n}\n```\n\n### Step 3: Webhook-Driven Cache Invalidation\n\nReplace polling with webhooks. Invalidate cache when relevant entities change.\n\n```typescript\nfunction handleCacheInvalidation(event: { type: string; action: string; data: any }) {\n  switch (event.type) {\n    case \"Issue\":\n      cache.invalidate(`issue:${event.data.id}`);\n      break;\n    case \"WorkflowState\":\n      cache.invalidate(`states:${event.data.teamId}`);\n      break;\n    case \"IssueLabel\":\n      cache.invalidate(\"labels\");\n      break;\n    case \"Team\":\n      cache.invalidate(\"teams\");\n      break;\n  }\n}\n```\n\n### Step 4: Batch Mutations\n\nCombine multiple mutations into one GraphQL request.\n\n```typescript\n// Instead of 100 separate updateIssue calls:\nasync function batchUpdatePriority(\n  client: LinearClient,\n  issueUpdates: Array<{ id: string; priority: number }>\n) {\n  const chunkSize = 20; // Keep complexity manageable\n  for (let i = 0; i < issueUpdates.length; i += chunkSize) {\n    const chunk = issueUpdates.slice(i, i + chunkSize);\n    const mutations = chunk.map((u, j) =>\n      `u${j}: issueUpdate(id: \"${u.id}\", input: { priority: ${u.priority} }) { success }`\n    ).join(\"\\n\");\n\n    await client.client.rawRequest(`mutation { ${mutations} }`);\n  }\n}\n\n// Batch issue creation\nasync function batchCreate(\n  client: LinearClient,\n  teamId: string,\n  issues: Array<{ title: string; priority?: number }>\n) {\n  const mutations = issues.map((issue, i) =>\n    `c${i}: issueCreate(input: {\n      teamId: \"${teamId}\",\n      title: \"${issue.title.replace(/\"/g, '\\\\\"')}\",\n      priority: ${issue.priority ?? 3}\n    }) { success issue { id identifier } }`\n  ).join(\"\\n\");\n\n  return client.client.rawRequest(`mutation { ${mutations} }`);\n}\n```\n\n### Step 5: Efficient Pagination\n\n```typescript\n// Stream all issues without loading everything into memory\nasync function* paginateIssues(\n  client: LinearClient,\n  teamId: string,\n  pageSize = 50\n) {\n  let cursor: string | undefined;\n  let hasNext = true;\n\n  while (hasNext) {\n    const result = await client.issues({\n      first: pageSize,\n      after: cursor,\n      filter: { team: { id: { eq: teamId } } },\n      orderBy: \"updatedAt\", // Fresh data first\n    });\n\n    yield result.nodes;\n    hasNext = result.pageInfo.hasNextPage;\n    cursor = result.pageInfo.endCursor;\n  }\n}\n\n// Process in batches\nfor await (const batch of paginateIssues(client, \"team-uuid\")) {\n  console.log(`Processing ${batch.length} issues`);\n}\n\n// Incremental sync: only fetch issues updated since last sync\nconst lastSync = \"2026-03-20T00:00:00Z\";\nconst updated = await client.issues({\n  first: 100,\n  filter: { updatedAt: { gte: lastSync } },\n  orderBy: \"updatedAt\",\n});\n```\n\n### Step 6: Request Coalescing\n\nDeduplicate concurrent identical requests.\n\n```typescript\nconst inflight = new Map<string, Promise<any>>();\n\nasync function coalesce<T>(key: string, fn: () => Promise<T>): Promise<T> {\n  if (inflight.has(key)) return inflight.get(key)!;\n  const promise = fn().finally(() => inflight.delete(key));\n  inflight.set(key, promise);\n  return promise;\n}\n\n// Multiple components requesting same team data simultaneously = 1 API call\nconst team = await coalesce(\"team:ENG\", () =>\n  client.teams({ filter: { key: { eq: \"ENG\" } } }).then(r => r.nodes[0])\n);\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `Query complexity too high` | Deep nesting + large `first` | Use `rawRequest()` with flat fields, `first: 50` |\n| HTTP 429 | Burst exceeding rate budget | Add request queue with 100ms spacing |\n| Stale cache | TTL too long | Shorten TTL or use webhook invalidation |\n| Timeout | Query spanning too many records | Paginate with `first: 50` + cursor |\n\n## Examples\n\n### Performance Benchmark\n\n```typescript\nasync function benchmark(label: string, fn: () => Promise<any>) {\n  const start = Date.now();\n  await fn();\n  console.log(`${label}: ${Date.now() - start}ms`);\n}\n\nawait benchmark(\"Cold teams\", () => client.teams());\nawait benchmark(\"Cached teams\", () => getTeams(client));\nawait benchmark(\"50 issues (SDK)\", () => client.issues({ first: 50 }));\nawait benchmark(\"50 issues (raw)\", () => client.client.rawRequest(\n  `query { issues(first: 50) { nodes { id identifier title priority } } }`\n));\n```\n\n## Resources\n\n- [Linear Best Practices](https://linear.app/developers/graphql)\n- [Rate Limiting](https://linear.app/developers/rate-limiting)\n- [Pagination](https://linear.app/developers/pagination)\n- [Filtering](https://linear.app/developers/filtering)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "linear-performance-tuning",
-    "description": "Optimize Linear API queries, caching, and batching for performance.",
-    "Trigger": "linear performance\", \"optimize linear\", \"linear caching\",",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

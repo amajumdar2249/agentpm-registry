@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031567",
   "name": "clickhouse-ci-integration",
   "slug": "clickhouse-ci-integration",
   "description": "Run ClickHouse integration tests in CI with GitHub Actions and Docker",
   "content": "# ClickHouse CI Integration\n\n## Overview\n\nRun integration tests against a real ClickHouse server in GitHub Actions using\nDocker service containers. No mocks needed for schema and query validation.\n\n## Prerequisites\n\n- GitHub repository with Actions enabled\n- `@clickhouse/client` in project dependencies\n- Test suite (vitest or jest)\n\n## Instructions\n\n### Step 1: GitHub Actions Workflow with ClickHouse Service\n\n```yaml\n# .github/workflows/clickhouse-tests.yml\nname: ClickHouse Integration Tests\n\non:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n\n    services:\n      clickhouse:\n        image: clickhouse/clickhouse-server:latest\n        ports:\n          - 8123:8123\n          - 9000:9000\n        options: >-\n          --health-cmd \"wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1\"\n          --health-interval 10s\n          --health-timeout 5s\n          --health-retries 5\n\n    env:\n      CLICKHOUSE_HOST: http://localhost:8123\n      CLICKHOUSE_USER: default\n      CLICKHOUSE_PASSWORD: \"\"\n\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: \"20\"\n          cache: \"npm\"\n\n      - run: npm ci\n\n      # Apply schema before tests\n      - name: Apply schema\n        run: |\n          curl -s 'http://localhost:8123/' -d 'CREATE DATABASE IF NOT EXISTS test_db'\n          for f in init-db/*.sql; do\n            echo \"Applying $f...\"\n            curl -s 'http://localhost:8123/?database=test_db' --data-binary @\"$f\"\n          done\n\n      - name: Run unit tests\n        run: npm test -- --coverage\n\n      - name: Run integration tests\n        run: npm run test:integration\n```\n\n### Step 2: Integration Test Setup\n\n```typescript\n// tests/setup-integration.ts\nimport { createClient, ClickHouseClient } from '@clickhouse/client';\nimport { beforeAll, afterAll, beforeEach } from 'vitest';\n\nlet client: ClickHouseClient;\n\nbeforeAll(async () => {\n  client = createClient({\n    url: process.env.CLICKHOUSE_HOST ?? 'http://localhost:8123',\n    database: 'test_db',\n  });\n\n  // Verify connection\n  const { success } = await client.ping();\n  if (!success) throw new Error('ClickHouse not reachable');\n});\n\nbeforeEach(async () => {\n  // Clean test data between tests\n  await client.command({ query: 'TRUNCATE TABLE IF EXISTS test_db.events' });\n});\n\nafterAll(async () => {\n  await client.close();\n});\n\nexport { client };\n```\n\n### Step 3: Write Real Integration Tests\n\n```typescript\n// tests/events.integration.test.ts\nimport { describe, it, expect } from 'vitest';\nimport { client } from './setup-integration';\n\ndescribe('Events table', () => {\n  it('creates and queries events', async () => {\n    // Insert test data\n    await client.insert({\n      table: 'events',\n      values: [\n        { event_type: 'page_view', user_id: 1, properties: '{\"url\":\"/home\"}' },\n        { event_type: 'click', user_id: 1, properties: '{\"btn\":\"cta\"}' },\n        { event_type: 'page_view', user_id: 2, properties: '{\"url\":\"/pricing\"}' },\n      ],\n      format: 'JSONEachRow',\n    });\n\n    // Query and validate\n    const rs = await client.query({\n      query: `\n        SELECT event_type, count() AS cnt, uniqExact(user_id) AS users\n        FROM events GROUP BY event_type ORDER BY cnt DESC\n      `,\n      format: 'JSONEachRow',\n    });\n    const rows = await rs.json<{ event_type: string; cnt: string; users: string }>();\n\n    expect(rows).toHaveLength(2);\n    expect(rows[0]).toMatchObject({ event_type: 'page_view', cnt: '2', users: '2' });\n    expect(rows[1]).toMatchObject({ event_type: 'click', cnt: '1', users: '1' });\n  });\n\n  it('validates parameterized queries prevent injection', async () => {\n    await client.insert({\n      table: 'events',\n      values: [{ event_type: 'test', user_id: 42, properties: '{}' }],\n      format: 'JSONEachRow',\n    });\n\n    const rs = await client.query({\n      query: 'SELECT count() AS cnt FROM events WHERE user_id = {uid:UInt64}',\n      query_params: { uid: 42 },\n      format: 'JSONEachRow',\n    });\n    const [row] = await rs.json<{ cnt: string }>();\n    expect(Number(row.cnt)).toBe(1);\n  });\n\n  it('handles empty results gracefully', async () => {\n    const rs = await client.query({\n      query: 'SELECT * FROM events WHERE user_id = 999999',\n      format: 'JSONEachRow',\n    });\n    const rows = await rs.json();\n    expect(rows).toEqual([]);\n  });\n});\n```\n\n### Step 4: Schema Validation in CI\n\n```typescript\n// tests/schema.integration.test.ts\nimport { describe, it, expect } from 'vitest';\nimport { client } from './setup-integration';\n\ndescribe('Schema validation', () => {\n  it('events table has expected columns', async () => {\n    const rs = await client.query({\n      query: \"SELECT name, type FROM system.columns WHERE database='test_db' AND table='events'\",\n      format: 'JSONEachRow',\n    });\n    const columns = await rs.json<{ name: string; type: string }>();\n    const colMap = new Map(columns.map((c) => [c.name, c.type]));\n\n    expect(colMap.get('event_type')).toBe(\"LowCardinality(String)\");\n    expect(colMap.get('user_id')).toBe('UInt64');\n    expect(colMap.get('created_at')).toMatch(/DateTime/);\n  });\n\n  it('events table uses MergeTree engine', async () => {\n    const rs = await client.query({\n      query: \"SELECT engine FROM system.tables WHERE database='test_db' AND name='events'\",\n      format: 'JSONEachRow',\n    });\n    const [row] = await rs.json<{ engine: string }>();\n    expect(row.engine).toBe('MergeTree');\n  });\n});\n```\n\n### Step 5: Package Scripts\n\n```json\n{\n  \"scripts\": {\n    \"test\": \"vitest run\",\n    \"test:integration\": \"vitest run --config vitest.integration.config.ts\",\n    \"test:ci\": \"vitest run --coverage --reporter=junit --outputFile=test-results.xml\"\n  }\n}\n```\n\n## CI Matrix for Multiple ClickHouse Versions\n\n```yaml\nstrategy:\n  matrix:\n    clickhouse-version: [\"24.3\", \"24.8\", \"latest\"]\n\nservices:\n  clickhouse:\n    image: clickhouse/clickhouse-server:${{ matrix.clickhouse-version }}\n    ports:\n      - 8123:8123\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Service not healthy | Slow container start | Increase `health-retries` |\n| Schema not found | Init scripts not run | Run schema step before tests |\n| Flaky test order | Shared state | Use `beforeEach` with TRUNCATE |\n| Port conflict | Another process | Use random port mapping |\n\n## Resources\n\n- [GitHub Actions Service Containers](https://docs.github.com/en/actions/using-containerized-services)\n- [ClickHouse Docker Image](https://hub.docker.com/r/clickhouse/clickhouse-server)\n- [Vitest Documentation](https://vitest.dev/)\n\n## Next Steps\n\nFor deployment patterns, see `clickhouse-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clickhouse-ci-integration",
-    "description": "Run ClickHouse integration tests in CI with GitHub Actions and Docker",
-    "Trigger": "clickhouse CI\", \"clickhouse GitHub Actions\", \"clickhouse integration tests\",",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

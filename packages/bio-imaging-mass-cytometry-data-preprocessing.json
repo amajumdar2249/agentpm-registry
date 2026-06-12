@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009275",
   "name": "bio-imaging-mass-cytometry-data-preprocessing",
   "slug": "bio-imaging-mass-cytometry-data-preprocessing",
   "description": "Load and preprocess imaging mass cytometry (IMC) and MIBI data. Covers MCD/TIFF handling, hot pixel removal, and image normalization. Use when starting IMC analysis from raw MCD files or preparing images for segmentation.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: anndata 0.10+, numpy 1.26+, pandas 2.2+, scanpy 1.10+, scipy 1.12+, steinbock 0.16+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# IMC Data Preprocessing\n\n**\"Preprocess my imaging mass cytometry data\"** \u2192 Load MCD files, apply hot pixel removal, channel cropping, and signal normalization to prepare multiplexed images for segmentation and analysis.\n- CLI: `steinbock preprocess` for automated IMC preprocessing pipeline\n\n## Load MCD Files with steinbock\n\n```bash\n# steinbock CLI workflow (Docker-based)\n# Convert MCD to TIFF\nsteinbock preprocess imc \\\n    --mcd raw/*.mcd \\\n    --panel panel.csv \\\n    -o img\n\n# Output: img/*.tiff (one per acquisition)\n```\n\n## Panel File Format\n\n```csv\n# panel.csv\nchannel,name,keep,ilastik\n1,DNA1,1,1\n2,CD45,1,1\n3,CD3,1,0\n4,CD8,1,0\n5,CD4,1,0\n```\n\n## Python-Based Loading\n\n```python\nimport readimc\nimport numpy as np\nfrom pathlib import Path\n\n# Read MCD file\nmcd_file = Path('acquisition.mcd')\nwith readimc.MCDFile(mcd_file) as mcd:\n    # List acquisitions\n    for acquisition in mcd.acquisitions:\n        print(f'Acquisition: {acquisition.id}')\n        print(f'  Channels: {len(acquisition.channel_metals)}')\n        print(f'  Size: {acquisition.width} x {acquisition.height}')\n\n    # Load specific acquisition\n    acq = mcd.acquisitions[0]\n    img = mcd.read_acquisition(acq)  # Returns (C, H, W) array\n\n    # Channel names\n    channel_names = acq.channel_names\n```\n\n## Hot Pixel Removal\n\n```python\nfrom scipy import ndimage\nimport numpy as np\n\ndef remove_hot_pixels(img, threshold=50):\n    '''Remove hot pixels using median filtering comparison'''\n    filtered = ndimage.median_filter(img, size=3)\n    diff = np.abs(img - filtered)\n    hot_pixels = diff > threshold\n\n    # Replace hot pixels with median\n    result = img.copy()\n    result[hot_pixels] = filtered[hot_pixels]\n\n    return result\n\n# Apply to each channel\nimg_clean = np.stack([remove_hot_pixels(img[c]) for c in range(img.shape[0])])\n```\n\n## Spillover Correction\n\n**Goal:** Remove channel crosstalk caused by isotope impurities in IMC data so that each channel reflects only its intended metal target.\n\n**Approach:** Invert the measured spillover matrix (channels x channels) and multiply each pixel's channel vector by the inverse, clipping negative values to zero.\n\n```python\nimport numpy as np\nimport pandas as pd\n\ndef apply_spillover_correction(img, spillover_matrix):\n    '''Apply spillover correction to IMC image\n\n    spillover_matrix: (n_channels, n_channels) DataFrame or array\n                      rows = measured, cols = emitting\n    '''\n    n_channels, height, width = img.shape\n\n    # Reshape to (pixels, channels)\n    pixels = img.reshape(n_channels, -1).T\n\n    # Invert spillover matrix\n    sm = np.array(spillover_matrix)\n    sm_inv = np.linalg.inv(sm)\n\n    # Apply correction\n    corrected = pixels @ sm_inv.T\n    corrected = np.clip(corrected, 0, None)  # No negative values\n\n    # Reshape back to image\n    return corrected.T.reshape(n_channels, height, width)\n\n# Load spillover matrix (from CATALYST or manual measurement)\nspillover = pd.read_csv('spillover_matrix.csv', index_col=0)\nimg_corrected = apply_spillover_correction(img_clean, spillover)\n```\n\n## Estimate Spillover from Single-Stain Controls\n\n```python\ndef estimate_spillover(single_stains, channel_names):\n    '''Estimate spillover matrix from single-stain controls'''\n    n_channels = len(channel_names)\n    spillover = np.eye(n_channels)\n\n    for i, (primary_channel, control_img) in enumerate(single_stains.items()):\n        primary_idx = channel_names.index(primary_channel)\n        primary_signal = control_img[primary_idx].flatten()\n        mask = primary_signal > np.percentile(primary_signal, 95)\n\n        for j, ch in enumerate(channel_names):\n            if i != j:\n                secondary_signal = control_img[j].flatten()[mask]\n                spillover[j, primary_idx] = np.median(secondary_signal / primary_signal[mask])\n\n    return pd.DataFrame(spillover, index=channel_names, columns=channel_names)\n```\n\n## Image Normalization\n\n```python\ndef percentile_normalize(img, low=1, high=99):\n    '''Normalize to percentiles (per channel)'''\n    normalized = np.zeros_like(img, dtype=np.float32)\n\n    for c in range(img.shape[0]):\n        channel = img[c]\n        p_low = np.percentile(channel, low)\n        p_high = np.percentile(channel, high)\n\n        normalized[c] = np.clip((channel - p_low) / (p_high - p_low), 0, 1)\n\n    return normalized\n\ndef arcsinh_transform(img, cofactor=5):\n    '''Arcsinh transformation (similar to flow cytometry)'''\n    return np.arcsinh(img / cofactor)\n\n# Apply transformations\nimg_norm = percentile_normalize(img_clean)\nimg_asinh = arcsinh_transform(img_clean)\n```\n\n## steinbock Preprocessing Pipeline\n\n```bash\n# Complete preprocessing with steinbock\n\n# 1. Extract images from MCD\nsteinbock preprocess imc --mcd raw/*.mcd -o img\n\n# 2. Apply hot pixel removal\nsteinbock preprocess filter --img img -o img_filtered\n\n# 3. Generate probability maps (for segmentation)\n# Requires trained Ilastik classifier\nsteinbock classify ilastik \\\n    --img img_filtered \\\n    --ilastik-project pixel_classifier.ilp \\\n    -o probabilities\n```\n\n## Visualize with napari\n\n```python\nimport napari\nimport tifffile\n\n# Load image\nimg = tifffile.imread('acquisition.tiff')\nchannel_names = ['DNA1', 'CD45', 'CD3', 'CD8', 'CD4']\n\n# Create viewer\nviewer = napari.Viewer()\n\n# Add channels\nfor i, name in enumerate(channel_names):\n    viewer.add_image(img[i], name=name, colormap='gray', blending='additive')\n\nnapari.run()\n```\n\n## Create AnnData Object\n\n```python\nimport anndata as ad\nimport pandas as pd\n\n# After segmentation, create AnnData from single-cell data\ndef create_anndata(intensities, cell_info, channel_names):\n    '''Create AnnData from segmented single-cell data'''\n\n    # Intensities: cells x channels\n    adata = ad.AnnData(X=intensities)\n\n    # Channel names\n    adata.var_names = channel_names\n\n    # Cell metadata\n    adata.obs = cell_info  # DataFrame with area, centroid_x, centroid_y, etc.\n\n    return adata\n\n# Example usage\nadata = create_anndata(\n    intensities=cell_intensities,  # (n_cells, n_channels)\n    cell_info=cell_metadata,       # DataFrame\n    channel_names=channel_names\n)\n\nadata.write('imc_data.h5ad')\n```\n\n## Batch Processing\n\n```python\nfrom pathlib import Path\nimport tifffile\n\ndef process_batch(input_dir, output_dir):\n    '''Process all images in directory'''\n    input_dir = Path(input_dir)\n    output_dir = Path(output_dir)\n    output_dir.mkdir(exist_ok=True)\n\n    for img_path in input_dir.glob('*.tiff'):\n        img = tifffile.imread(img_path)\n\n        # Preprocessing\n        img = np.stack([remove_hot_pixels(img[c]) for c in range(img.shape[0])])\n        img = percentile_normalize(img)\n\n        # Save\n        output_path = output_dir / img_path.name\n        tifffile.imwrite(output_path, img.astype(np.float32))\n\n        print(f'Processed: {img_path.name}')\n\nprocess_batch('raw_images', 'processed_images')\n```\n\n## Related Skills\n\n- cell-segmentation - Segment preprocessed images\n- spatial-transcriptomics/spatial-data-io - Similar data loading concepts\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-imaging-mass-cytometry-data-preprocessing",
-    "description": "Load and preprocess imaging mass cytometry (IMC) and MIBI data. Covers MCD/TIFF handling, hot pixel removal, and image normalization. Use when starting IMC analysis from raw MCD files or preparing images for segmentation.",
-    "tool_type": "python",
-    "primary_tool": "steinbock"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

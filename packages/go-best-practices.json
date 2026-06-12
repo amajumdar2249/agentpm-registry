@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000000352",
   "name": "go-best-practices",
   "slug": "go-best-practices",
   "description": "Provides Go patterns for type-first development with custom types, interfaces, functional options, and error handling. Must use when reading or writing Go files.",
   "content": "\n# Go Best Practices\n\n## Type-First Development\n\nTypes define the contract before implementation. Follow this workflow:\n\n1. **Define data structures** - structs and interfaces first\n2. **Define function signatures** - parameters, return types, and error conditions\n3. **Implement to satisfy types** - let the compiler guide completeness\n4. **Validate at boundaries** - check inputs where data enters the system\n\n### Make Illegal States Unrepresentable\n\nUse Go's type system to prevent invalid states at compile time.\n\n**Structs for domain models:**\n```go\n// Define the data model first\ntype User struct {\n    ID        UserID\n    Email     string\n    Name      string\n    CreatedAt time.Time\n}\n\ntype CreateUserRequest struct {\n    Email string\n    Name  string\n}\n\n// Functions follow from the types\nfunc CreateUser(req CreateUserRequest) (*User, error) {\n    // implementation\n}\n```\n\n**Custom types for domain primitives:**\n```go\n// Distinct types prevent mixing up IDs\ntype UserID string\ntype OrderID string\n\nfunc GetUser(id UserID) (*User, error) {\n    // Compiler prevents passing OrderID here\n}\n\nfunc NewUserID(raw string) UserID {\n    return UserID(raw)\n}\n\n// Methods attach behavior to the type\nfunc (id UserID) String() string {\n    return string(id)\n}\n```\n\n**Interfaces for behavior contracts:**\n```go\n// Define what you need, not what you have\ntype Reader interface {\n    Read(p []byte) (n int, err error)\n}\n\ntype UserRepository interface {\n    GetByID(ctx context.Context, id UserID) (*User, error)\n    Save(ctx context.Context, user *User) error\n}\n\n// Accept interfaces, return structs\nfunc ProcessInput(r Reader) ([]byte, error) {\n    return io.ReadAll(r)\n}\n```\n\n**Enums with iota:**\n```go\ntype Status int\n\nconst (\n    StatusActive Status = iota + 1\n    StatusInactive\n    StatusPending\n)\n\nfunc (s Status) String() string {\n    switch s {\n    case StatusActive:\n        return \"active\"\n    case StatusInactive:\n        return \"inactive\"\n    case StatusPending:\n        return \"pending\"\n    default:\n        return fmt.Sprintf(\"Status(%d)\", s)\n    }\n}\n\n// Exhaustive handling in switch\nfunc ProcessStatus(s Status) (string, error) {\n    switch s {\n    case StatusActive:\n        return \"processing\", nil\n    case StatusInactive:\n        return \"skipped\", nil\n    case StatusPending:\n        return \"waiting\", nil\n    default:\n        return \"\", fmt.Errorf(\"unhandled status: %v\", s)\n    }\n}\n```\n\n**Functional options for flexible construction:**\n```go\ntype ServerOption func(*Server)\n\nfunc WithPort(port int) ServerOption {\n    return func(s *Server) {\n        s.port = port\n    }\n}\n\nfunc WithTimeout(d time.Duration) ServerOption {\n    return func(s *Server) {\n        s.timeout = d\n    }\n}\n\nfunc NewServer(opts ...ServerOption) *Server {\n    s := &Server{\n        port:    8080,    // sensible defaults\n        timeout: 30 * time.Second,\n    }\n    for _, opt := range opts {\n        opt(s)\n    }\n    return s\n}\n\n// Usage: NewServer(WithPort(3000), WithTimeout(time.Minute))\n```\n\n**Embed for composition:**\n```go\ntype Timestamps struct {\n    CreatedAt time.Time\n    UpdatedAt time.Time\n}\n\ntype User struct {\n    Timestamps  // embedded - User has CreatedAt, UpdatedAt\n    ID    UserID\n    Email string\n}\n```\n\n## Module Structure\n\nPrefer smaller files within packages: one type or concern per file. Split when a file handles multiple unrelated types or exceeds ~300 lines. Keep tests in `_test.go` files alongside implementation. Package boundaries define the API; internal organization is flexible.\n\n## Functional Patterns\n\n- Use value receivers when methods don't mutate state; reserve pointer receivers for mutation.\n- Avoid package-level mutable variables; pass dependencies explicitly via function parameters.\n- Return new structs/slices rather than mutating inputs; makes data flow explicit.\n- Use closures and higher-order functions where they simplify code (e.g., `sort.Slice`, iterators).\n\n## Instructions\n\n- Return errors with context using `fmt.Errorf` and `%w` for wrapping. This preserves the error chain for debugging.\n- Every function returns a value or an error; unimplemented paths return descriptive errors. Explicit failures are debuggable.\n- Handle all branches in `switch` statements; include a `default` case that returns an error. Exhaustive handling prevents silent bugs.\n- Pass `context.Context` to external calls with explicit timeouts. Runaway requests cause cascading failures.\n- Reserve `panic` for truly unrecoverable situations; prefer returning errors. Panics crash the program.\n- Add or update table-driven tests for new logic; cover edge cases (empty input, nil, boundaries).\n\n## Examples\n\nExplicit failure for unimplemented logic:\n```go\nfunc buildWidget(widgetType string) (*Widget, error) {\n    return nil, fmt.Errorf(\"buildWidget not implemented for type: %s\", widgetType)\n}\n```\n\nWrap errors with context to preserve the chain:\n```go\nout, err := client.Do(ctx, req)\nif err != nil {\n    return nil, fmt.Errorf(\"fetch widget failed: %w\", err)\n}\nreturn out, nil\n```\n\nExhaustive switch with default error:\n```go\nfunc processStatus(status string) (string, error) {\n    switch status {\n    case \"active\":\n        return \"processing\", nil\n    case \"inactive\":\n        return \"skipped\", nil\n    default:\n        return \"\", fmt.Errorf(\"unhandled status: %s\", status)\n    }\n}\n```\n\nStructured logging with slog:\n```go\nimport \"log/slog\"\n\nvar log = slog.With(\"component\", \"widgets\")\n\nfunc createWidget(name string) (*Widget, error) {\n    log.Debug(\"creating widget\", \"name\", name)\n    widget := &Widget{Name: name}\n    log.Debug(\"created widget\", \"id\", widget.ID)\n    return widget, nil\n}\n```\n\n## Configuration\n\n- Load config from environment variables at startup; validate required values before use. Missing config should cause immediate exit.\n- Define a Config struct as single source of truth; avoid `os.Getenv` scattered throughout code.\n- Use sensible defaults for development; require explicit values for production secrets.\n\n### Examples\n\nTyped config struct:\n```go\ntype Config struct {\n    Port        int\n    DatabaseURL string\n    APIKey      string\n    Env         string\n}\n\nfunc LoadConfig() (*Config, error) {\n    dbURL := os.Getenv(\"DATABASE_URL\")\n    if dbURL == \"\" {\n        return nil, fmt.Errorf(\"DATABASE_URL is required\")\n    }\n    apiKey := os.Getenv(\"API_KEY\")\n    if apiKey == \"\" {\n        return nil, fmt.Errorf(\"API_KEY is required\")\n    }\n    port := 3000\n    if p := os.Getenv(\"PORT\"); p != \"\" {\n        var err error\n        port, err = strconv.Atoi(p)\n        if err != nil {\n            return nil, fmt.Errorf(\"invalid PORT: %w\", err)\n        }\n    }\n    return &Config{\n        Port:        port,\n        DatabaseURL: dbURL,\n        APIKey:      apiKey,\n        Env:         getEnvOrDefault(\"ENV\", \"development\"),\n    }, nil\n}\n```\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "go-best-practices",
-    "description": "Provides Go patterns for type-first development with custom types, interfaces, functional options, and error handling. Must use when reading or writing Go files."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

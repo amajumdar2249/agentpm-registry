@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033508",
   "name": "vercel-rate-limits",
   "slug": "vercel-rate-limits",
   "description": "Handle Vercel API rate limits, implement retry logic, and configure",
   "content": "# Vercel Rate Limits\n\n## Overview\n\nHandle Vercel REST API rate limits with proper retry logic, and configure Vercel's WAF rate limiting SDK to protect your deployed API endpoints from abuse. Covers both consuming the Vercel API (outbound) and protecting your own functions (inbound).\n\n## Prerequisites\n\n- Vercel CLI installed and authenticated\n- Understanding of HTTP 429 status codes\n- For WAF rate limiting: Vercel Pro or Enterprise plan\n\n## Instructions\n\n### Step 1: Vercel REST API Rate Limits\n\nThe Vercel REST API enforces rate limits per endpoint. When exceeded, the API returns HTTP 429 with rate limit headers:\n\n```\nHTTP/1.1 429 Too Many Requests\nX-RateLimit-Limit: 100\nX-RateLimit-Remaining: 0\nX-RateLimit-Reset: 1711152000\nRetry-After: 60\n```\n\n**Known API limits:**\n\n| Endpoint Category | Rate Limit |\n|-------------------|-----------|\n| Deployments (create) | 100/hour per project |\n| Deployments (list/get) | 500/min |\n| Projects (CRUD) | 200/min |\n| Environment variables | 200/min |\n| Domains | 200/min |\n| Teams | 200/min |\n| DNS records | 200/min |\n| General API | 120 requests/min (default) |\n\n### Step 2: Implement Retry with Backoff for Vercel API\n\n```typescript\n// lib/rate-limit-handler.ts\ninterface RateLimitInfo {\n  limit: number;\n  remaining: number;\n  reset: number; // Unix timestamp\n}\n\nfunction parseRateLimitHeaders(headers: Headers): RateLimitInfo {\n  return {\n    limit: Number(headers.get('X-RateLimit-Limit') ?? 100),\n    remaining: Number(headers.get('X-RateLimit-Remaining') ?? 100),\n    reset: Number(headers.get('X-RateLimit-Reset') ?? 0),\n  };\n}\n\nasync function vercelFetchWithRetry(\n  url: string,\n  options: RequestInit,\n  maxRetries = 3\n): Promise<Response> {\n  for (let attempt = 0; attempt <= maxRetries; attempt++) {\n    const res = await fetch(url, options);\n\n    if (res.status !== 429) return res;\n\n    if (attempt === maxRetries) {\n      throw new Error(`Rate limited after ${maxRetries} retries: ${url}`);\n    }\n\n    // Use Retry-After header if present, otherwise exponential backoff\n    const retryAfter = res.headers.get('Retry-After');\n    const waitMs = retryAfter\n      ? Number(retryAfter) * 1000\n      : Math.min(1000 * Math.pow(2, attempt) + Math.random() * 1000, 30000);\n\n    console.warn(`Rate limited (attempt ${attempt + 1}/${maxRetries}). Waiting ${Math.round(waitMs)}ms...`);\n    await new Promise(r => setTimeout(r, waitMs));\n  }\n  throw new Error('Unreachable');\n}\n```\n\n### Step 3: Proactive Rate Limit Avoidance\n\n```typescript\n// lib/rate-limiter.ts\n// Track remaining quota and slow down before hitting the wall\nclass VercelRateLimiter {\n  private remaining = 100;\n  private resetAt = 0;\n\n  async throttle(): Promise<void> {\n    // If near the limit, wait until reset\n    if (this.remaining < 5) {\n      const waitMs = Math.max(0, this.resetAt * 1000 - Date.now()) + 1000;\n      console.warn(`Near rate limit (${this.remaining} remaining). Waiting ${waitMs}ms...`);\n      await new Promise(r => setTimeout(r, waitMs));\n    }\n  }\n\n  update(headers: Headers): void {\n    this.remaining = Number(headers.get('X-RateLimit-Remaining') ?? this.remaining);\n    this.resetAt = Number(headers.get('X-RateLimit-Reset') ?? this.resetAt);\n  }\n}\n```\n\n### Step 4: Protect Your Own Endpoints \u2014 Vercel WAF Rate Limiting\n\nVercel's WAF provides built-in rate limiting for your deployed functions:\n\n```typescript\n// middleware.ts \u2014 WAF rate limiting via Vercel Firewall SDK\nimport { ipAddress } from '@vercel/functions';\nimport { checkRateLimit } from '@vercel/firewall';\n\nexport async function middleware(request: Request) {\n  const ip = ipAddress(request) ?? '127.0.0.1';\n\n  // Rate limit: 100 requests per 60 seconds per IP\n  const { rateLimited } = await checkRateLimit('api-limit', {\n    key: ip,\n    limit: 100,\n    window: '60s',\n  });\n\n  if (rateLimited) {\n    return new Response(\n      JSON.stringify({ error: 'Too many requests. Please try again later.' }),\n      { status: 429, headers: { 'Content-Type': 'application/json', 'Retry-After': '60' } }\n    );\n  }\n}\n\nexport const config = {\n  matcher: '/api/:path*',\n};\n```\n\nInstall: `npm install @vercel/firewall @vercel/functions`\n\n### Step 5: Custom Rate Limiting with Edge Config\n\n```typescript\n// api/rate-limited-endpoint.ts\nimport { get } from '@vercel/edge-config';\n\nexport const config = { runtime: 'edge' };\n\n// Simple in-memory sliding window (per-isolate, not global)\nconst windowMs = 60_000;\nconst maxRequests = 50;\nconst requests = new Map<string, number[]>();\n\nfunction isRateLimited(key: string): boolean {\n  const now = Date.now();\n  const timestamps = (requests.get(key) ?? []).filter(t => now - t < windowMs);\n  timestamps.push(now);\n  requests.set(key, timestamps);\n  return timestamps.length > maxRequests;\n}\n\nexport default async function handler(request: Request): Promise<Response> {\n  const ip = request.headers.get('x-forwarded-for') ?? 'unknown';\n\n  if (isRateLimited(ip)) {\n    return Response.json({ error: 'Rate limit exceeded' }, { status: 429 });\n  }\n\n  return Response.json({ data: 'ok' });\n}\n```\n\n## Platform Concurrency Limits\n\n| Plan | Concurrent Executions | Builds/Hour |\n|------|-----------------------|-------------|\n| Hobby | 10 | 32 |\n| Pro | 1,000 | 6,000/day |\n| Enterprise | 100,000 | Custom |\n\n## Output\n\n- Vercel API calls wrapped with automatic retry and backoff\n- Rate limit headers parsed and monitored proactively\n- WAF rate limiting protecting deployed API endpoints\n- Custom per-IP rate limiting for fine-grained control\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `429 Too Many Requests` | API rate limit exceeded | Use `vercelFetchWithRetry()` wrapper |\n| `FUNCTION_THROTTLED` | Concurrent execution limit hit | Reduce parallelism or upgrade plan |\n| Rate limit not applied | Middleware not matching routes | Check `config.matcher` pattern |\n| In-memory rate limit resets | Edge function isolate recycled | Use Redis or Vercel KV for persistent state |\n\n## Resources\n\n- [Vercel Limits](https://vercel.com/docs/limits)\n- [WAF Rate Limiting](https://vercel.com/docs/vercel-firewall/vercel-waf/rate-limiting)\n- [Rate Limiting SDK](https://vercel.com/docs/vercel-firewall/vercel-waf/rate-limiting-sdk)\n- [FUNCTION_THROTTLED](https://vercel.com/docs/errors/FUNCTION_THROTTLED)\n- [Concurrency Scaling](https://vercel.com/docs/functions/concurrency-scaling)\n\n## Next Steps\n\nFor security best practices, see `vercel-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "vercel-rate-limits",
-    "description": "Handle Vercel API rate limits, implement retry logic, and configure",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

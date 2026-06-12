@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033056",
   "name": "replit-rate-limits",
   "slug": "replit-rate-limits",
   "description": "Handle Replit resource limits: KV database caps, deployment quotas,",
   "content": "# Replit Rate Limits\n\n## Overview\n\nUnderstand and work within Replit's resource limits: Key-Value Database size caps, Object Storage quotas, deployment compute budgets, and egress allowances. Implement rate limiting in your own app for production safety.\n\n## Prerequisites\n\n- Replit account with active Repls\n- Understanding of your current resource usage\n- For rate limiting: Express or Flask app\n\n## Replit Platform Limits\n\n### Key-Value Database\n\n| Limit | Value |\n|-------|-------|\n| Total storage | 50 MiB (keys + values combined) |\n| Maximum keys | 5,000 |\n| Key size | 1,000 bytes |\n| Value size | 5 MiB per value |\n\n### Object Storage (App Storage)\n\n| Limit | Value |\n|-------|-------|\n| Object size | Configurable per bucket |\n| Bucket count | Per Repl (auto-provisioned) |\n| Rate | Throttled at high request volume |\n\n### PostgreSQL\n\n| Limit | Value |\n|-------|-------|\n| Storage | Plan-dependent (1-10+ GB) |\n| Connections | Pooled, plan-dependent |\n| Dev + Prod | Separate databases auto-provisioned |\n\n### Deployments\n\n| Resource | Autoscale | Reserved VM |\n|----------|-----------|-------------|\n| Scale behavior | 0 to N based on traffic | Always-on, fixed size |\n| Min cost | Pay per request | $0.20/day (~$6.20/month) |\n| Max resources | Plan-dependent | Up to 4 vCPU, 16 GiB RAM |\n| Egress | $0.10/GiB over allowance | $0.10/GiB over allowance |\n\n## Instructions\n\n### Step 1: Monitor KV Database Usage\n\n```typescript\n// Check how close you are to KV limits\nimport Database from '@replit/database';\n\nasync function checkKVUsage() {\n  const db = new Database();\n  const keys = await db.list();\n  let totalSize = 0;\n\n  for (const key of keys) {\n    const value = await db.get(key);\n    const valueSize = JSON.stringify(value).length;\n    totalSize += key.length + valueSize;\n  }\n\n  const limitMiB = 50;\n  const usedMiB = totalSize / (1024 * 1024);\n  const percentUsed = (usedMiB / limitMiB * 100).toFixed(1);\n\n  console.log(`KV Usage: ${usedMiB.toFixed(2)} MiB / ${limitMiB} MiB (${percentUsed}%)`);\n  console.log(`Keys: ${keys.length} / 5,000`);\n\n  if (parseFloat(percentUsed) > 80) {\n    console.warn('WARNING: KV database above 80%. Consider migrating large values to Object Storage.');\n  }\n}\n```\n\n### Step 2: Implement App-Level Rate Limiting\n\n```typescript\n// src/middleware/rate-limit.ts \u2014 protect your Replit-hosted API\nimport { Request, Response, NextFunction } from 'express';\n\ninterface RateLimitEntry {\n  count: number;\n  resetAt: number;\n}\n\nconst store = new Map<string, RateLimitEntry>();\n\nexport function rateLimit(opts = { windowMs: 60000, max: 100 }) {\n  return (req: Request, res: Response, next: NextFunction) => {\n    const key = req.headers['x-replit-user-id'] as string || req.ip;\n    const now = Date.now();\n    const entry = store.get(key);\n\n    if (!entry || now > entry.resetAt) {\n      store.set(key, { count: 1, resetAt: now + opts.windowMs });\n      setRateLimitHeaders(res, opts.max, opts.max - 1, now + opts.windowMs);\n      return next();\n    }\n\n    entry.count++;\n    const remaining = Math.max(0, opts.max - entry.count);\n    setRateLimitHeaders(res, opts.max, remaining, entry.resetAt);\n\n    if (entry.count > opts.max) {\n      const retryAfter = Math.ceil((entry.resetAt - now) / 1000);\n      res.set('Retry-After', String(retryAfter));\n      return res.status(429).json({\n        error: 'Too many requests',\n        retryAfter,\n      });\n    }\n\n    next();\n  };\n}\n\nfunction setRateLimitHeaders(res: Response, limit: number, remaining: number, reset: number) {\n  res.set('X-RateLimit-Limit', String(limit));\n  res.set('X-RateLimit-Remaining', String(remaining));\n  res.set('X-RateLimit-Reset', String(Math.ceil(reset / 1000)));\n}\n\n// Clean up expired entries periodically\nsetInterval(() => {\n  const now = Date.now();\n  for (const [key, entry] of store) {\n    if (now > entry.resetAt) store.delete(key);\n  }\n}, 60000);\n```\n\n### Step 3: Apply Rate Limiting\n\n```typescript\nimport express from 'express';\nimport { rateLimit } from './middleware/rate-limit';\n\nconst app = express();\n\n// Global: 100 requests per minute\napp.use(rateLimit({ windowMs: 60000, max: 100 }));\n\n// Strict: 10 per minute for write operations\napp.post('/api/*', rateLimit({ windowMs: 60000, max: 10 }));\n\n// Generous: 500 per minute for reads\napp.get('/api/*', rateLimit({ windowMs: 60000, max: 500 }));\n```\n\n### Step 4: Exponential Backoff for External APIs\n\n```typescript\n// When your Replit app calls external APIs\nexport async function withBackoff<T>(\n  fn: () => Promise<T>,\n  opts = { maxRetries: 5, baseMs: 1000, maxMs: 30000 }\n): Promise<T> {\n  for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {\n    try {\n      return await fn();\n    } catch (err: any) {\n      if (attempt === opts.maxRetries) throw err;\n      const status = err.status || err.response?.status;\n      if (status && status !== 429 && status < 500) throw err;\n\n      const delay = Math.min(opts.baseMs * 2 ** attempt, opts.maxMs);\n      const jitter = Math.random() * delay * 0.1;\n      await new Promise(r => setTimeout(r, delay + jitter));\n    }\n  }\n  throw new Error('Unreachable');\n}\n```\n\n### Step 5: Request Queue for Burst Protection\n\n```typescript\nimport PQueue from 'p-queue';\n\n// Limit concurrent requests to external services\nconst queue = new PQueue({\n  concurrency: 5,       // max parallel requests\n  interval: 1000,       // per this window\n  intervalCap: 10,      // max requests in window\n});\n\nasync function rateLimitedFetch(url: string, opts?: RequestInit) {\n  return queue.add(() => fetch(url, opts));\n}\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| KV `Max storage exceeded` | Over 50 MiB | Migrate large values to Object Storage |\n| KV `Max keys exceeded` | Over 5,000 keys | Archive old data, use prefix namespacing |\n| 429 from your API | Client hitting your limits | Return `Retry-After` header |\n| Object Storage throttled | Too many rapid requests | Add client-side request queue |\n| High egress costs | Large responses | Compress, paginate, or cache at CDN |\n\n## Resources\n\n- [Replit Database](https://docs.replit.com/cloud-services/storage-and-databases/replit-database)\n- [Usage-Based Billing](https://docs.replit.com/billing/about-usage-based-billing)\n- [p-queue](https://github.com/sindresorhus/p-queue)\n\n## Next Steps\n\nFor security configuration, see `replit-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "replit-rate-limits",
-    "description": "Handle Replit resource limits: KV database caps, deployment quotas,",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

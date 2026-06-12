@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033052",
   "name": "replit-observability",
   "slug": "replit-observability",
   "description": "Monitor Replit deployments with health checks, uptime tracking, resource",
   "content": "# Replit Observability\n\n## Overview\n\nMonitor Replit deployment health, track cold starts, measure resource usage, and set up alerting. Covers Replit's built-in monitoring, external health checking, structured logging, and integration with monitoring services.\n\n## Prerequisites\n\n- Replit app deployed (Autoscale or Reserved VM)\n- Health endpoint implemented (`/health`)\n- External monitoring service (UptimeRobot, Better Stack, or Prometheus)\n\n## Instructions\n\n### Step 1: Health Endpoint with Detailed Metrics\n\n```typescript\n// src/routes/health.ts \u2014 comprehensive health check\nimport { Router } from 'express';\nimport { pool } from '../services/postgres';\n\nconst router = Router();\nconst startTime = Date.now();\n\nrouter.get('/health', async (req, res) => {\n  const checks: Record<string, any> = {\n    status: 'ok',\n    uptime: process.uptime(),\n    bootTime: ((Date.now() - startTime) / 1000).toFixed(1) + 's ago',\n    timestamp: new Date().toISOString(),\n    repl: process.env.REPL_SLUG,\n    region: process.env.REPLIT_DEPLOYMENT_REGION,\n    env: process.env.NODE_ENV,\n  };\n\n  // Database check\n  if (process.env.DATABASE_URL) {\n    const dbStart = Date.now();\n    try {\n      await pool.query('SELECT 1');\n      checks.database = {\n        status: 'connected',\n        latencyMs: Date.now() - dbStart,\n        pool: { total: pool.totalCount, idle: pool.idleCount },\n      };\n    } catch (err: any) {\n      checks.database = { status: 'disconnected', error: err.message };\n      checks.status = 'degraded';\n    }\n  }\n\n  // Memory metrics\n  const mem = process.memoryUsage();\n  checks.memory = {\n    heapMB: Math.round(mem.heapUsed / 1024 / 1024),\n    totalMB: Math.round(mem.heapTotal / 1024 / 1024),\n    rssMB: Math.round(mem.rss / 1024 / 1024),\n    percent: ((mem.heapUsed / mem.heapTotal) * 100).toFixed(1),\n  };\n\n  // Node.js info\n  checks.runtime = {\n    node: process.version,\n    platform: process.platform,\n    pid: process.pid,\n  };\n\n  res.status(checks.status === 'ok' ? 200 : 503).json(checks);\n});\n\n// Lightweight ping for uptime monitors\nrouter.get('/ping', (req, res) => res.send('pong'));\n\nexport default router;\n```\n\n### Step 2: Structured Logging\n\n```typescript\n// src/utils/logger.ts \u2014 structured JSON logging\nconst IS_PROD = process.env.NODE_ENV === 'production';\n\ntype LogLevel = 'debug' | 'info' | 'warn' | 'error';\n\nfunction log(level: LogLevel, message: string, data?: Record<string, any>) {\n  if (level === 'debug' && IS_PROD) return;\n\n  const entry = {\n    timestamp: new Date().toISOString(),\n    level,\n    message,\n    repl: process.env.REPL_SLUG,\n    ...data,\n  };\n\n  // JSON format for machine parsing, human-readable in dev\n  if (IS_PROD) {\n    console[level === 'error' ? 'error' : 'log'](JSON.stringify(entry));\n  } else {\n    console[level === 'error' ? 'error' : 'log'](\n      `[${level.toUpperCase()}] ${message}`,\n      data || ''\n    );\n  }\n}\n\nexport const logger = {\n  debug: (msg: string, data?: any) => log('debug', msg, data),\n  info: (msg: string, data?: any) => log('info', msg, data),\n  warn: (msg: string, data?: any) => log('warn', msg, data),\n  error: (msg: string, data?: any) => log('error', msg, data),\n};\n\n// Request logging middleware\nexport function requestLogger(req: any, res: any, next: any) {\n  const start = Date.now();\n  res.on('finish', () => {\n    logger.info('request', {\n      method: req.method,\n      path: req.path,\n      status: res.statusCode,\n      durationMs: Date.now() - start,\n      userId: req.headers['x-replit-user-id'] || 'anonymous',\n    });\n  });\n  next();\n}\n```\n\n### Step 3: External Uptime Monitoring\n\nSet up external monitors to detect Autoscale cold starts and outages:\n\n```markdown\nUptimeRobot (free tier: 50 monitors):\n1. Create new monitor: HTTP(s)\n2. URL: https://your-app.replit.app/ping\n3. Interval: 5 minutes\n4. Alert contacts: email, Slack webhook\n\nBetter Stack / Datadog / Grafana Cloud:\n- Same setup, more features\n- Track response time trends\n- Detect cold start patterns\n- Set up PagerDuty integration\n\nKey metrics to monitor externally:\n- Uptime percentage (target: 99.9%)\n- Response time P95 (target: < 2s)\n- Cold start frequency (Autoscale only)\n- SSL certificate expiry\n```\n\n### Step 4: Cold Start Detection\n\n```typescript\n// Track cold starts for Autoscale deployments\nconst COLD_START_THRESHOLD_MS = 5000;\nlet firstRequestTime: number | null = null;\n\napp.use((req, res, next) => {\n  if (!firstRequestTime) {\n    firstRequestTime = Date.now();\n    const bootTime = process.uptime();\n    if (bootTime < 30) { // Just started\n      logger.info('cold_start_detected', {\n        bootTimeMs: Math.round(bootTime * 1000),\n        path: req.path,\n      });\n    }\n  }\n  next();\n});\n```\n\n### Step 5: Alerting Rules\n\n```typescript\n// src/utils/alerts.ts \u2014 send alerts to Slack on issues\nasync function alertSlack(message: string, severity: 'info' | 'warning' | 'critical') {\n  const webhookUrl = process.env.SLACK_WEBHOOK_URL;\n  if (!webhookUrl) return;\n\n  const emoji = { info: 'information_source', warning: 'warning', critical: 'rotating_light' };\n  await fetch(webhookUrl, {\n    method: 'POST',\n    headers: { 'Content-Type': 'application/json' },\n    body: JSON.stringify({\n      text: `:${emoji[severity]}: [${severity.toUpperCase()}] ${process.env.REPL_SLUG}\\n${message}`,\n    }),\n  });\n}\n\n// Monitor memory usage\nsetInterval(async () => {\n  const mem = process.memoryUsage();\n  const heapPercent = (mem.heapUsed / mem.heapTotal) * 100;\n\n  if (heapPercent > 90) {\n    await alertSlack(`Memory critical: ${heapPercent.toFixed(1)}% heap used`, 'critical');\n  } else if (heapPercent > 75) {\n    await alertSlack(`Memory warning: ${heapPercent.toFixed(1)}% heap used`, 'warning');\n  }\n}, 60000);\n\n// Monitor error rate\nlet errorCount = 0;\nlet requestCount = 0;\n\napp.use((req, res, next) => {\n  requestCount++;\n  res.on('finish', () => {\n    if (res.statusCode >= 500) errorCount++;\n  });\n  next();\n});\n\nsetInterval(async () => {\n  if (requestCount > 0) {\n    const errorRate = (errorCount / requestCount) * 100;\n    if (errorRate > 5) {\n      await alertSlack(`Error rate: ${errorRate.toFixed(1)}% (${errorCount}/${requestCount})`, 'critical');\n    }\n  }\n  errorCount = 0;\n  requestCount = 0;\n}, 300000); // Check every 5 minutes\n```\n\n### Step 6: Replit Dashboard Monitoring\n\n```markdown\nBuilt-in monitoring in Replit:\n1. Deployment Settings > Logs: real-time stdout/stderr\n2. Deployment Settings > History: deploy timeline + rollbacks\n3. Database pane > Settings: storage usage + connection info\n4. Billing > Usage: compute, egress, and storage costs\n\nCheck deployment logs:\n- Click on active deployment\n- View real-time log stream\n- Filter by error/warning\n- Logs persist across container restarts\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Cold starts undetected | No external monitor | Set up UptimeRobot or similar |\n| Deployment logs missing | Container restarted | Use external log aggregator |\n| Memory leak unnoticed | No memory monitoring | Add heap tracking + alerts |\n| DB pool exhaustion | Too many connections | Monitor pool.totalCount in health |\n\n## Resources\n\n- [Monitoring Deployments](https://docs.replit.com/cloud-services/deployments/monitoring-a-deployment)\n- [Replit Status Page](https://status.replit.com)\n- [UptimeRobot](https://uptimerobot.com)\n\n## Next Steps\n\nFor incident response, see `replit-incident-runbook`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "replit-observability",
-    "description": "Monitor Replit deployments with health checks, uptime tracking, resource",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

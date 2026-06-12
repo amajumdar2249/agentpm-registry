@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032314",
   "name": "intercom-core-workflow-a",
   "slug": "intercom-core-workflow-a",
   "description": "Manage Intercom contacts: create, search, update, merge leads into users.",
   "content": "# Intercom Contacts & Contact Management\n\n## Overview\n\nPrimary workflow for managing Intercom contacts. Covers creating users and leads, searching with filters, updating custom attributes, merging leads into users, and managing tags and segments.\n\n## Prerequisites\n\n- Completed `intercom-install-auth` setup\n- Understanding of Intercom contact model (users vs leads)\n- Valid API credentials with contacts read/write scope\n\n## Instructions\n\n### Step 1: Create Contacts\n\n```typescript\nimport { IntercomClient } from \"intercom-client\";\n\nconst client = new IntercomClient({\n  token: process.env.INTERCOM_ACCESS_TOKEN!,\n});\n\n// Create an identified user (has external_id)\nconst user = await client.contacts.create({\n  role: \"user\",\n  externalId: \"customer-9001\",\n  email: \"alice@acme.com\",\n  name: \"Alice Johnson\",\n  phone: \"+1-555-0100\",\n  customAttributes: {\n    plan: \"enterprise\",\n    company_size: 500,\n    signed_up_at: Math.floor(Date.now() / 1000),\n  },\n});\n// Response: { type: \"contact\", id: \"6657add46abd...\", role: \"user\", ... }\n\n// Create an anonymous lead (no external_id required)\nconst lead = await client.contacts.create({\n  role: \"lead\",\n  email: \"visitor@example.com\",\n  name: \"Website Visitor\",\n  customAttributes: {\n    landing_page: \"/pricing\",\n    utm_source: \"google\",\n  },\n});\n```\n\n### Step 2: Search Contacts\n\nPOST to `https://api.intercom.io/contacts/search` with query filters.\n\n```typescript\n// Simple search by email\nconst byEmail = await client.contacts.search({\n  query: {\n    field: \"email\",\n    operator: \"=\",\n    value: \"alice@acme.com\",\n  },\n});\n\n// Compound search: users on enterprise plan who signed up recently\nconst filtered = await client.contacts.search({\n  query: {\n    operator: \"AND\",\n    value: [\n      { field: \"role\", operator: \"=\", value: \"user\" },\n      { field: \"custom_attributes.plan\", operator: \"=\", value: \"enterprise\" },\n      { field: \"signed_up_at\", operator: \">\", value: Math.floor(Date.now() / 1000) - 86400 * 30 },\n    ],\n  },\n  pagination: { per_page: 50 },\n  sort: { field: \"created_at\", order: \"descending\" },\n});\n\nconsole.log(`Found ${filtered.totalCount} contacts`);\nfor (const contact of filtered.data) {\n  console.log(`  ${contact.name} (${contact.email}) - plan: ${contact.customAttributes?.plan}`);\n}\n```\n\n### Step 3: Update a Contact\n\n```typescript\nconst updated = await client.contacts.update({\n  contactId: user.id,\n  name: \"Alice Johnson-Smith\",\n  customAttributes: {\n    plan: \"enterprise_plus\",\n    upgraded_at: Math.floor(Date.now() / 1000),\n  },\n});\n```\n\n### Step 4: Merge a Lead into a User\n\nWhen an anonymous lead is identified, merge them into a user contact. The lead's conversation history transfers to the user.\n\n```typescript\n// Lead must have role \"lead\", user must have role \"user\"\nconst merged = await client.contacts.merge({\n  from: lead.id,  // Lead ID (will be deleted)\n  into: user.id,  // User ID (will absorb lead data)\n});\n\nconsole.log(`Merged lead into user: ${merged.id}`);\n// The lead's conversations, events, and tags are now on the user\n```\n\n### Step 5: List Segments for a Contact\n\n```typescript\nconst segments = await client.contacts.listSegments({\n  contactId: user.id,\n});\n\nfor (const segment of segments.data) {\n  console.log(`Segment: ${segment.name} (${segment.id})`);\n}\n```\n\n### Step 6: Paginate All Contacts\n\n```typescript\nasync function* allContacts(client: IntercomClient) {\n  let startingAfter: string | undefined;\n\n  do {\n    const page = await client.contacts.list({\n      perPage: 50,\n      startingAfter,\n    });\n\n    for (const contact of page.data) {\n      yield contact;\n    }\n\n    startingAfter = page.pages?.next?.startingAfter ?? undefined;\n  } while (startingAfter);\n}\n\n// Stream all contacts\nlet count = 0;\nfor await (const contact of allContacts(client)) {\n  count++;\n  if (count % 100 === 0) console.log(`Processed ${count} contacts`);\n}\n```\n\n## Contact Data Model\n\n| Field | Type | Description |\n|-------|------|-------------|\n| `id` | string | Intercom-generated unique ID |\n| `external_id` | string | Your system's user ID |\n| `role` | `\"user\"` or `\"lead\"` | Contact type |\n| `email` | string | Email address |\n| `name` | string | Full name |\n| `phone` | string | Phone number |\n| `custom_attributes` | object | Custom key-value data |\n| `created_at` | number | Unix timestamp |\n| `last_seen_at` | number | Last activity timestamp |\n| `signed_up_at` | number | Signup timestamp |\n| `tags` | object | Applied tags list |\n| `companies` | object | Associated companies |\n| `location` | object | GeoIP location data |\n\n## Error Handling\n\n| Error | HTTP Code | Cause | Solution |\n|-------|-----------|-------|----------|\n| `not_found` | 404 | Contact ID doesn't exist | Verify with search first |\n| `conflict` | 409 | Duplicate `external_id` or `email` | Search before creating |\n| `parameter_invalid` | 422 | Bad field value or missing required field | Check field types and names |\n| `rate_limit_exceeded` | 429 | Over 10,000 req/min (private apps) | Add backoff, batch operations |\n| `merge_not_possible` | 400 | Merging user into lead (reversed) | `from` must be lead, `into` must be user |\n\n## Resources\n\n- [Contacts API](https://developers.intercom.com/docs/references/rest-api/api.intercom.io/contacts)\n- [Search Contacts](https://developers.intercom.com/docs/references/rest-api/api.intercom.io/contacts/searchcontacts)\n- [Merge Contacts](https://developers.intercom.com/docs/references/rest-api/api.intercom.io/contacts/mergecontact)\n- [Contact Guides](https://developers.intercom.com/docs/guides/contacts)\n\n## Next Steps\n\nFor conversation management, see `intercom-core-workflow-b`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "intercom-core-workflow-a",
-    "description": "Manage Intercom contacts: create, search, update, merge leads into users.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

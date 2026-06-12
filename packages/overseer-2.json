@@ -1,15 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000028034",
   "name": "overseer",
   "slug": "overseer-2",
   "description": "Manage tasks via Overseer codemode MCP. Use when tracking multi-session work, breaking down implementation, or persisting context for handoffs.",
   "content": "\n# Agent Coordination with Overseer\n\n## Core Principle: Tickets, Not Todos\n\nOverseer tasks are **tickets** - structured artifacts with comprehensive context:\n\n- **Description**: One-line summary (issue title)\n- **Context**: Full background, requirements, approach (issue body)\n- **Result**: Implementation details, decisions, outcomes (PR description)\n\nThink: \"Would someone understand the what, why, and how from this task alone AND what success looks like?\"\n\n## Task IDs are Ephemeral\n\n**Never reference task IDs in external artifacts** (commits, PRs, docs). Task IDs like `task_01JQAZ...` become meaningless once tasks complete. Describe the work itself, not the task that tracked it.\n\n## Overseer vs OpenCode's TodoWrite\n\n|                 | Overseer                              | TodoWrite              |\n| --------------- | ------------------------------------- | ---------------------- |\n| **Persistence** | SQLite database                       | Session-only           |\n| **Context**     | Rich (description + context + result) | Basic                  |\n| **Hierarchy**   | 3-level (milestone -> task -> subtask)| Flat                   |\n\nUse **Overseer** for persistent work. Use **TodoWrite** for ephemeral in-session tracking only.\n\n## When to Use Overseer\n\n**Use Overseer when:**\n- Breaking down complexity into subtasks\n- Work spans multiple sessions\n- Context needs to persist for handoffs\n- Recording decisions for future reference\n\n**Skip Overseer when:**\n- Work is a single atomic action\n- Everything fits in one message exchange\n- Overhead exceeds value\n- TodoWrite is sufficient\n\n## Finding Work\n\n```javascript\n// Get next ready task with full context (recommended for work sessions)\nconst task = await tasks.nextReady(milestoneId); // TaskWithContext | null\nif (!task) {\n  console.log(\"No ready tasks\");\n  return;\n}\n\n// Get all ready tasks (for progress overview)\nconst readyTasks = await tasks.list({ ready: true }); // Task[]\n```\n\n**Use `nextReady()`** when starting work - returns `TaskWithContext | null` (deepest ready leaf with full context chain + inherited learnings).\n**Use `list({ ready: true })`** for status/progress checks - returns `Task[]` without context chain.\n\n## Basic Workflow\n\n```javascript\n// 1. Get next ready task (returns TaskWithContext | null)\nconst task = await tasks.nextReady();\nif (!task) return \"No ready tasks\";\n\n// 2. Review context (available on TaskWithContext)\nconsole.log(task.context.own);       // This task's context\nconsole.log(task.context.parent);    // Parent's context (if depth > 0)\nconsole.log(task.context.milestone); // Root milestone context (if depth > 1)\nconsole.log(task.learnings.own);     // Learnings attached to this task (bubbled from children)\n\n// 3. Start work (VCS required - creates bookmark, records start commit)\nawait tasks.start(task.id);\n\n// 4. Implement...\n\n// 5. Complete with learnings (VCS required - commits changes, bubbles learnings to parent)\nawait tasks.complete(task.id, {\n  result: \"Implemented login endpoint with JWT tokens\",\n  learnings: [\"bcrypt rounds should be 12 for production\"]\n});\n\n// Alternative: Cancel if abandoning (does NOT satisfy blockers)\nawait tasks.cancel(task.id);\n\n// 6. Archive finished tasks to hide from default list\nawait tasks.archive(task.id);\n```\n\nSee @file references/workflow.md for detailed workflow guidance.\n\n## Understanding Task Context\n\nTasks have **progressive context** - inherited from ancestors:\n\n```javascript\nconst task = await tasks.get(taskId); // Returns TaskWithContext\n// task.context.own      - this task's context (always present)\n// task.context.parent   - parent task's context (if depth > 0)\n// task.context.milestone - root milestone's context (if depth > 1)\n\n// Task's own learnings (bubbled from completed children)\n// task.learnings.own - learnings attached to this task\n```\n\n## Return Type Summary\n\n| Method | Returns | Notes |\n|--------|---------|-------|\n| `tasks.get(id)` | `TaskWithContext` | Full context chain + inherited learnings |\n| `tasks.nextReady()` | `TaskWithContext \\| null` | Deepest ready leaf with full context |\n| `tasks.list()` | `Task[]` | Basic task fields only |\n| `tasks.create()` | `Task` | No context chain |\n| `tasks.start/complete()` | `Task` | No context chain |\n\n## Blockers\n\nBlockers prevent a task from being ready until the blocker completes.\n\n**Constraints:**\n- Blockers cannot be self\n- Blockers cannot be ancestors (parent, grandparent, etc.)\n- Blockers cannot be descendants\n- Creating/reparenting with invalid blockers is rejected\n\n```javascript\n// Add blocker - taskA waits for taskB\nawait tasks.block(taskA.id, taskB.id);\n\n// Remove blocker\nawait tasks.unblock(taskA.id, taskB.id);\n```\n\n## Task Hierarchies\n\nThree levels: **Milestone** (depth 0) -> **Task** (depth 1) -> **Subtask** (depth 2).\n\n| Level | Name | Purpose | Example |\n|-------|------|---------|---------|\n| 0 | **Milestone** | Large initiative | \"Add user authentication system\" |\n| 1 | **Task** | Significant work item | \"Implement JWT middleware\" |\n| 2 | **Subtask** | Atomic step | \"Add token verification function\" |\n\n**Choosing the right level:**\n- Small feature (1-2 files) -> Single task\n- Medium feature (3-7 steps) -> Task with subtasks\n- Large initiative (5+ tasks) -> Milestone with tasks\n\nSee @file references/hierarchies.md for detailed guidance.\n\n## Recording Results\n\nComplete tasks **immediately after implementing AND verifying**:\n- Capture decisions while fresh\n- Note deviations from plan\n- Document verification performed\n- Create follow-up tasks for tech debt\n\nYour result must include explicit verification evidence. See @file references/verification.md.\n\n## Best Practices\n\n1. **Right-size tasks**: Completable in one focused session\n2. **Clear completion criteria**: Context should define \"done\"\n3. **Don't over-decompose**: 3-7 children per parent\n4. **Action-oriented descriptions**: Start with verbs (\"Add\", \"Fix\", \"Update\")\n5. **Verify before completing**: Tests passing, manual testing done\n\n---\n\n## Reading Order\n\n| Task | File |\n|------|------|\n| Understanding API | @file references/api.md |\n| Implementation workflow | @file references/workflow.md |\n| Task decomposition | @file references/hierarchies.md |\n| Good/bad examples | @file references/examples.md |\n| Verification checklist | @file references/verification.md |\n\n## In This Reference\n\n| File | Purpose |\n|------|---------|\n| `references/api.md` | Overseer MCP codemode API types/methods |\n| `references/workflow.md` | Start->implement->complete workflow |\n| `references/hierarchies.md` | Milestone/task/subtask organization |\n| `references/examples.md` | Good/bad context and result examples |\n| `references/verification.md` | Verification checklist and process |\n",
+  "author": "dmmulroy",
   "version": "1.0.0",
-  "metadata": {
-    "name": "overseer",
-    "description": "Manage tasks via Overseer codemode MCP. Use when tracking multi-session work, breaking down implementation, or persisting context for handoffs.",
-    "license": "MIT",
-    "metadata": "",
-    "author": "dmmulroy",
-    "version": "1.0.0"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

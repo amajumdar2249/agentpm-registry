@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031144",
   "name": "adobe-core-workflow-b",
   "slug": "adobe-core-workflow-b",
   "description": "Execute Adobe PDF Services workflow: create PDFs from HTML/DOCX, extract",
   "content": "# Adobe Core Workflow B \u2014 PDF Services\n\n## Overview\n\nDocument automation using Adobe PDF Services API: create PDFs from HTML/DOCX, extract structured text and tables with Sensei AI, generate documents from Word templates with JSON data, and convert PDFs to LLM-friendly Markdown.\n\n## Prerequisites\n\n- Completed `adobe-install-auth` with PDF Services credentials\n- `npm install @adobe/pdfservices-node-sdk` (v4.x+)\n- 500 free document transactions/month on the free tier\n\n## Instructions\n\n### Step 1: Create PDF from HTML\n\n```typescript\n// src/workflows/pdf-create.ts\nimport {\n  ServicePrincipalCredentials,\n  PDFServices,\n  MimeType,\n  CreatePDFJob,\n  CreatePDFResult,\n} from '@adobe/pdfservices-node-sdk';\nimport * as fs from 'fs';\n\nconst credentials = new ServicePrincipalCredentials({\n  clientId: process.env.ADOBE_CLIENT_ID!,\n  clientSecret: process.env.ADOBE_CLIENT_SECRET!,\n});\nconst pdfServices = new PDFServices({ credentials });\n\nexport async function htmlToPdf(htmlPath: string, outputPath: string): Promise<void> {\n  const inputStream = fs.createReadStream(htmlPath);\n  const inputAsset = await pdfServices.upload({\n    readStream: inputStream,\n    mimeType: MimeType.HTML,\n  });\n\n  const job = new CreatePDFJob({ inputAsset });\n  const pollingURL = await pdfServices.submit({ job });\n  const result = await pdfServices.getJobResult({\n    pollingURL,\n    resultType: CreatePDFResult,\n  });\n\n  const resultAsset = result.result!.asset;\n  const streamAsset = await pdfServices.getContent({ asset: resultAsset });\n  const output = fs.createWriteStream(outputPath);\n  streamAsset.readStream.pipe(output);\n\n  await new Promise((resolve, reject) => {\n    output.on('finish', resolve);\n    output.on('error', reject);\n  });\n\n  console.log(`PDF created: ${outputPath}`);\n}\n```\n\n### Step 2: Extract Text and Tables from PDF (Sensei AI)\n\n```typescript\n// src/workflows/pdf-extract.ts\nimport {\n  PDFServices,\n  MimeType,\n  ExtractPDFParams,\n  ExtractElementType,\n  ExtractPDFJob,\n  ExtractPDFResult,\n  ExtractRenditionsElementType,\n} from '@adobe/pdfservices-node-sdk';\nimport * as fs from 'fs';\nimport AdmZip from 'adm-zip';\n\nexport async function extractPdfContent(\n  pdfPath: string,\n  options?: { tables?: boolean; figures?: boolean }\n): Promise<{ text: string; tables: any[]; }> {\n  const inputStream = fs.createReadStream(pdfPath);\n  const inputAsset = await pdfServices.upload({\n    readStream: inputStream,\n    mimeType: MimeType.PDF,\n  });\n\n  const elements = [ExtractElementType.TEXT];\n  if (options?.tables !== false) elements.push(ExtractElementType.TABLES);\n\n  const params = new ExtractPDFParams({\n    elementsToExtract: elements,\n    ...(options?.figures && {\n      elementsToExtractRenditions: [ExtractRenditionsElementType.FIGURES],\n    }),\n  });\n\n  const job = new ExtractPDFJob({ inputAsset, params });\n  const pollingURL = await pdfServices.submit({ job });\n  const result = await pdfServices.getJobResult({\n    pollingURL,\n    resultType: ExtractPDFResult,\n  });\n\n  // Download and parse the result ZIP\n  const resultAsset = result.result!.resource;\n  const streamAsset = await pdfServices.getContent({ asset: resultAsset });\n  const chunks: Buffer[] = [];\n  for await (const chunk of streamAsset.readStream) {\n    chunks.push(Buffer.from(chunk));\n  }\n\n  const zip = new AdmZip(Buffer.concat(chunks));\n  const structuredData = JSON.parse(\n    zip.readAsText('structuredData.json')\n  );\n\n  // Parse text elements\n  const textElements = structuredData.elements\n    .filter((el: any) => el.Text)\n    .map((el: any) => el.Text);\n\n  // Parse table elements\n  const tableElements = structuredData.elements\n    .filter((el: any) => el.Path?.includes('/Table'));\n\n  return { text: textElements.join('\\n'), tables: tableElements };\n}\n```\n\n### Step 3: Document Generation from Word Template\n\n```typescript\n// src/workflows/pdf-docgen.ts\nimport {\n  PDFServices,\n  MimeType,\n  DocumentMergeJob,\n  DocumentMergeParams,\n  DocumentMergeResult,\n  OutputFormat,\n} from '@adobe/pdfservices-node-sdk';\nimport * as fs from 'fs';\n\nexport async function generateDocument(\n  templatePath: string,   // .docx Word template with {{tags}}\n  data: Record<string, any>,\n  outputPath: string,\n  format: 'pdf' | 'docx' = 'pdf'\n): Promise<void> {\n  const inputStream = fs.createReadStream(templatePath);\n  const inputAsset = await pdfServices.upload({\n    readStream: inputStream,\n    mimeType: MimeType.DOCX,\n  });\n\n  const params = new DocumentMergeParams({\n    jsonDataForMerge: data,\n    outputFormat: format === 'pdf' ? OutputFormat.PDF : OutputFormat.DOCX,\n  });\n\n  const job = new DocumentMergeJob({ inputAsset, params });\n  const pollingURL = await pdfServices.submit({ job });\n  const result = await pdfServices.getJobResult({\n    pollingURL,\n    resultType: DocumentMergeResult,\n  });\n\n  const resultAsset = result.result!.asset;\n  const streamAsset = await pdfServices.getContent({ asset: resultAsset });\n  const output = fs.createWriteStream(outputPath);\n  streamAsset.readStream.pipe(output);\n\n  console.log(`Document generated: ${outputPath}`);\n}\n\n// Usage: Invoice generation\n// await generateDocument('./templates/invoice.docx', {\n//   company: 'Acme Corp',\n//   invoiceNumber: 'INV-2026-001',\n//   items: [\n//     { description: 'API Integration', quantity: 1, price: 5000 },\n//     { description: 'Support Plan', quantity: 12, price: 200 },\n//   ],\n//   total: '$7,400.00',\n// }, './output/invoice.pdf');\n```\n\n### Step 4: PDF to Markdown (LLM-Friendly)\n\n```typescript\n// PDF Extract API supports structured output for LLM ingestion\nexport async function pdfToMarkdown(pdfPath: string): Promise<string> {\n  const { text } = await extractPdfContent(pdfPath, { tables: false });\n\n  // The structuredData.json includes element paths indicating heading levels\n  // For full Markdown fidelity, parse element Paths:\n  //   /H1 -> # heading, /H2 -> ## heading, /L/LI -> bullet\n  return text;\n}\n```\n\n## Output\n\n- PDF files created from HTML, DOCX, or other formats\n- Structured JSON with text, tables, and figures extracted from PDFs\n- Dynamic documents generated from Word templates with JSON data\n- Markdown text extracted from PDFs for LLM consumption\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `DISQUALIFIED` | Encrypted or DRM-protected PDF | Remove encryption before processing |\n| `BAD_PDF` | Corrupted PDF file | Validate PDF with `pdfinfo` before upload |\n| `TIMEOUT` | Large PDF (100+ pages) | Split into smaller PDFs first |\n| `QUOTA_EXCEEDED` | Free tier limit (500 tx/month) | Upgrade plan or wait for monthly reset |\n| `UNSUPPORTED_MEDIA_TYPE` | Wrong MimeType for input | Match MimeType to actual file format |\n\n## Resources\n\n- [PDF Services API How-Tos](https://developer.adobe.com/document-services/docs/overview/pdf-services-api/howtos/)\n- [Document Generation API](https://developer.adobe.com/document-services/docs/overview/document-generation-api/)\n- [PDF Extract API](https://developer.adobe.com/document-services/docs/overview/pdf-extract-api/)\n- [PDF Services Node SDK Samples](https://github.com/adobe/pdfservices-node-sdk-samples)\n\n## Next Steps\n\nFor common errors, see `adobe-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "adobe-core-workflow-b",
-    "description": "Execute Adobe PDF Services workflow: create PDFs from HTML/DOCX, extract",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

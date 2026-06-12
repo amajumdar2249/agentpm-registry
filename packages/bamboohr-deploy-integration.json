@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031385",
   "name": "bamboohr-deploy-integration",
   "slug": "bamboohr-deploy-integration",
   "description": "Deploy BambooHR integrations to Vercel, Fly.io, and Cloud Run platforms.",
   "content": "# BambooHR Deploy Integration\n\n## Overview\n\nDeploy BambooHR-powered applications to cloud platforms with proper secrets management, health checks, and webhook endpoint configuration. Covers Vercel (serverless), Fly.io (containers), and Google Cloud Run.\n\n## Prerequisites\n\n- BambooHR integration tested locally and in staging\n- Production API key and company domain ready\n- Platform CLI installed (`vercel`, `fly`, or `gcloud`)\n\n## Instructions\n\n### Vercel Deployment (Serverless)\n\n```bash\n# Set BambooHR secrets in Vercel\nvercel env add BAMBOOHR_API_KEY production\nvercel env add BAMBOOHR_COMPANY_DOMAIN production\nvercel env add BAMBOOHR_WEBHOOK_SECRET production\n```\n\n**vercel.json:**\n\n```json\n{\n  \"functions\": {\n    \"api/**/*.ts\": {\n      \"maxDuration\": 30\n    }\n  },\n  \"crons\": [{\n    \"path\": \"/api/bamboohr/sync\",\n    \"schedule\": \"0 */6 * * *\"\n  }]\n}\n```\n\n**Webhook endpoint (Vercel serverless):**\n\n```typescript\n// api/webhooks/bamboohr.ts\nimport { verifyBambooHRWebhook } from '../../src/bamboohr/security';\n\nexport const config = { api: { bodyParser: false } };\n\nexport default async function handler(req: any, res: any) {\n  if (req.method !== 'POST') return res.status(405).end();\n\n  const chunks: Buffer[] = [];\n  for await (const chunk of req) chunks.push(chunk);\n  const rawBody = Buffer.concat(chunks);\n\n  const sig = req.headers['x-bamboohr-signature'];\n  const ts = req.headers['x-bamboohr-timestamp'];\n\n  if (!verifyBambooHRWebhook(rawBody, sig, ts, process.env.BAMBOOHR_WEBHOOK_SECRET!)) {\n    return res.status(401).json({ error: 'Invalid signature' });\n  }\n\n  const event = JSON.parse(rawBody.toString());\n  // Process webhook asynchronously\n  await processWebhookEvent(event);\n\n  return res.status(200).json({ received: true });\n}\n```\n\n**Deploy:**\n\n```bash\nvercel --prod\n# Webhook URL: https://your-app.vercel.app/api/webhooks/bamboohr\n```\n\n### Fly.io Deployment (Containers)\n\n**fly.toml:**\n\n```toml\napp = \"my-bamboohr-sync\"\nprimary_region = \"iad\"\n\n[env]\n  NODE_ENV = \"production\"\n\n[http_service]\n  internal_port = 3000\n  force_https = true\n  auto_stop_machines = \"suspend\"\n  auto_start_machines = true\n  min_machines_running = 1\n\n[[services.http_checks]]\n  interval = \"30s\"\n  timeout = \"5s\"\n  path = \"/api/health\"\n  method = \"GET\"\n```\n\n```bash\n# Set secrets\nfly secrets set BAMBOOHR_API_KEY=\"your-prod-key\"\nfly secrets set BAMBOOHR_COMPANY_DOMAIN=\"yourcompany\"\nfly secrets set BAMBOOHR_WEBHOOK_SECRET=\"your-secret\"\n\n# Deploy\nfly deploy\n\n# Verify\nfly status\ncurl -s https://my-bamboohr-sync.fly.dev/api/health | jq .\n```\n\n### Google Cloud Run Deployment\n\n**Dockerfile:**\n\n```dockerfile\nFROM node:20-slim AS builder\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci\nCOPY . .\nRUN npm run build\n\nFROM node:20-slim\nWORKDIR /app\nCOPY --from=builder /app/dist ./dist\nCOPY --from=builder /app/node_modules ./node_modules\nCOPY --from=builder /app/package.json ./\n\nENV NODE_ENV=production\nEXPOSE 8080\nCMD [\"node\", \"dist/index.js\"]\n```\n\n```bash\nPROJECT_ID=\"${GOOGLE_CLOUD_PROJECT}\"\nSERVICE=\"bamboohr-integration\"\nREGION=\"us-central1\"\n\n# Store secrets in GCP Secret Manager\necho -n \"your-api-key\" | gcloud secrets create bamboohr-api-key --data-file=-\necho -n \"yourcompany\" | gcloud secrets create bamboohr-company-domain --data-file=-\n\n# Build and deploy\ngcloud builds submit --tag gcr.io/$PROJECT_ID/$SERVICE\n\ngcloud run deploy $SERVICE \\\n  --image gcr.io/$PROJECT_ID/$SERVICE \\\n  --region $REGION \\\n  --platform managed \\\n  --set-secrets=\"BAMBOOHR_API_KEY=bamboohr-api-key:latest,BAMBOOHR_COMPANY_DOMAIN=bamboohr-company-domain:latest\" \\\n  --min-instances=1 \\\n  --max-instances=10 \\\n  --timeout=30s \\\n  --allow-unauthenticated\n```\n\n### Health Check Endpoint (All Platforms)\n\n```typescript\n// src/api/health.ts\nimport { BambooHRClient } from '../bamboohr/client';\n\nexport async function handleHealthCheck(client: BambooHRClient) {\n  const start = Date.now();\n\n  try {\n    // Light-weight check: fetch employee 0 (current user)\n    await client.getEmployee(0, ['firstName']);\n    return {\n      status: 'healthy',\n      bamboohr: { connected: true, latencyMs: Date.now() - start },\n      timestamp: new Date().toISOString(),\n    };\n  } catch (err) {\n    return {\n      status: 'degraded',\n      bamboohr: {\n        connected: false,\n        latencyMs: Date.now() - start,\n        error: (err as Error).message,\n      },\n      timestamp: new Date().toISOString(),\n    };\n  }\n}\n```\n\n### Webhook Registration via API\n\n```typescript\n// Register a webhook programmatically via BambooHR API\n// POST /webhooks/\nconst webhook = await client.request('POST', '/webhooks/', {\n  name: 'Employee Sync',\n  monitorFields: ['firstName', 'lastName', 'department', 'jobTitle', 'status'],\n  postFields: {\n    firstName: 'firstName',\n    lastName: 'lastName',\n    department: 'department',\n    jobTitle: 'jobTitle',\n    status: 'status',\n  },\n  url: 'https://your-app.example.com/api/webhooks/bamboohr',\n  format: 'json',\n  frequency: { every: 0 }, // Immediate\n  limit: { enabled: false },\n});\n\nconsole.log(`Webhook registered: ${webhook.id}`);\n```\n\n## Output\n\n- Application deployed to production cloud platform\n- BambooHR secrets securely configured via platform secrets\n- Health check endpoint responding\n- Webhook endpoint configured and registered\n- Auto-scaling and health monitoring active\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Secret not found at runtime | Missing env var configuration | Re-add via platform CLI |\n| Webhook 401 from BambooHR | Signature verification failing | Check webhook secret matches |\n| Cold start timeout | Serverless function too slow | Pre-initialize client outside handler |\n| Health check failing after deploy | Wrong API key for environment | Verify secrets are production values |\n\n## Resources\n\n- [Vercel Serverless Functions](https://vercel.com/docs/functions)\n- [Fly.io Documentation](https://fly.io/docs)\n- [Google Cloud Run](https://cloud.google.com/run/docs)\n- [BambooHR Webhooks](https://documentation.bamboohr.com/docs/webhooks)\n\n## Next Steps\n\nFor webhook handling, see `bamboohr-webhooks-events`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bamboohr-deploy-integration",
-    "description": "Deploy BambooHR integrations to Vercel, Fly.io, and Cloud Run platforms.",
-    "allowed-tools": "Read, Write, Edit, Bash(vercel:*), Bash(fly:*), Bash(gcloud:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

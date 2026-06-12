@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032806",
   "name": "openrouter-load-balancing",
   "slug": "openrouter-load-balancing",
   "description": "Distribute OpenRouter requests across multiple keys and models for high",
   "content": "# OpenRouter Load Balancing\n\n## Overview\n\nA single OpenRouter API key has rate limits (requests/minute and tokens/minute). To scale beyond those limits, distribute requests across multiple keys. OpenRouter also provides server-side load balancing via provider routing and the `:nitro` variant for low-latency inference. This skill covers multi-key rotation, health-based routing, circuit breakers, and concurrent request patterns.\n\n## Multi-Key Round Robin\n\n```python\nimport os, itertools, time, logging\nfrom openai import OpenAI, RateLimitError\nfrom dataclasses import dataclass, field\n\nlog = logging.getLogger(\"openrouter.lb\")\n\n@dataclass\nclass KeyPool:\n    \"\"\"Round-robin API key pool with health tracking.\"\"\"\n    keys: list[str]\n    _cycle: itertools.cycle = field(init=False, repr=False)\n    _health: dict[str, dict] = field(init=False, default_factory=dict)\n\n    def __post_init__(self):\n        self._cycle = itertools.cycle(self.keys)\n        self._health = {k: {\"errors\": 0, \"last_error\": 0, \"healthy\": True} for k in self.keys}\n\n    def next_key(self) -> str:\n        \"\"\"Get next healthy key.\"\"\"\n        attempts = 0\n        while attempts < len(self.keys):\n            key = next(self._cycle)\n            h = self._health[key]\n            # Recover after 60s cooldown\n            if not h[\"healthy\"] and time.time() - h[\"last_error\"] > 60:\n                h[\"healthy\"] = True\n                h[\"errors\"] = 0\n            if h[\"healthy\"]:\n                return key\n            attempts += 1\n        # All keys unhealthy -- return any and hope for the best\n        return next(self._cycle)\n\n    def mark_error(self, key: str):\n        h = self._health[key]\n        h[\"errors\"] += 1\n        h[\"last_error\"] = time.time()\n        if h[\"errors\"] >= 3:  # Circuit breaker: 3 errors \u2192 unhealthy\n            h[\"healthy\"] = False\n            log.warning(f\"Key {key[:12]}... marked unhealthy after {h['errors']} errors\")\n\n    def mark_success(self, key: str):\n        self._health[key][\"errors\"] = 0\n        self._health[key][\"healthy\"] = True\n\npool = KeyPool(keys=[\n    os.environ.get(\"OPENROUTER_KEY_1\", \"\"),\n    os.environ.get(\"OPENROUTER_KEY_2\", \"\"),\n    os.environ.get(\"OPENROUTER_KEY_3\", \"\"),\n])\n\ndef balanced_completion(messages, model=\"anthropic/claude-3.5-sonnet\", **kwargs):\n    \"\"\"Send request using next healthy key from the pool.\"\"\"\n    key = pool.next_key()\n    client = OpenAI(\n        base_url=\"https://openrouter.ai/api/v1\",\n        api_key=key,\n        default_headers={\"HTTP-Referer\": \"https://my-app.com\", \"X-Title\": \"my-app\"},\n    )\n    try:\n        response = client.chat.completions.create(\n            model=model, messages=messages, **kwargs\n        )\n        pool.mark_success(key)\n        return response\n    except RateLimitError:\n        pool.mark_error(key)\n        # Retry with next key\n        return balanced_completion(messages, model, **kwargs)\n```\n\n## Concurrent Request Processing\n\n```python\nimport asyncio\nfrom openai import AsyncOpenAI\n\nasync def parallel_completions(prompts: list[str], model=\"openai/gpt-4o-mini\",\n                                max_concurrent=5, **kwargs):\n    \"\"\"Process multiple prompts concurrently with rate limiting.\"\"\"\n    semaphore = asyncio.Semaphore(max_concurrent)\n    client = AsyncOpenAI(\n        base_url=\"https://openrouter.ai/api/v1\",\n        api_key=os.environ[\"OPENROUTER_API_KEY\"],\n        default_headers={\"HTTP-Referer\": \"https://my-app.com\", \"X-Title\": \"my-app\"},\n    )\n\n    async def process_one(prompt: str):\n        async with semaphore:\n            response = await client.chat.completions.create(\n                model=model,\n                messages=[{\"role\": \"user\", \"content\": prompt}],\n                **kwargs,\n            )\n            return response.choices[0].message.content\n\n    return await asyncio.gather(*[process_one(p) for p in prompts])\n\n# Usage\nresults = asyncio.run(parallel_completions(\n    [\"Summarize X\", \"Translate Y\", \"Analyze Z\"],\n    max_concurrent=3,\n    max_tokens=500,\n))\n```\n\n## Provider-Level Load Balancing\n\n```python\n# OpenRouter can distribute across providers for the same model\nresponse = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet\",\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n    max_tokens=200,\n    extra_body={\n        \"provider\": {\n            # Let OpenRouter pick the best available provider\n            \"order\": [\"Anthropic\", \"AWS Bedrock\", \"GCP Vertex\"],\n            \"allow_fallbacks\": True,\n        },\n    },\n)\n```\n\n## Rate Limit Awareness\n\n```python\nimport requests\n\ndef check_rate_limits(api_key: str) -> dict:\n    \"\"\"Check current rate limit status for a key.\"\"\"\n    resp = requests.get(\n        \"https://openrouter.ai/api/v1/auth/key\",\n        headers={\"Authorization\": f\"Bearer {api_key}\"},\n    )\n    data = resp.json()[\"data\"]\n    return {\n        \"requests_limit\": data[\"rate_limit\"][\"requests\"],\n        \"interval\": data[\"rate_limit\"][\"interval\"],\n        \"credits_used\": data[\"usage\"],\n        \"credits_limit\": data.get(\"limit\"),\n    }\n\n# Check all keys in pool\nfor key in pool.keys:\n    limits = check_rate_limits(key)\n    print(f\"Key {key[:12]}...: {limits}\")\n```\n\n## Error Handling\n\n| Error | Cause | Fix |\n|-------|-------|-----|\n| 429 on all keys | All keys rate-limited simultaneously | Add more keys; implement request queuing |\n| Uneven load distribution | Round-robin not accounting for in-flight requests | Use weighted distribution based on current load |\n| Key health false positive | Transient error marked key unhealthy | Use sliding window (3 errors in 60s) before marking unhealthy |\n| Concurrent request failures | Too many parallel requests | Reduce semaphore limit; add backoff |\n\n## Enterprise Considerations\n\n- Create separate API keys per service/team with individual credit limits for cost isolation\n- Use 3+ keys to multiply effective rate limits (each key gets its own quota)\n- Implement circuit breakers: mark keys unhealthy after N consecutive errors, recover after cooldown\n- Use `asyncio.Semaphore` to control concurrency and prevent overwhelming the API\n- Monitor per-key error rates and latency to detect degraded keys early\n- Combine multi-key rotation with provider routing for maximum resilience\n\n## References\n\n- [Examples](${CLAUDE_SKILL_DIR}/references/examples.md) | [Errors](${CLAUDE_SKILL_DIR}/references/errors.md)\n- [Rate Limits](https://openrouter.ai/docs/api/limits) | [Provider Routing](https://openrouter.ai/docs/features/provider-routing)\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "openrouter-load-balancing",
-    "description": "Distribute OpenRouter requests across multiple keys and models for high",
-    "systems. Triggers": "openrouter load balance'', ''openrouter scaling'', ''distribute",
-    "allowed-tools": "Read, Write, Edit, Bash, Grep",
-    "version": "2.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000019343",
   "name": "next",
   "slug": "next",
   "description": "Next.js adapter for embedding emulators directly in a Next.js app via @emulators/adapter-next. Use when the user needs to embed emulators in Next.js, set up same-origin OAuth for Vercel preview deployments, create an emulate catch-all route handler, configure Auth.js/NextAuth with embedded emulators, add persistence to embedded emulators, or wrap next.config with withEmulate. Triggers include \"Next.js emulator\", \"adapter-next\", \"embedded emulator\", \"same-origin OAuth\", \"Vercel preview\", \"createEmulateHandler\", \"withEmulate\", or any task requiring emulators inside a Next.js app.",
   "content": "\n# Next.js Integration\n\nThe `@emulators/adapter-next` package embeds emulators directly into a Next.js App Router app, running them on the same origin. This is particularly useful for Vercel preview deployments where OAuth callback URLs change with every deployment.\n\n## Install\n\n```bash\nnpm install @emulators/adapter-next @emulators/github @emulators/google\n```\n\nOnly install the emulators you need. Each `@emulators/*` package is published independently, keeping serverless bundles small.\n\n## Route Handler\n\nCreate a catch-all route that serves emulator traffic:\n\n```typescript\n// app/emulate/[...path]/route.ts\nimport { createEmulateHandler } from '@emulators/adapter-next'\nimport * as github from '@emulators/github'\nimport * as google from '@emulators/google'\n\nexport const { GET, POST, PUT, PATCH, DELETE } = createEmulateHandler({\n  services: {\n    github: {\n      emulator: github,\n      seed: {\n        users: [{ login: 'octocat', name: 'The Octocat' }],\n        repos: [{ owner: 'octocat', name: 'hello-world', auto_init: true }],\n      },\n    },\n    google: {\n      emulator: google,\n      seed: {\n        users: [{ email: 'test@example.com', name: 'Test User' }],\n      },\n    },\n  },\n})\n```\n\nThis creates the following routes:\n\n- `/emulate/github/**` serves the GitHub emulator\n- `/emulate/google/**` serves the Google emulator\n\n## Auth.js / NextAuth Configuration\n\nPoint your provider at the emulator paths on the same origin:\n\n```typescript\nimport GitHub from 'next-auth/providers/github'\n\nconst baseUrl = process.env.VERCEL_URL\n  ? `https://${process.env.VERCEL_URL}`\n  : 'http://localhost:3000'\n\nGitHub({\n  clientId: 'any-value',\n  clientSecret: 'any-value',\n  authorization: { url: `${baseUrl}/emulate/github/login/oauth/authorize` },\n  token: { url: `${baseUrl}/emulate/github/login/oauth/access_token` },\n  userinfo: { url: `${baseUrl}/emulate/github/user` },\n})\n```\n\nNo `oauth_apps` need to be seeded. When none are configured, the emulator skips `client_id`, `client_secret`, and `redirect_uri` validation.\n\n## Font Tracing for Serverless\n\nEmulator UI pages use bundled fonts. Wrap your Next.js config to include them in the serverless trace:\n\n```typescript\n// next.config.mjs\nimport { withEmulate } from '@emulators/adapter-next'\n\nexport default withEmulate({\n  // your normal Next.js config\n})\n```\n\nIf you mount the catch-all at a custom path, pass the matching prefix:\n\n```typescript\nexport default withEmulate(nextConfig, { routePrefix: '/api/emulate' })\n```\n\n## Persistence\n\nBy default, emulator state is in-memory and resets on every cold start. To persist state across restarts, pass a `persistence` adapter.\n\n### Custom Adapter (Vercel KV, Redis, etc.)\n\n```typescript\nimport { createEmulateHandler } from '@emulators/adapter-next'\nimport * as github from '@emulators/github'\n\nconst kvAdapter = {\n  async load() { return await kv.get('emulate-state') },\n  async save(data: string) { await kv.set('emulate-state', data) },\n}\n\nexport const { GET, POST, PUT, PATCH, DELETE } = createEmulateHandler({\n  services: { github: { emulator: github } },\n  persistence: kvAdapter,\n})\n```\n\n### File Persistence (Local Dev)\n\nFor local development, `@emulators/core` ships a file-based adapter:\n\n```typescript\nimport { filePersistence } from '@emulators/core'\n\n// persists to a JSON file\npersistence: filePersistence('.emulate/state.json'),\n```\n\n### How Persistence Works\n\n- **Cold start**: The adapter loads state from the persistence adapter. If found, it restores the full Store and token map (skipping seed). If not found, it seeds from config and saves the initial state.\n- **After mutating requests** (POST, PUT, PATCH, DELETE): State is saved. Saves are serialized via an internal queue to prevent race conditions.\n- **No persistence configured**: Falls back to pure in-memory. Seed data re-initializes on every cold start.\n\n## How It Works\n\n1. **Incoming request**: `/emulate/github/login/oauth/authorize?client_id=...`\n2. **Parse**: service = `github`, rest = `/login/oauth/authorize`\n3. **Strip prefix**: A new `Request` is created with the stripped path and forwarded to the GitHub service app\n4. **Rewrite response**: HTML `action` and `href` attributes, CSS `url()` font references, and `Location` headers get the service prefix prepended\n5. **Persist**: After mutating requests, state is saved via the persistence adapter\n\n## Limitations\n\n- Requires the Node.js runtime (not Edge) since emulators use `crypto.randomBytes`\n- Concurrent serverless instances writing to the same persistence adapter use last-write-wins semantics (acceptable for dev/preview traffic)\n\n## Config Reference\n\n### `createEmulateHandler(config)`\n\n| Field | Type | Description |\n|-------|------|-------------|\n| `services` | `Record<string, EmulatorEntry>` | Map of service name to emulator config |\n| `persistence?` | `PersistenceAdapter` | Optional persistence adapter for state across cold starts |\n\nEach `EmulatorEntry`:\n\n| Field | Type | Description |\n|-------|------|-------------|\n| `emulator` | `EmulatorModule` | The emulator package (e.g. `import * as github from '@emulators/github'`) |\n| `seed?` | `Record<string, unknown>` | Seed data matching the service's config schema |\n\n### `withEmulate(nextConfig, options?)`\n\nWraps a Next.js config to include emulator font files in the serverless output trace. Call it around your exported config in `next.config.mjs` or `next.config.ts`.\n\n| Option | Type | Default | Description |\n|--------|------|---------|-------------|\n| `routePrefix` | `string` | `\"/emulate\"` | The path prefix where the catch-all route is mounted |\n\n### `PersistenceAdapter`\n\n```typescript\ninterface PersistenceAdapter {\n  load(): Promise<string | null>\n  save(data: string): Promise<void>\n}\n```\n\nThe built-in `filePersistence(path)` from `@emulators/core` provides a file-based adapter for local development.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "next",
-    "description": "Next.js adapter for embedding emulators directly in a Next.js app via @emulators/adapter-next. Use when the user needs to embed emulators in Next.js, set up same-origin OAuth for Vercel preview deployments, create an emulate catch-all route handler, configure Auth.js/NextAuth with embedded emulators, add persistence to embedded emulators, or wrap next.config with withEmulate. Triggers include \"Next.js emulator\", \"adapter-next\", \"embedded emulator\", \"same-origin OAuth\", \"Vercel preview\", \"createEmulateHandler\", \"withEmulate\", or any task requiring emulators inside a Next.js app.",
-    "allowed-tools": "Bash(npx emulate:*), Bash(emulate:*)"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

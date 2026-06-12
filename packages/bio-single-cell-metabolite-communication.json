@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009427",
   "name": "bio-single-cell-metabolite-communication",
   "slug": "bio-single-cell-metabolite-communication",
   "description": "Analyze metabolite-mediated cell-cell communication using MeboCost for metabolic signaling inference between cell types. Predict metabolite secretion and sensing patterns from scRNA-seq data. Use when studying metabolic crosstalk between cell populations or metabolite-receptor interactions.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: matplotlib 3.8+, scanpy 1.10+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Metabolite-Mediated Cell Communication\n\n**\"Analyze metabolic crosstalk between cell types\"** \u2192 Predict metabolite secretion-sensing interactions between cell populations based on enzyme and transporter expression patterns.\n- Python: `mebocost.MeboCost(adata, groupby='cell_type')` \u2192 `run_mebocost()`\n\n## MeboCost Overview\n\nMeboCost infers metabolite-mediated communication by:\n1. Predicting metabolite secretion from enzyme expression\n2. Identifying metabolite-sensing receptors\n3. Computing communication scores between cell types\n\n## Basic Workflow\n\n**Goal:** Infer metabolite-mediated cell-cell communication from scRNA-seq data by predicting which cell types secrete and sense specific metabolites.\n\n**Approach:** Initialize a MeboCost object from an AnnData with cell type annotations, run permutation-based communication inference to score metabolite secretion-sensing interactions, then filter for statistically significant pairs.\n\n```python\nimport mebocost as mbc\nimport scanpy as sc\n\n# Load scRNA-seq data\nadata = sc.read_h5ad('adata.h5ad')\n\n# Initialize MeboCost\nmebo = mbc.create_obj(\n    adata=adata,\n    group_col='cell_type',  # Cell type annotation column\n    species='human'  # 'human' or 'mouse'\n)\n\n# Infer metabolite communication\nmebo.infer_commu(\n    n_permutations=1000,  # Permutations for significance testing\n    seed=42\n)\n\n# Get significant interactions\nsig_interactions = mebo.commu_res[mebo.commu_res['pval'] < 0.05]\n```\n\n## Prepare Data\n\n```python\nimport scanpy as sc\n\ndef prepare_for_mebocost(adata, cell_type_col='cell_type', min_cells=50):\n    '''Prepare AnnData for MeboCost analysis\n\n    Requirements:\n    - Log-normalized expression (sc.pp.normalize_total, sc.pp.log1p)\n    - Cell type annotations\n    - Gene symbols (not Ensembl IDs)\n    '''\n    # Check normalization\n    if adata.X.max() > 50:\n        print('Warning: Data may not be log-normalized')\n\n    # Filter rare cell types\n    cell_counts = adata.obs[cell_type_col].value_counts()\n    valid_types = cell_counts[cell_counts >= min_cells].index\n    adata = adata[adata.obs[cell_type_col].isin(valid_types)].copy()\n\n    print(f'Cell types: {len(valid_types)}')\n    print(f'Cells: {adata.n_obs}')\n\n    return adata\n```\n\n## Run Communication Analysis\n\n```python\ndef run_mebocost(adata, cell_type_col='cell_type', species='human'):\n    '''Run MeboCost metabolite communication analysis\n\n    Args:\n        adata: AnnData with log-normalized expression\n        cell_type_col: Column with cell type annotations\n        species: 'human' or 'mouse'\n\n    Returns:\n        MeboCost object with communication results\n    '''\n    import mebocost as mbc\n\n    # Create MeboCost object\n    mebo = mbc.create_obj(\n        adata=adata,\n        group_col=cell_type_col,\n        species=species\n    )\n\n    # Infer enzyme-metabolite-receptor communication\n    # n_permutations: Higher = more accurate p-values but slower\n    # 1000 is standard; use 100 for quick exploration\n    mebo.infer_commu(n_permutations=1000, seed=42)\n\n    return mebo\n```\n\n## Analyze Results\n\n```python\ndef analyze_metabolite_communication(mebo, pval_threshold=0.05):\n    '''Extract and summarize significant communications\n\n    Communication flow:\n    Sender cell -> Enzyme -> Metabolite -> Receptor -> Receiver cell\n    '''\n    results = mebo.commu_res.copy()\n\n    # Filter significant interactions\n    sig = results[results['pval'] < pval_threshold]\n\n    # Summary statistics\n    summary = {\n        'total_interactions': len(results),\n        'significant_interactions': len(sig),\n        'unique_metabolites': sig['metabolite'].nunique(),\n        'unique_sender_types': sig['sender'].nunique(),\n        'unique_receiver_types': sig['receiver'].nunique()\n    }\n\n    # Top metabolites by frequency\n    top_metabolites = sig['metabolite'].value_counts().head(10)\n\n    # Top sender-receiver pairs\n    sig['pair'] = sig['sender'] + ' -> ' + sig['receiver']\n    top_pairs = sig['pair'].value_counts().head(10)\n\n    return {\n        'summary': summary,\n        'top_metabolites': top_metabolites,\n        'top_pairs': top_pairs,\n        'significant_interactions': sig\n    }\n```\n\n## Visualization\n\n```python\ndef plot_communication_network(mebo, pval_threshold=0.05):\n    '''Plot metabolite communication network'''\n    import matplotlib.pyplot as plt\n\n    # Filter significant\n    sig = mebo.commu_res[mebo.commu_res['pval'] < pval_threshold]\n\n    # Aggregate by cell type pair\n    pair_counts = sig.groupby(['sender', 'receiver']).size().reset_index(name='count')\n\n    # Create chord diagram or heatmap\n    pivot = pair_counts.pivot(index='sender', columns='receiver', values='count')\n    pivot = pivot.fillna(0)\n\n    plt.figure(figsize=(10, 8))\n    plt.imshow(pivot.values, cmap='Reds')\n    plt.xticks(range(len(pivot.columns)), pivot.columns, rotation=45, ha='right')\n    plt.yticks(range(len(pivot.index)), pivot.index)\n    plt.colorbar(label='Number of interactions')\n    plt.xlabel('Receiver')\n    plt.ylabel('Sender')\n    plt.title('Metabolite Communication Network')\n    plt.tight_layout()\n\n    return plt.gcf()\n\n\ndef plot_metabolite_flow(mebo, metabolite, pval_threshold=0.05):\n    '''Visualize communication flow for specific metabolite'''\n    sig = mebo.commu_res[\n        (mebo.commu_res['metabolite'] == metabolite) &\n        (mebo.commu_res['pval'] < pval_threshold)\n    ]\n\n    print(f'\\n{metabolite} communication:')\n    for _, row in sig.iterrows():\n        print(f\"  {row['sender']} ({row['enzyme']}) -> \"\n              f\"{row['receiver']} ({row['receptor']})\")\n        print(f\"    Score: {row['commu_score']:.3f}, p-value: {row['pval']:.4f}\")\n```\n\n## Compare Conditions\n\n```python\ndef compare_conditions(adata, condition_col, cell_type_col, species='human'):\n    '''Compare metabolite communication between conditions\n\n    Useful for:\n    - Tumor vs normal\n    - Treatment vs control\n    - Disease vs healthy\n    '''\n    import mebocost as mbc\n\n    conditions = adata.obs[condition_col].unique()\n    results = {}\n\n    for condition in conditions:\n        adata_subset = adata[adata.obs[condition_col] == condition].copy()\n\n        mebo = mbc.create_obj(\n            adata=adata_subset,\n            group_col=cell_type_col,\n            species=species\n        )\n        mebo.infer_commu(n_permutations=1000, seed=42)\n\n        results[condition] = mebo.commu_res\n\n    # Find differential communications\n    # Interactions significant in one condition but not another\n    return results\n```\n\n## Metabolite Categories\n\n```python\n# MeboCost includes curated metabolite-receptor pairs\n# Major categories:\n\nMETABOLITE_CATEGORIES = {\n    'amino_acids': ['Glutamine', 'Glutamate', 'Tryptophan', 'Arginine'],\n    'lipids': ['Prostaglandin E2', 'Leukotriene B4', 'Sphingosine-1-phosphate'],\n    'nucleotides': ['ATP', 'Adenosine', 'UDP'],\n    'vitamins': ['Retinoic acid', 'Vitamin D'],\n    'other': ['Lactate', 'Succinate', 'Itaconate']\n}\n\ndef filter_by_category(results, category):\n    '''Filter results to specific metabolite category'''\n    metabolites = METABOLITE_CATEGORIES.get(category, [])\n    return results[results['metabolite'].isin(metabolites)]\n```\n\n## Related Skills\n\n- single-cell/cell-communication - Ligand-receptor communication analysis\n- metabolomics/pathway-mapping - Metabolic pathway context\n- systems-biology/flux-balance-analysis - Metabolic flux predictions\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-single-cell-metabolite-communication",
-    "description": "Analyze metabolite-mediated cell-cell communication using MeboCost for metabolic signaling inference between cell types. Predict metabolite secretion and sensing patterns from scRNA-seq data. Use when studying metabolic crosstalk between cell populations or metabolite-receptor interactions.",
-    "tool_type": "python",
-    "primary_tool": "MeboCost"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

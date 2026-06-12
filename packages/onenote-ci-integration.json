@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032751",
   "name": "onenote-ci-integration",
   "slug": "onenote-ci-integration",
   "description": "Set up CI/CD pipelines for OneNote integrations with Graph API testing",
   "content": "# OneNote CI Integration\n\n## Overview\n\nTesting OneNote integrations in CI requires Azure AD app registration, credential management, and mock strategies for Graph API responses. This skill provides two proven CI strategies: mock-only PR checks (zero Azure credentials required) and nightly live integration tests with proper credential isolation and rate limit awareness.\n\n## Prerequisites\n\n- GitHub Actions or equivalent CI platform\n- Node.js 18+ or Python 3.10+\n- For mock-only CI: no Azure credentials needed\n- For live integration tests: Azure AD test tenant with app registration\n- GitHub repository secrets configured (live tests only)\n\n## Instructions\n\n### Strategy 1: Mock-Only CI (PR Checks)\n\nUse `msw` (Mock Service Worker) to intercept Graph API calls with zero Azure dependency:\n\n```typescript\n// tests/mocks/handlers.ts\nimport { http, HttpResponse } from \"msw\";\nconst GRAPH = \"https://graph.microsoft.com/v1.0\";\n\nexport const handlers = [\n  http.get(`${GRAPH}/me/onenote/notebooks`, () =>\n    HttpResponse.json({ value: [\n      { id: \"nb-001\", displayName: \"Work Notes\", createdDateTime: \"2026-01-15T10:00:00Z\" },\n    ]})),\n\n  http.get(`${GRAPH}/me/onenote/sections/:sectionId/pages`, () =>\n    HttpResponse.json({ value: [\n      { id: \"page-001\", title: \"Sprint Review\", createdDateTime: \"2026-03-10T14:00:00Z\" },\n    ]})),\n\n  http.post(`${GRAPH}/me/onenote/sections/:sectionId/pages`, async ({ request }) => {\n    const body = await request.text();\n    if (!body.includes(\"<html\")) {\n      return new HttpResponse(JSON.stringify({\n        error: { code: \"InvalidArgument\", message: \"Page content must be valid XHTML\" }\n      }), { status: 400 });\n    }\n    return HttpResponse.json({ id: \"page-new\", title: \"Created Page\" }, { status: 201 });\n  }),\n];\n```\n\n```typescript\n// tests/setup.ts\nimport { setupServer } from \"msw/node\";\nimport { handlers } from \"./mocks/handlers\";\nexport const server = setupServer(...handlers);\nbeforeAll(() => server.listen({ onUnhandledRequest: \"error\" }));\nafterEach(() => server.resetHandlers());\nafterAll(() => server.close());\n```\n\n### Strategy 2: Live Integration Tests (Nightly)\n\nRequired GitHub Secrets: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`.\n\n**Warning:** `ClientSecretCredential` (app-only auth) was deprecated March 31, 2025 for OneNote APIs. CI test environments may still use it for automation, but production code must use delegated auth. Monitor Microsoft deprecation notices.\n\n### GitHub Actions Workflows\n\n```yaml\n# .github/workflows/onenote-pr.yml \u2014 Mock-only, every PR\nname: OneNote PR Checks\non: [push, pull_request]\njobs:\n  mock-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with: { node-version: 20, cache: npm }\n      - run: npm ci && npm test -- --reporter=verbose\n        env: { ONENOTE_TEST_MODE: mock }\n```\n\n```yaml\n# .github/workflows/onenote-nightly.yml \u2014 Live tests, daily 3AM UTC\nname: OneNote Integration Tests\non:\n  schedule: [{ cron: \"0 3 * * *\" }]\n  workflow_dispatch:\njobs:\n  integration:\n    runs-on: ubuntu-latest\n    concurrency: { group: onenote-live-tests, cancel-in-progress: false }\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with: { node-version: 20, cache: npm }\n      - run: npm ci && npm test -- --testPathPattern=\"integration\"\n        env:\n          ONENOTE_TEST_MODE: live\n          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}\n          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}\n          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}\n      - name: Cleanup test notebooks\n        if: always()\n        run: node scripts/cleanup-test-notebooks.js\n        env:\n          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}\n          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}\n          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}\n```\n\n### Test Isolation\n\nEach test creates resources with a unique prefix. Note: OneNote notebooks cannot be deleted via Graph API \u2014 use a disposable test tenant or archive-based cleanup.\n\n```typescript\n// tests/helpers/test-context.ts\nimport { randomUUID } from \"crypto\";\nexport function createTestContext() {\n  const prefix = `ci-test-${randomUUID().slice(0, 8)}`;\n  return {\n    notebookName: `${prefix}-notebook`,\n    sectionName: `${prefix}-section`,\n    prefix,\n  };\n}\n```\n\n### Rate Limit Awareness\n\nStay under 600 req/60s per user across parallel test jobs:\n\n```typescript\nexport async function withRateLimit<T>(fn: () => Promise<T>): Promise<T> {\n  await new Promise((r) => setTimeout(r, 200));\n  try { return await fn(); }\n  catch (err: any) {\n    if (err?.statusCode === 429) {\n      const retry = parseInt(err.headers?.[\"retry-after\"] ?? \"5\", 10);\n      await new Promise((r) => setTimeout(r, retry * 1000));\n      return fn();\n    }\n    throw err;\n  }\n}\n```\n\n## Output\n\n- `.github/workflows/onenote-pr.yml` \u2014 mock-based PR check workflow\n- `.github/workflows/onenote-nightly.yml` \u2014 live integration test workflow\n- `tests/mocks/handlers.ts` \u2014 MSW handlers for Graph API endpoints\n- `tests/setup.ts` \u2014 mock server lifecycle management\n- `tests/helpers/test-context.ts` \u2014 test isolation with unique prefixes\n\n## Error Handling\n\n| CI Error | Cause | Fix |\n|----------|-------|-----|\n| `401 Unauthorized` in nightly | Expired client secret | Rotate `AZURE_CLIENT_SECRET` in GitHub Settings > Secrets |\n| `403 Forbidden` in live tests | Missing `Notes.ReadWrite` scope | Update app registration API permissions in Azure portal |\n| Mock handler mismatch | `onUnhandledRequest: \"error\"` caught unknown URL | Add missing endpoint to `handlers.ts` |\n| Rate limit in parallel jobs | Multiple CI runs hitting same tenant | Use `concurrency` group to serialize nightly runs |\n| Orphaned test notebooks | Cleanup step skipped | OneNote notebooks cannot be API-deleted; archive manually |\n\n## Examples\n\n```bash\n# Run mock tests locally\nONENOTE_TEST_MODE=mock npm test\n\n# Run single integration test against live API\nONENOTE_TEST_MODE=live AZURE_TENANT_ID=xxx AZURE_CLIENT_ID=yyy \\\n  AZURE_CLIENT_SECRET=zzz npx vitest run tests/integration/notebooks.test.ts\n```\n\n## Resources\n\n- [OneNote API Overview](https://learn.microsoft.com/en-us/graph/api/resources/onenote-api-overview)\n- [Azure App Registration](https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps)\n- [Graph API Error Codes](https://learn.microsoft.com/en-us/graph/onenote-error-codes)\n- [MSW Documentation](https://mswjs.io/docs/)\n\n## Next Steps\n\n- Deploy tested integrations with `onenote-deploy-integration`\n- Debug CI failures with `onenote-debug-bundle`\n- Monitor rate limits in CI with `onenote-rate-limits`\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "onenote-ci-integration",
-    "description": "Set up CI/CD pipelines for OneNote integrations with Graph API testing",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(pip:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

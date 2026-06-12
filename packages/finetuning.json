@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000005422",
   "name": "finetuning",
   "slug": "finetuning",
   "description": "Generates a Jupyter notebook that fine-tunes a base model using SageMaker serverless training jobs. Use when the user says \"start training\", \"fine-tune my model\", \"I'm ready to train\", or when the plan reaches the finetuning step. Supports SFT, DPO, and RLVR trainers, including RLVR Lambda reward function creation.",
   "content": "\n# Prerequisites\n\nBefore starting this workflow, verify:\n\n1. A `use_case_spec.md` file exists\n   - If missing: Activate the `use-case-specification` skill first, then resume\n   - DON'T EVER offer to create a use case spec without activating the use-case-specification skill.\n\n2. A fine-tuning technique (SFT, DPO, or RLVR) and base model have already been selected\n   - If missing: Activate the `finetuning-setup` skill to collect what's missing, then resume\n   - Don't make recommendations on the spot. You MUST activate the finetuning-setup skill.\n\n3. A base model name available on SageMakerHub has been identified\n   - If missing: Activate the `finetuning-setup` skill to get it\n   - **Important:** Only use the model name that `finetuning-setup` retrieves, as it may differ from other commonly used names for the same model\n\n# Critical Rules\n\n## Code Generation Rules\n\n- \u2705 Use EXACTLY the imports shown in each cell template\n- \u274c Do NOT add additional imports even if they seem helpful\n- \u274c Do NOT create variables before they're needed in that cell\n- \ud83d\udccb Copy the code structure precisely - no improvisation\n- \ud83c\udfaf Follow the minimal code principle strictly\n- \u2705 When writing a notebook cell, make sure the indentation and f strings are correct\n- \u2705 Write notebooks using your standard file write tool to create the `.ipynb` file with the complete notebook JSON, OR use notebook MCP tools (e.g., `create_notebook`, `add_cell`) if available\n- \u274c Do NOT use bash commands, shell scripts, or `echo`/`cat` piping to generate notebooks\n\n## User Communication Rules\n\n- \u274c NEVER offer to run the notebook for the user (you don't have the tools)\n- \u274c NEVER offer to move on to a downstream skill while training is in progress (logically impossible)\n- \u274c NEVER set ACCEPT_EULA to True yourself for Meta/Llama models (user must read and agree)\n- \u2705 Always mention both the number AND title of cells you reference\n- \u2705 If user asks how to run: Tell them to run cells one by one, mention ipykernel requirement\n\n---\n\n# Workflow\n\n## 1. Notebook Setup\n\n### 1.1 Directory Setup\n\n1. Identify project directory from conversation context\n   - If unclear (multiple relevant directories exist) \u2192 Ask user which folder to use\n   - If no project directory exists \u2192 activate the **directory-management** skill to set one up\n2. Check if the project notebook already exists at `<project-dir>/notebooks/<project-name>.ipynb`\n   - If it exists \u2192 ask: _\"Would you like me to append the fine-tuning cells to the existing notebook, or create a new one?\"_\n   - If it doesn't exist \u2192 create it\n3. When appending, add a markdown header cell `## Fine-Tuning` as a section divider before the new cells\n\n\u23f8 Wait for user.\n\n### 1.2 Select Reference Template\n\nRead the example notebook matching the finetuning strategy:\n\n- SFT \u2192 `references/sft_example.md`\n- DPO \u2192 `references/dpo_example.md`\n- RLVR \u2192 `references/rlvr_example.md`\n\n### 1.3 Copy Notebook Structure\n\n1. Write the exact cells from the example to the project notebook\n2. Use same order, dependencies, and imports as the example\n3. DO NOT improvise or add extra code\n4. If the model is **NOT** a Meta/Llama model (model ID does NOT start with `meta-`):\n   - Omit the `ACCEPT_EULA = False` line from the config cell\n   - Omit the `accept_eula=ACCEPT_EULA,` line from the trainer call\n5. If the model is in the Nova family, exclude print and override statements for the following hyperparameters: `max_epochs` and `lr_warmup_ratio`\n\n### 1.4 Auto-Generate Configuration Values\n\n**In the 'Setup & Credentials' cell, populate:**\n\n1. **BASE_MODEL**\n   - Use the exact SageMakerHub model name from context\n\n2. **MODEL_PACKAGE_GROUP_NAME**\n   - Generate from use case (read `use_case_spec.md` if needed)\n   - Format rules:\n     - Lowercase, alphanumeric with hyphens only\n     - 1-63 characters\n     - Pattern: `[a-zA-Z0-9](-*[a-zA-Z0-9]){0,62}`\n     - Example: \"Customer Support Chatbot\" \u2192 `customer-support-chatbot-v1`\n\n3. Save notebook\n\n## 2. RLVR Reward Function (for RLVR only, skip this section if technique is SFT or DPO)\n\n### 2.1 Check Reward Function Status\n\n- Ask if user has a reward function already, or would like help creating one.\n  - If user says they have one \u2192 Ask for the SageMaker Hub Evaluator ARN. Only proceed to Section 2.3 once the user provides a valid Evaluator ARN. If they don't have it registered as a SageMaker Hub Evaluator, continue to 2.2.\n  - If user says they do not have one \u2192 Continue to 2.2\n\n### 2.2 Generate Reward Function From Template\n\n1. Follow workflow in `references/rlvr_reward_function.md` section \"Helping Users Create Lambda Functions\"\n\n### 2.3 Set CUSTOM_REWARD_FUNCTION value\n\n1. Set the value for `CUSTOM_REWARD_FUNCTION` in the Notebook with the ARN of the reward function (either given directly by the user, or from the function generation code as `evaluator.arn`).\n\n## 3. EULA review and acceptance\n\n1. Look up the official license link for the selected base model from references/eula_links.md\n2. Display the license to the user following the phrasing in references/eula_links.md. For OSS models: \"This model is licensed under **{License}**. Please review the license terms here: {URL}.\" For Nova models: \"This model is subject to the AWS Service Terms: {URL}.\"\n3. Check if the selected base model is a Meta/Llama model (model ID starts with `meta-`)\n   - **If Meta/Llama**: Tell the user they must read and agree to the EULA before using this model. Ask them to manually change `ACCEPT_EULA` to `True` in the notebook after reviewing the license. **NEVER set ACCEPT_EULA to True yourself for Meta/Llama models.**\n   - **If non-Meta**: Inform the user of the license for their awareness. No code-level action needed \u2014 the `ACCEPT_EULA` variable and `accept_eula` parameter should already be omitted from the notebook (see Step 1.3).\n\n## 4. Notebook Execution\n\n1. **Display the following to the user:**: `I have updated your Jupyter Notebook with the finetuning code. If you run it cell by cell, you should be able to launch your SageMaker Training job. \nTraining takes a while. Please monitor the progress and let me know when it's complete so I can help you get to the next step in your plan.`\n\n2. Wait for user's confirmation about training completion. Once the user has confirmed, you are free to move to the next step of the plan.\n\n**CRITICAL:**\n\n- DON'T suggest moving to next steps before training completes\n- DON'T elaborate on the next steps unless the user specifically asks you about them.\n\n## 5. Continuous Customization\n\nIf the user wants to finetune a model they had already customized, follow the instructions in references/continuous_customization.md\n\n---\n\n# References\n\n- `rlvr_reward_function.md` - Lambda reward function creation guide (RLVR only)\n- `templates/rlvr_reward_function_source_template.py` - Lambda reward function source template for open-weights models (RLVR only)\n- `templates/nova_rlvr_reward_function_source_template.py` - Lambda reward function source template for Nova 2.0 Lite (RLVR only)\n- `sft_example.md` - Complete notebook template for Supervised Fine-Tuning\n- `dpo_example.md` - Complete notebook template for Direct Preference Optimization\n- `rlvr_example.md` - Complete notebook template for Reinforcement Learning from Verifiable Rewards\n- `continuous_customization.md` - Instructions on fine-tuning an already fine-tuned model.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "finetuning",
-    "description": "Generates a Jupyter notebook that fine-tunes a base model using SageMaker serverless training jobs. Use when the user says \"start training\", \"fine-tune my model\", \"I'm ready to train\", or when the plan reaches the finetuning step. Supports SFT, DPO, and RLVR trainers, including RLVR Lambda reward function creation.",
-    "metadata": "",
-    "version": "1.0.0"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

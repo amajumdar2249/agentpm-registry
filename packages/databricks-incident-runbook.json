@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031751",
   "name": "databricks-incident-runbook",
   "slug": "databricks-incident-runbook",
   "description": "Execute Databricks incident response procedures with triage, mitigation,",
   "content": "# Databricks Incident Runbook\n\n## Overview\n\nRapid incident response for Databricks: triage script, decision tree, immediate actions by error type, communication templates, evidence collection, and postmortem template. Designed for on-call engineers to follow during live incidents.\n\n## Severity Levels\n\n| Level | Definition | Response Time | Examples |\n|-------|------------|---------------|----------|\n| P1 | Production pipeline down | < 15 min | Critical ETL failed, data not updating |\n| P2 | Degraded performance | < 1 hour | Slow queries, partial failures, stale data |\n| P3 | Non-critical issues | < 4 hours | Dev cluster issues, non-critical job delays |\n| P4 | No user impact | Next business day | Monitoring gaps, cleanup needed |\n\n## Instructions\n\n### Step 1: Quick Triage (Run First)\n\n```bash\n#!/bin/bash\nset -euo pipefail\necho \"=== DATABRICKS TRIAGE $(date -u +%H:%M:%S\\ UTC) ===\"\n\n# 1. Is Databricks itself down?\necho \"--- Platform Status ---\"\ncurl -s https://status.databricks.com/api/v2/status.json | \\\n  jq -r '.status.description // \"UNKNOWN\"'\n\n# 2. Can we reach the workspace?\necho \"--- Workspace ---\"\nif databricks current-user me --output json 2>/dev/null | jq -r .userName; then\n    echo \"API: CONNECTED\"\nelse\n    echo \"API: UNREACHABLE \u2014 check VPN/firewall/token\"\nfi\n\n# 3. Recent failures\necho \"--- Failed Runs (last 1h) ---\"\ndatabricks runs list --limit 20 --output json 2>/dev/null | \\\n  jq -r '.runs[]? | select(.state.result_state == \"FAILED\") |\n    \"\\(.run_id): \\(.run_name // \"unnamed\") \u2014 \\(.state.state_message // \"no message\")\"' || \\\n  echo \"Could not fetch runs\"\n\n# 4. Cluster health\necho \"--- Clusters in ERROR state ---\"\ndatabricks clusters list --output json 2>/dev/null | \\\n  jq -r '.[]? | select(.state == \"ERROR\") |\n    \"\\(.cluster_id): \\(.cluster_name) \u2014 \\(.termination_reason.code // \"unknown\")\"' || \\\n  echo \"Could not fetch clusters\"\n```\n\n### Step 2: Decision Tree\n\n```\nIs the issue affecting production data pipelines?\n\u251c\u2500 YES: Is it a single job or multiple?\n\u2502   \u251c\u2500 SINGLE JOB\n\u2502   \u2502   \u251c\u2500 Cluster failed to start \u2192 Step 3a\n\u2502   \u2502   \u251c\u2500 Code/logic error \u2192 Step 3b\n\u2502   \u2502   \u251c\u2500 Data quality issue \u2192 Step 3c\n\u2502   \u2502   \u2514\u2500 Permission error \u2192 Step 3d\n\u2502   \u2502\n\u2502   \u2514\u2500 MULTIPLE JOBS \u2192 Likely infrastructure\n\u2502       \u251c\u2500 Check platform status (status.databricks.com)\n\u2502       \u251c\u2500 Check workspace quotas (Admin Console)\n\u2502       \u2514\u2500 Check network/VPN connectivity\n\u2502\n\u2514\u2500 NO: Is it performance?\n    \u251c\u2500 Slow queries \u2192 Check query plan, warehouse sizing\n    \u251c\u2500 Slow cluster startup \u2192 Check instance availability\n    \u2514\u2500 Data freshness \u2192 Check upstream dependencies\n```\n\n### Step 3a: Cluster Failed to Start\n\n```bash\nCLUSTER_ID=\"your-cluster-id\"\n\n# Get termination reason\ndatabricks clusters get --cluster-id $CLUSTER_ID | \\\n  jq '{state, termination_reason}'\n\n# Check recent events\ndatabricks clusters events --cluster-id $CLUSTER_ID --limit 10 | \\\n  jq '.events[] | \"\\(.timestamp): \\(.type) \u2014 \\(.details // \"none\")\"'\n\n# Common fixes:\n# QUOTA_EXCEEDED \u2192 Terminate idle clusters\n# CLOUD_PROVIDER_LAUNCH_FAILURE \u2192 Check instance availability in region\n# DRIVER_UNREACHABLE \u2192 Network/security group issue\n\n# Quick fix: restart\ndatabricks clusters start --cluster-id $CLUSTER_ID\n```\n\n### Step 3b: Code/Logic Error\n\n```bash\nRUN_ID=\"your-run-id\"\n\n# Get run details and error\ndatabricks runs get --run-id $RUN_ID | jq '{\n  state: .state,\n  tasks: [.tasks[]? | {key: .task_key, result: .state.result_state, error: .state.state_message}]\n}'\n\n# Get task output for failed tasks\ndatabricks runs get-output --run-id $RUN_ID | jq '{\n  error: .error,\n  trace: (.error_trace // \"\" | .[0:1000])\n}'\n\n# Repair failed tasks only (skip successful ones)\ndatabricks runs repair --run-id $RUN_ID --rerun-tasks FAILED\n```\n\n### Step 3c: Data Quality Issue\n\n```sql\n-- Quick data sanity check\nSELECT COUNT(*) AS total_rows,\n       COUNT(DISTINCT id) AS unique_ids,\n       SUM(CASE WHEN amount IS NULL THEN 1 ELSE 0 END) AS null_amounts,\n       MIN(created_at) AS oldest,\n       MAX(created_at) AS newest\nFROM prod_catalog.silver.orders\nWHERE created_at > current_timestamp() - INTERVAL 1 DAY;\n\n-- Check recent table changes\nDESCRIBE HISTORY prod_catalog.silver.orders LIMIT 10;\n\n-- Restore to previous version if corrupted\nRESTORE TABLE prod_catalog.silver.orders TO VERSION AS OF 5;\n```\n\n### Step 3d: Permission Error\n\n```bash\n# Check current user\ndatabricks current-user me\n\n# Check job permissions\ndatabricks permissions get jobs --job-id $JOB_ID\n\n# Fix permissions\ndatabricks permissions update jobs --job-id $JOB_ID --json '{\n  \"access_control_list\": [{\n    \"user_name\": \"service-principal@company.com\",\n    \"permission_level\": \"CAN_MANAGE_RUN\"\n  }]\n}'\n```\n\n### Step 4: Communication\n\n#### Internal (Slack)\n\n```\n:red_circle: **P1 INCIDENT: [Brief Description]**\n\n**Status:** INVESTIGATING\n**Impact:** [What data/users are affected]\n**Started:** [Time UTC]\n**Current Action:** [What you're doing now]\n**Next Update:** [+30 min]\n\n**IC:** @[your-name]\n```\n\n#### External (Status Page)\n\n```\n**Data Pipeline Delay**\nWe are experiencing delays in data processing.\nDashboard data may be up to [X] hours stale.\nStarted: [Time] UTC\nStatus: Actively investigating\nNext update: [Time] UTC\n```\n\n### Step 5: Evidence Collection\n\n```bash\n#!/bin/bash\nINCIDENT_ID=$1\nRUN_ID=$2\nCLUSTER_ID=$3\n\nmkdir -p \"incident-$INCIDENT_ID\"\n\n# Collect everything\ndatabricks runs get --run-id $RUN_ID --output json > \"incident-$INCIDENT_ID/run.json\" 2>&1\ndatabricks runs get-output --run-id $RUN_ID --output json > \"incident-$INCIDENT_ID/output.json\" 2>&1\n\nif [ -n \"$CLUSTER_ID\" ]; then\n    databricks clusters get --cluster-id $CLUSTER_ID --output json > \"incident-$INCIDENT_ID/cluster.json\" 2>&1\n    databricks clusters events --cluster-id $CLUSTER_ID --limit 50 --output json > \"incident-$INCIDENT_ID/events.json\" 2>&1\nfi\n\ntar -czf \"incident-$INCIDENT_ID.tar.gz\" \"incident-$INCIDENT_ID\"\necho \"Evidence: incident-$INCIDENT_ID.tar.gz\"\n```\n\n### Step 6: Postmortem Template\n\n```markdown\n## Incident: [Title]\n\n**Date:** YYYY-MM-DD | **Duration:** Xh Ym | **Severity:** P[1-4]\n**IC:** [Name]\n\n### Summary\n[1-2 sentences: what happened and what was the impact]\n\n### Timeline (UTC)\n| Time | Event |\n|------|-------|\n| HH:MM | Alert fired / issue detected |\n| HH:MM | Investigation started |\n| HH:MM | Root cause identified |\n| HH:MM | Mitigation applied |\n| HH:MM | Resolved |\n\n### Root Cause\n[Technical explanation]\n\n### Impact\n- Tables affected: [list]\n- Data staleness: [hours]\n- Users affected: [count/teams]\n\n### Action Items\n| Priority | Action | Owner | Due |\n|----------|--------|-------|-----|\n| P1 | [Preventive fix] | [Name] | [Date] |\n| P2 | [Monitoring gap] | [Name] | [Date] |\n```\n\n## Output\n\n- Issue triaged and severity assigned\n- Root cause identified via decision tree\n- Immediate remediation applied\n- Stakeholders notified with structured updates\n- Evidence collected for postmortem\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Can't reach API | Token expired or VPN down | Re-auth: `databricks auth login` |\n| `runs repair` fails | Run too old for repair | Create new run with same config |\n| `RESTORE TABLE` fails | VACUUM already cleaned old versions | Restore from backup or replay pipeline |\n| Cluster restart loops | Init script failing | Check cluster events for init script errors |\n\n## Examples\n\n### One-Line Health Checks\n\n```bash\n# Last 5 runs for a job\ndatabricks runs list --job-id $JID --limit 5 | jq '.runs[] | \"\\(.state.result_state): \\(.run_name)\"'\n\n# Quick cluster restart\ndatabricks clusters restart --cluster-id $CID && echo \"Restart initiated\"\n\n# Cancel all active runs for a job\ndatabricks runs list --job-id $JID --active-only | jq -r '.runs[].run_id' | \\\n  xargs -I{} databricks runs cancel --run-id {}\n```\n\n## Resources\n\n- [Databricks Status](https://status.databricks.com)\n- [Support Portal](https://help.databricks.com)\n- [Community Forum](https://community.databricks.com)\n\n## Next Steps\n\nFor data handling and compliance, see `databricks-data-handling`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "databricks-incident-runbook",
-    "description": "Execute Databricks incident response procedures with triage, mitigation,",
-    "allowed-tools": "Read, Grep, Bash(databricks:*), Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

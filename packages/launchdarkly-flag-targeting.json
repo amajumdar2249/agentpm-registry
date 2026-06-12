@@ -1,16 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000011521",
   "name": "launchdarkly-flag-targeting",
   "slug": "launchdarkly-flag-targeting",
   "description": "Control LaunchDarkly feature flag targeting including toggling flags on/off, percentage rollouts, targeting rules, individual targets, and copying flag configurations between environments. Use when the user wants to change who sees a flag, roll out to a percentage, add targeting rules, or promote config between environments.",
   "content": "\n# LaunchDarkly Flag Targeting & Rollout\n\nYou're using a skill that will guide you through changing who sees what for a feature flag. Your job is to understand the current state of the flag, figure out the right targeting approach for what the user wants, make the changes safely, and verify the resulting state.\n\n## Prerequisites\n\nThis skill requires the remotely hosted LaunchDarkly MCP server to be configured in your environment.\n\n**Required MCP tools:**\n- `get-flag`: understand current state before making changes\n- `toggle-flag`: turn targeting on or off for a flag in an environment\n- `update-rollout`: change the default rule (fallthrough) variation or percentage rollout\n- `update-targeting-rules`: add, remove, or modify custom targeting rules\n- `update-individual-targets`: add or remove specific users/contexts from individual targeting\n\n**Optional MCP tools:**\n- `copy-flag-config`: copy targeting configuration from one environment to another\n- `create-approval-request`: create an approval request when direct changes are blocked\n- `list-approval-requests`: check on pending approval requests for a flag\n- `apply-approval-request`: apply an already-approved approval request\n\n## Core Concept: Evaluation Order\n\nBefore making any targeting changes, understand how LaunchDarkly evaluates flags. This determines what your changes actually do:\n\n1. **Flag is OFF** -> Serve the `offVariation` to everyone. Nothing else matters.\n2. **Individual targets** -> If the context matches a specific target list, serve that variation. Highest priority.\n3. **Custom rules** -> Evaluate rules top-to-bottom. First matching rule wins.\n4. **Default rule (fallthrough)** -> If nothing else matched, serve this variation or rollout.\n\nThis means: if you add a targeting rule but the flag is OFF, nobody sees the change. If you set a percentage rollout on the default rule but there's an individual target, that targeted user bypasses the rollout.\n\n## Workflow\n\n### Step 1: Understand Current State\n\nBefore changing anything, check what's already configured.\n\n1. **Confirm the environment.** \"Turn it on\" without specifying an environment is ambiguous. Always confirm which environment the user means. Default to asking rather than assuming.\n2. **Fetch the flag.** Use `get-flag` with the target environment to see:\n   - `on`: Is targeting currently enabled?\n   - `fallthrough`: What's the default rule? (variation or percentage rollout)\n   - `offVariation`: What serves when the flag is off?\n   - `rules`: Any custom targeting rules?\n   - `targets`: Any individually targeted users/contexts?\n   - `prerequisites`: Any flags this depends on?\n3. **Assess complexity.** A flag with no rules and no individual targets is simple. A flag with multiple rules, targets, and prerequisites needs more care.\n\n### Step 2: Determine the Right Approach\n\nBased on what the user wants and what you found, choose the right tool and strategy. See [Targeting Patterns](references/targeting-patterns.md) for the full reference.\n\n**Common scenarios:**\n\n| User wants | Tool | Notes |\n|-----------|------|-------|\n| \"Turn it on\" | `toggle-flag` with `on: true` | Simplest change |\n| \"Turn it off\" | `toggle-flag` with `on: false` | Serves offVariation to everyone |\n| \"Roll out to X%\" | `update-rollout` with `rolloutType: \"percentage\"` | Weights must sum to 100 |\n| \"Enable for beta users\" | `update-targeting-rules`: add a rule with clause | Rules are ANDed within, ORed between |\n| \"Add specific users\" | `update-individual-targets` | Highest priority, overrides all rules |\n| \"Full rollout\" | `update-rollout` with `rolloutType: \"variation\"` | Serve one variation to everyone |\n| \"Copy from staging\" | `copy-flag-config` | Promote tested config to production |\n\n### Step 3: Run the Safety Checklist\n\nBefore applying changes, especially in production, run through the [Safety Checklist](references/safety-checklist.md). The key checks:\n\n1. **Right environment?** Double-check you're targeting the intended environment.\n2. **Approval required?** Some environments require approval workflows. If any mutation tool returns `requiresApproval: true`:\n   - Inform the user that this environment requires approvals.\n   - Share the `approvalUrl` if provided.\n   - Offer to create an approval request using `create-approval-request` with the same instructions (returned in the `instructions` field of the response).\n   - Do NOT attempt to bypass approval or auto-approve.\n   - See [Approval Workflows](references/approval-workflows.md) for the full process.\n3. **Prerequisite flags?** If this flag has prerequisites, they must be met before targeting works as expected.\n4. **Rule ordering impact?** If adding rules, consider where they fall in evaluation order. Rules evaluate top-to-bottom, first match wins.\n5. **Include a comment.** Always add an audit trail comment, especially for production changes.\n\n### Step 4: Apply Changes\n\nUse the appropriate tool for the change. Key notes:\n\n- **`toggle-flag`**: Specify `on: true` or `on: false`, the `env`, and a `comment`.\n- **`update-rollout`**: Use `rolloutType: \"percentage\"` with human-friendly weights (e.g., 80 for 80%) that sum to 100, or `rolloutType: \"variation\"` with a `variationIndex`.\n- **`update-targeting-rules`**: Instructions support `addRule`, `removeRule`, `updateRuleVariationOrRollout`, `addClauses`, `removeClauses`, `reorderRules`.\n- **`update-individual-targets`**: Instructions support `addTargets`, `removeTargets`, `addContextTargets`, `removeContextTargets`, `replaceTargets`.\n\nSee [Targeting Patterns](references/targeting-patterns.md) for detailed instruction examples.\n\n### Step 5: Verify\n\nAfter applying changes, confirm the result:\n\n1. **Fetch the updated flag.** Use `get-flag` again to verify the new state.\n2. **Confirm what the user expects.** Describe the resulting targeting in plain language:\n   - \"The flag is now ON in production, serving `true` to 25% of users and `false` to 75%.\"\n   - \"Beta users now see variation A. Everyone else gets the default (variation B).\"\n3. **Check for side effects.** If there are rules or individual targets, make sure the change interacts correctly with them.\n\n### Handling Approval-Required Environments\n\nWhen any mutation tool returns `requiresApproval: true`, the direct change was blocked because the environment requires approvals. Follow the [Approval Workflows](references/approval-workflows.md) reference to:\n\n1. **Create an approval request** with `create-approval-request` using the `instructions` from the blocked response\n2. **Inform the user** about the pending approval and share the approval request details\n3. **Check on approval status** later with `list-approval-requests` if requested\n4. **Apply the request** with `apply-approval-request` once a reviewer has approved it (reviewStatus is \"approved\")\n5. **Verify the result** with `get-flag` after applying\n\n## Important Context\n\n- **`update-rollout` uses human-friendly percentages.** Pass 80 for 80%, not 80000. The tool handles the internal weight conversion.\n- **Weights must sum to 100.** For percentage rollouts, the weights across all variations must total exactly 100.\n- **Rule ordering matters.** Rules evaluate top-to-bottom. Reordering rules can change behavior without changing any individual rule.\n- **Individual targets are highest priority.** They override all rules and the default. Adding someone as an individual target means rules don't apply to them.\n- **\"Launched\" flags are still ON.** A flag with status \"launched\" is serving a single variation to everyone. If you want to remove the flag, use the [cleanup skill](../launchdarkly-flag-cleanup/SKILL.md), not targeting changes.\n\n## References\n\n- [Targeting Patterns](references/targeting-patterns.md): Rollout strategies, rule construction, individual targeting, and cross-environment copying\n- [Safety Checklist](references/safety-checklist.md): Pre-change verification, approval workflows, environment awareness\n- [Approval Workflows](references/approval-workflows.md): Creating, checking, and applying approval requests\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "launchdarkly-flag-targeting",
-    "description": "Control LaunchDarkly feature flag targeting including toggling flags on/off, percentage rollouts, targeting rules, individual targets, and copying flag configurations between environments. Use when the user wants to change who sees a flag, roll out to a percentage, add targeting rules, or promote config between environments.",
-    "license": "Apache-2.0",
-    "compatibility": "Requires the remotely hosted LaunchDarkly MCP server",
-    "metadata": "",
-    "author": "launchdarkly",
-    "version": "1.0.0-experimental"
+  "author": "launchdarkly",
+  "version": "1.0.0-experimental",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "Apache-2.0",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

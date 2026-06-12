@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032673",
   "name": "navan-cost-tuning",
   "slug": "navan-cost-tuning",
   "description": "Use when optimizing travel spend with Navan''s policy engine, analyzing",
   "content": "# Navan Cost Tuning\n\n## Overview\n\nNavan's platform includes a built-in policy engine, negotiated rate management, unused ticket tracking, and the Navan Rewards program \u2014 but these features require deliberate configuration to deliver savings. This skill covers the full cost optimization lifecycle: setting up travel policies with hard and soft caps, analyzing booking data via the REST API to find savings opportunities, enforcing negotiated corporate rates, recovering value from unused tickets, and incentivizing employees to choose cheaper options through Navan Rewards. No SDK exists \u2014 all analytics use direct REST API calls against `https://api.navan.com/v1`.\n\n## Prerequisites\n\n- **Navan Admin** account with policy management permissions\n- **OAuth 2.0 credentials** from Admin > API Settings (client_id, client_secret)\n- **Historical booking data** \u2014 at least 3 months for meaningful analysis\n- **Navan plan** \u2014 Business (free for up to 300 employees), Expense ($15/user/month after 5 free), or Enterprise (custom)\n- Pricing details: https://navan.com/pricing\n\n## Instructions\n\n### Step 1 \u2014 Analyze Current Spend via API\n\nPull booking data to identify where money is being lost:\n\n```bash\n# Authenticate\nACCESS_TOKEN=$(curl -sf -X POST https://api.navan.com/ta-auth/oauth/token \\\n  -H \"Content-Type: application/x-www-form-urlencoded\" \\\n  -d \"grant_type=client_credentials&client_id=${NAVAN_CLIENT_ID}&client_secret=${NAVAN_CLIENT_SECRET}\" \\\n  | jq -r '.access_token')\n\n# Fetch last 90 days of bookings for analysis (page + size pagination)\ncurl -s \"https://api.navan.com/v1/bookings?createdFrom=2026-01-01&page=0&size=50\" \\\n  -H \"Authorization: Bearer ${ACCESS_TOKEN}\" \\\n  -o bookings.json\n\n# Analyze: average booking lead time (days before travel)\n# Response structure: records in .data array\njq '[.data[] | ((.departure_date | fromdate) - (.created_at | fromdate)) / 86400] | add / length' \\\n  bookings.json\n# Target: 14+ days average lead time for maximum savings\n```\n\n```typescript\n// Identify top savings opportunities by category\ninterface BookingAnalysis {\n  total_spend: number;\n  avg_lead_time_days: number;\n  out_of_policy_pct: number;\n  unused_tickets: number;\n  top_routes: { route: string; spend: number; trips: number }[];\n}\n\nasync function analyzeSpend(token: string): Promise<BookingAnalysis> {\n  const response = await fetch(\n    'https://api.navan.com/v1/bookings?page=0&size=50',\n    { headers: { 'Authorization': `Bearer ${token}` } }\n  );\n\n  if (!response.ok) throw new Error(`HTTP ${response.status}`);\n  const { data: bookings } = await response.json();\n\n  const routeMap = new Map<string, { spend: number; trips: number }>();\n  let totalSpend = 0;\n  let outOfPolicy = 0;\n\n  for (const b of bookings) {\n    totalSpend += b.total_amount;\n    if (b.out_of_policy) outOfPolicy++;\n\n    const route = `${b.origin}-${b.destination}`;\n    const existing = routeMap.get(route) ?? { spend: 0, trips: 0 };\n    routeMap.set(route, {\n      spend: existing.spend + b.total_amount,\n      trips: existing.trips + 1,\n    });\n  }\n\n  return {\n    total_spend: totalSpend,\n    avg_lead_time_days: calculateAvgLeadTime(bookings),\n    out_of_policy_pct: (outOfPolicy / bookings.length) * 100,\n    unused_tickets: await countUnusedTickets(token),\n    top_routes: [...routeMap.entries()]\n      .map(([route, data]) => ({ route, ...data }))\n      .sort((a, b) => b.spend - a.spend)\n      .slice(0, 10),\n  };\n}\n```\n\n### Step 2 \u2014 Configure the Policy Engine\n\nSet up travel policies in Navan Admin > Policies with these recommended tiers:\n\n| Policy Rule | Configuration | Savings Impact |\n|------------|---------------|----------------|\n| **Flight cap** | Soft cap at lowest logical fare + 20% | 10-15% on airfare |\n| **Hotel cap** | Per-city nightly rate (e.g., NYC $250, Austin $180) | 15-25% on lodging |\n| **Advance booking** | Flag bookings made < 7 days before travel | 20-30% on last-minute trips |\n| **Cabin class** | Economy for flights < 6 hours, Business for 6+ | Varies by route mix |\n| **Approval workflow** | Manager approval for out-of-policy bookings | Reduces out-of-policy by 40-60% |\n\n### Step 3 \u2014 Enforce Negotiated Corporate Rates\n\n```bash\n# Check if negotiated rates are being utilized\ncurl -s \"https://api.navan.com/v1/bookings?page=0&size=50\" \\\n  -H \"Authorization: Bearer ${ACCESS_TOKEN}\" | \\\n  jq '{\n    total_bookings: (.data | length),\n    bookings_with_negotiated: [.data[] | select(.negotiated_savings != null)] | length,\n    total_savings: [.data[].negotiated_savings // 0] | add\n  }'\n```\n\nUpload negotiated rates in Navan Admin > Rates. Navan automatically surfaces these as preferred options during booking.\n\n### Step 4 \u2014 Track Unused Tickets\n\n```bash\n# Identify unused or partially used tickets\ncurl -s \"https://api.navan.com/v1/bookings?page=0&size=50\" \\\n  -H \"Authorization: Bearer ${ACCESS_TOKEN}\" | \\\n  jq '{\n    cancelled: [.data[] | select(.status == \"cancelled\")] | length,\n    total_credit_value: [.data[] | select(.status == \"cancelled\") | .credit_amount // 0] | add\n  }'\n# Credits expiring within 30 days should be rebooked or refunded\n```\n\n### Step 5 \u2014 Enable Navan Rewards\n\nNavan Rewards gives employees personal travel credit when they book below policy limits. Configure in Admin > Rewards:\n\n- **Activation**: Enable Navan Rewards for all employees or specific departments\n- **Credit calculation**: Employee earns a percentage of the difference between policy cap and actual booking\n- **Redemption**: Credits apply to personal travel booked through Navan\n- **Reporting**: Track rewards earned and redeemed via the admin dashboard\n\nThis creates a direct incentive for employees to choose cheaper options \u2014 Navan reports typical 5-15% additional savings from Rewards adoption.\n\n## Output\n\nA cost optimization implementation delivering:\n\n- **Spend analysis report** identifying top savings opportunities by department and route\n- **Configured policy engine** with hard/soft caps and approval workflows\n- **Negotiated rate enforcement** surfacing corporate rates during booking\n- **Unused ticket recovery** preventing credit expiration\n- **Navan Rewards activation** incentivizing employee cost-conscious booking behavior\n\n## Error Handling\n\n| HTTP Code | Meaning | Resolution |\n|-----------|---------|------------|\n| `200` | Success | Process response data |\n| `401` | Token expired | Refresh OAuth token and retry |\n| `403` | Plan does not include this feature | Check Navan plan tier at https://navan.com/pricing |\n| `404` | Endpoint not available for your region | Contact Navan support for regional API availability |\n| `422` | Invalid policy configuration | Verify cap amounts and currency codes |\n| `429` | Rate limited | Reduce analytics query frequency |\n\n## Examples\n\n**Monthly savings dashboard query:**\n\n```bash\n# Generate a monthly savings summary\ncurl -s \"https://api.navan.com/v1/reports/savings-summary?period=2026-02\" \\\n  -H \"Authorization: Bearer ${ACCESS_TOKEN}\" | \\\n  jq '{\n    period: .period,\n    total_spend: .total_spend,\n    policy_savings: .in_policy_savings,\n    negotiated_rate_savings: .negotiated_savings,\n    rewards_credits_earned: .rewards_earned,\n    unused_tickets_recovered: .credits_rebooked,\n    total_savings: (.in_policy_savings + .negotiated_savings + .credits_rebooked)\n  }'\n```\n\n## Resources\n\n- [Navan Help Center](https://app.navan.com/app/helpcenter) \u2014 Policy setup guides and API docs\n- [Navan Pricing](https://navan.com/pricing) \u2014 Plan comparison (Business free up to 300 employees)\n- [Navan Integrations](https://navan.com/integrations) \u2014 ERP connectors for automated expense reporting\n\n## Next Steps\n\n- Add `navan-reference-architecture` for end-to-end integration design\n- Add `navan-performance-tuning` to optimize the API calls powering cost analytics\n- See `navan-observability` to monitor policy compliance rates over time\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "navan-cost-tuning",
-    "description": "Use when optimizing travel spend with Navan''s policy engine, analyzing",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Grep, Glob",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

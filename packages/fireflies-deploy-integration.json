@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031988",
   "name": "fireflies-deploy-integration",
   "slug": "fireflies-deploy-integration",
   "description": "Deploy Fireflies.ai webhook receivers and GraphQL clients to Vercel,",
   "content": "# Fireflies.ai Deploy Integration\n\n## Overview\n\nDeploy Fireflies.ai integrations across platforms. Covers GraphQL client setup, webhook receiver deployment, and secret management for Vercel, Docker, and Google Cloud Run.\n\n## Prerequisites\n\n- Fireflies.ai Business+ plan for API access\n- `FIREFLIES_API_KEY` and `FIREFLIES_WEBHOOK_SECRET` ready\n- Platform CLI installed (vercel, docker, or gcloud)\n\n## Instructions\n\n### Step 1: Shared GraphQL Client\n\n```typescript\n// lib/fireflies.ts\nconst FIREFLIES_API = \"https://api.fireflies.ai/graphql\";\n\nexport async function firefliesQuery(query: string, variables?: any) {\n  const res = await fetch(FIREFLIES_API, {\n    method: \"POST\",\n    headers: {\n      \"Content-Type\": \"application/json\",\n      Authorization: `Bearer ${process.env.FIREFLIES_API_KEY}`,\n    },\n    body: JSON.stringify({ query, variables }),\n  });\n\n  const json = await res.json();\n  if (json.errors) throw new Error(json.errors[0].message);\n  return json.data;\n}\n```\n\n### Step 2: Webhook Receiver (Next.js / Vercel)\n\n```typescript\n// app/api/webhooks/fireflies/route.ts\nimport crypto from \"crypto\";\n\nexport async function POST(req: Request) {\n  const rawBody = await req.text();\n  const signature = req.headers.get(\"x-hub-signature\") || \"\";\n\n  // Verify HMAC-SHA256 signature\n  const expected = crypto\n    .createHmac(\"sha256\", process.env.FIREFLIES_WEBHOOK_SECRET!)\n    .update(rawBody)\n    .digest(\"hex\");\n\n  if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {\n    return Response.json({ error: \"Invalid signature\" }, { status: 401 });\n  }\n\n  const event = JSON.parse(rawBody);\n\n  if (event.eventType === \"Transcription completed\") {\n    // Fetch transcript data\n    const data = await firefliesQuery(`\n      query($id: String!) {\n        transcript(id: $id) {\n          id title duration\n          speakers { name }\n          summary { overview action_items }\n        }\n      }\n    `, { id: event.meetingId });\n\n    // Process transcript (store, notify, create tasks)\n    console.log(`Processed: ${data.transcript.title}`);\n  }\n\n  return Response.json({ received: true });\n}\n```\n\n### Step 3: Deploy to Vercel\n\n```bash\nset -euo pipefail\n# Add secrets\nvercel env add FIREFLIES_API_KEY production\nvercel env add FIREFLIES_WEBHOOK_SECRET production\n\n# Deploy\nvercel --prod\n\n# Register webhook URL in Fireflies dashboard:\n# https://your-app.vercel.app/api/webhooks/fireflies\n```\n\n### Step 4: Deploy with Docker\n\n```dockerfile\nFROM node:20-slim\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci --only=production\nCOPY . .\nRUN npm run build\nEXPOSE 3000\nCMD [\"node\", \"dist/index.js\"]\n```\n\n```yaml\n# docker-compose.yml\nservices:\n  fireflies-app:\n    build: .\n    ports:\n      - \"3000:3000\"\n    environment:\n      - FIREFLIES_API_KEY=${FIREFLIES_API_KEY}\n      - FIREFLIES_WEBHOOK_SECRET=${FIREFLIES_WEBHOOK_SECRET}\n    restart: unless-stopped\n```\n\n```bash\nset -euo pipefail\ndocker compose up -d\n# Verify\ncurl -f http://localhost:3000/api/health | jq .\n```\n\n### Step 5: Deploy to Google Cloud Run\n\n```bash\nset -euo pipefail\n# Build and push\ngcloud builds submit --tag gcr.io/$PROJECT_ID/fireflies-app\n\n# Deploy\ngcloud run deploy fireflies-app \\\n  --image gcr.io/$PROJECT_ID/fireflies-app \\\n  --platform managed \\\n  --allow-unauthenticated \\\n  --set-env-vars \"FIREFLIES_WEBHOOK_SECRET=${FIREFLIES_WEBHOOK_SECRET}\" \\\n  --set-secrets \"FIREFLIES_API_KEY=fireflies-api-key:latest\"\n\n# Get URL for webhook registration\ngcloud run services describe fireflies-app --format='value(status.url)'\n```\n\n### Step 6: Health Check Endpoint\n\n```typescript\n// app/api/health/route.ts (or /health endpoint)\nexport async function GET() {\n  try {\n    const start = Date.now();\n    const data = await firefliesQuery(\"{ user { email } }\");\n    return Response.json({\n      status: \"healthy\",\n      fireflies: {\n        connected: true,\n        user: data.user.email,\n        latencyMs: Date.now() - start,\n      },\n    });\n  } catch (err) {\n    return Response.json({\n      status: \"degraded\",\n      fireflies: { connected: false, error: (err as Error).message },\n    }, { status: 503 });\n  }\n}\n```\n\n## Post-Deploy: Register Webhook\n\nAfter deploying, register your webhook URL:\n\n1. Go to [app.fireflies.ai/settings](https://app.fireflies.ai/settings) > Developer settings\n2. Enter your webhook URL (e.g., `https://your-app.vercel.app/api/webhooks/fireflies`)\n3. Save the webhook secret\n\nOr test via API:\n\n```bash\nset -euo pipefail\n# Test API connectivity from deployed app\ncurl -f https://your-app.vercel.app/api/health | jq .\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| GraphQL auth error | API key not set in platform | Add secret via platform CLI |\n| Webhook 401 | Secret mismatch | Verify secret matches dashboard |\n| Cold start timeout | Serverless cold start + API latency | Increase function timeout to 30s |\n| No webhook events | URL not registered | Register at app.fireflies.ai/settings |\n\n## Output\n\n- Deployed webhook receiver with HMAC signature verification\n- GraphQL client configured with platform-specific secrets\n- Health check endpoint monitoring Fireflies connectivity\n- Platform-specific deployment verified\n\n## Resources\n\n- [Fireflies API Docs](https://docs.fireflies.ai/)\n- [Fireflies Webhooks](https://docs.fireflies.ai/graphql-api/webhooks)\n\n## Next Steps\n\nFor webhook event handling, see `fireflies-webhooks-events`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "fireflies-deploy-integration",
-    "description": "Deploy Fireflies.ai webhook receivers and GraphQL clients to Vercel,",
-    "allowed-tools": "Read, Write, Edit, Bash(vercel:*), Bash(docker:*), Bash(gcloud:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

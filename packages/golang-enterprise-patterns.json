@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000000574",
   "name": "golang-enterprise-patterns",
   "slug": "golang-enterprise-patterns",
   "description": "Enterprise-level Go architecture patterns including clean architecture,",
   "content": "\n# Golang Enterprise Patterns\n\nThis skill provides guidance on enterprise-level Go application architecture, design patterns, and production-ready code organization.\n\n## When to Use This Skill\n\n- When designing new Go applications with complex business logic\n- When implementing clean architecture or hexagonal architecture\n- When applying Domain-Driven Design (DDD) principles\n- When organizing large Go codebases\n- When establishing patterns for team consistency\n\n## Clean Architecture\n\n### Layer Structure\n\n```text\n/cmd\n  /api           - HTTP/gRPC entry points\n  /worker        - Background job runners\n/internal\n  /domain        - Business entities and interfaces\n  /application   - Use cases and application services\n  /infrastructure\n    /persistence - Database implementations\n    /messaging   - Queue implementations\n    /http        - HTTP client implementations\n  /interfaces\n    /api         - HTTP handlers\n    /grpc        - gRPC handlers\n/pkg             - Shared libraries (public)\n```\n\n### Dependency Rule\n\nDependencies flow inward only:\n\n```text\nInterfaces \u2192 Application \u2192 Domain\n     \u2193            \u2193\nInfrastructure (implements domain interfaces)\n```\n\n### Domain Layer\n\n```go\n// domain/user.go\npackage domain\n\nimport \"time\"\n\ntype UserID string\n\ntype User struct {\n    ID        UserID\n    Email     string\n    Name      string\n    CreatedAt time.Time\n}\n\n// UserRepository defines the contract for user persistence\ntype UserRepository interface {\n    FindByID(ctx context.Context, id UserID) (*User, error)\n    FindByEmail(ctx context.Context, email string) (*User, error)\n    Save(ctx context.Context, user *User) error\n    Delete(ctx context.Context, id UserID) error\n}\n\n// UserService defines domain business logic\ntype UserService interface {\n    Register(ctx context.Context, email, name string) (*User, error)\n    Authenticate(ctx context.Context, email, password string) (*User, error)\n}\n```\n\n### Application Layer\n\n```go\n// application/user_service.go\npackage application\n\ntype UserServiceImpl struct {\n    repo   domain.UserRepository\n    hasher PasswordHasher\n    logger Logger\n}\n\nfunc NewUserService(repo domain.UserRepository, hasher PasswordHasher, logger Logger) *UserServiceImpl {\n    return &UserServiceImpl{repo: repo, hasher: hasher, logger: logger}\n}\n\nfunc (s *UserServiceImpl) Register(ctx context.Context, email, name string) (*domain.User, error) {\n    // Check if user exists\n    existing, err := s.repo.FindByEmail(ctx, email)\n    if err != nil && !errors.Is(err, domain.ErrNotFound) {\n        return nil, fmt.Errorf(\"checking existing user: %w\", err)\n    }\n    if existing != nil {\n        return nil, domain.ErrUserAlreadyExists\n    }\n\n    user := &domain.User{\n        ID:        domain.UserID(uuid.New().String()),\n        Email:     email,\n        Name:      name,\n        CreatedAt: time.Now(),\n    }\n\n    if err := s.repo.Save(ctx, user); err != nil {\n        return nil, fmt.Errorf(\"saving user: %w\", err)\n    }\n\n    return user, nil\n}\n```\n\n## Hexagonal Architecture (Ports & Adapters)\n\n### Port Definitions\n\n```go\n// ports/primary.go - Driving ports (input)\npackage ports\n\ntype UserAPI interface {\n    CreateUser(ctx context.Context, req CreateUserRequest) (*UserResponse, error)\n    GetUser(ctx context.Context, id string) (*UserResponse, error)\n}\n\n// ports/secondary.go - Driven ports (output)\ntype UserStorage interface {\n    Save(ctx context.Context, user *domain.User) error\n    FindByID(ctx context.Context, id string) (*domain.User, error)\n}\n\ntype NotificationSender interface {\n    SendWelcomeEmail(ctx context.Context, user *domain.User) error\n}\n```\n\n### Adapter Implementations\n\n```go\n// adapters/postgres/user_repository.go\npackage postgres\n\ntype UserRepository struct {\n    db *sql.DB\n}\n\nfunc (r *UserRepository) Save(ctx context.Context, user *domain.User) error {\n    query := `INSERT INTO users (id, email, name, created_at) VALUES ($1, $2, $3, $4)`\n    _, err := r.db.ExecContext(ctx, query, user.ID, user.Email, user.Name, user.CreatedAt)\n    return err\n}\n```\n\n## Domain-Driven Design (DDD)\n\n### Aggregate Roots\n\n```go\n// domain/order/aggregate.go\npackage order\n\ntype Order struct {\n    id         OrderID\n    customerID CustomerID\n    items      []OrderItem\n    status     OrderStatus\n    events     []DomainEvent\n}\n\nfunc NewOrder(customerID CustomerID) *Order {\n    o := &Order{\n        id:         OrderID(uuid.New().String()),\n        customerID: customerID,\n        status:     StatusPending,\n    }\n    o.recordEvent(OrderCreated{OrderID: o.id, CustomerID: customerID})\n    return o\n}\n\nfunc (o *Order) AddItem(productID ProductID, quantity int, price Money) error {\n    if o.status != StatusPending {\n        return ErrOrderNotModifiable\n    }\n    o.items = append(o.items, OrderItem{\n        ProductID: productID,\n        Quantity:  quantity,\n        Price:     price,\n    })\n    return nil\n}\n\nfunc (o *Order) Submit() error {\n    if len(o.items) == 0 {\n        return ErrEmptyOrder\n    }\n    o.status = StatusSubmitted\n    o.recordEvent(OrderSubmitted{OrderID: o.id})\n    return nil\n}\n```\n\n### Value Objects\n\n```go\n// domain/money.go\ntype Money struct {\n    amount   int64  // cents\n    currency string\n}\n\nfunc NewMoney(amount int64, currency string) (Money, error) {\n    if amount < 0 {\n        return Money{}, ErrNegativeAmount\n    }\n    return Money{amount: amount, currency: currency}, nil\n}\n\nfunc (m Money) Add(other Money) (Money, error) {\n    if m.currency != other.currency {\n        return Money{}, ErrCurrencyMismatch\n    }\n    return Money{amount: m.amount + other.amount, currency: m.currency}, nil\n}\n```\n\n### Domain Events\n\n```go\n// domain/events.go\ntype DomainEvent interface {\n    EventName() string\n    OccurredAt() time.Time\n}\n\ntype OrderCreated struct {\n    OrderID    OrderID\n    CustomerID CustomerID\n    occurredAt time.Time\n}\n\nfunc (e OrderCreated) EventName() string    { return \"order.created\" }\nfunc (e OrderCreated) OccurredAt() time.Time { return e.occurredAt }\n```\n\n## Dependency Injection\n\n### Wire-Style DI\n\n```go\n// wire.go\n//+build wireinject\n\nfunc InitializeApp(cfg *config.Config) (*App, error) {\n    wire.Build(\n        NewDatabase,\n        NewUserRepository,\n        NewUserService,\n        NewHTTPServer,\n        NewApp,\n    )\n    return nil, nil\n}\n```\n\n### Manual DI (Preferred for Simplicity)\n\n```go\n// main.go\nfunc main() {\n    cfg := config.Load()\n\n    db := database.Connect(cfg.DatabaseURL)\n\n    userRepo := postgres.NewUserRepository(db)\n    orderRepo := postgres.NewOrderRepository(db)\n\n    userService := application.NewUserService(userRepo)\n    orderService := application.NewOrderService(orderRepo, userRepo)\n\n    handler := api.NewHandler(userService, orderService)\n    server := http.NewServer(cfg.Port, handler)\n\n    server.Run()\n}\n```\n\n## Error Handling Patterns\n\n### Custom Error Types\n\n```go\n// domain/errors.go\ntype Error struct {\n    Code    string\n    Message string\n    Err     error\n}\n\nfunc (e *Error) Error() string {\n    if e.Err != nil {\n        return fmt.Sprintf(\"%s: %s: %v\", e.Code, e.Message, e.Err)\n    }\n    return fmt.Sprintf(\"%s: %s\", e.Code, e.Message)\n}\n\nfunc (e *Error) Unwrap() error { return e.Err }\n\nvar (\n    ErrNotFound         = &Error{Code: \"NOT_FOUND\", Message: \"resource not found\"}\n    ErrUserAlreadyExists = &Error{Code: \"USER_EXISTS\", Message: \"user already exists\"}\n    ErrInvalidInput     = &Error{Code: \"INVALID_INPUT\", Message: \"invalid input\"}\n)\n```\n\n## Configuration Management\n\n```go\n// config/config.go\ntype Config struct {\n    Server   ServerConfig\n    Database DatabaseConfig\n    Redis    RedisConfig\n}\n\nfunc Load() (*Config, error) {\n    cfg := &Config{}\n\n    cfg.Server.Port = getEnvInt(\"PORT\", 8080)\n    cfg.Server.ReadTimeout = getEnvDuration(\"READ_TIMEOUT\", 30*time.Second)\n\n    cfg.Database.URL = mustGetEnv(\"DATABASE_URL\")\n    cfg.Database.MaxConns = getEnvInt(\"DB_MAX_CONNS\", 25)\n\n    return cfg, nil\n}\n```\n\n## Best Practices\n\n1. **Keep domain pure** - No framework dependencies in domain layer\n2. **Interface segregation** - Small, focused interfaces\n3. **Dependency inversion** - Depend on abstractions, not concretions\n4. **Explicit dependencies** - Pass dependencies via constructor\n5. **Fail fast** - Validate at boundaries, trust internal code\n6. **Make illegal states unrepresentable** - Use types to enforce invariants\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "golang-enterprise-patterns",
-    "description": "Enterprise-level Go architecture patterns including clean architecture,",
-    "author": "Joseph OBrien",
-    "status": "unpublished",
-    "updated": "2025-12-23",
-    "version": "1.0.1",
-    "tag": "skill",
-    "type": "skill"
+  "author": "Joseph OBrien",
+  "version": "1.0.1",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

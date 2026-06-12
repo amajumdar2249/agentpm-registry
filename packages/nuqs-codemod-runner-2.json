@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000040976",
   "name": "nuqs-codemod-runner",
   "slug": "nuqs-codemod-runner-2",
   "description": "Use this skill whenever a codebase has nuqs code that may be stuck on pre-v2.5 patterns \u2014 deprecated `throttleMs`, hand-rolled setTimeout/useState debounce around `useQueryState`, unchecked `parseAsJson` casts, unversioned `nuqs/adapters/react-router` imports, or `ParserBuilder<T>` type references. The skill scans the repo, produces a dry-run report, asks for confirmation, applies AST codemods, then runs `tsc --noEmit` + the user's lint as a gate. Trigger even if the user only mentions \"upgrade nuqs\" or \"migrate to nuqs v2.5+\" without naming the specific patterns \u2014 they almost always exist in pre-v2.5 codebases.",
   "content": "\n# nuqs Codemod Runner\n\nMigrate a codebase from pre-v2.5 nuqs patterns to current v2.5\u2013v2.8 idioms. The skill is **read-only by default** \u2014 it never modifies files without an explicit confirmation step, and refuses to run on a dirty git working tree.\n\n## When to Apply\n\nTrigger this skill when:\n- A user asks to \"upgrade nuqs\" or \"migrate to nuqs 2.x\" in a project that already uses nuqs\n- You spot any of the 5 legacy patterns during a review (see the codemod table below)\n- A `nuqs` version bump in `package.json` from `<2.5` to `>=2.5` is part of the diff\n- The user has just installed/updated the [`nuqs` skill](../nuqs/SKILL.md) and wants to bring existing code into line with it\n\nThis skill is the **automation companion** to `skills/.curated/nuqs/` \u2014 that skill teaches what each correct pattern looks like; this skill rewrites legacy code to match.\n\n## Workflow Overview\n\n```\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510    \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510    \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510    \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510    \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2502  scan.sh \u2502\u2500\u2500\u25b6 \u2502 scan.json  \u2502\u2500\u2500\u25b6 \u2502   report.sh      \u2502\u2500\u2500\u25b6 \u2502 apply.sh  \u2502\u2500\u2500\u25b6 \u2502 verify.sh  \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518    \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518    \u2502 (dry-run table)  \u2502    \u2502 (codemods)\u2502    \u2502 (tsc+lint) \u2502\n                                  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518    \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518    \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n                                          \u2502                     \u25b2                \u2502\n                                          \u25bc                     \u2502                \u25bc\n                                  user reviews \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500  confirms       on fail: revert\n```\n\n1. **`scripts/scan.sh <repo-root>`** \u2014 ripgreps every `.ts/.tsx/.js/.jsx` file for the 5 legacy patterns, emits `scan.json` with `{path, line, matchedPattern, snippet, suggestion}`.\n2. **`scripts/report.sh`** \u2014 renders `scan.json` as a markdown table grouped by codemod, with file paths and before/after pairs. **Show this output to the user verbatim** and ask for explicit confirmation before continuing.\n3. **`scripts/apply.sh [--filter <codemod-id>]`** \u2014 runs the jscodeshift transforms in `scripts/transforms/`. Refuses to run unless a fresh `scan.json` exists for the current `git HEAD` and the working tree is clean (`--allow-dirty` overrides).\n4. **`scripts/verify.sh`** \u2014 runs `tsc --noEmit` and `npm run lint` (or the equivalent commands from `config.json`). If anything fails, `git restore` reverts every file the codemod touched.\n\nRun all four sequentially. If the user only wants to scan, stop at step 2.\n\n## The Five Codemods\n\n| ID | Detects | Rewrites to |\n|----|---------|-------------|\n| `throttle-ms` | `withOptions({ throttleMs: N })` or `setX(v, { throttleMs: N })` | `withOptions({ limitUrlUpdates: throttle(N) })` + adds `throttle` to the `nuqs` import |\n| `manual-debounce` | `useState` mirror + `useEffect` + `setTimeout` debounce around a `useQueryState` setter | `withOptions({ limitUrlUpdates: debounce(N) })` + adds `debounce` to the `nuqs` import; deletes the mirror state and effect |\n| `unchecked-json-cast` | `parseAsJson<T>()` (no validator) or `parseAsJson((v) => v as T)` | Inserts a `// TODO: validate` type-guard stub or, if Zod is detected in `package.json`, a `parseAsJson(SchemaName.parse)` form |\n| `react-router-unversioned` | `from 'nuqs/adapters/react-router'` | `from 'nuqs/adapters/react-router/v6'` (the alias the unversioned import historically pointed at) |\n| `parser-builder-type` | type references to `ParserBuilder<T>` from `nuqs` | `SingleParserBuilder<T>` |\n\nSee [`references/workflow.md`](references/workflow.md) for the exact AST shapes each codemod matches and the edge cases it deliberately skips.\n\n## Setup\n\nOn first run, `config.json` is populated with the user's lint/typecheck commands and a default `min_node_version`. See `_setup_instructions` in `config.json` for what to fill in.\n\n## Risk & Guardrails\n\nThis skill is **write-risk** (it modifies source files). Guardrails:\n\n- `apply.sh` aborts if the working tree is dirty (use `git stash` first, or pass `--allow-dirty` after reading [`gotchas.md`](gotchas.md))\n- `apply.sh` aborts if `scan.json` is older than 60 minutes or was generated against a different `git HEAD` \u2014 re-run `scan.sh`\n- The `hooks/hooks.json` PreToolUse matcher blocks any direct `node scripts/transforms/*.js` invocation that bypasses the orchestrator\n- `verify.sh` auto-reverts on TS or lint failure via `git restore` over the touched files (recorded in `last-run.json`)\n\n## Related Skills\n\n- [`nuqs`](../nuqs/) \u2014 Best-practice reference for nuqs v2.5+. This skill rewrites legacy code; that skill defines the target.\n\n## Gotchas\n\nSee [`gotchas.md`](gotchas.md) for failure modes discovered during use.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "nuqs-codemod-runner",
-    "description": "Use this skill whenever a codebase has nuqs code that may be stuck on pre-v2.5 patterns \u2014 deprecated `throttleMs`, hand-rolled setTimeout/useState debounce around `useQueryState`, unchecked `parseAsJson` casts, unversioned `nuqs/adapters/react-router` imports, or `ParserBuilder<T>` type references. The skill scans the repo, produces a dry-run report, asks for confirmation, applies AST codemods, then runs `tsc --noEmit` + the user's lint as a gate. Trigger even if the user only mentions \"upgrade nuqs\" or \"migrate to nuqs v2.5+\" without naming the specific patterns \u2014 they almost always exist in pre-v2.5 codebases."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

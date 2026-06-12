@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032497",
   "name": "linear-core-workflow-a",
   "slug": "linear-core-workflow-a",
   "description": "Issue lifecycle management with Linear: create, update, transition,",
   "content": "# Linear Core Workflow A: Issue Lifecycle\n\n## Overview\n\nMaster issue lifecycle management: creating, updating, transitioning states, building parent/sub-issue hierarchies, managing labels, and commenting. Linear issues flow through typed workflow states (`triage` -> `backlog` -> `unstarted` -> `started` -> `completed` | `canceled`), belong to a team, and support priorities 0-4, estimates, due dates, labels, and cycle/project assignment.\n\n## Prerequisites\n\n- `@linear/sdk` installed with API key or OAuth token configured\n- Access to target team(s)\n- Understanding of your team's workflow states\n\n## Instructions\n\n### Step 1: Create Issues\n\n```typescript\nimport { LinearClient } from \"@linear/sdk\";\n\nconst client = new LinearClient({ apiKey: process.env.LINEAR_API_KEY! });\n\n// Get team\nconst teams = await client.teams();\nconst team = teams.nodes.find(t => t.key === \"ENG\") ?? teams.nodes[0];\n\n// Basic issue\nconst result = await client.createIssue({\n  teamId: team.id,\n  title: \"Implement user authentication\",\n  description: \"Add OAuth 2.0 login flow with Google and GitHub providers.\",\n  priority: 2, // 0=None, 1=Urgent, 2=High, 3=Medium, 4=Low\n});\n\nif (result.success) {\n  const issue = await result.issue;\n  console.log(`Created: ${issue?.identifier} \u2014 ${issue?.title}`);\n  console.log(`URL: ${issue?.url}`);\n}\n\n// Issue with full metadata\nconst labelResult = await client.issueLabels({ filter: { name: { eq: \"Bug\" } } });\nconst bugLabel = labelResult.nodes[0];\nconst states = await team.states();\nconst todoState = states.nodes.find(s => s.type === \"unstarted\")!;\n\nawait client.createIssue({\n  teamId: team.id,\n  title: \"Fix login redirect loop on Safari\",\n  description: \"Users get stuck in infinite redirect after SSO callback.\",\n  priority: 1,\n  stateId: todoState.id,\n  assigneeId: \"user-uuid\",\n  labelIds: bugLabel ? [bugLabel.id] : [],\n  estimate: 3,\n  dueDate: \"2026-04-15\",\n});\n```\n\n### Step 2: Update Issues\n\n```typescript\n// Update by issue ID\nawait client.updateIssue(\"issue-uuid\", {\n  title: \"Updated title\",\n  priority: 1,\n  estimate: 5,\n  dueDate: \"2026-04-30\",\n});\n\n// Find issue by team key + number, then update\nconst issues = await client.issues({\n  filter: { number: { eq: 123 }, team: { key: { eq: \"ENG\" } } },\n});\nconst issue = issues.nodes[0];\nif (issue) {\n  await issue.update({\n    priority: 2,\n    description: \"Updated description with more details.\",\n  });\n}\n\n// Add/remove labels\nconst featureLabel = (await client.issueLabels({\n  filter: { name: { eq: \"Feature\" } },\n})).nodes[0];\n\nif (featureLabel) {\n  await client.updateIssue(issue.id, {\n    labelIds: [...(issue.labelIds ?? []), featureLabel.id],\n  });\n}\n```\n\n### Step 3: State Transitions\n\n```typescript\n// List all workflow states for a team\nconst teamStates = await team.states();\nfor (const state of teamStates.nodes) {\n  console.log(`${state.name} (type: ${state.type}, position: ${state.position})`);\n}\n// Output example:\n// Triage (type: triage, position: 0)\n// Backlog (type: backlog, position: 1)\n// Todo (type: unstarted, position: 2)\n// In Progress (type: started, position: 3)\n// In Review (type: started, position: 4)\n// Done (type: completed, position: 5)\n// Canceled (type: canceled, position: 6)\n\n// Move to \"In Progress\"\nconst inProgress = teamStates.nodes.find(s => s.name === \"In Progress\");\nif (inProgress) {\n  await client.updateIssue(issue.id, { stateId: inProgress.id });\n}\n\n// Complete an issue\nconst done = teamStates.nodes.find(s => s.type === \"completed\");\nif (done) {\n  await issue.update({ stateId: done.id });\n}\n```\n\n### Step 4: Parent/Sub-Issue Hierarchy\n\n```typescript\n// Create parent issue\nconst parentResult = await client.createIssue({\n  teamId: team.id,\n  title: \"Auth system overhaul\",\n  description: \"Epic: modernize authentication infrastructure.\",\n});\nconst parent = await parentResult.issue;\n\n// Create sub-issues under parent\nawait client.createIssue({\n  teamId: team.id,\n  title: \"Implement JWT token refresh\",\n  parentId: parent!.id,\n  priority: 2,\n});\n\nawait client.createIssue({\n  teamId: team.id,\n  title: \"Add MFA support\",\n  parentId: parent!.id,\n  priority: 3,\n});\n\n// List sub-issues\nconst children = await parent!.children();\nfor (const child of children.nodes) {\n  console.log(`  Sub: ${child.identifier} \u2014 ${child.title}`);\n}\n```\n\n### Step 5: Issue Relations\n\n```typescript\n// Relation types: \"blocks\", \"duplicate\", \"related\"\nawait client.createIssueRelation({\n  issueId: \"blocked-issue-id\",\n  relatedIssueId: \"blocking-issue-id\",\n  type: \"blocks\",\n});\n\n// Mark as duplicate\nawait client.createIssueRelation({\n  issueId: \"duplicate-issue-id\",\n  relatedIssueId: \"original-issue-id\",\n  type: \"duplicate\",\n});\n\n// List relations on an issue\nconst relations = await issue.relations();\nfor (const rel of relations.nodes) {\n  const related = await rel.relatedIssue;\n  console.log(`${rel.type}: ${related?.identifier}`);\n}\n```\n\n### Step 6: Comments\n\n```typescript\n// Add a comment (supports Markdown)\nawait client.createComment({\n  issueId: issue.id,\n  body: \"Deployed fix to staging.\\n\\n```bash\\nnpm run test:e2e -- --filter auth\\n```\\n\\nAll 47 tests passing.\",\n});\n\n// List comments on an issue\nconst comments = await issue.comments();\nfor (const comment of comments.nodes) {\n  const user = await comment.user;\n  console.log(`${user?.name}: ${comment.body.substring(0, 80)}...`);\n}\n```\n\n### Step 7: Attachments\n\n```typescript\n// Create a link attachment on an issue\nawait client.createAttachment({\n  issueId: issue.id,\n  title: \"Figma Design\",\n  url: \"https://figma.com/file/xxx\",\n  subtitle: \"Login page redesign\",\n});\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `Entity not found` | Invalid issue ID or deleted | Verify with `client.issue(id)` first |\n| `State not found` | Wrong team's state ID | List states for correct team: `team.states()` |\n| `Validation error` on create | Missing required field | `teamId` + `title` required; priority must be 0-4 |\n| `Circular dependency` | Issue blocks itself transitively | Validate relation graph before creating |\n| `Forbidden` | No write access to team | Check team membership and API key scope |\n\n## Examples\n\n### Bulk Create from CSV\n\n```typescript\nimport { parse } from \"csv-parse/sync\";\nimport fs from \"fs\";\n\nconst rows = parse(fs.readFileSync(\"issues.csv\"), { columns: true });\nfor (const row of rows) {\n  const result = await client.createIssue({\n    teamId: team.id,\n    title: row.title,\n    description: row.description,\n    priority: parseInt(row.priority) || 3,\n  });\n  const issue = await result.issue;\n  console.log(`Created: ${issue?.identifier}`);\n}\n```\n\n### Close Stale Issues\n\n```typescript\nconst stale = await client.issues({\n  filter: {\n    state: { type: { in: [\"unstarted\", \"started\"] } },\n    updatedAt: { lt: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString() },\n  },\n  first: 50,\n});\n\nconst canceled = (await team.states()).nodes.find(s => s.type === \"canceled\")!;\nfor (const issue of stale.nodes) {\n  await issue.update({ stateId: canceled.id });\n  await client.createComment({\n    issueId: issue.id,\n    body: \"Auto-closed: no activity for 90 days.\",\n  });\n  console.log(`Closed: ${issue.identifier} (last updated ${issue.updatedAt})`);\n}\n```\n\n## Resources\n\n- [SDK Data Fetching](https://linear.app/developers/sdk-fetching-and-modifying-data)\n- [GraphQL Filtering](https://linear.app/developers/filtering)\n- [Issue Model Schema](https://studio.apollographql.com/public/Linear-API/variant/current/schema/reference/objects/Issue)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "linear-core-workflow-a",
-    "description": "Issue lifecycle management with Linear: create, update, transition,",
-    "Trigger": "linear issue workflow\", \"linear issue lifecycle\",",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

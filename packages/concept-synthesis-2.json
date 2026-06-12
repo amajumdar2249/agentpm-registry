@@ -1,16 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000028757",
   "name": "concept-synthesis",
   "slug": "concept-synthesis-2",
   "description": "Deduplicate and synthesize raw concept stubs into a tiered intellectual map (T1 Canon to T4 Riff), tracing idea evolution across sources over time. Transforms thousands of raw concept pages into a curated intellectual fingerprint.",
   "content": "\n# concept-synthesis \u2014 From Raw Stubs to Intellectual Map\n\n> **Convention:** see [conventions/quality.md](../conventions/quality.md) for\n> back-link enforcement and quote-fidelity requirements.\n>\n> **Convention:** see [_brain-filing-rules.md](../_brain-filing-rules.md) \u2014\n> output files under `concepts/` per the primary-subject rule.\n\n## What this solves\n\nMany ingestion pipelines (signal-detector, idea-ingest, voice-note-ingest)\ncreate a concept page for every idea mentioned. Over months this produces:\n\n- Thousands of stub pages, many duplicates or near-duplicates\n- Timeline entries that repeat the same source across multiple concept pages\n- No synthesis \u2014 just \"the user mentioned X on this date\"\n- No tier assignments \u2014 everything flat\n- No clustering \u2014 related ideas aren't linked\n\nThis skill transforms that raw material into a curated intellectual map.\n\n## Architecture\n\n```\nPhase 1: Dedup + merge (deterministic)\n  N stubs \u2192 ~N/4 canonical concepts\n    \u251c\u2500\u2500 Jaccard dedup (word-overlap on titles + first-paragraph)\n    \u251c\u2500\u2500 Substring dedup (\"founder mode\" vs \"founder mode vs manager mode\")\n    \u251c\u2500\u2500 Semantic dedup (LLM: \"are these the same idea?\")\n    \u2514\u2500\u2500 Merge timelines + aliases from duplicates into the canonical page\n\nPhase 2: Score + tier (deterministic + heuristic)\n  Each canonical concept \u2192 scored and tiered\n    \u251c\u2500\u2500 Frequency: distinct sources referencing this concept\n    \u251c\u2500\u2500 Timespan: first mention \u2192 last mention in days\n    \u251c\u2500\u2500 Breadth: distinct months it appears in\n    \u251c\u2500\u2500 Engagement: avg engagement on concept-bearing sources (if available)\n    \u2514\u2500\u2500 Tier: T1 Canon | T2 Developing | T3 Speculative | T4 Riff\n\nPhase 3: Synthesize (LLM, T1+T2 only)\n  T1 + T2 concepts \u2192 rich synthesis\n    \u251c\u2500\u2500 Evolution narrative: how the idea sharpened over time\n    \u251c\u2500\u2500 Best articulation: highest-engagement or most precise quote\n    \u251c\u2500\u2500 Related concepts: cross-links to other concepts\n    \u251c\u2500\u2500 Context: what was happening when this idea emerged / evolved\n    \u2514\u2500\u2500 Counter-positions: what this idea argues against\n\nPhase 4: Cluster + map (LLM)\n  All tiered concepts \u2192 intellectual clusters\n    \u251c\u2500\u2500 Group related concepts into domains (auto-named via LLM)\n    \u251c\u2500\u2500 Generate cluster summary pages\n    \u251c\u2500\u2500 Build a master concepts/README.md with the full map\n    \u2514\u2500\u2500 Identify idea genealogies (concept A \u2192 evolved into concept B)\n```\n\n## Invocation\n\nThe skill is markdown agent instructions. The agent uses gbrain's\nexisting operations + LLM passes:\n\n```bash\n# 1. List all concept pages\ngbrain query \"type:concept\" --limit 10000 --json\n\n# 2. Phase 1 dedup \u2014 agent applies Jaccard + substring locally,\n#    then LLM passes to identify semantic duplicates.\n\n# 3. Phase 2 tier \u2014 agent scores each canonical concept based on\n#    frequency / timespan / breadth and writes tier into frontmatter.\n\n# 4. Phase 3 synthesis \u2014 for each T1/T2, agent reads the timeline\n#    + associated source pages and writes a synthesis section\n#    onto the concept page via put_page.\n\n# 5. Phase 4 clustering \u2014 agent reads the tiered concept list\n#    and writes concepts/README.md with the full intellectual map.\n```\n\n## Output: concept page format (post-synthesis)\n\n### T1 Canon \u2014 full synthesis\n\n```markdown\n---\ntitle: \"concept name\"\ntype: concept\ntier: 1\ntier_label: \"Canon\"\nmention_count: 18\ndistinct_months: 8\nfirst_mention: \"YYYY-MM-DD\"\nlast_mention: \"YYYY-MM-DD\"\ncomposite_score: 78.4\naliases: [\"alternate phrasing 1\", \"alternate phrasing 2\"]\nrelated: [\"sibling-concept-1\", \"sibling-concept-2\"]\n---\n\n# concept name\n\n**Tier 1 \u2014 Canon** | 18 mentions across 8 months\n\n## Synthesis\n\n[2-4 paragraph narrative tracing how the idea evolved, what it means in\nthe user's worldview, why it matters. Third-person analytical voice.]\n\n## Best Articulation\n\n> \"Verbatim quote from a source \u2014 the most precise or highest-engagement\n> expression of this idea.\" \u2014 [Date](source-url)\n\n## Evolution\n\n| Period | Expression | Signal |\n|--------|-----------|--------|\n| YYYY-MM | \"First articulation\" | First use \u2014 aspiration frame |\n| YYYY-MM | \"Sharpening\" | Anti-pattern emerges |\n| YYYY-MM | \"Peak form\" | Cleanest expression |\n\n## Related Concepts\n- [sibling concept](sibling-concept.md) \u2014 relationship description\n- [sibling concept](sibling-concept.md) \u2014 relationship description\n\n## Timeline\n[Full timeline with deduped entries, quotes, source links]\n```\n\n### T3 / T4 \u2014 stub only (no LLM synthesis)\n\n```markdown\n---\ntitle: \"concept name\"\ntype: concept\ntier: 4\ntier_label: \"Riff\"\nmention_count: 1\n---\n\n# concept name\n\n**Tier 4 \u2014 Riff** | 1 mention\n\n> \"Quote from the source\" \u2014 [Date](URL)\n```\n\n## Output: cluster map at concepts/README.md\n\n```markdown\n# Intellectual Universe\n\n## Canon (T1) \u2014 N concepts\nThe permanent intellectual fingerprint. Ideas that recur across years.\n\n### [Cluster Name]\n- [concept-slug](concept-slug.md) \u2014 one-line characterization\n- ...\n\n### [Other Cluster]\n- ...\n\n## Developing (T2) \u2014 N concepts\nSharpening. Might become canon.\n\n## Speculative (T3) \u2014 N concepts\nTesting in public.\n\n## Stats\n- Total concepts: N\n- T1 Canon: N\n- T2 Developing: N\n- T3 Speculative: N\n- T4 Riff: N\n- Earliest source: YYYY-MM-DD\n- Latest source: YYYY-MM-DD\n```\n\n## Quality gates\n\n### Dedup quality\n- No two concept pages should be \"the same idea in different words.\"\n- Aliases preserved in frontmatter for search.\n- Run `gbrain query \"type:concept\"` and spot-check the count reduction.\n\n### Tier quality\n- T1 should feel like \"yes, that IS one of my recurring frameworks\" \u2014\n  recognizable, recurring, sharp.\n- T2 should feel like \"I'm working on this; it's getting clearer.\"\n- No concept should be T1 with < 4 months span or < 6 mentions.\n- No concept should be T4 with > 3 months span.\n\n### Synthesis quality\n- Captures evolution, not just repetition.\n- Uses verbatim quotes, not paraphrase.\n- Links to related concepts (markdown links, not wiki-links).\n- Does NOT hallucinate sources or dates.\n\n## Cron integration\n\nThis is heavy work. Run on a cadence, not on every signal:\n\n- After a major ingestion batch completes (signal-detector burst, archive\n  crawler run, etc.).\n- Weekly cron for incremental synthesis of newly-promoted T1/T2 concepts.\n- Manual trigger for a full re-synthesis when the corpus shifts\n  significantly.\n\n## Anti-Patterns\n\n- \u274c Running synthesis on T3/T4 \u2014 wastes API budget on ideas that may\n  never sharpen.\n- \u274c Hallucinating quotes or dates. The timeline must be verifiable\n  against existing brain pages.\n- \u274c Generic cluster names (\"Various Topics\"). If you can't name the\n  cluster, the cluster isn't real.\n- \u274c Re-synthesizing already-synthesized T1s without new source material.\n  Idempotency-respect.\n\n## Related skills\n\n- `skills/signal-detector/SKILL.md` \u2014 creates raw concept stubs from text channels\n- `skills/voice-note-ingest/SKILL.md` \u2014 same for audio channels\n- `skills/idea-ingest/SKILL.md` \u2014 same for links / articles\n\n\n## Contract\n\nThis skill guarantees:\n\n- Routing matches the canonical triggers in the frontmatter.\n- Output written under the directories listed in `writes_to:` (when applicable).\n- Conventions referenced (`quality.md`, `brain-first.md`, `_brain-filing-rules.md`) are followed.\n- Privacy contract preserved: no real names, no fork-specific filesystem path literals, no upstream-fork references.\n\nThe full behavior contract is documented in the body sections above; this section exists for the conformance test.\n\n## Output Format\n\nThe skill's output shape is documented inline in the body sections above (see \"Output\", \"Brain page format\", or equivalent). The literal section header here exists for the conformance test (`test/skills-conformance.test.ts`).\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "concept-synthesis",
-    "version": "0.1.0",
-    "description": "Deduplicate and synthesize raw concept stubs into a tiered intellectual map (T1 Canon to T4 Riff), tracing idea evolution across sources over time. Transforms thousands of raw concept pages into a curated intellectual fingerprint.",
-    "triggers": "",
-    "mutating": "true",
-    "writes_pages": "true",
-    "writes_to": ""
+  "author": "agentpm",
+  "version": "0.1.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

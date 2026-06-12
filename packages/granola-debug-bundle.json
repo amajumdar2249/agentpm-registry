@@ -1,19 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032166",
   "name": "granola-debug-bundle",
   "slug": "granola-debug-bundle",
   "description": "Create diagnostic bundles for Granola support requests.",
   "content": "# Granola Debug Bundle\n\n## Current State\n\n!`sw_vers 2>/dev/null || uname -a`\n!`defaults read /Applications/Granola.app/Contents/Info.plist CFBundleShortVersionString 2>/dev/null || echo 'Granola version: check Menu > About'`\n\n## Overview\n\nCollect diagnostic information for Granola support. Produces a zip bundle with system info, audio configuration, network connectivity, and app state \u2014 without exposing meeting content, transcripts, or API keys.\n\n## Prerequisites\n\n- Terminal access (macOS Terminal or Windows PowerShell)\n- Granola installed (even if malfunctioning)\n- Internet access for network diagnostics\n\n## Instructions\n\n### Step 1 \u2014 Create Debug Directory\n\n```bash\nset -euo pipefail\nDEBUG_DIR=\"$HOME/Desktop/granola-debug-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$DEBUG_DIR\"\necho \"Debug directory: $DEBUG_DIR\"\n```\n\n### Step 2 \u2014 Collect System Information\n\n**macOS:**\n\n```bash\nset -euo pipefail\ncd \"$DEBUG_DIR\"\n\n# OS and hardware\nsw_vers > system-info.txt\nuname -a >> system-info.txt\nsysctl -n hw.memsize | awk '{printf \"RAM: %.0f GB\\n\", $1/1073741824}' >> system-info.txt\n\n# Granola version\ndefaults read /Applications/Granola.app/Contents/Info.plist CFBundleShortVersionString >> system-info.txt 2>/dev/null || echo \"Version: not found\" >> system-info.txt\n\n# Granola process status\npgrep -l Granola >> system-info.txt 2>/dev/null || echo \"Granola: NOT RUNNING\" >> system-info.txt\n\n# Audio configuration (critical for transcription issues)\nsystem_profiler SPAudioDataType > audio-config.txt 2>/dev/null\n```\n\n**Windows (PowerShell):**\n\n```powershell\n$dir = \"$env:USERPROFILE\\Desktop\\granola-debug-$(Get-Date -Format 'yyyyMMdd-HHmmss')\"\nNew-Item -ItemType Directory -Path $dir\n\n# System info\nGet-CimInstance Win32_OperatingSystem | Select Caption, Version > \"$dir\\system-info.txt\"\nGet-Process Granola -ErrorAction SilentlyContinue >> \"$dir\\system-info.txt\"\n\n# Audio devices\nGet-CimInstance Win32_SoundDevice | Select Name, Status > \"$dir\\audio-config.txt\"\n```\n\n### Step 3 \u2014 Check Permissions (macOS)\n\n```bash\nset -euo pipefail\ncd \"$DEBUG_DIR\"\necho \"=== Permission Check ===\" > permissions.txt\n\n# Check if Granola has microphone access\nsqlite3 ~/Library/Application\\ Support/com.apple.TCC/TCC.db \\\n  \"SELECT service, allowed FROM access WHERE client='ai.granola.app';\" >> permissions.txt 2>/dev/null \\\n  || echo \"Cannot read TCC database (expected on macOS 14+). Check manually:\" >> permissions.txt\n\necho \"\" >> permissions.txt\necho \"Manual verification required:\" >> permissions.txt\necho \"  System Settings > Privacy & Security > Microphone > Granola\" >> permissions.txt\necho \"  System Settings > Privacy & Security > Screen & System Audio Recording > Granola\" >> permissions.txt\n```\n\n### Step 4 \u2014 Network Diagnostics\n\n```bash\nset -euo pipefail\ncd \"$DEBUG_DIR\"\n\n# Test Granola API connectivity\necho \"=== Network Tests ===\" > network-test.txt\necho \"Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> network-test.txt\n\n# API endpoint\nHTTP_CODE=$(curl -s -o /dev/null -w \"%{http_code}\" --connect-timeout 5 https://api.granola.ai/ 2>/dev/null || echo \"FAIL\")\necho \"api.granola.ai: HTTP $HTTP_CODE\" >> network-test.txt\n\n# DNS resolution\nnslookup api.granola.ai >> network-test.txt 2>&1\n\n# WorkOS auth endpoint (Granola uses WorkOS for authentication)\nHTTP_CODE=$(curl -s -o /dev/null -w \"%{http_code}\" --connect-timeout 5 https://api.workos.com/ 2>/dev/null || echo \"FAIL\")\necho \"api.workos.com (auth): HTTP $HTTP_CODE\" >> network-test.txt\n```\n\n### Step 5 \u2014 Collect Cache Metadata (Not Content)\n\n```bash\nset -euo pipefail\ncd \"$DEBUG_DIR\"\n\nCACHE_FILE=\"$HOME/Library/Application Support/Granola/cache-v3.json\"\necho \"=== Cache Metadata ===\" > cache-info.txt\n\nif [ -f \"$CACHE_FILE\" ]; then\n    ls -lh \"$CACHE_FILE\" >> cache-info.txt\n    # Count documents without exposing content\n    python3 -c \"\nimport json\nfrom pathlib import Path\ntry:\n    raw = json.loads(Path('$CACHE_FILE').read_text())\n    state = json.loads(raw) if isinstance(raw, str) else raw\n    data = state.get('state', state)\n    print(f'Documents: {len(data.get(\\\"documents\\\", {}))}')\n    print(f'Transcripts: {len(data.get(\\\"transcripts\\\", {}))}')\n    print(f'Meetings metadata: {len(data.get(\\\"meetingsMetadata\\\", {}))}')\nexcept Exception as e:\n    print(f'Parse error: {e}')\n\" >> cache-info.txt 2>/dev/null\nelse\n    echo \"Cache file not found\" >> cache-info.txt\nfi\n```\n\n### Step 6 \u2014 Package and Submit\n\n```bash\nset -euo pipefail\ncd \"$(dirname \"$DEBUG_DIR\")\"\nzip -r \"$(basename \"$DEBUG_DIR\").zip\" \"$(basename \"$DEBUG_DIR\")/\"\necho \"Bundle ready: $(basename \"$DEBUG_DIR\").zip\"\necho \"Submit to: help@granola.ai or via in-app support\"\n```\n\n## Self-Diagnosis Checklist\n\nRun through this before contacting support:\n\n- [ ] Granola is updated to the latest version (Check for updates in menu)\n- [ ] Internet connection is stable (can load granola.ai in browser)\n- [ ] Microphone permission is granted\n- [ ] Screen & System Audio Recording permission is granted (macOS)\n- [ ] Correct audio input device is selected in System Settings\n- [ ] No conflicting virtual audio software (Loopback, BlackHole, etc.)\n- [ ] Calendar is connected and syncing (check Settings > Calendar)\n- [ ] Sufficient disk space (> 500 MB free)\n- [ ] [status.granola.ai](https://status.granola.ai) shows no active incidents\n\n## Privacy: What the Bundle Does NOT Include\n\n- Meeting transcripts or notes content\n- Personal calendar event details\n- API keys or authentication tokens\n- Audio recordings\n- Contact/attendee information\n\n## Output\n\n- Zip file on Desktop containing system, audio, network, and app diagnostics\n- Ready for submission to Granola support at help@granola.ai\n- Self-diagnosis checklist completed before escalation\n\n## Error Handling\n\n| Error | Cause | Fix |\n|-------|-------|-----|\n| Permission denied on TCC database | macOS 14+ security | Use manual permission verification instead |\n| Network test fails | Firewall or proxy | Check outbound HTTPS to `api.granola.ai` and `api.workos.com` |\n| Zip creation fails | Disk full | Free space, or tar instead: `tar czf bundle.tar.gz debug-dir/` |\n| Cache parse error | Different Granola version | Report the error \u2014 it helps support identify the version issue |\n\n## Resources\n\n- [Granola Support](https://help.granola.ai)\n- [Status Page](https://status.granola.ai)\n- [Transcription Troubleshooting](https://docs.granola.ai/help-center/troubleshooting/transcription-issues)\n\n## Next Steps\n\nProceed to `granola-rate-limits` to understand usage limits and plan differences.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "granola-debug-bundle",
-    "description": "Create diagnostic bundles for Granola support requests.",
-    "Trigger": "granola debug\", \"granola diagnostics\", \"granola support bundle\",",
-    "allowed-tools": "Read, Write, Edit, Bash(system_profiler:*), Bash(sw_vers:*), Bash(defaults:*),",
-    "Bash(curl": "*), Bash(pgrep:*), Bash(ls:*), Bash(zip:*), Bash(mkdir:*), Bash(uname:*),",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

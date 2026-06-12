@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033297",
   "name": "snowflake-prod-checklist",
   "slug": "snowflake-prod-checklist",
   "description": "Execute Snowflake production readiness checklist with monitoring and",
   "content": "# Snowflake Production Checklist\n\n## Overview\n\nComplete checklist for deploying Snowflake data pipelines and integrations to production.\n\n## Prerequisites\n\n- Staging environment validated\n- Production Snowflake account configured\n- Resource monitors in place\n- Monitoring infrastructure ready\n\n## Pre-Deployment Checklist\n\n### Authentication & Secrets\n\n- [ ] Service accounts use key pair auth (not password)\n- [ ] Private keys stored in secret manager (not files/env vars)\n- [ ] Key rotation procedure documented and tested\n- [ ] Network policy applied to production account\n- [ ] Connection parameters use production account identifier\n\n### Warehouse Configuration\n\n- [ ] Production warehouses created with appropriate sizing\n- [ ] Auto-suspend configured (60-300s based on workload)\n- [ ] Auto-resume enabled\n- [ ] Resource monitors with credit quotas and alerts\n- [ ] Separate warehouses for ETL, analytics, and dashboard workloads\n\n```sql\n-- Production warehouse setup\nCREATE WAREHOUSE IF NOT EXISTS PROD_ETL_WH\n  WAREHOUSE_SIZE = 'LARGE'\n  AUTO_SUSPEND = 120\n  AUTO_RESUME = TRUE;\n\nCREATE WAREHOUSE IF NOT EXISTS PROD_ANALYTICS_WH\n  WAREHOUSE_SIZE = 'MEDIUM'\n  MIN_CLUSTER_COUNT = 1\n  MAX_CLUSTER_COUNT = 3\n  SCALING_POLICY = 'STANDARD'\n  AUTO_SUSPEND = 300\n  AUTO_RESUME = TRUE;\n\n-- Resource monitor with alerts\nCREATE OR REPLACE RESOURCE MONITOR prod_monitor\n  WITH CREDIT_QUOTA = 1000\n  FREQUENCY = MONTHLY\n  START_TIMESTAMP = IMMEDIATELY\n  TRIGGERS\n    ON 75 PERCENT DO NOTIFY\n    ON 90 PERCENT DO NOTIFY\n    ON 100 PERCENT DO SUSPEND\n    ON 110 PERCENT DO SUSPEND_IMMEDIATE;\n\nALTER WAREHOUSE PROD_ETL_WH SET RESOURCE_MONITOR = prod_monitor;\nALTER WAREHOUSE PROD_ANALYTICS_WH SET RESOURCE_MONITOR = prod_monitor;\n```\n\n### Data Pipeline Readiness\n\n- [ ] All tasks resumed and running on schedule\n- [ ] Streams not stale (check with `SHOW STREAMS`)\n- [ ] Snowpipe notifications configured and verified\n- [ ] COPY INTO error handling set (`ON_ERROR = 'CONTINUE'` or `'SKIP_FILE'`)\n- [ ] Data retention set appropriately (`DATA_RETENTION_TIME_IN_DAYS`)\n\n### Query & Performance\n\n- [ ] Critical queries tested at production data volume\n- [ ] Clustering keys set on large tables (>1TB)\n- [ ] Statement timeout configured per warehouse\n- [ ] Result caching enabled (`USE_CACHED_RESULT = TRUE`)\n\n```sql\n-- Set statement timeout for production\nALTER WAREHOUSE PROD_ETL_WH SET STATEMENT_TIMEOUT_IN_SECONDS = 3600;\nALTER WAREHOUSE PROD_ANALYTICS_WH SET STATEMENT_TIMEOUT_IN_SECONDS = 600;\n\n-- Enable query result caching (default is ON)\nALTER ACCOUNT SET USE_CACHED_RESULT = TRUE;\n```\n\n### Access Control\n\n- [ ] RBAC hierarchy follows Snowflake best practices\n- [ ] No users have ACCOUNTADMIN as default role\n- [ ] Service accounts have minimal required privileges\n- [ ] Object ownership assigned to functional roles\n\n```sql\n-- Verify no one defaults to ACCOUNTADMIN\nSELECT name, default_role\nFROM SNOWFLAKE.ACCOUNT_USAGE.USERS\nWHERE default_role = 'ACCOUNTADMIN' AND disabled = 'false';\n```\n\n### Monitoring & Alerting\n\n- [ ] Query failure alerts configured\n- [ ] Warehouse credit consumption dashboards\n- [ ] Task failure notifications\n- [ ] Login failure monitoring\n\n```sql\n-- Create alert for task failures (Snowflake Alerts feature)\nCREATE OR REPLACE ALERT task_failure_alert\n  WAREHOUSE = PROD_ANALYTICS_WH\n  SCHEDULE = '5 MINUTE'\n  IF (EXISTS (\n    SELECT *\n    FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(\n      SCHEDULED_TIME_RANGE_START => DATEADD(minutes, -10, CURRENT_TIMESTAMP())\n    ))\n    WHERE state = 'FAILED'\n  ))\n  THEN\n    CALL SYSTEM$SEND_EMAIL(\n      'prod_notifications',\n      'oncall@company.com',\n      'Snowflake Task Failure',\n      'One or more tasks failed in the last 10 minutes. Check TASK_HISTORY.'\n    );\n\nALTER ALERT task_failure_alert RESUME;\n```\n\n### Disaster Recovery\n\n- [ ] Time Travel retention set (Enterprise: up to 90 days)\n- [ ] Database replication configured for critical databases\n- [ ] Failover tested to secondary account/region\n- [ ] Backup procedure documented\n\n```sql\n-- Enable 14-day Time Travel on production tables\nALTER TABLE prod_db.core.orders SET DATA_RETENTION_TIME_IN_DAYS = 14;\n\n-- Enable database replication\nALTER DATABASE prod_db ENABLE REPLICATION TO ACCOUNTS myorg.secondary_account;\n```\n\n## Health Check Query\n\n```sql\n-- Run this before and after deployment\nSELECT 'Warehouses' AS check_type,\n       COUNT(*) AS count,\n       COUNT_IF(state = 'STARTED') AS active\nFROM TABLE(INFORMATION_SCHEMA.WAREHOUSES())\nUNION ALL\nSELECT 'Tasks', COUNT(*), COUNT_IF(state = 'started')\nFROM TABLE(INFORMATION_SCHEMA.TASKS())\nUNION ALL\nSELECT 'Streams', COUNT(*), COUNT_IF(stale = FALSE)\nFROM TABLE(INFORMATION_SCHEMA.STREAMS())\nUNION ALL\nSELECT 'Pipes', COUNT(*), COUNT_IF(is_autoingest_enabled = 'true')\nFROM TABLE(INFORMATION_SCHEMA.PIPES());\n```\n\n## Rollback Procedure\n\n```sql\n-- Use Time Travel to revert a table\nCREATE OR REPLACE TABLE prod_db.core.orders\n  CLONE prod_db.core.orders AT (TIMESTAMP => '2026-03-21 12:00:00'::TIMESTAMP_NTZ);\n\n-- Suspend problematic tasks\nALTER TASK transform_orders SUSPEND;\n\n-- Revert warehouse changes\nALTER WAREHOUSE PROD_ETL_WH SET WAREHOUSE_SIZE = 'MEDIUM';\n```\n\n## Error Handling\n\n| Alert | Condition | Severity |\n|-------|-----------|----------|\n| Task failure | `state = 'FAILED'` in TASK_HISTORY | P1 |\n| Stream stale | `stale = TRUE` in SHOW STREAMS | P1 |\n| Credit quota >90% | Resource monitor trigger | P2 |\n| Query queue >5min | `avg_queued_load > 0` sustained | P2 |\n| Login failures spike | >10 failures/hour | P2 |\n\n## Resources\n\n- [Resource Monitors](https://docs.snowflake.com/en/user-guide/resource-monitors)\n- [Business Continuity](https://docs.snowflake.com/en/user-guide/replication-intro)\n- [Access Control Best Practices](https://docs.snowflake.com/en/user-guide/security-access-control-considerations)\n\n## Next Steps\n\nFor version upgrades, see `snowflake-upgrade-migration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "snowflake-prod-checklist",
-    "description": "Execute Snowflake production readiness checklist with monitoring and",
-    "allowed-tools": "Read, Bash(kubectl:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

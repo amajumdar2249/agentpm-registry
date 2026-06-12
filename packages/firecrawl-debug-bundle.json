@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031959",
   "name": "firecrawl-debug-bundle",
   "slug": "firecrawl-debug-bundle",
   "description": "Collect Firecrawl debug evidence for support tickets and troubleshooting.",
   "content": "# Firecrawl Debug Bundle\n\n## Current State\n\n!`node --version 2>/dev/null || echo 'N/A'`\n!`npm list @mendable/firecrawl-js 2>/dev/null | grep firecrawl || echo 'SDK not installed'`\n\n## Overview\n\nCollect all diagnostic information needed for Firecrawl support tickets. Tests API connectivity, checks SDK version, verifies credentials, captures error context, and packages it all into a redacted bundle.\n\n## Prerequisites\n\n- Firecrawl SDK installed\n- `FIRECRAWL_API_KEY` environment variable set\n- Access to application logs\n\n## Instructions\n\n### Step 1: Create Debug Bundle Script\n\n```bash\n#!/bin/bash\nset -euo pipefail\n# firecrawl-debug-bundle.sh\n\nBUNDLE_DIR=\"firecrawl-debug-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE_DIR\"\n\necho \"=== Firecrawl Debug Bundle ===\" > \"$BUNDLE_DIR/summary.txt\"\necho \"Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# Environment\necho \"--- Runtime ---\" >> \"$BUNDLE_DIR/summary.txt\"\nnode --version >> \"$BUNDLE_DIR/summary.txt\" 2>&1 || echo \"Node: N/A\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"OS: $(uname -a)\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:+SET (${#FIRECRAWL_API_KEY} chars)}\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"FIRECRAWL_API_URL: ${FIRECRAWL_API_URL:-https://api.firecrawl.dev (default)}\" >> \"$BUNDLE_DIR/summary.txt\"\n```\n\n### Step 2: Collect SDK and API Status\n\n```bash\nset -euo pipefail\n# SDK version\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"--- SDK ---\" >> \"$BUNDLE_DIR/summary.txt\"\nnpm list @mendable/firecrawl-js 2>/dev/null >> \"$BUNDLE_DIR/summary.txt\" || echo \"Not found in npm\" >> \"$BUNDLE_DIR/summary.txt\"\npip show firecrawl-py 2>/dev/null >> \"$BUNDLE_DIR/summary.txt\" || true\n\n# API connectivity test\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"--- API Connectivity ---\" >> \"$BUNDLE_DIR/summary.txt\"\nAPI_RESPONSE=$(curl -s -w \"\\n%{http_code}\" https://api.firecrawl.dev/v1/scrape \\\n  -H \"Authorization: Bearer ${FIRECRAWL_API_KEY:-missing}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"url\":\"https://example.com\",\"formats\":[\"markdown\"]}' 2>&1)\nHTTP_CODE=$(echo \"$API_RESPONSE\" | tail -1)\necho \"API Status: HTTP $HTTP_CODE\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# Credit balance\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"--- Credits ---\" >> \"$BUNDLE_DIR/summary.txt\"\ncurl -s https://api.firecrawl.dev/v1/team/credits \\\n  -H \"Authorization: Bearer ${FIRECRAWL_API_KEY:-missing}\" 2>/dev/null | \\\n  jq '{credits_remaining, plan}' >> \"$BUNDLE_DIR/summary.txt\" 2>/dev/null || echo \"Could not fetch credits\" >> \"$BUNDLE_DIR/summary.txt\"\n```\n\n### Step 3: Capture Error Context\n\n```bash\nset -euo pipefail\n# Recent error logs (redacted)\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"--- Recent Errors ---\" >> \"$BUNDLE_DIR/summary.txt\"\ngrep -ri \"firecrawl\\|scrape\\|crawl\" /tmp/*.log 2>/dev/null | tail -30 >> \"$BUNDLE_DIR/errors.txt\" || echo \"No log files found\" >> \"$BUNDLE_DIR/errors.txt\"\n\n# Redact secrets from any config\necho \"--- Config (redacted) ---\" >> \"$BUNDLE_DIR/summary.txt\"\ncat .env 2>/dev/null | sed 's/\\(API_KEY\\|SECRET\\|TOKEN\\|PASSWORD\\)=.*/\\1=***REDACTED***/' >> \"$BUNDLE_DIR/config-redacted.txt\" || echo \"No .env file\" >> \"$BUNDLE_DIR/config-redacted.txt\"\n```\n\n### Step 4: Run Diagnostic Scrape\n\n```typescript\n// diagnostic-scrape.ts \u2014 include output in debug bundle\nimport FirecrawlApp from \"@mendable/firecrawl-js\";\n\nasync function runDiagnostic() {\n  const firecrawl = new FirecrawlApp({\n    apiKey: process.env.FIRECRAWL_API_KEY!,\n  });\n\n  const tests = [\n    { name: \"Basic scrape\", fn: () => firecrawl.scrapeUrl(\"https://example.com\", { formats: [\"markdown\"] }) },\n    { name: \"Map endpoint\", fn: () => firecrawl.mapUrl(\"https://example.com\") },\n  ];\n\n  for (const test of tests) {\n    const start = Date.now();\n    try {\n      const result = await test.fn();\n      console.log(`PASS: ${test.name} (${Date.now() - start}ms)`);\n    } catch (err: any) {\n      console.log(`FAIL: ${test.name} (${Date.now() - start}ms) \u2014 ${err.statusCode}: ${err.message}`);\n    }\n  }\n}\n\nrunDiagnostic();\n```\n\n### Step 5: Package Bundle\n\n```bash\nset -euo pipefail\ntar -czf \"$BUNDLE_DIR.tar.gz\" \"$BUNDLE_DIR\"\necho \"Bundle created: $BUNDLE_DIR.tar.gz\"\necho \"Review for sensitive data before sharing!\"\nrm -rf \"$BUNDLE_DIR\"\n```\n\n## Output\n\n- `firecrawl-debug-YYYYMMDD-HHMMSS.tar.gz` containing:\n  - `summary.txt` \u2014 Runtime, SDK version, API status, credits\n  - `errors.txt` \u2014 Recent error logs\n  - `config-redacted.txt` \u2014 Configuration with secrets masked\n\n## Error Handling\n\n| Item | Purpose | Included |\n|------|---------|----------|\n| Node/Python version | Compatibility check | Yes |\n| SDK version | Version-specific bugs | Yes |\n| API HTTP status | Connectivity | Yes |\n| Credit balance | Quota issues | Yes |\n| Diagnostic scrape | End-to-end test | Yes |\n\n## ALWAYS REDACT\n\n- API keys (anything starting with `fc-`)\n- Passwords, tokens, secrets\n- PII in scraped content\n\n## Resources\n\n- [Firecrawl Status](https://firecrawl.dev/status)\n- [Firecrawl Dashboard](https://firecrawl.dev/app)\n- [GitHub Issues](https://github.com/mendableai/firecrawl/issues)\n\n## Next Steps\n\nFor rate limit issues, see `firecrawl-rate-limits`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "firecrawl-debug-bundle",
-    "description": "Collect Firecrawl debug evidence for support tickets and troubleshooting.",
-    "allowed-tools": "Read, Bash(grep:*), Bash(curl:*), Bash(tar:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

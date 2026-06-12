@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000025596",
   "name": "as-built-documentation",
   "slug": "as-built-documentation-2",
   "description": "Manage as-built documentation for project closeout. Track drawing markups, coordinate updates, and verify completeness.",
   "content": "\n# As-Built Documentation Manager\n\n## Business Case\n\n### Problem Statement\nAs-built documentation is often incomplete:\n- Field changes not documented\n- Drawings not updated consistently\n- Missing documentation at closeout\n- Difficult to verify completeness\n\n### Solution\nSystematic as-built documentation tracking with drawing markup management, completeness verification, and handover preparation.\n\n## Technical Implementation\n\n```python\nimport pandas as pd\nfrom datetime import datetime, date\nfrom typing import Dict, Any, List, Optional\nfrom dataclasses import dataclass, field\nfrom enum import Enum\n\n\nclass DocumentType(Enum):\n    DRAWING = \"drawing\"\n    SPECIFICATION = \"specification\"\n    SUBMITTAL = \"submittal\"\n    MANUAL = \"manual\"\n    WARRANTY = \"warranty\"\n    CERTIFICATE = \"certificate\"\n\n\nclass MarkupStatus(Enum):\n    PENDING = \"pending\"\n    IN_REVIEW = \"in_review\"\n    APPROVED = \"approved\"\n    INCORPORATED = \"incorporated\"\n\n\nclass DocumentStatus(Enum):\n    DRAFT = \"draft\"\n    UNDER_REVIEW = \"under_review\"\n    APPROVED = \"approved\"\n    FINAL = \"final\"\n\n\n@dataclass\nclass Markup:\n    markup_id: str\n    description: str\n    location: str\n    marked_by: str\n    marked_date: date\n    status: MarkupStatus\n    cloud_reference: str = \"\"\n    notes: str = \"\"\n\n\n@dataclass\nclass AsBuiltDocument:\n    document_id: str\n    document_number: str\n    title: str\n    document_type: DocumentType\n    discipline: str\n    revision: str\n    status: DocumentStatus\n    original_file: str\n    as_built_file: str\n    markups: List[Markup] = field(default_factory=list)\n    last_updated: Optional[date] = None\n    verified_by: str = \"\"\n    verified_date: Optional[date] = None\n\n    @property\n    def is_complete(self) -> bool:\n        return self.status == DocumentStatus.FINAL and all(\n            m.status == MarkupStatus.INCORPORATED for m in self.markups\n        )\n\n\nclass AsBuiltDocumentManager:\n    \"\"\"Manage as-built documentation.\"\"\"\n\n    def __init__(self, project_name: str):\n        self.project_name = project_name\n        self.documents: Dict[str, AsBuiltDocument] = {}\n        self._markup_counter = 0\n\n    def register_document(self, document_number: str, title: str,\n                         document_type: DocumentType, discipline: str,\n                         original_file: str, revision: str = \"0\") -> AsBuiltDocument:\n        doc_id = f\"DOC-{len(self.documents) + 1:04d}\"\n\n        doc = AsBuiltDocument(\n            document_id=doc_id,\n            document_number=document_number,\n            title=title,\n            document_type=document_type,\n            discipline=discipline,\n            revision=revision,\n            status=DocumentStatus.DRAFT,\n            original_file=original_file,\n            as_built_file=\"\"\n        )\n        self.documents[doc_id] = doc\n        return doc\n\n    def add_markup(self, doc_id: str, description: str, location: str,\n                  marked_by: str, cloud_reference: str = \"\") -> Markup:\n        if doc_id not in self.documents:\n            raise ValueError(f\"Document {doc_id} not found\")\n\n        self._markup_counter += 1\n        markup = Markup(\n            markup_id=f\"MKP-{self._markup_counter:05d}\",\n            description=description,\n            location=location,\n            marked_by=marked_by,\n            marked_date=date.today(),\n            status=MarkupStatus.PENDING,\n            cloud_reference=cloud_reference\n        )\n        self.documents[doc_id].markups.append(markup)\n        return markup\n\n    def update_markup_status(self, doc_id: str, markup_id: str, status: MarkupStatus):\n        if doc_id in self.documents:\n            for markup in self.documents[doc_id].markups:\n                if markup.markup_id == markup_id:\n                    markup.status = status\n                    break\n\n    def upload_as_built(self, doc_id: str, file_path: str, new_revision: str = None):\n        if doc_id not in self.documents:\n            return\n        doc = self.documents[doc_id]\n        doc.as_built_file = file_path\n        doc.last_updated = date.today()\n        if new_revision:\n            doc.revision = new_revision\n        doc.status = DocumentStatus.UNDER_REVIEW\n\n    def verify_document(self, doc_id: str, verified_by: str):\n        if doc_id not in self.documents:\n            return\n        doc = self.documents[doc_id]\n        doc.verified_by = verified_by\n        doc.verified_date = date.today()\n        doc.status = DocumentStatus.FINAL\n\n    def get_completeness_report(self) -> Dict[str, Any]:\n        total = len(self.documents)\n        complete = sum(1 for d in self.documents.values() if d.is_complete)\n        pending_markups = sum(\n            len([m for m in d.markups if m.status != MarkupStatus.INCORPORATED])\n            for d in self.documents.values()\n        )\n\n        by_discipline = {}\n        for doc in self.documents.values():\n            if doc.discipline not in by_discipline:\n                by_discipline[doc.discipline] = {'total': 0, 'complete': 0}\n            by_discipline[doc.discipline]['total'] += 1\n            if doc.is_complete:\n                by_discipline[doc.discipline]['complete'] += 1\n\n        return {\n            'project': self.project_name,\n            'total_documents': total,\n            'complete': complete,\n            'completion_percent': round(complete / total * 100, 1) if total > 0 else 0,\n            'pending_markups': pending_markups,\n            'by_discipline': by_discipline\n        }\n\n    def get_incomplete_documents(self) -> List[AsBuiltDocument]:\n        return [d for d in self.documents.values() if not d.is_complete]\n\n    def export_register(self, output_path: str):\n        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:\n            # Document register\n            doc_data = [{\n                'ID': d.document_id,\n                'Number': d.document_number,\n                'Title': d.title,\n                'Type': d.document_type.value,\n                'Discipline': d.discipline,\n                'Revision': d.revision,\n                'Status': d.status.value,\n                'Complete': d.is_complete,\n                'Markups': len(d.markups),\n                'Verified By': d.verified_by\n            } for d in self.documents.values()]\n            pd.DataFrame(doc_data).to_excel(writer, sheet_name='Register', index=False)\n\n            # Markups\n            markup_data = []\n            for doc in self.documents.values():\n                for m in doc.markups:\n                    markup_data.append({\n                        'Document': doc.document_number,\n                        'Markup ID': m.markup_id,\n                        'Description': m.description,\n                        'Location': m.location,\n                        'Marked By': m.marked_by,\n                        'Status': m.status.value\n                    })\n            if markup_data:\n                pd.DataFrame(markup_data).to_excel(writer, sheet_name='Markups', index=False)\n\n        return output_path\n```\n\n## Quick Start\n\n```python\nmanager = AsBuiltDocumentManager(\"Office Tower\")\n\n# Register document\ndoc = manager.register_document(\n    document_number=\"A-101\",\n    title=\"Floor Plan Level 1\",\n    document_type=DocumentType.DRAWING,\n    discipline=\"Architectural\",\n    original_file=\"drawings/A-101.pdf\"\n)\n\n# Add field markup\nmarkup = manager.add_markup(\n    doc.document_id,\n    description=\"Wall moved 6 inches south\",\n    location=\"Grid B-3\",\n    marked_by=\"Site Superintendent\"\n)\n\n# Upload as-built\nmanager.upload_as_built(doc.document_id, \"as-built/A-101-AB.pdf\", \"AB\")\n\n# Verify\nmanager.verify_document(doc.document_id, \"Project Manager\")\n\n# Check completeness\nreport = manager.get_completeness_report()\nprint(f\"Completion: {report['completion_percent']}%\")\n```\n\n## Resources\n- **DDC Book**: Chapter 5 - Project Closeout\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "slug": "as-built-documentation",
-    "display_name": "As Built Documentation",
-    "description": "Manage as-built documentation for project closeout. Track drawing markups, coordinate updates, and verify completeness."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

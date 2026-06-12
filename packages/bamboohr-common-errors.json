@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031380",
   "name": "bamboohr-common-errors",
   "slug": "bamboohr-common-errors",
   "description": "Diagnose and fix BambooHR API errors and exceptions.",
   "content": "# BambooHR Common Errors\n\n## Overview\n\nDiagnostic reference for BambooHR REST API errors. BambooHR returns error details in the `X-BambooHR-Error-Message` response header for most 400-level and some 500-level errors.\n\n## Prerequisites\n\n- BambooHR API access configured\n- Access to application logs or HTTP response headers\n\n## Instructions\n\n### Step 1: Read the Error Header\n\nAlways check `X-BambooHR-Error-Message` first \u2014 it contains BambooHR's specific error detail, which is more useful than generic HTTP status text.\n\n```typescript\nconst res = await fetch(`${BASE}/employees/999/`, {\n  headers: { Authorization: AUTH, Accept: 'application/json' },\n});\n\nif (!res.ok) {\n  const errorDetail = res.headers.get('X-BambooHR-Error-Message');\n  console.error(`HTTP ${res.status}: ${errorDetail || res.statusText}`);\n}\n```\n\n### Step 2: Match Error to Solution\n\n---\n\n#### 401 Unauthorized \u2014 Invalid API Key\n\n```\nX-BambooHR-Error-Message: Invalid API key\n```\n\n**Cause:** API key is missing, expired, revoked, or malformed in the Basic Auth header.\n\n**Solution:**\n\n```bash\n# Verify key is set\necho \"Key length: ${#BAMBOOHR_API_KEY}\"\n\n# Test auth directly\ncurl -s -o /dev/null -w \"%{http_code}\" \\\n  -u \"${BAMBOOHR_API_KEY}:x\" \\\n  \"https://api.bamboohr.com/api/gateway.php/${BAMBOOHR_COMPANY_DOMAIN}/v1/employees/directory\"\n```\n\n**Common mistakes:**\n\n- Using Bearer token instead of Basic Auth\n- Putting the API key as the password instead of the username\n- Missing the `:x` password part in Basic Auth encoding\n\n---\n\n#### 403 Forbidden \u2014 Insufficient Permissions\n\n```\nX-BambooHR-Error-Message: You do not have access to this resource\n```\n\n**Cause:** The API key's user account lacks permissions for the requested endpoint or employee.\n\n**Solution:**\n\n- Verify the user's access level in BambooHR (Account > Access Levels)\n- Time-off management endpoints require manager or admin permissions\n- Compensation table access requires admin permissions\n- Some fields are restricted to specific access levels\n\n---\n\n#### 400 Bad Request \u2014 Invalid Fields or Payload\n\n```\nX-BambooHR-Error-Message: Invalid field: \"jobTitl\"\n```\n\n**Cause:** Misspelled field name, invalid date format, or malformed JSON body.\n\n**Solution:**\n\n```bash\n# Verify field names against BambooHR's field list\ncurl -s -u \"${BAMBOOHR_API_KEY}:x\" \\\n  \"https://api.bamboohr.com/api/gateway.php/${BAMBOOHR_COMPANY_DOMAIN}/v1/employees/0/?fields=firstName,lastName\" \\\n  -H \"Accept: application/json\"\n```\n\n**Common field name mistakes:**\n\n- `title` (wrong) vs `jobTitle` (correct)\n- `email` (wrong) vs `workEmail` (correct)\n- `name` (wrong) vs `firstName` + `lastName` (correct)\n- Date format must be `YYYY-MM-DD`, not `MM/DD/YYYY`\n\n---\n\n#### 404 Not Found \u2014 Wrong Endpoint or ID\n\n```\nX-BambooHR-Error-Message: Employee not found\n```\n\n**Cause:** Employee ID does not exist, wrong company domain, or malformed URL path.\n\n**Solution:**\n\n```bash\n# Verify company domain\necho \"Domain: $BAMBOOHR_COMPANY_DOMAIN\"\n\n# Verify the base URL structure\n# Correct:  /api/gateway.php/{domain}/v1/employees/{id}/\n# Wrong:    /api/v1/employees/{id}/\n# Wrong:    /api/gateway.php/{domain}/employees/{id}/  (missing /v1/)\n```\n\n---\n\n#### 429 / 503 \u2014 Rate Limited\n\n```\nHTTP 503 with Retry-After: 30\n```\n\n**Cause:** Too many requests in a short period. BambooHR does not publish exact rate limits but returns 503 with a `Retry-After` header.\n\n**Solution:**\n\n```typescript\nasync function handleRateLimit(res: Response): Promise<void> {\n  if (res.status === 503 || res.status === 429) {\n    const retryAfter = parseInt(res.headers.get('Retry-After') || '30', 10);\n    console.warn(`Rate limited. Waiting ${retryAfter}s...`);\n    await new Promise(r => setTimeout(r, retryAfter * 1000));\n  }\n}\n```\n\n**Prevention:**\n\n- Batch reads using custom reports instead of individual employee GETs\n- Cache directory results (they change infrequently)\n- Use `/employees/changed/?since=...` for incremental sync instead of full pulls\n\n---\n\n#### 500 / 502 \u2014 Server Errors\n\n**Cause:** BambooHR internal error. Usually transient.\n\n**Solution:**\n\n1. Check [BambooHR Status Page](https://status.bamboohr.com) for outages\n2. Retry with exponential backoff (see `bamboohr-rate-limits`)\n3. If persistent, collect request details for BambooHR support\n\n---\n\n#### Content-Type Mismatch\n\n**Cause:** Missing `Accept: application/json` header \u2014 BambooHR defaults to XML.\n\n```bash\n# Wrong \u2014 returns XML\ncurl -u \"${BAMBOOHR_API_KEY}:x\" \\\n  \"${BASE}/employees/directory\"\n\n# Correct \u2014 returns JSON\ncurl -u \"${BAMBOOHR_API_KEY}:x\" \\\n  -H \"Accept: application/json\" \\\n  \"${BASE}/employees/directory\"\n```\n\n### Step 3: Quick Diagnostic Script\n\n```bash\n#!/bin/bash\necho \"=== BambooHR Diagnostic ===\"\necho \"Company: ${BAMBOOHR_COMPANY_DOMAIN}\"\necho \"Key set: ${BAMBOOHR_API_KEY:+YES}\"\necho \"Key length: ${#BAMBOOHR_API_KEY}\"\n\nBASE=\"https://api.bamboohr.com/api/gateway.php/${BAMBOOHR_COMPANY_DOMAIN}/v1\"\n\necho -n \"Auth test: \"\nSTATUS=$(curl -s -o /dev/null -w \"%{http_code}\" -u \"${BAMBOOHR_API_KEY}:x\" \\\n  -H \"Accept: application/json\" \"${BASE}/employees/directory\")\necho \"$STATUS\"\n\necho -n \"Status page: \"\ncurl -s https://status.bamboohr.com | head -c 100\necho \"\"\n\nif [ \"$STATUS\" -eq 200 ]; then\n  echo \"Connection OK\"\nelif [ \"$STATUS\" -eq 401 ]; then\n  echo \"FIX: Regenerate API key in BambooHR dashboard\"\nelif [ \"$STATUS\" -eq 403 ]; then\n  echo \"FIX: Upgrade API key user's access level\"\nelif [ \"$STATUS\" -eq 404 ]; then\n  echo \"FIX: Check BAMBOOHR_COMPANY_DOMAIN value\"\nelse\n  echo \"FIX: Check status page and retry\"\nfi\n```\n\n## Output\n\n- Identified error from HTTP status + `X-BambooHR-Error-Message` header\n- Applied fix based on error category\n- Verified resolution with diagnostic script\n\n## Error Summary Table\n\n| Status | Header | Root Cause | Fix |\n|--------|--------|-----------|-----|\n| 400 | Invalid field | Typo in field name | Check field list docs |\n| 401 | Invalid API key | Bad credentials | Regenerate API key |\n| 403 | No access | Insufficient permissions | Upgrade user access level |\n| 404 | Not found | Wrong ID or domain | Verify URL components |\n| 429/503 | `Retry-After` | Rate limited | Backoff and retry |\n| 500/502 | \u2014 | Server error | Retry; check status page |\n\n## Resources\n\n- [BambooHR API Details](https://documentation.bamboohr.com/docs/api-details)\n- [BambooHR Status Page](https://status.bamboohr.com)\n- [BambooHR Field Names](https://documentation.bamboohr.com/docs/list-of-field-names)\n\n## Next Steps\n\nFor comprehensive debugging, see `bamboohr-debug-bundle`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bamboohr-common-errors",
-    "description": "Diagnose and fix BambooHR API errors and exceptions.",
-    "allowed-tools": "Read, Grep, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

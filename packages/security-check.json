@@ -1,14 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000008459",
   "name": "security-check",
   "slug": "security-check",
   "description": "Quick configuration security check against known threats database",
   "content": "\n# Security Check\n\nQuick configuration security check against known threats database. Verifies your Claude Code setup for known malicious skills, vulnerable MCPs, dangerous patterns, and exposed secrets.\n\n**Time**: ~30 seconds | **Scope**: Claude Code configuration only\n\n## Instructions\n\nYou are a security analyst. Check the user's Claude Code configuration against the threat intelligence database bundled at `examples/skills/update-threat-db/threat-db.yaml`. Produce a concise, actionable report.\n\n### Phase 1: Load Threat Database\n\nRead `examples/skills/update-threat-db/threat-db.yaml` from this repository to load:\n- Known malicious authors and skills\n- CVE database for MCP servers\n- Suspicious patterns for hooks, agents, and config\n\n### Phase 2: MCP Server Audit\n\nRead the user's MCP configuration:\n\n```bash\n# Global MCP config\ncat ~/.claude.json 2>/dev/null | jq '.mcpServers // empty'\n\n# Project MCP config\ncat .mcp.json 2>/dev/null\n```\n\n**Check against threat-db.yaml:**\n- [ ] Any MCP server matching a CVE entry? \u2192 CRITICAL\n- [ ] Version pinning: are all MCP servers pinned to exact versions (not `@latest`)? \u2192 HIGH if unpinned\n- [ ] Any `--dangerous-*` flags in MCP args? \u2192 CRITICAL\n- [ ] Any MCP servers not on the Safe List (see `guide/security-hardening.md` \u00a71.1)? \u2192 MEDIUM (flag for manual review)\n\n### Phase 3: Skills & Agents Audit\n\n```bash\n# List installed skills\nls -la .claude/skills/ 2>/dev/null\nls -la ~/.claude/skills/ 2>/dev/null\n\n# List agents\nls -la .claude/agents/ 2>/dev/null\nls -la ~/.claude/agents/ 2>/dev/null\n\n# Check agent tools field\ngrep -r \"^tools:\" .claude/agents/ 2>/dev/null\ngrep -r \"^tools:\" ~/.claude/agents/ 2>/dev/null\n```\n\n**Check against threat-db.yaml:**\n- [ ] Any skill/agent name matching `malicious_skills` entries? \u2192 CRITICAL\n- [ ] Any skill/agent author matching `malicious_authors` entries? \u2192 CRITICAL\n- [ ] Any agent with `tools: Bash` only? \u2192 HIGH\n- [ ] Any agent with overly broad tool access + vague description? \u2192 MEDIUM\n\n### Phase 4: Hook Security\n\n```bash\n# List all hooks\nfind .claude/hooks/ -type f 2>/dev/null\nfind ~/.claude/hooks/ -type f 2>/dev/null\n\n# Scan hooks for suspicious patterns\ngrep -rn \"curl\\|wget\\|nc \\|ncat\\|netcat\\|base64\\|eval\\|exec\\|/dev/tcp\\|/dev/udp\" .claude/hooks/ 2>/dev/null\ngrep -rn \"curl\\|wget\\|nc \\|ncat\\|netcat\\|base64\\|eval\\|exec\\|/dev/tcp\\|/dev/udp\" ~/.claude/hooks/ 2>/dev/null\n\n# Check for credential access in hooks\ngrep -rn \"ssh\\|id_rsa\\|id_ed25519\\|\\.env\\|credentials\\|secret\\|password\\|token\\|api.key\" .claude/hooks/ 2>/dev/null\ngrep -rn \"ssh\\|id_rsa\\|id_ed25519\\|\\.env\\|credentials\\|secret\\|password\\|token\\|api.key\" ~/.claude/hooks/ 2>/dev/null\n```\n\n**Check against threat-db.yaml `suspicious_patterns.hooks`:**\n- [ ] Network calls (`curl`, `wget`) \u2192 HIGH\n- [ ] Reverse shell indicators (`nc`, `/dev/tcp`) \u2192 CRITICAL\n- [ ] Credential access (`ssh`, `.env`, `password`) \u2192 CRITICAL\n- [ ] Base64 encoding \u2192 MEDIUM (review context)\n\n### Phase 5: Memory Poisoning Check\n\n```bash\n# Check for suspicious instructions in memory/config files\ngrep -in \"ignore\\|forget\\|override\\|disregard\\|you are now\\|new role\\|system prompt\" \\\n  CLAUDE.md .claude/CLAUDE.md SOUL.md .claude/SOUL.md MEMORY.md .claude/MEMORY.md \\\n  ~/.claude/CLAUDE.md ~/.claude/MEMORY.md 2>/dev/null\n```\n\n- [ ] Prompt injection patterns in CLAUDE.md / SOUL.md / MEMORY.md? \u2192 HIGH\n- [ ] Instructions to disable security, skip reviews, or grant broad permissions? \u2192 CRITICAL\n\n### Phase 6: Permissions & Settings\n\n```bash\n# Check settings\ncat .claude/settings.json 2>/dev/null\ncat ~/.claude/settings.json 2>/dev/null\n```\n\n- [ ] `permissions.deny` exists and covers `.env*`, `*.pem`, `*.key`, secrets? \u2192 MEDIUM if missing\n- [ ] No wildcard `permissions.allow` for Bash or Write? \u2192 HIGH if present\n- [ ] No `dangerouslySkipPermissions` or similar flags? \u2192 CRITICAL if present\n\n### Phase 7: Exposed Secrets in Config\n\n```bash\n# Check for secrets in .claude/ directory\ngrep -rn \"sk-[a-zA-Z0-9]\\{20,\\}\\|sk-ant-[a-zA-Z0-9]\\{20,\\}\\|ghp_[a-zA-Z0-9]\\{36\\}\\|AKIA[A-Z0-9]\\{16\\}\" \\\n  .claude/ ~/.claude/ 2>/dev/null\n\n# Check for private keys\ngrep -rn \"BEGIN.*PRIVATE KEY\" .claude/ ~/.claude/ 2>/dev/null\n```\n\n- [ ] API keys or tokens in config files? \u2192 CRITICAL\n- [ ] Private keys in config? \u2192 CRITICAL\n\n## Output Format\n\n```\n## \ud83d\udee1\ufe0f Security Check Report\n\n**Date**: [timestamp]\n**Scope**: Claude Code configuration\n\n### Results Summary\n\n| Severity | Count | Status |\n|----------|-------|--------|\n| \ud83d\udd34 CRITICAL | X | [PASS/FAIL] |\n| \ud83d\udfe0 HIGH | X | [PASS/FAIL] |\n| \ud83d\udfe1 MEDIUM | X | [PASS/FAIL] |\n| \ud83d\udfe2 LOW | X | [PASS/FAIL] |\n\n### \ud83d\udd34 Critical Issues\n[List each critical finding with location and fix]\n\n### \ud83d\udfe0 High Issues\n[List each high finding with location and fix]\n\n### \ud83d\udfe1 Medium Issues\n[List each medium finding with location and fix]\n\n### \u2705 Passed Checks\n[List what passed \u2014 important for confidence]\n\n### \ud83d\udd27 Recommended Actions (Priority Order)\n1. [Most urgent fix with exact command]\n2. [Second priority]\n3. [...]\n\n### \ud83d\udcda References\n- Full security guide: guide/security-hardening.md\n- Threat database: examples/skills/update-threat-db/threat-db.yaml\n- MCP scan: `npx mcp-scan` (Snyk)\n```\n\nIf ALL checks pass, output:\n\n```\n## \ud83d\udee1\ufe0f Security Check Report \u2014 ALL CLEAR \u2705\n\n**Date**: [timestamp]\nNo known threats detected in your Claude Code configuration.\n\n**Recommendations for continued security:**\n- Re-run `/security-check` after installing new skills or MCP servers\n- Run `/security-audit` for a comprehensive project + config audit\n- Keep Claude Code updated (current security fixes in v2.1.34+)\n```\n\n$ARGUMENTS\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "security-check",
-    "description": "Quick configuration security check against known threats database",
-    "argument-hint": "[path]",
-    "effort": "low",
-    "disable-model-invocation": "true"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

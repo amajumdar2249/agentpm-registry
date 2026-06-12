@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000029402",
   "name": "bio-ctdna-mutation-detection",
   "slug": "bio-ctdna-mutation-detection-2",
   "description": "Detects somatic mutations in circulating tumor DNA using variant callers optimized for low allele fractions with UMI-based error suppression. Reliably detects mutations at VAF above 0.5 percent using consensus-based approaches. Use when identifying tumor mutations from plasma DNA or tracking specific variants.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: Ensembl VEP 111+, SnpEff 5.2+, VarDict 1.8+, pandas 2.2+, pysam 0.22+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# ctDNA Mutation Detection\n\n**\"Detect mutations in my cfDNA sample\"** \u2192 Identify somatic variants at low allele fractions (0.1-1%) from cell-free DNA using error-suppressed consensus calling and specialized callers.\n- CLI: `vardict-java` for low-VAF variant calling from cfDNA\n\nDetect somatic mutations in cfDNA at low variant allele fractions.\n\n## Input Requirements\n\n| Requirement | Specification |\n|-------------|---------------|\n| Data type | Targeted panel or WES (NOT sWGS) |\n| Depth | >= 1000x for low VAF detection |\n| UMIs | Highly recommended for < 1% VAF |\n| Input | Preprocessed BAM (UMI consensus if available) |\n\n## VAF Detection Limits\n\n| VAF Range | Reliability | Notes |\n|-----------|-------------|-------|\n| > 1% | Reliable | Standard callers work |\n| 0.5-1% | Good with UMIs | Requires error suppression |\n| 0.1-0.5% | Challenging | Needs deep UMI consensus |\n| < 0.1% | Unreliable | Near noise floor |\n\n## VarDict for High Sensitivity (Ensembl VEP 111+)\n\n```bash\n# VarDict is highly sensitive for low VAF\n# Use on UMI-consensus BAM for best results\n\nvardict-java \\\n    -G reference.fa \\\n    -f 0.005 \\      # Min VAF 0.5%\n    -N sample_id \\\n    -b sample.bam \\\n    -c 1 -S 2 -E 3 -g 4 \\\n    regions.bed | \\\nteststrandbias.R | \\\nvar2vcf_valid.pl \\\n    -N sample_id \\\n    -E \\\n    -f 0.005 \\\n    > sample.vcf\n```\n\n## Python Implementation\n\n```python\nimport subprocess\nimport pandas as pd\nimport pysam\n\n\ndef call_variants_vardict(bam_file, reference, bed_file, output_vcf, min_vaf=0.005, min_depth=100):\n    '''\n    Call variants with VarDict.\n\n    Args:\n        bam_file: UMI-consensus BAM preferred\n        reference: Reference FASTA\n        bed_file: Target regions BED\n        output_vcf: Output VCF path\n        min_vaf: Minimum VAF (0.005 = 0.5%)\n        min_depth: Minimum read depth\n    '''\n    sample_id = bam_file.split('/')[-1].replace('.bam', '')\n\n    cmd = f'''\n    vardict-java \\\n        -G {reference} \\\n        -f {min_vaf} \\\n        -N {sample_id} \\\n        -b {bam_file} \\\n        -c 1 -S 2 -E 3 -g 4 \\\n        {bed_file} | \\\n    teststrandbias.R | \\\n    var2vcf_valid.pl \\\n        -N {sample_id} \\\n        -E \\\n        -f {min_vaf} \\\n        > {output_vcf}\n    '''\n\n    subprocess.run(cmd, shell=True, check=True)\n    return output_vcf\n\n\ndef filter_ctdna_variants(vcf_file, chip_genes=None):\n    '''\n    Filter ctDNA variants, removing CHIP.\n\n    CHIP genes commonly mutated in elderly:\n    DNMT3A, TET2, ASXL1, PPM1D, TP53, SF3B1, etc.\n    '''\n    if chip_genes is None:\n        chip_genes = ['DNMT3A', 'TET2', 'ASXL1', 'PPM1D', 'JAK2',\n                      'SF3B1', 'SRSF2', 'TP53', 'CBL', 'BCOR']\n\n    import vcfpy\n    reader = vcfpy.Reader.from_path(vcf_file)\n\n    somatic = []\n    chip = []\n\n    for record in reader:\n        gene = record.INFO.get('GENE', [''])[0]\n\n        if gene in chip_genes:\n            chip.append(record)\n        else:\n            somatic.append(record)\n\n    print(f'Somatic variants: {len(somatic)}')\n    print(f'Potential CHIP variants: {len(chip)}')\n\n    return somatic, chip\n```\n\n## UMI-VarCal for Best Specificity (Ensembl VEP 111+)\n\n```python\ndef call_with_umi_varcal(bam_file, reference, bed_file, output_vcf, min_vaf=0.005):\n    '''\n    UMI-VarCal: Best specificity with UMI data.\n    '''\n    subprocess.run([\n        'umi-varcal',\n        '--bam', bam_file,\n        '--ref', reference,\n        '--bed', bed_file,\n        '--out', output_vcf,\n        '--min-vaf', str(min_vaf),\n        '--min-alt-reads', '3',\n        '--min-depth', '100'\n    ], check=True)\n```\n\n## Variant Annotation (Ensembl VEP 111+)\n\n```python\ndef annotate_ctdna_variants(vcf_file, output_vcf):\n    '''Annotate variants with clinically relevant information.'''\n    # Use VEP or snpEff for annotation\n    subprocess.run([\n        'vep',\n        '--input_file', vcf_file,\n        '--output_file', output_vcf,\n        '--format', 'vcf',\n        '--vcf',\n        '--cache',\n        '--canonical',\n        '--protein',\n        '--sift', 'b',\n        '--polyphen', 'b',\n        '--af_gnomad'\n    ], check=True)\n```\n\n## Tracking Known Mutations\n\n**Goal:** Quantify the variant allele fraction of specific known mutations across serial liquid biopsy samples for minimal residual disease monitoring.\n\n**Approach:** For each target mutation, pileup reads at the variant position, count reference and alternative alleles, and compute VAF with depth statistics.\n\n```python\ndef track_specific_mutations(bam_file, mutations, min_depth=100):\n    '''\n    Track specific known mutations across samples.\n    Useful for MRD monitoring.\n\n    Args:\n        bam_file: Aligned BAM\n        mutations: List of (chrom, pos, ref, alt) tuples\n    '''\n    import pysam\n\n    bam = pysam.AlignmentFile(bam_file, 'rb')\n    results = []\n\n    for chrom, pos, ref, alt in mutations:\n        counts = {'ref': 0, 'alt': 0, 'other': 0}\n\n        for pileupcolumn in bam.pileup(chrom, pos-1, pos):\n            if pileupcolumn.pos != pos - 1:\n                continue\n\n            for read in pileupcolumn.pileups:\n                if read.is_del or read.is_refskip:\n                    continue\n                base = read.alignment.query_sequence[read.query_position]\n                if base == ref:\n                    counts['ref'] += 1\n                elif base == alt:\n                    counts['alt'] += 1\n                else:\n                    counts['other'] += 1\n\n        total = counts['ref'] + counts['alt'] + counts['other']\n        vaf = counts['alt'] / total if total > 0 else 0\n\n        results.append({\n            'chrom': chrom, 'pos': pos, 'ref': ref, 'alt': alt,\n            'depth': total, 'alt_count': counts['alt'], 'vaf': vaf\n        })\n\n    bam.close()\n    return pd.DataFrame(results)\n```\n\n## Related Skills\n\n- cfdna-preprocessing - Preprocess with UMI consensus\n- tumor-fraction-estimation - Estimate overall tumor burden\n- longitudinal-monitoring - Track mutations over time\n- variant-calling/variant-calling - General variant calling concepts\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-ctdna-mutation-detection",
-    "description": "Detects somatic mutations in circulating tumor DNA using variant callers optimized for low allele fractions with UMI-based error suppression. Reliably detects mutations at VAF above 0.5 percent using consensus-based approaches. Use when identifying tumor mutations from plasma DNA or tracking specific variants.",
-    "tool_type": "python",
-    "primary_tool": "VarDict"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

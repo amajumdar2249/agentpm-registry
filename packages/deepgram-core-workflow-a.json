@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031767",
   "name": "deepgram-core-workflow-a",
   "slug": "deepgram-core-workflow-a",
   "description": "Implement production pre-recorded speech-to-text with Deepgram.",
   "content": "# Deepgram Core Workflow A: Pre-recorded Transcription\n\n## Overview\n\nProduction pre-recorded transcription service using Deepgram's REST API. Covers `transcribeUrl` and `transcribeFile`, speaker diarization, audio intelligence (summarization, topic detection, sentiment, intent), batch processing with concurrency control, and callback-based async transcription for large files.\n\n## Prerequisites\n\n- `@deepgram/sdk` installed, `DEEPGRAM_API_KEY` configured\n- Audio files: WAV, MP3, FLAC, OGG, M4A, or WebM\n- For batch: `p-limit` package (`npm install p-limit`)\n\n## Instructions\n\n### Step 1: Transcription Service Class\n\n```typescript\nimport { createClient, DeepgramClient } from '@deepgram/sdk';\nimport { readFileSync } from 'fs';\n\ninterface TranscribeOptions {\n  model?: 'nova-3' | 'nova-2' | 'nova-2-meeting' | 'nova-2-phonecall' | 'base';\n  language?: string;\n  diarize?: boolean;\n  utterances?: boolean;\n  paragraphs?: boolean;\n  smart_format?: boolean;\n  summarize?: boolean;      // Audio intelligence\n  detect_topics?: boolean;  // Topic detection\n  sentiment?: boolean;      // Sentiment analysis\n  intents?: boolean;        // Intent recognition\n  keywords?: string[];      // Keyword boosting: [\"term:weight\"]\n  callback?: string;        // Async callback URL\n}\n\nclass DeepgramTranscriber {\n  private client: DeepgramClient;\n\n  constructor(apiKey: string) {\n    this.client = createClient(apiKey);\n  }\n\n  async transcribeUrl(url: string, opts: TranscribeOptions = {}) {\n    const { result, error } = await this.client.listen.prerecorded.transcribeUrl(\n      { url },\n      {\n        model: opts.model ?? 'nova-3',\n        language: opts.language ?? 'en',\n        smart_format: opts.smart_format ?? true,\n        diarize: opts.diarize ?? false,\n        utterances: opts.utterances ?? false,\n        paragraphs: opts.paragraphs ?? false,\n        summarize: opts.summarize ? 'v2' : undefined,\n        detect_topics: opts.detect_topics ?? false,\n        sentiment: opts.sentiment ?? false,\n        intents: opts.intents ?? false,\n        keywords: opts.keywords,\n        callback: opts.callback,\n      }\n    );\n    if (error) throw new Error(`Transcription failed: ${error.message}`);\n    return result;\n  }\n\n  async transcribeFile(filePath: string, opts: TranscribeOptions = {}) {\n    const audio = readFileSync(filePath);\n    const mimetype = this.detectMimetype(filePath);\n\n    const { result, error } = await this.client.listen.prerecorded.transcribeFile(\n      audio,\n      {\n        model: opts.model ?? 'nova-3',\n        smart_format: opts.smart_format ?? true,\n        mimetype,\n        diarize: opts.diarize ?? false,\n        utterances: opts.utterances ?? false,\n        summarize: opts.summarize ? 'v2' : undefined,\n        detect_topics: opts.detect_topics ?? false,\n        sentiment: opts.sentiment ?? false,\n      }\n    );\n    if (error) throw new Error(`File transcription failed: ${error.message}`);\n    return result;\n  }\n\n  private detectMimetype(path: string): string {\n    const ext = path.split('.').pop()?.toLowerCase();\n    const map: Record<string, string> = {\n      wav: 'audio/wav', mp3: 'audio/mpeg', flac: 'audio/flac',\n      ogg: 'audio/ogg', m4a: 'audio/mp4', webm: 'audio/webm',\n    };\n    return map[ext ?? ''] ?? 'audio/wav';\n  }\n}\n```\n\n### Step 2: Extract Structured Results\n\n```typescript\nfunction formatResult(result: any) {\n  const channel = result.results.channels[0];\n  const alt = channel.alternatives[0];\n\n  return {\n    transcript: alt.transcript,\n    confidence: alt.confidence,\n    words: alt.words?.map((w: any) => ({\n      word: w.word,\n      start: w.start,\n      end: w.end,\n      confidence: w.confidence,\n      speaker: w.speaker,       // Only if diarize: true\n      punctuated_word: w.punctuated_word,\n    })),\n    // Speaker segments (requires utterances: true + diarize: true)\n    utterances: result.results.utterances?.map((u: any) => ({\n      speaker: u.speaker,\n      text: u.transcript,\n      start: u.start,\n      end: u.end,\n      confidence: u.confidence,\n    })),\n    // Audio intelligence results\n    summary: result.results.summary?.short,\n    topics: result.results.topics?.segments,\n    sentiments: result.results.sentiments?.segments,\n    intents: result.results.intents?.segments,\n    metadata: {\n      duration: result.metadata.duration,\n      channels: result.metadata.channels,\n      model: result.metadata.model_info,\n      request_id: result.metadata.request_id,\n    },\n  };\n}\n```\n\n### Step 3: Batch Processing\n\n```typescript\nimport pLimit from 'p-limit';\n\nasync function batchTranscribe(\n  files: string[],\n  opts: TranscribeOptions = {},\n  concurrency = 5\n) {\n  const transcriber = new DeepgramTranscriber(process.env.DEEPGRAM_API_KEY!);\n  const limit = pLimit(concurrency);\n\n  const results = await Promise.allSettled(\n    files.map(file =>\n      limit(async () => {\n        const result = await transcriber.transcribeFile(file, opts);\n        console.log(`Done: ${file} (${result.metadata.duration}s)`);\n        return { file, result: formatResult(result) };\n      })\n    )\n  );\n\n  const succeeded = results.filter(r => r.status === 'fulfilled');\n  const failed = results.filter(r => r.status === 'rejected');\n  console.log(`Batch complete: ${succeeded.length} ok, ${failed.length} failed`);\n  return results;\n}\n```\n\n### Step 4: Async Callback Transcription (Large Files)\n\n```typescript\n// For files >2 hours or when you don't want to hold a connection open,\n// use Deepgram's callback feature. Deepgram POSTs results to your URL.\nasync function submitAsync(audioUrl: string, callbackUrl: string) {\n  const transcriber = new DeepgramTranscriber(process.env.DEEPGRAM_API_KEY!);\n\n  // Deepgram returns a request_id immediately, processes in background\n  const result = await transcriber.transcribeUrl(audioUrl, {\n    model: 'nova-3',\n    diarize: true,\n    callback: callbackUrl,  // Your HTTPS endpoint\n  });\n\n  console.log('Submitted. Request ID:', result.metadata.request_id);\n  // Deepgram will POST results to callbackUrl when done\n  // Retries up to 10 times with 30s delay on failure\n}\n```\n\n### Step 5: Keyword Boosting\n\n```typescript\n// Boost domain-specific terms for higher accuracy\nconst result = await transcriber.transcribeUrl(audioUrl, {\n  model: 'nova-3',\n  keywords: [\n    'Kubernetes:1.5',    // Boost weight 1.0-2.0\n    'PostgreSQL:1.5',\n    'microservices:1.3',\n  ],\n});\n```\n\n## Output\n\n- `DeepgramTranscriber` class with URL and file transcription\n- Structured result extraction with word-level timing, speakers, and intelligence\n- Batch processing with configurable concurrency via `p-limit`\n- Async callback pattern for large files\n- Keyword boosting for domain vocabulary\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `400 Bad Request` | Invalid audio format | Verify file header bytes (WAV: `RIFF`, MP3: `0xFFF3/0xFFFB`) |\n| `413 Payload Too Large` | File exceeds limit | Use callback URL for async processing |\n| Empty transcript | No speech in audio | Check audio volume, try `alternatives: 3` for confidence |\n| `408 Timeout` | Long file, sync mode | Switch to callback-based async |\n| Low confidence | Background noise | Preprocess: `ffmpeg -i input.wav -af \"highpass=f=200,lowpass=f=3000\" clean.wav` |\n\n## Resources\n\n- [Pre-recorded API](https://developers.deepgram.com/docs/pre-recorded-audio)\n- [Speaker Diarization](https://developers.deepgram.com/docs/diarization)\n- [Audio Intelligence](https://deepgram.com/product/audio-intelligence)\n- [Summarization](https://developers.deepgram.com/docs/summarization)\n- [Callback Feature](https://developers.deepgram.com/docs/callback)\n\n## Next Steps\n\nProceed to `deepgram-core-workflow-b` for real-time streaming transcription.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "deepgram-core-workflow-a",
-    "description": "Implement production pre-recorded speech-to-text with Deepgram.",
-    "Trigger": "deepgram transcription\", \"speech to text\", \"transcribe audio\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(pip:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

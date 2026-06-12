@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000019108",
   "name": "fabric-api",
   "slug": "fabric-api",
   "description": "Create, search, and manage Fabric resources via the Fabric HTTP API (notepads/notes, folders, bookmarks, files, tags).",
   "content": "\n# Fabric API (HTTP via Node/Python)\n\nUse this skill when you need to **read or write content in a user's Fabric workspace** using the Fabric HTTP API (`https://api.fabric.so`).\n\nThis version avoids bash-only wrapper scripts. It ships **cross-platform** helpers:\n\n- Node: `{baseDir}/scripts/fabric.mjs` (recommended)\n- Python: `{baseDir}/scripts/fabric.py`\n\n## Critical gotchas (read first)\n\n- **There is no** `POST /v2/notes` endpoint in the bundled OpenAPI spec. To create a \u201cnote\u201d, use **`POST /v2/notepads`**.\n- Most create endpoints require **`parentId`**:\n  - A folder UUID **or** one of: `@alias::inbox`, `@alias::bin`\n- Notepad creation requires:\n  - `parentId`\n  - and **either** `text` (markdown string) **or** `ydoc` (advanced/structured)\n- `tags` must be **an array of objects**, each item **either**:\n  - `{ \"name\": \"tag name\" }` **or** `{ \"id\": \"<uuid>\" }`\n  - Never strings, never nested arrays.\n- **Field name gotcha:** the API schema uses `name` (not `title`). If the user says \u201ctitle\u201d, map it to `name` in requests.\n\nWhen the user doesn\u2019t specify a destination folder, default to:\n\n- `parentId: \"@alias::inbox\"`\n\n## Setup (OpenClaw / Clawdbot)\n\nThis skill expects the Fabric API key in:\n\n- `FABRIC_API_KEY`\n\nOpenClaw config example (`~/.openclaw/openclaw.json`):\n\n```json5\n{\n  skills: {\n    entries: {\n      \"fabric-api\": {\n        enabled: true,\n        apiKey: \"YOUR_FABRIC_API_KEY\"\n      }\n    }\n  }\n}\n```\n\nNotes:\n\n- `apiKey` is a convenience for skills that declare `primaryEnv`; it injects `FABRIC_API_KEY` for the duration of an agent run.\n- Don\u2019t paste the API key into prompts, client-side code, or logs.\n\n## HTTP basics\n\n- Base URL: `https://api.fabric.so` (override with `FABRIC_BASE` if needed)\n- Auth header: `X-Api-Key: $FABRIC_API_KEY`\n- JSON header (for JSON bodies): `Content-Type: application/json`\n\n## Convenience scripts (cross-platform)\n\n### Node helper (recommended)\n\n```bash\nnode {baseDir}/scripts/fabric.mjs GET /v2/user/me\n\nnode {baseDir}/scripts/fabric.mjs POST /v2/notepads --json '{\"name\":\"Test note\",\"text\":\"Hello\",\"parentId\":\"@alias::inbox\"}'\n```\n\n### Python helper\n\n```bash\npython3 {baseDir}/scripts/fabric.py GET /v2/user/me\n\npython3 {baseDir}/scripts/fabric.py POST /v2/notepads --json '{\"name\":\"Test note\",\"text\":\"Hello\",\"parentId\":\"@alias::inbox\"}'\n```\n\nNotes:\n\n- Both helpers print the response body on success.\n- On HTTP errors (4xx/5xx), they print `HTTP <code> <reason>` to stderr **and still print the response body**, then exit non\u2011zero (similar to `curl --fail-with-body`).\n- If you pass an absolute URL (`https://...`), the helpers **do not** attach `X-Api-Key` unless you explicitly pass `--with-key`.\n\n## Core workflows\n\n### 1) Create a notepad (note)\n\nEndpoint: `POST /v2/notepads`\n\nRules:\n\n- Map user \u201ctitle\u201d \u2192 `name`\n- Use `text` for markdown content\n- Always include `parentId`\n- If you\u2019re debugging 400s, start minimal (required fields only), then add `name`, then `tags`.\n\nMinimal create:\n\n```bash\nnode {baseDir}/scripts/fabric.mjs POST /v2/notepads --json '{\"parentId\":\"@alias::inbox\",\"text\":\"Hello\"}'\n```\n\nCreate with a name:\n\n```bash\nnode {baseDir}/scripts/fabric.mjs POST /v2/notepads --json '{\"name\":\"Calendar Test Note\",\"text\":\"Created via OpenClaw\",\"parentId\":\"@alias::inbox\"}'\n```\n\nCreate with tags (correct shape):\n\n```bash\nnode {baseDir}/scripts/fabric.mjs POST /v2/notepads --json '{\"name\":\"Ideas\",\"text\":\"# Ideas\\\\n\\\\n- First\\\\n- Second\\\\n\",\"parentId\":\"@alias::inbox\",\"tags\":[{\"name\":\"ideas\"},{\"name\":\"draft\"}]}'\n```\n\nIf you keep seeing tag validation errors, temporarily omit `tags` and create the notepad first.\n\n### 2) Create a folder\n\nEndpoint: `POST /v2/folders`\n\n```bash\nnode {baseDir}/scripts/fabric.mjs POST /v2/folders --json '{\"name\":\"My new folder\",\"parentId\":\"@alias::inbox\",\"description\":null}'\n```\n\n### 3) Create a bookmark\n\nEndpoint: `POST /v2/bookmarks`\n\n```bash\nnode {baseDir}/scripts/fabric.mjs POST /v2/bookmarks --json '{\"url\":\"https://example.com\",\"parentId\":\"@alias::inbox\",\"name\":\"Example\",\"tags\":[{\"name\":\"reading\"}]}'\n```\n\n### 4) Browse resources (list children of a folder)\n\nEndpoint: `POST /v2/resources/filter`\n\nImportant:\n\n- This endpoint\u2019s `parentId` expects a **UUID** (not an alias).\n- If you only have an alias, resolve it by listing resource roots and picking the inbox/bin folder ID.\n\n```bash\nnode {baseDir}/scripts/fabric.mjs POST /v2/resources/filter --json '{\"parentId\":\"PARENT_UUID_HERE\",\"limit\":50,\"order\":{\"property\":\"modifiedAt\",\"direction\":\"DESC\"}}'\n```\n\n### 5) Search\n\nEndpoint: `POST /v2/search`\n\nUse search when the user gives a fuzzy description (\u201cthe note about\u2026\u201d).\n\n```bash\nnode {baseDir}/scripts/fabric.mjs POST /v2/search --json '{\"queries\":[{\"mode\":\"text\",\"text\":\"meeting notes\",\"filters\":{\"kinds\":[\"notepad\"]}}],\"pagination\":{\"page\":1,\"pageSize\":20},\"sort\":{\"field\":\"modifiedAt\",\"order\":\"desc\"}}'\n```\n\n## Error handling + retries (practical guidance)\n\n- **400 Bad Request**: schema validation. Re-check required fields, and that `tags` is `[{name}|{id}]` not nested.\n- **401/403**: auth/subscription/permission. Stop and report the error details; don\u2019t brute-force.\n- **404**: wrong endpoint, wrong ID, or no access.\n- **429**: rate limiting. Back off (sleep + jitter) and retry **reads**. Avoid blind retries on **create** (you may create duplicates).\n- **5xx**: transient; retry with backoff.\n\n## Reference files\n\n- OpenAPI spec (source of truth): `{baseDir}/fabric-api.yaml`\n- Extra schema notes: `{baseDir}/references/REFERENCE.md`\n- Debug playbook: `{baseDir}/references/TROUBLESHOOTING.md`\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "fabric-api",
-    "description": "Create, search, and manage Fabric resources via the Fabric HTTP API (notepads/notes, folders, bookmarks, files, tags).",
-    "homepage": "https://fabric.so",
-    "metadata": "{\"openclaw\":{\"emoji\":\"\ud83e\uddf5\",\"homepage\":\"https://fabric.so\",\"requires\":{\"env\":[\"FABRIC_API_KEY\"],\"anyBins\":[\"node\",\"python3\",\"python\",\"curl\"]},\"primaryEnv\":\"FABRIC_API_KEY\"},\"clawdbot\":{\"emoji\":\"\ud83e\uddf5\",\"homepage\":\"https://fabric.so\",\"requires\":{\"env\":[\"FABRIC_API_KEY\"],\"anyBins\":[\"node\",\"python3\",\"python\",\"curl\"]},\"primaryEnv\":\"FABRIC_API_KEY\"}}"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

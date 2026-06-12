@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031615",
   "name": "coderabbit-ci-integration",
   "slug": "coderabbit-ci-integration",
   "description": "Configure CodeRabbit as a CI gate with GitHub Actions, branch protection,",
   "content": "# CodeRabbit CI Integration\n\n## Overview\n\nIntegrate CodeRabbit into your CI/CD pipeline as a merge gate. CodeRabbit posts a GitHub Check on each PR, and you can require this check to pass before merging. This skill covers branch protection rules, GitHub Actions workflows that react to CodeRabbit reviews, and strategies for enforcing review quality in CI.\n\n## Prerequisites\n\n- CodeRabbit GitHub App installed on your repository\n- GitHub repository with branch protection enabled\n- `.coderabbit.yaml` committed to repository root\n- GitHub Actions enabled on the repository\n\n## Instructions\n\n### Step 1: Enable CodeRabbit as a Required Status Check\n\n```markdown\n1. Go to GitHub repo > Settings > Branches > Branch protection rules\n2. Click \"Add rule\" (or edit existing rule for `main`)\n3. Enable \"Require status checks to pass before merging\"\n4. Search for \"coderabbitai\" in the status checks list\n5. Select it as a required check\n6. Save changes\n\nResult: PRs cannot be merged until CodeRabbit completes its review.\n```\n\n### Step 2: Configure Review Approval Behavior\n\n```yaml\n# .coderabbit.yaml - Control when CodeRabbit blocks merge\nreviews:\n  request_changes_workflow: true   # CodeRabbit marks review as \"Changes Requested\" for issues\n  # When true: PRs with issues show as \"Changes Requested\" (blocks merge if reviews required)\n  # When false: CodeRabbit only posts \"Comment\" reviews (never blocks merge)\n\n  profile: \"assertive\"             # Controls comment volume\n  # chill: fewer comments, only critical issues\n  # assertive: balanced, blocks on significant issues\n  # nitpicky: detailed comments, blocks more frequently\n\n  auto_review:\n    enabled: true\n    drafts: false                  # Don't run CI-blocking reviews on drafts\n    base_branches:\n      - main\n      - develop\n      - \"release/*\"\n    ignore_title_keywords:\n      - \"WIP\"\n      - \"DO NOT MERGE\"\n```\n\n### Step 3: Create a Review Gate Workflow\n\n```yaml\n# .github/workflows/coderabbit-gate.yml\nname: CodeRabbit Review Gate\n\non:\n  pull_request_review:\n    types: [submitted]\n\njobs:\n  check-review:\n    # Only run when CodeRabbit submits a review\n    if: github.event.review.user.login == 'coderabbitai[bot]'\n    runs-on: ubuntu-latest\n    steps:\n      - name: Evaluate CodeRabbit review\n        uses: actions/github-script@v7\n        with:\n          script: |\n            const reviews = await github.rest.pulls.listReviews({\n              owner: context.repo.owner,\n              repo: context.repo.repo,\n              pull_number: context.issue.number,\n            });\n\n            const crReview = reviews.data\n              .filter(r => r.user.login === 'coderabbitai[bot]')\n              .pop();\n\n            if (!crReview) {\n              core.info('No CodeRabbit review found yet.');\n              return;\n            }\n\n            core.info(`CodeRabbit review state: ${crReview.state}`);\n\n            if (crReview.state === 'CHANGES_REQUESTED') {\n              core.setFailed('CodeRabbit requested changes. Address review feedback before merging.');\n            }\n```\n\n### Step 4: Add PR Size Check with CodeRabbit\n\n```yaml\n# .github/workflows/pr-size-check.yml\nname: PR Size Check\n\non:\n  pull_request:\n    types: [opened, synchronize]\n\njobs:\n  check-size:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n\n      - name: Check PR size\n        run: |\n          CHANGES=$(git diff --stat origin/${{ github.base_ref }}...HEAD | tail -1)\n          LINES=$(echo \"$CHANGES\" | grep -oP '\\d+ insertion' | grep -oP '\\d+' || echo 0)\n          DELETIONS=$(echo \"$CHANGES\" | grep -oP '\\d+ deletion' | grep -oP '\\d+' || echo 0)\n          TOTAL=$((LINES + DELETIONS))\n\n          echo \"Total lines changed: $TOTAL\"\n\n          if [ \"$TOTAL\" -gt 1000 ]; then\n            echo \"::warning::PR has $TOTAL lines changed. CodeRabbit works best with PRs under 500 lines.\"\n            echo \"Consider splitting into smaller PRs for better review quality.\"\n          fi\n```\n\n### Step 5: Notify on CodeRabbit Findings\n\n```yaml\n# .github/workflows/coderabbit-notify.yml\nname: CodeRabbit Notification\n\non:\n  pull_request_review:\n    types: [submitted]\n\njobs:\n  notify:\n    if: >\n      github.event.review.user.login == 'coderabbitai[bot]' &&\n      github.event.review.state == 'changes_requested'\n    runs-on: ubuntu-latest\n    steps:\n      - name: Post Slack notification\n        uses: slackapi/slack-github-action@v1.27.1\n        with:\n          payload: |\n            {\n              \"text\": \"CodeRabbit found issues in PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}\",\n              \"blocks\": [\n                {\n                  \"type\": \"section\",\n                  \"text\": {\n                    \"type\": \"mrkdwn\",\n                    \"text\": \"*CodeRabbit Review*: Changes requested on <${{ github.event.pull_request.html_url }}|PR #${{ github.event.pull_request.number }}>\"\n                  }\n                }\n              ]\n            }\n        env:\n          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}\n```\n\n### Step 6: Enforce CodeRabbit via Branch Protection API\n\n```bash\nset -euo pipefail\n# Programmatically set CodeRabbit as a required check\nOWNER=\"your-org\"\nREPO=\"your-repo\"\nBRANCH=\"main\"\n\ngh api \"repos/$OWNER/$REPO/branches/$BRANCH/protection\" \\\n  --method PUT \\\n  --field 'required_status_checks={\"strict\":true,\"contexts\":[\"coderabbitai\"]}' \\\n  --field 'required_pull_request_reviews={\"required_approving_review_count\":1}' \\\n  --field 'enforce_admins=true' \\\n  --field 'restrictions=null'\n\necho \"Branch protection updated: CodeRabbit review required for merge\"\n```\n\n## Output\n\n- CodeRabbit configured as a required status check on protected branches\n- GitHub Actions workflow that gates merges on CodeRabbit approval\n- PR size warnings to improve review quality\n- Slack notifications for CodeRabbit findings\n- Branch protection enforced via API\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| \"coderabbitai\" not in status checks list | App not installed or no PRs reviewed yet | Install App, create a test PR, then configure |\n| Review blocks all PRs | `request_changes_workflow: true` with aggressive profile | Switch to `chill` or set to `false` |\n| CI times out waiting for review | Large PR or CodeRabbit backlog | Reviews take 2-15 min depending on PR size |\n| Draft PRs blocked | `drafts: true` in config | Set `drafts: false` to skip draft PR reviews |\n| Status check stays pending | CodeRabbit outage | Check status.coderabbit.ai; admin merge if needed |\n\n## Resources\n\n- [CodeRabbit Configuration Reference](https://docs.coderabbit.ai/reference/configuration)\n- [GitHub Branch Protection](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-a-branch-protection-rule)\n- [GitHub Actions: Pull Request Events](https://docs.github.com/en/actions/using-workflows/events-that-trigger-workflows#pull_request_review)\n\n## Next Steps\n\nFor deployment and multi-repo rollout, see `coderabbit-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "coderabbit-ci-integration",
-    "description": "Configure CodeRabbit as a CI gate with GitHub Actions, branch protection,",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*), Bash(git:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

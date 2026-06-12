@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031782",
   "name": "deepgram-prod-checklist",
   "slug": "deepgram-prod-checklist",
   "description": "Execute Deepgram production deployment checklist.",
   "content": "# Deepgram Production Checklist\n\n## Overview\n\nComprehensive go-live checklist for Deepgram integrations. Covers singleton client, health checks, Prometheus metrics, alert rules, error handling, and a phased go-live timeline.\n\n## Production Readiness Matrix\n\n| Category | Item | Status |\n|----------|------|--------|\n| **Auth** | Production API key with scoped permissions | [ ] |\n| **Auth** | Key stored in secret manager (not env file) | [ ] |\n| **Auth** | Key rotation schedule (90-day) configured | [ ] |\n| **Auth** | Fallback key provisioned and tested | [ ] |\n| **Resilience** | Retry with exponential backoff on 429/5xx | [ ] |\n| **Resilience** | Circuit breaker for cascade failure prevention | [ ] |\n| **Resilience** | Request timeout set (30s pre-recorded, 10s TTS) | [ ] |\n| **Resilience** | Graceful degradation when API unavailable | [ ] |\n| **Performance** | Singleton client (not creating per-request) | [ ] |\n| **Performance** | Concurrency limited (50-80% of plan limit) | [ ] |\n| **Performance** | Audio preprocessed (16kHz mono for best results) | [ ] |\n| **Performance** | Large files use callback URL (async) | [ ] |\n| **Monitoring** | Health check endpoint testing Deepgram API | [ ] |\n| **Monitoring** | Prometheus metrics: latency, error rate, usage | [ ] |\n| **Monitoring** | Alerts: error rate >5%, latency >10s, circuit open | [ ] |\n| **Security** | PII redaction enabled if handling sensitive audio | [ ] |\n| **Security** | Audio URLs validated (HTTPS, no private IPs) | [ ] |\n| **Security** | Audit logging on all operations | [ ] |\n\n## Instructions\n\n### Step 1: Production Singleton Client\n\n```typescript\nimport { createClient, DeepgramClient } from '@deepgram/sdk';\n\nclass ProductionDeepgram {\n  private static client: DeepgramClient | null = null;\n\n  static getClient(): DeepgramClient {\n    if (!this.client) {\n      const key = process.env.DEEPGRAM_API_KEY;\n      if (!key) throw new Error('DEEPGRAM_API_KEY required for production');\n      this.client = createClient(key);\n    }\n    return this.client;\n  }\n\n  // Force re-init (for key rotation)\n  static reset() { this.client = null; }\n}\n```\n\n### Step 2: Health Check Endpoint\n\n```typescript\nimport express from 'express';\nimport { createClient } from '@deepgram/sdk';\n\nconst app = express();\nconst deepgram = createClient(process.env.DEEPGRAM_API_KEY!);\n\napp.get('/health', async (req, res) => {\n  const start = Date.now();\n  try {\n    // Test API connectivity by listing projects\n    const { error } = await deepgram.manage.getProjects();\n    const latency = Date.now() - start;\n\n    if (error) {\n      return res.status(503).json({\n        status: 'unhealthy',\n        deepgram: 'error',\n        error: error.message,\n        latency_ms: latency,\n      });\n    }\n\n    res.json({\n      status: 'healthy',\n      deepgram: 'connected',\n      latency_ms: latency,\n      timestamp: new Date().toISOString(),\n    });\n  } catch (err: any) {\n    res.status(503).json({\n      status: 'unhealthy',\n      deepgram: 'unreachable',\n      error: err.message,\n      latency_ms: Date.now() - start,\n    });\n  }\n});\n```\n\n### Step 3: Prometheus Metrics\n\n```typescript\nimport { Counter, Histogram, Gauge, Registry } from 'prom-client';\n\nconst registry = new Registry();\n\nconst transcriptionRequests = new Counter({\n  name: 'deepgram_requests_total',\n  help: 'Total Deepgram API requests',\n  labelNames: ['method', 'model', 'status'],\n  registers: [registry],\n});\n\nconst transcriptionLatency = new Histogram({\n  name: 'deepgram_latency_seconds',\n  help: 'Deepgram API request latency',\n  labelNames: ['method', 'model'],\n  buckets: [0.5, 1, 2, 5, 10, 30],\n  registers: [registry],\n});\n\nconst audioProcessed = new Counter({\n  name: 'deepgram_audio_seconds_total',\n  help: 'Total audio seconds processed',\n  labelNames: ['model'],\n  registers: [registry],\n});\n\nconst activeConnections = new Gauge({\n  name: 'deepgram_active_connections',\n  help: 'Active WebSocket connections',\n  registers: [registry],\n});\n\n// Instrumented transcription\nasync function instrumentedTranscribe(url: string, model = 'nova-3') {\n  const timer = transcriptionLatency.startTimer({ method: 'prerecorded', model });\n  try {\n    const { result, error } = await deepgram.listen.prerecorded.transcribeUrl(\n      { url }, { model, smart_format: true }\n    );\n    timer();\n    transcriptionRequests.inc({ method: 'prerecorded', model, status: error ? 'error' : 'ok' });\n    if (result?.metadata?.duration) {\n      audioProcessed.inc({ model }, result.metadata.duration);\n    }\n    if (error) throw error;\n    return result;\n  } catch (err) {\n    timer();\n    transcriptionRequests.inc({ method: 'prerecorded', model, status: 'error' });\n    throw err;\n  }\n}\n\n// Expose metrics endpoint\napp.get('/metrics', async (req, res) => {\n  res.set('Content-Type', registry.contentType);\n  res.send(await registry.metrics());\n});\n```\n\n### Step 4: Alert Rules (Prometheus/AlertManager)\n\n```yaml\ngroups:\n  - name: deepgram\n    rules:\n      - alert: DeepgramHighErrorRate\n        expr: rate(deepgram_requests_total{status=\"error\"}[5m]) / rate(deepgram_requests_total[5m]) > 0.05\n        for: 5m\n        labels:\n          severity: critical\n        annotations:\n          summary: \"Deepgram error rate > 5%\"\n\n      - alert: DeepgramHighLatency\n        expr: histogram_quantile(0.95, rate(deepgram_latency_seconds_bucket[5m])) > 10\n        for: 5m\n        labels:\n          severity: warning\n        annotations:\n          summary: \"Deepgram P95 latency > 10s\"\n\n      - alert: DeepgramHealthCheckFailed\n        expr: up{job=\"deepgram-service\"} == 0\n        for: 2m\n        labels:\n          severity: critical\n        annotations:\n          summary: \"Deepgram health check failed for 2+ minutes\"\n```\n\n### Step 5: Error Handling Wrapper\n\n```typescript\nasync function safeTranscribe(url: string, options: Record<string, any> = {}) {\n  const timeout = options.timeout ?? 30000;\n\n  const controller = new AbortController();\n  const timeoutId = setTimeout(() => controller.abort(), timeout);\n\n  try {\n    const result = await Promise.race([\n      instrumentedTranscribe(url, options.model ?? 'nova-3'),\n      new Promise((_, reject) =>\n        setTimeout(() => reject(new Error('Transcription timeout')), timeout)\n      ),\n    ]);\n    clearTimeout(timeoutId);\n    return result;\n  } catch (err: any) {\n    clearTimeout(timeoutId);\n    // Log structured error\n    console.error(JSON.stringify({\n      level: 'error',\n      service: 'deepgram',\n      message: err.message,\n      url: url.substring(0, 100),\n      timestamp: new Date().toISOString(),\n    }));\n    throw err;\n  }\n}\n```\n\n### Step 6: Go-Live Timeline\n\n| Phase | When | Actions |\n|-------|------|---------|\n| D-7 | 1 week before | Load test at 2x expected volume, security review |\n| D-3 | 3 days before | Smoke test with production key, verify all alerts fire |\n| D-1 | Day before | Confirm on-call rotation, validate dashboards |\n| D-0 | Launch | Shadow mode (10% traffic), monitoring open |\n| D+1 | Day after | Review error rate, latency, verify no anomalies |\n| D+7 | 1 week after | Full traffic, tune alert thresholds based on baselines |\n\n## Output\n\n- Singleton client with reset capability\n- Health check endpoint with latency reporting\n- Prometheus metrics (requests, latency, audio, connections)\n- AlertManager rules for error rate, latency, availability\n- Timeout-safe transcription wrapper\n- Phased go-live timeline\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Health check 503 | API key expired | Rotate key, check secret manager |\n| Metrics not scraped | Wrong port/path | Verify Prometheus target config |\n| Alert storms | Thresholds too tight | Add `for:` duration, tune values |\n| Timeout on large files | Sync mode too slow | Switch to `callback` URL pattern |\n\n## Resources\n\n- [Deepgram Production Guide](https://developers.deepgram.com/docs/production-guide)\n- [Prometheus Best Practices](https://prometheus.io/docs/practices/)\n- [Deepgram SLA](https://deepgram.com/sla)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "deepgram-prod-checklist",
-    "description": "Execute Deepgram production deployment checklist.",
-    "Trigger": "deepgram production\", \"deploy deepgram\", \"deepgram prod checklist\",",
-    "allowed-tools": "Read, Write, Edit, Grep, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

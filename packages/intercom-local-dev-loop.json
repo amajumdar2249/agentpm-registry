@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032324",
   "name": "intercom-local-dev-loop",
   "slug": "intercom-local-dev-loop",
   "description": "Configure Intercom local development with testing, mocking, and hot",
   "content": "# Intercom Local Dev Loop\n\n## Overview\n\nSet up a fast local development workflow for Intercom integrations with proper test isolation, mocking strategies, and webhook tunneling.\n\n## Prerequisites\n\n- Completed `intercom-install-auth` setup\n- Node.js 18+ with npm/pnpm\n- A test/development Intercom workspace (separate from production)\n\n## Instructions\n\n### Step 1: Project Structure\n\n```\nmy-intercom-app/\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 intercom/\n\u2502   \u2502   \u251c\u2500\u2500 client.ts       # Singleton client\n\u2502   \u2502   \u251c\u2500\u2500 contacts.ts     # Contact operations\n\u2502   \u2502   \u251c\u2500\u2500 conversations.ts # Conversation operations\n\u2502   \u2502   \u2514\u2500\u2500 types.ts        # Intercom type extensions\n\u2502   \u2514\u2500\u2500 index.ts\n\u251c\u2500\u2500 tests/\n\u2502   \u251c\u2500\u2500 mocks/\n\u2502   \u2502   \u2514\u2500\u2500 intercom.ts     # Mock client factory\n\u2502   \u251c\u2500\u2500 contacts.test.ts\n\u2502   \u2514\u2500\u2500 conversations.test.ts\n\u251c\u2500\u2500 .env.development        # Dev workspace token\n\u251c\u2500\u2500 .env.test               # Test config (mocked)\n\u251c\u2500\u2500 .env.example            # Template\n\u2514\u2500\u2500 package.json\n```\n\n### Step 2: Environment Configuration\n\n```bash\n# .env.example (commit this)\nINTERCOM_ACCESS_TOKEN=\nINTERCOM_WEBHOOK_SECRET=\nNODE_ENV=development\n\n# .env.development (git-ignored, real dev workspace token)\nINTERCOM_ACCESS_TOKEN=dG9rOmRldl90b2tlbl9oZXJl\nINTERCOM_WEBHOOK_SECRET=your-webhook-secret\nNODE_ENV=development\n```\n\n### Step 3: Client Singleton with Environment Awareness\n\n```typescript\n// src/intercom/client.ts\nimport { IntercomClient } from \"intercom-client\";\n\nlet instance: IntercomClient | null = null;\n\nexport function getClient(): IntercomClient {\n  if (!instance) {\n    const token = process.env.INTERCOM_ACCESS_TOKEN;\n    if (!token) {\n      throw new Error(\n        \"INTERCOM_ACCESS_TOKEN not set. Copy .env.example to .env.development\"\n      );\n    }\n    instance = new IntercomClient({ token });\n  }\n  return instance;\n}\n\n// Reset for testing\nexport function resetClient(): void {\n  instance = null;\n}\n```\n\n### Step 4: Mock Client for Tests\n\n```typescript\n// tests/mocks/intercom.ts\nimport { vi } from \"vitest\";\n\nexport function createMockClient() {\n  return {\n    contacts: {\n      create: vi.fn().mockResolvedValue({\n        type: \"contact\",\n        id: \"mock-contact-id\",\n        role: \"user\",\n        email: \"test@example.com\",\n        name: \"Test User\",\n        external_id: \"ext-123\",\n        custom_attributes: {},\n        created_at: 1711100000,\n        updated_at: 1711100000,\n      }),\n      find: vi.fn().mockResolvedValue({\n        type: \"contact\",\n        id: \"mock-contact-id\",\n        email: \"test@example.com\",\n      }),\n      search: vi.fn().mockResolvedValue({\n        type: \"list\",\n        data: [],\n        total_count: 0,\n        pages: { type: \"pages\", page: 1, per_page: 50, total_pages: 0 },\n      }),\n      list: vi.fn().mockResolvedValue({\n        type: \"list\",\n        data: [],\n        total_count: 0,\n        pages: { next: null },\n      }),\n      update: vi.fn(),\n      delete: vi.fn(),\n      tag: vi.fn(),\n      untag: vi.fn(),\n    },\n    conversations: {\n      create: vi.fn().mockResolvedValue({\n        type: \"conversation\",\n        id: \"mock-convo-id\",\n        state: \"open\",\n      }),\n      find: vi.fn(),\n      list: vi.fn().mockResolvedValue({\n        type: \"conversation.list\",\n        conversations: [],\n        pages: { next: null },\n      }),\n      reply: vi.fn(),\n      close: vi.fn(),\n      assign: vi.fn(),\n    },\n    messages: {\n      create: vi.fn().mockResolvedValue({\n        type: \"user_message\",\n        id: \"mock-msg-id\",\n      }),\n    },\n    admins: {\n      list: vi.fn().mockResolvedValue({\n        type: \"admin.list\",\n        admins: [{ id: \"admin-1\", name: \"Test Admin\", email: \"admin@test.com\" }],\n      }),\n    },\n    tags: {\n      create: vi.fn().mockResolvedValue({ type: \"tag\", id: \"tag-1\", name: \"test\" }),\n      list: vi.fn().mockResolvedValue({ type: \"list\", data: [] }),\n    },\n  };\n}\n```\n\n### Step 5: Write Tests\n\n```typescript\n// tests/contacts.test.ts\nimport { describe, it, expect, vi, beforeEach } from \"vitest\";\nimport { createMockClient } from \"./mocks/intercom\";\n\ndescribe(\"Contact Operations\", () => {\n  let mockClient: ReturnType<typeof createMockClient>;\n\n  beforeEach(() => {\n    mockClient = createMockClient();\n  });\n\n  it(\"should create a user contact\", async () => {\n    const contact = await mockClient.contacts.create({\n      role: \"user\",\n      externalId: \"user-123\",\n      email: \"test@example.com\",\n    });\n\n    expect(contact.id).toBe(\"mock-contact-id\");\n    expect(contact.role).toBe(\"user\");\n    expect(mockClient.contacts.create).toHaveBeenCalledWith({\n      role: \"user\",\n      externalId: \"user-123\",\n      email: \"test@example.com\",\n    });\n  });\n\n  it(\"should search contacts by email\", async () => {\n    await mockClient.contacts.search({\n      query: { field: \"email\", operator: \"=\", value: \"test@example.com\" },\n    });\n\n    expect(mockClient.contacts.search).toHaveBeenCalledOnce();\n  });\n});\n```\n\n### Step 6: Webhook Testing with ngrok\n\n```bash\n# Install ngrok\nnpm install -g ngrok\n\n# Start your local server\nnpm run dev  # Starts on port 3000\n\n# Tunnel to expose locally\nngrok http 3000\n\n# Use the HTTPS URL (e.g., https://abc123.ngrok.io) as your webhook URL\n# in Intercom Developer Hub > Webhooks\n```\n\n### Step 7: Package Scripts\n\n```json\n{\n  \"scripts\": {\n    \"dev\": \"tsx watch src/index.ts\",\n    \"test\": \"vitest\",\n    \"test:watch\": \"vitest --watch\",\n    \"test:integration\": \"INTERCOM_ACCESS_TOKEN=$INTERCOM_DEV_TOKEN vitest --config vitest.integration.config.ts\",\n    \"typecheck\": \"tsc --noEmit\"\n  }\n}\n```\n\n## Integration Test Pattern\n\n```typescript\n// tests/integration/contacts.integration.test.ts\nimport { describe, it, expect } from \"vitest\";\nimport { IntercomClient } from \"intercom-client\";\n\nconst client = new IntercomClient({\n  token: process.env.INTERCOM_ACCESS_TOKEN!,\n});\n\ndescribe.skipIf(!process.env.INTERCOM_ACCESS_TOKEN)(\"Contacts Integration\", () => {\n  it(\"should create and retrieve a contact\", async () => {\n    const created = await client.contacts.create({\n      role: \"lead\",\n      name: `Integration Test ${Date.now()}`,\n    });\n\n    expect(created.id).toBeDefined();\n\n    // Clean up\n    await client.contacts.delete({ contactId: created.id });\n  });\n});\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `INTERCOM_ACCESS_TOKEN not set` | Missing .env file | Copy `.env.example` to `.env.development` |\n| Port 3000 in use | Another process | `lsof -i :3000` and kill, or change port |\n| ngrok tunnel expired | Free tier 2h limit | Restart ngrok or use paid plan |\n| Mock type mismatch | SDK updated | Regenerate mocks from SDK types |\n| `rate_limit_exceeded` in dev | Dev workspace limits | Add delays between integration tests |\n\n## Resources\n\n- [intercom-client npm](https://www.npmjs.com/package/intercom-client)\n- [Vitest Documentation](https://vitest.dev/)\n- [ngrok](https://ngrok.com/)\n\n## Next Steps\n\nSee `intercom-sdk-patterns` for production-ready code patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "intercom-local-dev-loop",
-    "description": "Configure Intercom local development with testing, mocking, and hot",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(npx:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

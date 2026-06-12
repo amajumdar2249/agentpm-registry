@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031406",
   "name": "brightdata-local-dev-loop",
   "slug": "brightdata-local-dev-loop",
   "description": "Configure Bright Data local development with hot reload and testing.",
   "content": "# Bright Data Local Dev Loop\n\n## Overview\n\nSet up a fast, reproducible local development workflow for Bright Data scraping projects with mocked proxy responses, cached results, and vitest integration.\n\n## Prerequisites\n\n- Completed `brightdata-install-auth` setup\n- Node.js 18+ with npm/pnpm\n- brd-ca.crt SSL certificate downloaded\n\n## Instructions\n\n### Step 1: Create Project Structure\n\n```\nmy-scraper/\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 brightdata/\n\u2502   \u2502   \u251c\u2500\u2500 proxy.ts         # Proxy configuration helper\n\u2502   \u2502   \u251c\u2500\u2500 scraper.ts       # Scraping functions\n\u2502   \u2502   \u2514\u2500\u2500 cache.ts         # Response caching for dev\n\u2502   \u2514\u2500\u2500 index.ts\n\u251c\u2500\u2500 tests/\n\u2502   \u251c\u2500\u2500 fixtures/            # Cached HTML responses\n\u2502   \u2502   \u2514\u2500\u2500 example.html\n\u2502   \u2514\u2500\u2500 scraper.test.ts\n\u251c\u2500\u2500 .env.local               # Local credentials (git-ignored)\n\u251c\u2500\u2500 .env.example             # Template for team\n\u251c\u2500\u2500 brd-ca.crt               # Bright Data SSL cert (git-ignored)\n\u2514\u2500\u2500 package.json\n```\n\n### Step 2: Build Proxy Configuration Module\n\n```typescript\n// src/brightdata/proxy.ts\nimport 'dotenv/config';\n\nexport interface BrightDataProxy {\n  host: string;\n  port: number;\n  auth: { username: string; password: string };\n}\n\nexport function getProxy(options?: {\n  country?: string;\n  city?: string;\n  session?: string;\n}): BrightDataProxy {\n  const { BRIGHTDATA_CUSTOMER_ID, BRIGHTDATA_ZONE, BRIGHTDATA_ZONE_PASSWORD } = process.env;\n  if (!BRIGHTDATA_CUSTOMER_ID || !BRIGHTDATA_ZONE || !BRIGHTDATA_ZONE_PASSWORD) {\n    throw new Error('Missing BRIGHTDATA_* environment variables');\n  }\n\n  let username = `brd-customer-${BRIGHTDATA_CUSTOMER_ID}-zone-${BRIGHTDATA_ZONE}`;\n  if (options?.country) username += `-country-${options.country}`;\n  if (options?.city) username += `-city-${options.city}`;\n  if (options?.session) username += `-session-${options.session}`;\n\n  return {\n    host: 'brd.superproxy.io',\n    port: 33335,\n    auth: { username, password: BRIGHTDATA_ZONE_PASSWORD },\n  };\n}\n```\n\n### Step 3: Add Response Cache for Development\n\n```typescript\n// src/brightdata/cache.ts \u2014 cache scraped pages to avoid burning proxy credits\nimport { createHash } from 'crypto';\nimport { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';\nimport { join } from 'path';\n\nconst CACHE_DIR = join(process.cwd(), '.scrape-cache');\n\nexport function getCachedResponse(url: string): string | null {\n  const key = createHash('md5').update(url).digest('hex');\n  const path = join(CACHE_DIR, `${key}.html`);\n  return existsSync(path) ? readFileSync(path, 'utf-8') : null;\n}\n\nexport function setCachedResponse(url: string, html: string): void {\n  mkdirSync(CACHE_DIR, { recursive: true });\n  const key = createHash('md5').update(url).digest('hex');\n  writeFileSync(join(CACHE_DIR, `${key}.html`), html);\n}\n```\n\n### Step 4: Configure Testing with Mocked Responses\n\n```typescript\n// tests/scraper.test.ts\nimport { describe, it, expect, vi, beforeEach } from 'vitest';\nimport axios from 'axios';\n\nvi.mock('axios');\nconst mockedAxios = vi.mocked(axios);\n\ndescribe('Bright Data Scraper', () => {\n  beforeEach(() => vi.clearAllMocks());\n\n  it('should scrape through proxy and return HTML', async () => {\n    mockedAxios.get.mockResolvedValueOnce({\n      status: 200,\n      data: '<html><head><title>Test</title></head></html>',\n    });\n\n    const { scrape } = await import('../src/brightdata/scraper');\n    const html = await scrape('https://example.com');\n    expect(html).toContain('<title>Test</title>');\n\n    // Verify proxy was configured\n    expect(mockedAxios.get).toHaveBeenCalledWith(\n      'https://example.com',\n      expect.objectContaining({\n        proxy: expect.objectContaining({ host: 'brd.superproxy.io' }),\n      }),\n    );\n  });\n\n  it('should retry on 502 proxy errors', async () => {\n    mockedAxios.get\n      .mockRejectedValueOnce({ response: { status: 502 } })\n      .mockResolvedValueOnce({ status: 200, data: '<html>OK</html>' });\n\n    const { scrapeWithRetry } = await import('../src/brightdata/scraper');\n    const html = await scrapeWithRetry('https://example.com');\n    expect(html).toContain('OK');\n    expect(mockedAxios.get).toHaveBeenCalledTimes(2);\n  });\n});\n```\n\n### Step 5: Package Scripts\n\n```json\n{\n  \"scripts\": {\n    \"dev\": \"tsx watch src/index.ts\",\n    \"scrape\": \"tsx src/index.ts\",\n    \"test\": \"vitest\",\n    \"test:watch\": \"vitest --watch\",\n    \"test:live\": \"BRIGHTDATA_LIVE=1 vitest --testPathPattern=integration\"\n  }\n}\n```\n\n## Output\n\n- Proxy config module with geo-targeting support\n- Response cache to avoid burning credits during development\n- Mocked test suite that doesn't require live proxy access\n- Live integration test flag (`BRIGHTDATA_LIVE=1`)\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `Missing BRIGHTDATA_* vars` | No `.env.local` | Copy from `.env.example` |\n| Cache stale | Old cached HTML | Delete `.scrape-cache/` directory |\n| Mock not working | Import order | Use `vi.mock()` before dynamic imports |\n| SSL errors in tests | CA cert path | Tests use mocks, not live proxy |\n\n## Resources\n\n- [Bright Data Proxy Docs](https://docs.brightdata.com/general/account/proxy-infrastructure)\n- [Vitest Documentation](https://vitest.dev/)\n- [tsx Documentation](https://github.com/esbuild-kit/tsx)\n\n## Next Steps\n\nSee `brightdata-sdk-patterns` for production-ready code patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "brightdata-local-dev-loop",
-    "description": "Configure Bright Data local development with hot reload and testing.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(pnpm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

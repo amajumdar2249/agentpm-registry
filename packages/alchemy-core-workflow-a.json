@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031171",
   "name": "alchemy-core-workflow-a",
   "slug": "alchemy-core-workflow-a",
   "description": "Build a complete wallet portfolio tracker using Alchemy Enhanced APIs.",
   "content": "# Alchemy Core Workflow A \u2014 Wallet Portfolio Tracker\n\n## Overview\n\nPrimary workflow: build a wallet portfolio tracker using Alchemy's Enhanced APIs. Combines `getTokenBalances`, `getNftsForOwner`, `getAssetTransfers`, and token metadata to create a complete wallet view across ERC-20, ERC-721, and ERC-1155 assets.\n\n## Prerequisites\n\n- Completed `alchemy-install-auth` setup\n- `alchemy-sdk` installed\n- Understanding of Ethereum address format and token standards\n\n## Instructions\n\n### Step 1: Portfolio Data Fetcher\n\n```typescript\n// src/portfolio/fetcher.ts\nimport { Alchemy, Network, AssetTransfersCategory } from 'alchemy-sdk';\n\nconst alchemy = new Alchemy({\n  apiKey: process.env.ALCHEMY_API_KEY,\n  network: Network.ETH_MAINNET,\n});\n\ninterface TokenHolding {\n  contractAddress: string;\n  symbol: string;\n  name: string;\n  balance: number;\n  decimals: number;\n}\n\ninterface NftHolding {\n  contractAddress: string;\n  collectionName: string;\n  tokenId: string;\n  name: string;\n  imageUrl: string | null;\n}\n\ninterface WalletPortfolio {\n  address: string;\n  ethBalance: string;\n  tokens: TokenHolding[];\n  nfts: NftHolding[];\n  recentTransactions: any[];\n  fetchedAt: string;\n}\n\nasync function fetchPortfolio(address: string): Promise<WalletPortfolio> {\n  // Parallel fetch all portfolio data\n  const [ethBalance, tokenBalances, nftResponse, transfers] = await Promise.all([\n    alchemy.core.getBalance(address),\n    alchemy.core.getTokenBalances(address),\n    alchemy.nft.getNftsForOwner(address, { pageSize: 100 }),\n    alchemy.core.getAssetTransfers({\n      fromAddress: address,\n      category: [\n        AssetTransfersCategory.EXTERNAL,\n        AssetTransfersCategory.ERC20,\n        AssetTransfersCategory.ERC721,\n      ],\n      maxCount: 25,\n      order: 'desc',\n    }),\n  ]);\n\n  // Resolve token metadata\n  const tokens: TokenHolding[] = [];\n  for (const tb of tokenBalances.tokenBalances) {\n    if (tb.tokenBalance && tb.tokenBalance !== '0x0') {\n      const metadata = await alchemy.core.getTokenMetadata(tb.contractAddress);\n      const balance = parseInt(tb.tokenBalance, 16) / Math.pow(10, metadata.decimals || 18);\n      if (balance > 0.001) {  // Filter dust\n        tokens.push({\n          contractAddress: tb.contractAddress,\n          symbol: metadata.symbol || 'UNKNOWN',\n          name: metadata.name || 'Unknown Token',\n          balance,\n          decimals: metadata.decimals || 18,\n        });\n      }\n    }\n  }\n\n  // Map NFTs\n  const nfts: NftHolding[] = nftResponse.ownedNfts.map(nft => ({\n    contractAddress: nft.contract.address,\n    collectionName: nft.contract.name || 'Unknown Collection',\n    tokenId: nft.tokenId,\n    name: nft.name || `#${nft.tokenId}`,\n    imageUrl: nft.image?.cachedUrl || null,\n  }));\n\n  return {\n    address,\n    ethBalance: (parseInt(ethBalance.toString()) / 1e18).toFixed(6),\n    tokens: tokens.sort((a, b) => b.balance - a.balance),\n    nfts,\n    recentTransactions: transfers.transfers,\n    fetchedAt: new Date().toISOString(),\n  };\n}\n\nexport { fetchPortfolio, WalletPortfolio };\n```\n\n### Step 2: Transaction History Analyzer\n\n```typescript\n// src/portfolio/transactions.ts\nimport { Alchemy, Network, AssetTransfersCategory, SortingOrder } from 'alchemy-sdk';\n\nconst alchemy = new Alchemy({\n  apiKey: process.env.ALCHEMY_API_KEY,\n  network: Network.ETH_MAINNET,\n});\n\nasync function getTransactionHistory(address: string, maxCount: number = 50) {\n  // Get both sent and received transactions\n  const [sent, received] = await Promise.all([\n    alchemy.core.getAssetTransfers({\n      fromAddress: address,\n      category: [AssetTransfersCategory.EXTERNAL, AssetTransfersCategory.ERC20],\n      maxCount,\n      order: 'desc',\n    }),\n    alchemy.core.getAssetTransfers({\n      toAddress: address,\n      category: [AssetTransfersCategory.EXTERNAL, AssetTransfersCategory.ERC20],\n      maxCount,\n      order: 'desc',\n    }),\n  ]);\n\n  // Merge and sort by block number\n  const allTransfers = [\n    ...sent.transfers.map(t => ({ ...t, direction: 'sent' as const })),\n    ...received.transfers.map(t => ({ ...t, direction: 'received' as const })),\n  ].sort((a, b) => parseInt(b.blockNum) - parseInt(a.blockNum));\n\n  return allTransfers;\n}\n\nexport { getTransactionHistory };\n```\n\n### Step 3: Multi-Chain Portfolio Aggregator\n\n```typescript\n// src/portfolio/multi-chain.ts\nimport { Alchemy, Network } from 'alchemy-sdk';\n\nconst CHAINS = [\n  { name: 'Ethereum', network: Network.ETH_MAINNET },\n  { name: 'Polygon', network: Network.MATIC_MAINNET },\n  { name: 'Arbitrum', network: Network.ARB_MAINNET },\n  { name: 'Optimism', network: Network.OPT_MAINNET },\n  { name: 'Base', network: Network.BASE_MAINNET },\n];\n\nasync function getMultiChainBalances(address: string) {\n  const results = await Promise.allSettled(\n    CHAINS.map(async (chain) => {\n      const client = new Alchemy({\n        apiKey: process.env.ALCHEMY_API_KEY,\n        network: chain.network,\n      });\n      const balance = await client.core.getBalance(address);\n      const tokens = await client.core.getTokenBalances(address);\n      const nonZeroTokens = tokens.tokenBalances.filter(\n        t => t.tokenBalance && t.tokenBalance !== '0x0'\n      );\n      return {\n        chain: chain.name,\n        nativeBalance: (parseInt(balance.toString()) / 1e18).toFixed(6),\n        tokenCount: nonZeroTokens.length,\n      };\n    })\n  );\n\n  return results\n    .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled')\n    .map(r => r.value);\n}\n\nexport { getMultiChainBalances };\n```\n\n## Output\n\n- Complete wallet portfolio: ETH + ERC-20 tokens + NFTs\n- Transaction history with sent/received classification\n- Multi-chain balance aggregation across 5 networks\n- Sorted holdings with dust filtering\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `429 Rate Limit` | Too many metadata calls | Batch with delays or cache metadata |\n| Empty token list | Address has no tokens | Verify address is correct |\n| Missing NFT images | IPFS gateway timeout | Use Alchemy's cached URL fallback |\n| `getAssetTransfers` empty | Wrong category filter | Include all relevant categories |\n\n## Resources\n\n- [Alchemy Enhanced APIs](https://www.alchemy.com/docs)\n- [Alchemy NFT API](https://www.alchemy.com/docs/reference/nft-api-quickstart)\n- [Alchemy Asset Transfers](https://www.alchemy.com/docs/reference/sdk-getassettransfers)\n\n## Next Steps\n\nFor NFT minting and smart contract interaction, see `alchemy-core-workflow-b`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "alchemy-core-workflow-a",
-    "description": "Build a complete wallet portfolio tracker using Alchemy Enhanced APIs.",
-    "Trigger": "alchemy wallet tracker\", \"alchemy portfolio\", \"alchemy token dashboard\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

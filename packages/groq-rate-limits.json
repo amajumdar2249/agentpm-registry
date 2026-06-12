@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032202",
   "name": "groq-rate-limits",
   "slug": "groq-rate-limits",
   "description": "Implement Groq rate limit handling with backoff, queuing, and header",
   "content": "# Groq Rate Limits\n\n## Overview\n\nHandle Groq rate limits using the `retry-after` header, exponential backoff, and request queuing. Groq enforces limits at the organization level with both RPM (requests/minute) and TPM (tokens/minute) constraints -- hitting either one triggers a `429`.\n\n## Rate Limit Structure\n\nGroq rate limits vary by plan and model. Limits are applied simultaneously -- you must stay under both RPM and TPM.\n\n| Constraint | Description |\n|-----------|-------------|\n| RPM | Requests per minute |\n| RPD | Requests per day |\n| TPM | Tokens per minute |\n| TPD | Tokens per day |\n\nFree tier limits are significantly lower than paid tier. Check your current limits at [console.groq.com/settings/limits](https://console.groq.com/settings/limits).\n\n## Rate Limit Response Headers\n\nWhen Groq responds (even on success), it includes these headers:\n\n| Header | Description |\n|--------|-------------|\n| `x-ratelimit-limit-requests` | Max requests in current window |\n| `x-ratelimit-limit-tokens` | Max tokens in current window |\n| `x-ratelimit-remaining-requests` | Requests remaining before limit |\n| `x-ratelimit-remaining-tokens` | Tokens remaining before limit |\n| `x-ratelimit-reset-requests` | Time until request limit resets |\n| `x-ratelimit-reset-tokens` | Time until token limit resets |\n| `retry-after` | Seconds to wait (only on 429 responses) |\n\n## Instructions\n\n### Step 1: Parse Rate Limit Headers\n\n```typescript\nimport Groq from \"groq-sdk\";\n\ninterface RateLimitInfo {\n  limitRequests: number;\n  limitTokens: number;\n  remainingRequests: number;\n  remainingTokens: number;\n  resetRequestsMs: number;\n  resetTokensMs: number;\n}\n\nfunction parseRateLimitHeaders(headers: Record<string, string>): RateLimitInfo {\n  return {\n    limitRequests: parseInt(headers[\"x-ratelimit-limit-requests\"] || \"0\"),\n    limitTokens: parseInt(headers[\"x-ratelimit-limit-tokens\"] || \"0\"),\n    remainingRequests: parseInt(headers[\"x-ratelimit-remaining-requests\"] || \"0\"),\n    remainingTokens: parseInt(headers[\"x-ratelimit-remaining-tokens\"] || \"0\"),\n    resetRequestsMs: parseResetTime(headers[\"x-ratelimit-reset-requests\"]),\n    resetTokensMs: parseResetTime(headers[\"x-ratelimit-reset-tokens\"]),\n  };\n}\n\nfunction parseResetTime(value?: string): number {\n  if (!value) return 0;\n  // Groq returns reset times like \"1.2s\" or \"120ms\"\n  if (value.endsWith(\"ms\")) return parseFloat(value);\n  if (value.endsWith(\"s\")) return parseFloat(value) * 1000;\n  return parseFloat(value) * 1000;\n}\n```\n\n### Step 2: Exponential Backoff with Retry-After\n\n```typescript\nasync function withRateLimitRetry<T>(\n  operation: () => Promise<T>,\n  options = { maxRetries: 5, baseDelayMs: 1000, maxDelayMs: 60_000 }\n): Promise<T> {\n  for (let attempt = 0; attempt <= options.maxRetries; attempt++) {\n    try {\n      return await operation();\n    } catch (err) {\n      if (attempt === options.maxRetries) throw err;\n\n      if (err instanceof Groq.APIError && err.status === 429) {\n        // Prefer retry-after header from Groq\n        const retryAfterSec = parseInt(err.headers?.[\"retry-after\"] || \"0\");\n        let delayMs: number;\n\n        if (retryAfterSec > 0) {\n          delayMs = retryAfterSec * 1000;\n        } else {\n          // Exponential backoff with jitter\n          const exponential = options.baseDelayMs * Math.pow(2, attempt);\n          const jitter = Math.random() * 500;\n          delayMs = Math.min(exponential + jitter, options.maxDelayMs);\n        }\n\n        console.warn(`Rate limited (attempt ${attempt + 1}/${options.maxRetries}). Waiting ${(delayMs / 1000).toFixed(1)}s...`);\n        await new Promise((r) => setTimeout(r, delayMs));\n        continue;\n      }\n\n      // Non-rate-limit errors: only retry 5xx\n      if (err instanceof Groq.APIError && err.status >= 500) {\n        const delayMs = options.baseDelayMs * Math.pow(2, attempt);\n        await new Promise((r) => setTimeout(r, delayMs));\n        continue;\n      }\n\n      throw err; // 4xx (except 429) are not retryable\n    }\n  }\n  throw new Error(\"Unreachable\");\n}\n```\n\n### Step 3: Request Queue with Concurrency Control\n\n```typescript\nimport PQueue from \"p-queue\";\n\n// Queue that respects Groq RPM limits\nfunction createGroqQueue(requestsPerMinute: number) {\n  return new PQueue({\n    intervalCap: requestsPerMinute,\n    interval: 60_000,  // 1 minute window\n    concurrency: 5,    // Max parallel requests\n  });\n}\n\nconst queue = createGroqQueue(30); // Free tier: 30 RPM\n\nasync function queuedCompletion(messages: any[], model: string) {\n  return queue.add(() =>\n    withRateLimitRetry(() =>\n      groq.chat.completions.create({ model, messages })\n    )\n  );\n}\n```\n\n### Step 4: Proactive Rate Limit Monitor\n\n```typescript\nclass RateLimitMonitor {\n  private remaining = { requests: Infinity, tokens: Infinity };\n  private resets = { requests: 0, tokens: 0 };\n\n  update(headers: Record<string, string>): void {\n    const info = parseRateLimitHeaders(headers);\n    this.remaining.requests = info.remainingRequests;\n    this.remaining.tokens = info.remainingTokens;\n    this.resets.requests = Date.now() + info.resetRequestsMs;\n    this.resets.tokens = Date.now() + info.resetTokensMs;\n  }\n\n  shouldThrottle(): boolean {\n    return this.remaining.requests < 3 || this.remaining.tokens < 500;\n  }\n\n  async waitIfNeeded(): Promise<void> {\n    if (!this.shouldThrottle()) return;\n\n    const waitMs = Math.max(\n      this.resets.requests - Date.now(),\n      this.resets.tokens - Date.now(),\n      0\n    );\n\n    if (waitMs > 0) {\n      console.log(`Throttling: waiting ${(waitMs / 1000).toFixed(1)}s for rate limit reset`);\n      await new Promise((r) => setTimeout(r, waitMs));\n    }\n  }\n\n  getStatus(): string {\n    return `Requests: ${this.remaining.requests} remaining | Tokens: ${this.remaining.tokens} remaining`;\n  }\n}\n```\n\n### Step 5: Model-Aware Rate Limit Strategy\n\n```typescript\n// Different models have different limits -- route accordingly\nasync function smartModelSelect(\n  messages: any[],\n  preferredModel: string,\n  monitor: RateLimitMonitor\n): Promise<string> {\n  // If rate limited on preferred model, try a different one\n  if (monitor.shouldThrottle()) {\n    const fallbacks: Record<string, string> = {\n      \"llama-3.3-70b-versatile\": \"llama-3.1-8b-instant\",\n      \"llama-3.1-8b-instant\": \"llama-3.3-70b-versatile\", // Different limit pool\n    };\n    const fallback = fallbacks[preferredModel];\n    if (fallback) {\n      console.log(`Switching from ${preferredModel} to ${fallback} (rate limit)`);\n      return fallback;\n    }\n  }\n  return preferredModel;\n}\n```\n\n## Error Handling\n\n| Scenario | Symptom | Solution |\n|----------|---------|----------|\n| Burst of requests | Many 429s in quick succession | Use queue with `p-queue` interval limiting |\n| Large prompts burn TPM | 429 on tokens, not requests | Reduce `max_tokens`, compress prompts |\n| Free tier too restrictive | Constant 429s | Upgrade to Developer plan at console.groq.com |\n| Multiple services sharing key | Cascading 429s | Use separate API keys per service |\n\n## Resources\n\n- [Groq Rate Limits Documentation](https://console.groq.com/docs/rate-limits)\n- [Groq Pricing / Plans](https://groq.com/pricing)\n- [p-queue on npm](https://www.npmjs.com/package/p-queue)\n\n## Next Steps\n\nFor security configuration, see `groq-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "groq-rate-limits",
-    "description": "Implement Groq rate limit handling with backoff, queuing, and header",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

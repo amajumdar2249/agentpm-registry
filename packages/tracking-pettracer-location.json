@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000019131",
   "name": "tracking-pettracer-location",
   "slug": "tracking-pettracer-location",
   "description": ">-",
   "content": "\n# Tracking PetTracer pet location\n\n## Why this exists\n\nPetTracer exposes an (unofficial) web portal API used by their apps/website. This skill gives a reliable, low-drama workflow for:\n- **Current location** (latest known point)\n- **Recent route/history** (time-windowed points)\n- **Near-real-time updates** (WebSocket push, optional)\n\nIt is designed to minimise API load (be respectful) and to produce **consistent, copy/paste-friendly outputs**.\n\n## Quick start\n\n### Snapshot location (recommended default)\n1. Set credentials (prefer env vars, not CLI args):\n\n```bash\nexport PETTRACER_USERNAME=\"you@example.com\"\nexport PETTRACER_PASSWORD=\"\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022\"\n```\n\n2. List devices:\n\n```bash\npython scripts/pettracer_cli.py list --format json --pretty\n```\n\n3. Locate a pet:\n\n- By name:\n```bash\npython scripts/pettracer_cli.py locate --pet \"Fluffy\" --format json --pretty\n```\n\n- By id:\n```bash\npython scripts/pettracer_cli.py locate --device-id 12345 --format json --pretty\n```\n\n- If the account has **exactly one collar**, you can omit `--pet/--device-id`:\n```bash\npython scripts/pettracer_cli.py locate --format json --pretty\n```\n\n### Get location history (last 6 hours)\n```bash\npython scripts/pettracer_cli.py history --pet \"Fluffy\" --hours 6 --format json --pretty\n```\n\n## Core workflow the agent should follow\n\n### 1) Decide: snapshot vs history vs live updates\n- **Snapshot**: user asks \u201cwhere is X right now?\u201d \u2192 use `locate`.\n- **History**: user asks \u201cwhere has X been today/last hour?\u201d \u2192 use `history`.\n- **Live**: user wants continuous updates \u2192 use WebSocket (see [references/websocket.md](references/websocket.md)).\n\nDefault to **snapshot** unless the user explicitly wants a route or live tracking.\n\n### 2) Authenticate safely\nPreferred order:\n1. Use `PETTRACER_TOKEN` if already available.\n2. Else login with `PETTRACER_USERNAME` + `PETTRACER_PASSWORD` (or `PETTRACER_EMAIL`).\n\n**Never** ask the user to paste tokens into chat. Ask them to set env vars or store secrets in their vault.\n\nOptional overrides (useful for debugging / future-proofing):\n- `PETTRACER_API_BASE` (REST base; default `https://portal.pettracer.com/api`)\n- `PETTRACER_WS_BASE` (WebSocket base; default `wss://pt.pettracer.com/sc`)\n\n### 3) Identify the right device\n- Fetch devices via `GET /api/map/getccs` (wrapped by `pettracer_cli.py list`).\n- Match by `details.name` case-insensitively.\n- If multiple matches: show a disambiguation list (id + name) and ask the user which one.\n- If no match: show available device names.\n- If the account has exactly one collar, you can default to it.\n\n### 4) Fetch location data\n- **Current location** comes from `device.lastPos` (collars) or top-level `posLat/posLong` (HomeStations):\n  - `posLat`, `posLong`\n  - `timeMeasure` (timestamp)\n  - `acc` (accuracy, metres) or `horiPrec` (fallback)\n- **History** uses `POST /api/map/getccpositions` with:\n  - `devId`, `filterTime` (ms), `toTime` (ms)\n\nSee [references/endpoints.md](references/endpoints.md) and [references/data-model.md](references/data-model.md).\n\n### 5) Present results consistently\nWhen reporting location, include:\n- Pet name + device id\n- Coordinates (lat, lon)\n- Last update time\n- Accuracy (if present)\n- How old the fix is (seconds/minutes since last fix), if possible\n- Optional: a map link (Google Maps + OpenStreetMap)\n\n**Preferred JSON shape (for tool-to-tool handoff):**\n```json\n{\n  \"pet\": { \"id\": 12345, \"name\": \"Fluffy\" },\n  \"last_fix\": {\n    \"lat\": 48.137154,\n    \"lon\": 11.576124,\n    \"time\": \"2026-02-25T12:34:56+00:00\",\n    \"accuracy_m\": 12\n  },\n  \"last_fix_age_s\": 90,\n  \"battery_mv\": 4012,\n  \"battery_percent_est\": 78,\n  \"home\": false,\n  \"links\": {\n    \"google_maps\": \"https://www.google.com/maps?q=48.137154,11.576124\",\n    \"openstreetmap\": \"https://www.openstreetmap.org/?mlat=48.137154&mlon=11.576124#map=18/48.137154/11.576124\"\n  }\n}\n```\n\nNotes:\n- `battery_percent_est` is an **estimate** derived from voltage (PetTracer reports millivolts, not %).\n- If there\u2019s no GPS fix, report `error=no_recent_fix` and include `last_contact`.\n\n## Live tracking (optional, avoid aggressive polling)\n\nIf you need frequent updates:\n- Prefer WebSocket push (avoid aggressive polling).\n- Only fall back to polling if WebSocket is not possible; keep polling \u2265 60s by default.\n\nInstall dependency:\n```bash\npip install aiohttp\n```\n\nThen run:\n```bash\npython scripts/pettracer_watch.py --pet \"Fluffy\"\n```\n\nSee:\n- [references/websocket.md](references/websocket.md)\n- `scripts/pettracer_watch.py` for a working SockJS/STOMP implementation.\n\n## Troubleshooting playbook\n\n### No location / `lastPos` is missing\nCommon reasons:\n- Collar hasn\u2019t reported a GPS fix recently (indoors, low signal).\n- Battery low / collar off.\n- Subscription expired.\n\nAction:\n- Report \u201cno recent fix\u201d and show `lastContact` if available.\n- Suggest switching to a higher-frequency mode (Fast/Live) in the PetTracer app/portal **only if the user asks** (see [references/modes.md](references/modes.md)).\n\n### Auth failures (401 / invalid_auth)\n- Re-login to obtain a fresh `access_token`.\n- Confirm the login payload uses keys `login` + `password` (not `username`).\n\n### Rate limiting / service respect\n- Avoid tight loops against `/map/getccs`.\n- Prefer WebSocket for near-real-time tracking.\n\n## THE EXACT PROMPT \u2014 Location response format\n\nUse this when the user wants a human-readable answer:\n\n```\nGive the pet\u2019s latest known PetTracer location.\n\nInclude:\n- Pet name + device id\n- Time of last fix (and last contact if different)\n- Coordinates + map link(s)\n- Accuracy (metres) if present\n- One-line assessment: \u201crecent fix\u201d vs \u201cstale fix\u201d (use last_fix_age_s if available; interpret in the context of the current tracking mode)\n```\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "tracking-pettracer-location",
-    "description": ">-",
-    "Tracks PetTracer (pettracer.com) GPS collars via the PetTracer portal API": "fetches a pet\u2019s latest location,"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

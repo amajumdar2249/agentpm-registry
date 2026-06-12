@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031199",
   "name": "algolia-local-dev-loop",
   "slug": "algolia-local-dev-loop",
   "description": "Configure Algolia local development with separate dev index, mocking,",
   "content": "# Algolia Local Dev Loop\n\n## Overview\n\nSet up a fast, reproducible local development workflow for Algolia. Use separate dev indices, mock the client in tests, and iterate without touching production data.\n\n## Prerequisites\n\n- Completed `algolia-install-auth` setup\n- Node.js 18+ with npm/pnpm\n- Vitest or Jest for testing\n\n## Instructions\n\n### Step 1: Environment-Based Index Names\n\n```typescript\n// src/algolia/config.ts\nimport { algoliasearch } from 'algoliasearch';\n\nconst ENV = process.env.NODE_ENV || 'development';\n\n// Each environment gets its own index prefix\nexport function indexName(base: string): string {\n  if (ENV === 'production') return base;\n  return `${ENV}_${base}`; // e.g., \"development_products\"\n}\n\nexport const client = algoliasearch(\n  process.env.ALGOLIA_APP_ID!,\n  process.env.ALGOLIA_ADMIN_KEY!\n);\n```\n\n### Step 2: Seed Script for Dev Data\n\n```typescript\n// scripts/seed-algolia.ts\nimport { client, indexName } from '../src/algolia/config';\n\nconst SEED_DATA = [\n  { objectID: 'prod-1', name: 'Widget A', category: 'tools', price: 29.99 },\n  { objectID: 'prod-2', name: 'Widget B', category: 'tools', price: 49.99 },\n  { objectID: 'prod-3', name: 'Gadget C', category: 'electronics', price: 199.99 },\n];\n\nasync function seed() {\n  const idx = indexName('products');\n\n  // replaceAllObjects atomically swaps index content\n  const { taskID } = await client.replaceAllObjects({\n    indexName: idx,\n    objects: SEED_DATA,\n  });\n  await client.waitForTask({ indexName: idx, taskID });\n\n  // Configure settings for the dev index\n  await client.setSettings({\n    indexName: idx,\n    indexSettings: {\n      searchableAttributes: ['name', 'category'],\n      attributesForFaceting: ['category', 'filterOnly(price)'],\n      customRanking: ['asc(price)'],\n    },\n  });\n\n  console.log(`Seeded ${SEED_DATA.length} records into ${idx}`);\n}\n\nseed().catch(console.error);\n```\n\n```json\n{\n  \"scripts\": {\n    \"seed:algolia\": \"npx tsx scripts/seed-algolia.ts\",\n    \"dev\": \"tsx watch src/index.ts\",\n    \"test\": \"vitest\",\n    \"test:watch\": \"vitest --watch\"\n  }\n}\n```\n\n### Step 3: Mock Algolia in Unit Tests\n\n```typescript\n// tests/algolia.test.ts\nimport { describe, it, expect, vi, beforeEach } from 'vitest';\n\n// Mock the entire algoliasearch module\nvi.mock('algoliasearch', () => ({\n  algoliasearch: vi.fn(() => ({\n    searchSingleIndex: vi.fn().mockResolvedValue({\n      hits: [\n        { objectID: '1', name: 'Widget A', _highlightResult: {} },\n      ],\n      nbHits: 1,\n      page: 0,\n      nbPages: 1,\n    }),\n    saveObjects: vi.fn().mockResolvedValue({ taskID: 123 }),\n    waitForTask: vi.fn().mockResolvedValue({}),\n  })),\n}));\n\nimport { algoliasearch } from 'algoliasearch';\n\ndescribe('Product Search', () => {\n  const client = algoliasearch('test-app-id', 'test-api-key');\n\n  it('returns matching products', async () => {\n    const { hits } = await client.searchSingleIndex({\n      indexName: 'development_products',\n      searchParams: { query: 'widget' },\n    });\n    expect(hits).toHaveLength(1);\n    expect(hits[0].name).toBe('Widget A');\n  });\n});\n```\n\n### Step 4: Integration Test with Real API\n\n```typescript\n// tests/integration/algolia.integration.test.ts\nimport { describe, it, expect } from 'vitest';\nimport { algoliasearch } from 'algoliasearch';\n\ndescribe.skipIf(!process.env.ALGOLIA_APP_ID)('Algolia Integration', () => {\n  const client = algoliasearch(\n    process.env.ALGOLIA_APP_ID!,\n    process.env.ALGOLIA_ADMIN_KEY!\n  );\n  const testIndex = `test_${Date.now()}_products`;\n\n  it('indexes and searches records', async () => {\n    // Index\n    const { taskID } = await client.saveObjects({\n      indexName: testIndex,\n      objects: [{ objectID: '1', name: 'Test Product' }],\n    });\n    await client.waitForTask({ indexName: testIndex, taskID });\n\n    // Search\n    const { hits } = await client.searchSingleIndex({\n      indexName: testIndex,\n      searchParams: { query: 'test' },\n    });\n    expect(hits.length).toBeGreaterThan(0);\n\n    // Cleanup\n    await client.deleteIndex({ indexName: testIndex });\n  });\n});\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `Index does not exist` | Dev index not seeded | Run `npm run seed:algolia` |\n| Test pollution | Shared index between tests | Use unique timestamped index names |\n| Stale search results | Indexing not waited | Always `await client.waitForTask()` after writes |\n| Mock not applied | Wrong import order | Ensure `vi.mock()` is before imports |\n\n## Examples\n\n### Clean Dev Index on Start\n\n```typescript\n// scripts/reset-dev-algolia.ts\nimport { client, indexName } from '../src/algolia/config';\n\nasync function reset() {\n  const idx = indexName('products');\n  try {\n    await client.deleteIndex({ indexName: idx });\n    console.log(`Deleted ${idx}`);\n  } catch (e) {\n    // Index may not exist yet \u2014 that's fine\n  }\n}\n\nreset().catch(console.error);\n```\n\n## Resources\n\n- [Algolia JavaScript v5 Client](https://www.algolia.com/doc/libraries/javascript/v5/methods/search/)\n- [Vitest Documentation](https://vitest.dev/)\n- [tsx (TypeScript execute)](https://github.com/privatenumber/tsx)\n\n## Next Steps\n\nSee `algolia-sdk-patterns` for production-ready code patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "algolia-local-dev-loop",
-    "description": "Configure Algolia local development with separate dev index, mocking,",
-    "Trigger": "algolia dev setup\", \"algolia local development\", \"algolia dev environment\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(pnpm:*), Bash(npx:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009322",
   "name": "bio-methylation-dmr-detection",
   "slug": "bio-methylation-dmr-detection",
   "description": "Differentially methylated region (DMR) detection using methylKit tiles, bsseq BSmooth, and DMRcate. Use when identifying contiguous genomic regions with methylation differences between experimental conditions or cell types.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: GenomicRanges 1.54+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- R: `packageVersion('<pkg>')` then `?function_name` to verify parameters\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# DMR Detection\n\n**\"Find differentially methylated regions\"** \u2192 Identify contiguous genomic regions with statistically significant methylation differences between conditions using tiling, smoothing, or kernel-based approaches.\n- R: `methylKit::tileMethylCounts()` + `calculateDiffMeth()`, `bsseq::BSmooth()`, `DMRcate::dmrcate()`\n\n## methylKit Tile-Based DMRs\n\n```r\nlibrary(methylKit)\n\n# Read and process data\nmeth_obj <- methRead(location = file_list, sample.id = sample_ids, treatment = treatment,\n                      assembly = 'hg38', pipeline = 'bismarkCoverage')\nmeth_filt <- filterByCoverage(meth_obj, lo.count = 10, hi.perc = 99.9)\n\n# Create tiles (windows)\ntiles <- tileMethylCounts(meth_filt, win.size = 1000, step.size = 1000, cov.bases = 3)\n\ntiles_united <- unite(tiles, destrand = TRUE)\n\n# Differential methylation on tiles\ndiff_tiles <- calculateDiffMeth(tiles_united, overdispersion = 'MN', mc.cores = 4)\n\n# Get significant DMRs\ndmrs <- getMethylDiff(diff_tiles, difference = 25, qvalue = 0.01)\ndmrs_hyper <- getMethylDiff(diff_tiles, difference = 25, qvalue = 0.01, type = 'hyper')\ndmrs_hypo <- getMethylDiff(diff_tiles, difference = 25, qvalue = 0.01, type = 'hypo')\n```\n\n## bsseq BSmooth DMRs\n\n```r\nlibrary(bsseq)\n\n# Read Bismark cytosine reports\nbs <- read.bismark(files = c('sample1.CpG_report.txt.gz', 'sample2.CpG_report.txt.gz'),\n                    sampleNames = c('ctrl', 'treat'),\n                    rmZeroCov = TRUE,\n                    strandCollapse = TRUE)\n\n# Smooth methylation data\nbs_smooth <- BSmooth(bs, mc.cores = 4, verbose = TRUE)\n\n# Filter by coverage\nbs_cov <- getCoverage(bs_smooth)\nkeep <- which(rowSums(bs_cov >= 2) == ncol(bs_cov))\nbs_filt <- bs_smooth[keep, ]\n\n# Find DMRs with BSmooth\ndmrs_bsseq <- dmrFinder(bs_filt, cutoff = c(-0.1, 0.1), stat = 'tstat.corrected')\n```\n\n## DMRcate Method\n\n```r\nlibrary(DMRcate)\nlibrary(minfi)\n\n# From methylation matrix (beta values)\n# Rows = CpGs, columns = samples\ndesign <- model.matrix(~ treatment)\n\n# Run DMRcate\nmyannotation <- cpg.annotate('array', meth_matrix, what = 'Beta', arraytype = 'EPIC',\n                               design = design, coef = 2)\n\ndmr_results <- dmrcate(myannotation, lambda = 1000, C = 2)\ndmr_ranges <- extractRanges(dmr_results)\n```\n\n## Annotate DMRs with Genes\n\n**Goal:** Map differentially methylated regions to overlapping genes, promoters, and CpG islands for biological interpretation.\n\n**Approach:** Build a genome annotation set with annotatr, convert DMRs to GRanges, and intersect with genomic features to classify each DMR by functional context.\n\n```r\nlibrary(annotatr)\n\n# Build annotations\nannots <- build_annotations(genome = 'hg38', annotations = c(\n    'hg38_basicgenes',\n    'hg38_genes_promoters',\n    'hg38_cpg_islands'\n))\n\n# Convert DMRs to GRanges\ndmr_gr <- as(dmrs, 'GRanges')\n\n# Annotate\ndmr_annotated <- annotate_regions(regions = dmr_gr, annotations = annots, ignore.strand = TRUE)\ndmr_df <- data.frame(dmr_annotated)\n```\n\n## Annotate with genomation\n\n```r\nlibrary(genomation)\n\n# Read gene annotations\ngene_obj <- readTranscriptFeatures('genes.bed12')\n\n# Annotate DMRs\ndmr_gr <- as(dmrs, 'GRanges')\nannot_result <- annotateWithGeneParts(dmr_gr, gene_obj)\n\n# Get promoter/exon/intron breakdown\ngetTargetAnnotationStats(annot_result, percentage = TRUE, precedence = TRUE)\n```\n\n## Visualize DMR\n\n```r\nlibrary(Gviz)\n\n# Create track for a DMR\nchr <- 'chr1'\nstart <- 1000000\nend <- 1010000\n\n# Methylation data track\nmeth_track <- DataTrack(\n    range = bs_smooth,\n    genome = 'hg38',\n    name = 'Methylation',\n    type = 'smooth'\n)\n\n# Gene annotation track\ngene_track <- GeneRegionTrack(TxDb.Hsapiens.UCSC.hg38.knownGene, genome = 'hg38', name = 'Genes')\n\n# Plot\nplotTracks(list(meth_track, gene_track), from = start, to = end, chromosome = chr)\n```\n\n## Merge Adjacent DMRs\n\n```r\nlibrary(GenomicRanges)\n\ndmr_gr <- as(dmrs, 'GRanges')\n\n# Merge DMRs within 500bp\ndmr_merged <- reduce(dmr_gr, min.gapwidth = 500)\n```\n\n## Export DMRs\n\n```r\n# To BED\nlibrary(rtracklayer)\nexport(dmr_gr, 'dmrs.bed', format = 'BED')\n\n# To CSV\ndmr_df <- getData(dmrs)\nwrite.csv(dmr_df, 'dmrs.csv', row.names = FALSE)\n\n# To GFF\nexport(dmr_gr, 'dmrs.gff3', format = 'GFF3')\n```\n\n## DMR Comparison Across Methods\n\n| Method | Package | Approach | Best For |\n|--------|---------|----------|----------|\n| Tiles | methylKit | Fixed windows | Quick analysis |\n| BSmooth | bsseq | Smoothing | WGBS data |\n| DMRcate | DMRcate | Kernel smoothing | Array data |\n| DSS | DSS | Bayesian | Complex designs |\n\n## Key Parameters\n\n### methylKit tileMethylCounts\n\n| Parameter | Default | Description |\n|-----------|---------|-------------|\n| win.size | 1000 | Window size (bp) |\n| step.size | 1000 | Step size (bp) |\n| cov.bases | 0 | Min CpGs per tile |\n\n### bsseq dmrFinder\n\n| Parameter | Description |\n|-----------|-------------|\n| cutoff | Methylation difference threshold |\n| stat | Statistic to use |\n| maxGap | Max gap between CpGs |\n\n## Related Skills\n\n- methylkit-analysis - Single CpG analysis\n- differential-cpg-testing - Per-CpG testing before region-level analysis\n- methylation-calling - Generate input files\n- pathway-analysis/go-enrichment - Functional annotation of DMR genes\n- differential-expression/deseq2-basics - Compare with expression changes\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-methylation-dmr-detection",
-    "description": "Differentially methylated region (DMR) detection using methylKit tiles, bsseq BSmooth, and DMRcate. Use when identifying contiguous genomic regions with methylation differences between experimental conditions or cell types.",
-    "tool_type": "r",
-    "primary_tool": "methylKit"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

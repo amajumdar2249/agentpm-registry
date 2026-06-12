@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000044449",
   "name": "laravel-tdd",
   "slug": "laravel-tdd-3",
   "description": "Test-driven development for Laravel with PHPUnit and Pest, factories, database testing, fakes, and coverage targets.",
   "content": "\n# Laravel TDD Workflow\n\nTest-driven development for Laravel applications using PHPUnit and Pest with 80%+ coverage (unit + feature).\n\n## When to Use\n\n- New features or endpoints in Laravel\n- Bug fixes or refactors\n- Testing Eloquent models, policies, jobs, and notifications\n- Prefer Pest for new tests unless the project already standardizes on PHPUnit\n\n## How It Works\n\n### Red-Green-Refactor Cycle\n\n1) Write a failing test\n2) Implement the minimal change to pass\n3) Refactor while keeping tests green\n\n### Test Layers\n\n- **Unit**: pure PHP classes, value objects, services\n- **Feature**: HTTP endpoints, auth, validation, policies\n- **Integration**: database + queue + external boundaries\n\nChoose layers based on scope:\n\n- Use **Unit** tests for pure business logic and services.\n- Use **Feature** tests for HTTP, auth, validation, and response shape.\n- Use **Integration** tests when validating DB/queues/external services together.\n\n### Database Strategy\n\n- `RefreshDatabase` for most feature/integration tests (runs migrations once per test run, then wraps each test in a transaction when supported; in-memory databases may re-migrate per test)\n- `DatabaseTransactions` when the schema is already migrated and you only need per-test rollback\n- `DatabaseMigrations` when you need a full migrate/fresh for every test and can afford the cost\n\nUse `RefreshDatabase` as the default for tests that touch the database: for databases with transaction support, it runs migrations once per test run (via a static flag) and wraps each test in a transaction; for `:memory:` SQLite or connections without transactions, it migrates before each test. Use `DatabaseTransactions` when the schema is already migrated and you only need per-test rollbacks.\n\n### Testing Framework Choice\n\n- Default to **Pest** for new tests when available.\n- Use **PHPUnit** only if the project already standardizes on it or requires PHPUnit-specific tooling.\n\n## Examples\n\n### PHPUnit Example\n\n```php\nuse App\\Models\\User;\nuse Illuminate\\Foundation\\Testing\\RefreshDatabase;\nuse Tests\\TestCase;\n\nfinal class ProjectControllerTest extends TestCase\n{\n    use RefreshDatabase;\n\n    public function test_owner_can_create_project(): void\n    {\n        $user = User::factory()->create();\n\n        $response = $this->actingAs($user)->postJson('/api/projects', [\n            'name' => 'New Project',\n        ]);\n\n        $response->assertCreated();\n        $this->assertDatabaseHas('projects', ['name' => 'New Project']);\n    }\n}\n```\n\n### Feature Test Example (HTTP Layer)\n\n```php\nuse App\\Models\\Project;\nuse App\\Models\\User;\nuse Illuminate\\Foundation\\Testing\\RefreshDatabase;\nuse Tests\\TestCase;\n\nfinal class ProjectIndexTest extends TestCase\n{\n    use RefreshDatabase;\n\n    public function test_projects_index_returns_paginated_results(): void\n    {\n        $user = User::factory()->create();\n        Project::factory()->count(3)->for($user)->create();\n\n        $response = $this->actingAs($user)->getJson('/api/projects');\n\n        $response->assertOk();\n        $response->assertJsonStructure(['success', 'data', 'error', 'meta']);\n    }\n}\n```\n\n### Pest Example\n\n```php\nuse App\\Models\\User;\nuse Illuminate\\Foundation\\Testing\\RefreshDatabase;\n\nuse function Pest\\Laravel\\actingAs;\nuse function Pest\\Laravel\\assertDatabaseHas;\n\nuses(RefreshDatabase::class);\n\ntest('owner can create project', function () {\n    $user = User::factory()->create();\n\n    $response = actingAs($user)->postJson('/api/projects', [\n        'name' => 'New Project',\n    ]);\n\n    $response->assertCreated();\n    assertDatabaseHas('projects', ['name' => 'New Project']);\n});\n```\n\n### Feature Test Pest Example (HTTP Layer)\n\n```php\nuse App\\Models\\Project;\nuse App\\Models\\User;\nuse Illuminate\\Foundation\\Testing\\RefreshDatabase;\n\nuse function Pest\\Laravel\\actingAs;\n\nuses(RefreshDatabase::class);\n\ntest('projects index returns paginated results', function () {\n    $user = User::factory()->create();\n    Project::factory()->count(3)->for($user)->create();\n\n    $response = actingAs($user)->getJson('/api/projects');\n\n    $response->assertOk();\n    $response->assertJsonStructure(['success', 'data', 'error', 'meta']);\n});\n```\n\n### Factories and States\n\n- Use factories for test data\n- Define states for edge cases (archived, admin, trial)\n\n```php\n$user = User::factory()->state(['role' => 'admin'])->create();\n```\n\n### Database Testing\n\n- Use `RefreshDatabase` for clean state\n- Keep tests isolated and deterministic\n- Prefer `assertDatabaseHas` over manual queries\n\n### Persistence Test Example\n\n```php\nuse App\\Models\\Project;\nuse Illuminate\\Foundation\\Testing\\RefreshDatabase;\nuse Tests\\TestCase;\n\nfinal class ProjectRepositoryTest extends TestCase\n{\n    use RefreshDatabase;\n\n    public function test_project_can_be_retrieved_by_slug(): void\n    {\n        $project = Project::factory()->create(['slug' => 'alpha']);\n\n        $found = Project::query()->where('slug', 'alpha')->firstOrFail();\n\n        $this->assertSame($project->id, $found->id);\n    }\n}\n```\n\n### Fakes for Side Effects\n\n- `Bus::fake()` for jobs\n- `Queue::fake()` for queued work\n- `Mail::fake()` and `Notification::fake()` for notifications\n- `Event::fake()` for domain events\n\n```php\nuse Illuminate\\Support\\Facades\\Queue;\n\nQueue::fake();\n\ndispatch(new SendOrderConfirmation($order->id));\n\nQueue::assertPushed(SendOrderConfirmation::class);\n```\n\n```php\nuse Illuminate\\Support\\Facades\\Notification;\n\nNotification::fake();\n\n$user->notify(new InvoiceReady($invoice));\n\nNotification::assertSentTo($user, InvoiceReady::class);\n```\n\n### Auth Testing (Sanctum)\n\n```php\nuse Laravel\\Sanctum\\Sanctum;\n\nSanctum::actingAs($user);\n\n$response = $this->getJson('/api/projects');\n$response->assertOk();\n```\n\n### HTTP and External Services\n\n- Use `Http::fake()` to isolate external APIs\n- Assert outbound payloads with `Http::assertSent()`\n\n### Coverage Targets\n\n- Enforce 80%+ coverage for unit + feature tests\n- Use `pcov` or `XDEBUG_MODE=coverage` in CI\n\n### Test Commands\n\n- `php artisan test`\n- `vendor/bin/phpunit`\n- `vendor/bin/pest`\n\n### Test Configuration\n\n- Use `phpunit.xml` to set `DB_CONNECTION=sqlite` and `DB_DATABASE=:memory:` for fast tests\n- Keep separate env for tests to avoid touching dev/prod data\n\n### Authorization Tests\n\n```php\nuse Illuminate\\Support\\Facades\\Gate;\n\n$this->assertTrue(Gate::forUser($user)->allows('update', $project));\n$this->assertFalse(Gate::forUser($otherUser)->allows('update', $project));\n```\n\n### Inertia Feature Tests\n\nWhen using Inertia.js, assert on the component name and props with the Inertia testing helpers.\n\n```php\nuse App\\Models\\User;\nuse Inertia\\Testing\\AssertableInertia;\nuse Illuminate\\Foundation\\Testing\\RefreshDatabase;\nuse Tests\\TestCase;\n\nfinal class DashboardInertiaTest extends TestCase\n{\n    use RefreshDatabase;\n\n    public function test_dashboard_inertia_props(): void\n    {\n        $user = User::factory()->create();\n\n        $response = $this->actingAs($user)->get('/dashboard');\n\n        $response->assertOk();\n        $response->assertInertia(fn (AssertableInertia $page) => $page\n            ->component('Dashboard')\n            ->where('user.id', $user->id)\n            ->has('projects')\n        );\n    }\n}\n```\n\nPrefer `assertInertia` over raw JSON assertions to keep tests aligned with Inertia responses.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "laravel-tdd",
-    "description": "Test-driven development for Laravel with PHPUnit and Pest, factories, database testing, fakes, and coverage targets.",
-    "origin": "ECC"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

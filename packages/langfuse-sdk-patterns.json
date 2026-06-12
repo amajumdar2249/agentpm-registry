@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032467",
   "name": "langfuse-sdk-patterns",
   "slug": "langfuse-sdk-patterns",
   "description": "Langfuse SDK best practices, patterns, and idiomatic usage.",
   "content": "# Langfuse SDK Patterns\n\n## Overview\n\nProduction-quality patterns for the Langfuse SDK: singleton clients, the `observe` wrapper, `startActiveObservation` for nested traces, session tracking, graceful shutdown, and error-safe tracing.\n\n## Prerequisites\n\n- Completed `langfuse-install-auth` setup\n- Understanding of async/await patterns\n- For v4+: `@langfuse/tracing`, `@langfuse/otel`, `@opentelemetry/sdk-node`\n\n## Instructions\n\n### Pattern 1: Singleton Client with Graceful Shutdown\n\n```typescript\n// src/lib/langfuse.ts -- single file, import everywhere\nimport { LangfuseClient } from \"@langfuse/client\";\nimport { LangfuseSpanProcessor } from \"@langfuse/otel\";\nimport { NodeSDK } from \"@opentelemetry/sdk-node\";\n\n// Singleton client for prompts, datasets, scores\nlet client: LangfuseClient | null = null;\nexport function getLangfuseClient(): LangfuseClient {\n  if (!client) {\n    client = new LangfuseClient();\n  }\n  return client;\n}\n\n// One-time OTel setup (call at app entry point)\nlet sdk: NodeSDK | null = null;\nexport function initTracing(): NodeSDK {\n  if (!sdk) {\n    sdk = new NodeSDK({\n      spanProcessors: [new LangfuseSpanProcessor()],\n    });\n    sdk.start();\n\n    // Graceful shutdown on process exit\n    const shutdown = async () => {\n      await sdk?.shutdown();\n      process.exit(0);\n    };\n    process.on(\"SIGTERM\", shutdown);\n    process.on(\"SIGINT\", shutdown);\n  }\n  return sdk;\n}\n```\n\n**Legacy v3 singleton:**\n\n```typescript\nimport { Langfuse } from \"langfuse\";\n\nlet instance: Langfuse | null = null;\n\nexport function getLangfuse(): Langfuse {\n  if (!instance) {\n    instance = new Langfuse({\n      flushAt: 15,\n      flushInterval: 10000,\n    });\n    process.on(\"beforeExit\", () => instance?.shutdownAsync());\n  }\n  return instance;\n}\n```\n\n### Pattern 2: `observe` Wrapper for Existing Functions\n\nThe `observe` wrapper is the most ergonomic way to add tracing. It wraps any function and auto-creates a span.\n\n```typescript\nimport { observe, updateActiveObservation } from \"@langfuse/tracing\";\n\n// Wrap existing functions -- no internal changes needed\nconst fetchUserProfile = observe(async (userId: string) => {\n  updateActiveObservation({ input: { userId } });\n  const profile = await db.users.findById(userId);\n  updateActiveObservation({ output: { found: !!profile } });\n  return profile;\n});\n\n// Mark LLM calls as generations\nconst summarize = observe(\n  { name: \"summarize-text\", asType: \"generation\" },\n  async (text: string) => {\n    updateActiveObservation({ model: \"gpt-4o-mini\", input: text });\n    const result = await openai.chat.completions.create({\n      model: \"gpt-4o-mini\",\n      messages: [{ role: \"user\", content: `Summarize: ${text}` }],\n    });\n    const output = result.choices[0].message.content;\n    updateActiveObservation({\n      output,\n      usage: {\n        promptTokens: result.usage?.prompt_tokens,\n        completionTokens: result.usage?.completion_tokens,\n      },\n    });\n    return output;\n  }\n);\n\n// When called inside another observed function, spans auto-nest\nconst pipeline = observe(async (userId: string) => {\n  const profile = await fetchUserProfile(userId);\n  const summary = await summarize(profile.bio);\n  return { profile, summary };\n});\n```\n\n### Pattern 3: `startActiveObservation` for Inline Control\n\nUse when you need fine-grained control over observation lifecycle within a function:\n\n```typescript\nimport { startActiveObservation, updateActiveObservation } from \"@langfuse/tracing\";\n\nasync function processOrder(orderId: string) {\n  return await startActiveObservation(\"process-order\", async () => {\n    updateActiveObservation({ input: { orderId } });\n\n    // Nested spans are automatic\n    const validated = await startActiveObservation(\"validate\", async () => {\n      const result = await validateOrder(orderId);\n      updateActiveObservation({ output: { valid: result.valid } });\n      return result;\n    });\n\n    if (!validated.valid) {\n      updateActiveObservation({ output: { error: \"validation failed\" } });\n      return { success: false };\n    }\n\n    // Generation span for LLM call\n    const description = await startActiveObservation(\n      { name: \"generate-confirmation\", asType: \"generation\" },\n      async () => {\n        updateActiveObservation({ model: \"gpt-4o-mini\" });\n        const result = await generateConfirmation(orderId);\n        updateActiveObservation({ output: result });\n        return result;\n      }\n    );\n\n    updateActiveObservation({ output: { success: true } });\n    return { success: true, description };\n  });\n}\n```\n\n### Pattern 4: Session and User Tracking\n\nLink traces across conversation turns for user-level analytics:\n\n```typescript\n// v4+: Set session/user via observation metadata\nawait startActiveObservation(\"chat-turn\", async () => {\n  updateActiveObservation({\n    metadata: {\n      sessionId: \"session-abc-123\",\n      userId: \"user-456\",\n    },\n  });\n  // All nested observations inherit this context\n  await handleUserMessage(message);\n});\n\n// v3: Set directly on trace\nconst trace = langfuse.trace({\n  name: \"chat-turn\",\n  sessionId: \"session-abc-123\", // Groups traces into a session\n  userId: \"user-456\",           // Links to user analytics\n  input: { message },\n});\n```\n\n### Pattern 5: Error-Safe Tracing\n\nNever let tracing failures break your application:\n\n```typescript\nimport { observe, updateActiveObservation } from \"@langfuse/tracing\";\n\nconst safeObserve = <T extends (...args: any[]) => Promise<any>>(\n  name: string,\n  fn: T\n): T => {\n  return (async (...args: Parameters<T>) => {\n    try {\n      return await observe({ name }, async () => {\n        updateActiveObservation({ input: args });\n        const result = await fn(...args);\n        updateActiveObservation({ output: result });\n        return result;\n      })();\n    } catch (tracingError) {\n      // If tracing fails, still run the function\n      console.warn(`Tracing error in ${name}:`, tracingError);\n      return fn(...args);\n    }\n  }) as T;\n};\n\n// Usage -- function works even if Langfuse is down\nconst processRequest = safeObserve(\"process-request\", async (input: string) => {\n  return await callLLM(input);\n});\n```\n\n### Pattern 6: Legacy v3 -- Always End Spans\n\n```typescript\n// Always use try/finally to ensure .end() is called\nconst span = trace.span({ name: \"risky-operation\", input: data });\ntry {\n  const result = await riskyOperation(data);\n  span.end({ output: result });\n  return result;\n} catch (error) {\n  span.end({ level: \"ERROR\", statusMessage: String(error) });\n  throw error;\n}\n```\n\n## Anti-Patterns to Avoid\n\n| Anti-Pattern | Problem | Correct Pattern |\n|-------------|---------|-----------------|\n| `new Langfuse()` per request | Memory leaks, duplicate traces | Singleton client |\n| Awaiting flush in hot path | Adds latency to every request | Background flush, shutdown handler |\n| Logging full request bodies | Trace payloads too large | Truncate/summarize inputs |\n| Missing `.end()` on spans (v3) | Spans show \"in progress\" forever | Use `try/finally` or `observe` wrapper |\n| Hardcoding API keys | Security risk | Environment variables only |\n\n## Resources\n\n- [TypeScript SDK Instrumentation](https://langfuse.com/docs/observability/sdk/typescript/instrumentation)\n- [Advanced SDK Configuration](https://langfuse.com/docs/observability/sdk/typescript/advanced-usage)\n- [Python Decorators](https://langfuse.com/docs/sdk/python/decorators)\n- [Event Queuing/Batching](https://langfuse.com/docs/observability/features/queuing-batching)\n\n## Next Steps\n\nFor OpenAI/LangChain tracing examples, see `langfuse-core-workflow-a`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "langfuse-sdk-patterns",
-    "description": "Langfuse SDK best practices, patterns, and idiomatic usage.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

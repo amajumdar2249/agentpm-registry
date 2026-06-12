@@ -1,20 +1,48 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000028392",
   "name": "guest-checkout",
   "slug": "guest-checkout-2",
   "description": "Allow shoppers to buy without creating an account, then invite them to save their details post-purchase to reduce checkout friction and increase conversion",
   "content": "\n# Guest Checkout\n\n## Overview\n\nRequiring account creation before purchase is one of the top causes of checkout abandonment \u2014 it adds friction for first-time buyers who do not yet trust your store enough to commit to a relationship. Enabling guest checkout and deferring account creation to after the purchase typically increases checkout completion by 20\u201335%. All major platforms support this with a single settings change.\n\n## When to Use This Skill\n\n- When checkout funnel analysis shows a significant drop-off at the account creation or login step\n- When setting up a new store and deciding on account requirements\n- When adding a \"Buy as Guest\" option to an existing checkout that currently requires login\n- When optimizing first-time buyer conversion rates\n\n## Core Instructions\n\n### Step 1: Enable guest checkout on your platform\n\n---\n\n#### Shopify\n\nGuest checkout is enabled by default on Shopify. To verify or configure it:\n\n1. Go to **Settings \u2192 Checkout \u2192 Customer accounts**\n2. Choose one of:\n   - **Accounts are optional** (recommended): customers can check out as a guest or log in; Shopify shows a \"Continue as guest\" option\n   - **Accounts are disabled**: checkout requires no account at all\n   - **Accounts are required**: blocks guest checkout \u2014 avoid this unless you specifically need a members-only store\n3. Click **Save**\n\nFor the post-purchase account creation prompt (so guests can save their details after buying):\n1. Under **Settings \u2192 Checkout \u2192 Customer accounts**, enable **Self-serve returns** and **Order status page** \u2014 this lets guests view their order status without an account\n2. Shopify automatically sends a \"Create an account\" link in the order confirmation email when accounts are optional\n\n#### WooCommerce\n\n1. Go to **WooCommerce \u2192 Settings \u2192 Accounts & Privacy**\n2. Under **Guest checkout**:\n   - Check **Allow customers to place orders without an account** (enables guest checkout)\n   - Uncheck **Allow customers to log into an existing account during checkout** if you want to simplify the checkout form (or leave checked to offer both)\n3. Under **Account creation**:\n   - Check **Allow customers to create an account during checkout** \u2014 this shows an optional \"Create an account\" checkbox on the checkout page\n   - Check **Allow customers to create an account on the \"My account\" page** \u2014 this lets guests create an account after ordering via the confirmation email link\n4. Click **Save changes**\n\nFor post-purchase account creation, WooCommerce automatically includes an account creation prompt in the order confirmation email when the above settings are enabled.\n\n#### BigCommerce\n\n1. Go to **Settings \u2192 Store Setup \u2192 Account Signup**\n2. Under **Customer accounts**, select **Optional \u2014 customers can check out as guests or create an account**\n3. Enable **Send account creation email** \u2014 this sends a post-purchase email prompting the customer to activate an account with a single click\n\nAlternatively, BigCommerce supports **Apple ID login** and **Google login** which let returning customers authenticate without a traditional password \u2014 lower friction than full account creation.\n\n---\n\n#### Custom / Headless\n\nFor headless storefronts, implement the guest checkout pattern with post-purchase account creation:\n\n**Guest order flow:**\n1. Email is the only required identifier \u2014 collect it at the start of checkout\n2. Check if an account exists for that email; if yes, offer to log in or continue as guest\n3. Place the order without linking it to a user account\n4. Generate a time-limited account creation token (72 hours) and include it in the confirmation email\n\n```javascript\n// POST /api/auth/check-email \u2014 check if account exists before showing login prompt\nasync function checkEmail(req, res) {\n  const { email } = req.body;\n  const exists = await db.users.findUnique({ where: { email: email.toLowerCase() } });\n  res.json({ exists: !!exists });\n}\n\n// POST /api/auth/create-account-from-order \u2014 called when guest clicks \"Create account\" link\nasync function createAccountFromOrder(req, res) {\n  const { token, password } = req.body;\n  const record = await db.accountCreationTokens.findUnique({ where: { token } });\n\n  if (!record || record.expiresAt < new Date()) {\n    return res.status(400).json({ error: 'Link expired \u2014 request a new one from your account page' });\n  }\n\n  const user = await db.users.create({\n    data: { email: record.email, passwordHash: await hashPassword(password) },\n  });\n\n  // Associate all guest orders with this email to the new account\n  await db.orders.updateMany({\n    where: { guestEmail: record.email, userId: null },\n    data: { userId: user.id },\n  });\n\n  await db.accountCreationTokens.delete({ where: { token } });\n  res.json({ success: true });\n}\n```\n\n**Order tracking without an account:**\nLet guest customers track orders via order number + email, without requiring login:\n\n```javascript\n// GET /api/orders/track?orderNumber=ORDER-12345&email=customer@example.com\nasync function trackGuestOrder(req, res) {\n  const { orderNumber, email } = req.query;\n  const order = await db.orders.findFirst({\n    where: {\n      orderNumber,\n      OR: [{ guestEmail: email.toLowerCase() }, { user: { email: email.toLowerCase() } }],\n    },\n    include: { fulfillments: true },\n  });\n  if (!order) return res.status(404).json({ error: 'Order not found' });\n  res.json({ order });\n}\n```\n\n### Step 2: Optimize the post-purchase account creation prompt\n\nThe order confirmation page is the ideal time to offer account creation \u2014 the customer is in a positive, just-purchased state and has a concrete reason to create an account (tracking their order).\n\n**Best practices for the prompt:**\n\n- **Lead with the benefit**, not the action: \"Track this order and check out faster next time\" vs. \"Create an account\"\n- **Make it one click**: show a password field only; all other details are already known from the order\n- **Include in the confirmation email**: many customers miss the on-page prompt; the email gives them a 72-hour window to create the account\n\n**Email template for post-purchase account creation:**\n\n```\nSubject: Your order #{{orderNumber}} is confirmed!\n\nHi {{email}},\n\nYour order is on its way!\n\n---\nSAVE YOUR DETAILS FOR NEXT TIME\nCreate a free account to track your order and check out faster:\n{{accountCreationUrl}}\n(This link expires in 72 hours)\n---\n```\n\n### Step 3: Measure guest checkout adoption\n\nTrack these metrics in Google Analytics 4 or your analytics platform:\n\n- **Guest checkout rate**: what % of orders are placed as guest? (target: 40\u201360% for new customers)\n- **Post-purchase account creation rate**: what % of guests create accounts within 72 hours? (target: 15\u201325%)\n- **Checkout completion rate by type**: compare guest vs. account checkout completion rates\n\nIf guest checkout completion is significantly higher than account checkout completion, consider making accounts optional store-wide rather than having the login prompt appear prominently.\n\n## Best Practices\n\n- **Require only email at checkout entry** \u2014 do not ask for a password or account creation before taking payment; defer it entirely to post-purchase\n- **Offer to log in, not force it** \u2014 when the email has an existing account, show both \"Log in\" and \"Continue as guest\"; never block checkout\n- **Send the account creation link in the confirmation email** \u2014 many shoppers miss the on-page prompt\n- **Link historical guest orders on account creation** \u2014 when a guest creates an account, transfer all prior orders with that email to their new account\n- **Expire account creation tokens** \u2014 72 hours is appropriate; long enough to read the email, short enough for security\n\n## Common Pitfalls\n\n| Problem | Solution |\n|---------|----------|\n| Shopify requiring account login at checkout | Go to Settings \u2192 Checkout \u2192 Customer accounts and set to \"Accounts are optional\" |\n| WooCommerce not allowing guest checkout | Enable \"Allow customers to place orders without an account\" in WooCommerce \u2192 Settings \u2192 Accounts & Privacy |\n| Guest orders inaccessible after account creation | When creating the account, associate all orders matching the guest email to the new user ID |\n| Account creation link in email expired | Set token expiry to 72 hours minimum; include a link to request a new one in the confirmation email |\n| Guest checkout bypasses fraud prevention | Apply the same fraud scoring to guest orders as authenticated orders \u2014 Shopify Fraud Analysis and Stripe Radar both work regardless of account status |\n\n## Related Skills\n\n- @checkout-flow-optimization\n- @cart-logic\n- @order-processing-pipeline\n- @accessibility-commerce\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "guest-checkout",
-    "description": "Allow shoppers to buy without creating an account, then invite them to save their details post-purchase to reduce checkout friction and increase conversion",
-    "category": "payments-checkout",
-    "risk": "safe",
-    "source": "curated",
-    "date_added": "2026-03-12",
-    "tags": "[guest-checkout, account-creation, conversion, frictionless, email-capture, post-purchase]",
-    "triggers": "[\"guest checkout\", \"checkout without account\", \"guest purchase\", \"post-purchase account creation\", \"frictionless checkout\"]",
-    "tools": "[claude-code, cursor, gemini-cli, copilot, codex-cli, kiro, opencode]",
-    "platforms": "[shopify, woocommerce, bigcommerce, custom]",
-    "difficulty": "beginner"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "payments-checkout",
+  "tags": [
+    "[guest-checkout",
+    "account-creation",
+    "conversion",
+    "frictionless",
+    "email-capture",
+    "post-purchase]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

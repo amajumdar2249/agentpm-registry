@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032655",
   "name": "mistral-incident-runbook",
   "slug": "mistral-incident-runbook",
   "description": "Execute Mistral AI incident response procedures with triage, mitigation,",
   "content": "# Mistral AI Incident Runbook\n\n## Overview\n\nRapid incident response procedures for Mistral AI integration failures. Covers severity classification, quick triage script, decision tree, per-error mitigations, communication templates, and postmortem process.\n\n## Severity Levels\n\n| Level | Definition | Response Time | Example |\n|-------|------------|---------------|---------|\n| P1 | Complete outage | < 15 min | All Mistral requests failing |\n| P2 | Degraded service | < 1 hour | High latency, partial 429s |\n| P3 | Minor impact | < 4 hours | Occasional errors, non-critical feature |\n| P4 | No user impact | Next business day | Monitoring gaps, docs |\n\n## Quick Triage Script\n\n```bash\n#!/bin/bash\nset -euo pipefail\necho \"=== Mistral AI Quick Triage ===\"\necho \"Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n\n# 1. API health\necho -e \"\\n1. Mistral API status:\"\nHTTP=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"Authorization: Bearer ${MISTRAL_API_KEY}\" \\\n  https://api.mistral.ai/v1/models 2>/dev/null)\necho \"   HTTP: $HTTP\"\ncase $HTTP in\n  200) echo \"   OK \u2014 API is reachable\" ;;\n  401) echo \"   AUTH FAILURE \u2014 API key invalid or revoked\" ;;\n  429) echo \"   RATE LIMITED \u2014 check workspace limits\" ;;\n  5*) echo \"   SERVER ERROR \u2014 Mistral service issue\" ;;\n  000) echo \"   NETWORK ERROR \u2014 cannot reach api.mistral.ai\" ;;\nesac\n\n# 2. Our service health\necho -e \"\\n2. App health endpoint:\"\ncurl -sf https://yourapp.com/health 2>/dev/null | jq '.services.mistral' || echo \"   UNREACHABLE\"\n\n# 3. Error rate (if Prometheus available)\necho -e \"\\n3. Error rate (last 5m):\"\ncurl -sf \"localhost:9090/api/v1/query?query=rate(mistral_errors_total[5m])\" 2>/dev/null \\\n  | jq -r '.data.result[] | \"\\(.metric.model): \\(.value[1])/s\"' || echo \"   Prometheus unavailable\"\n```\n\n## Decision Tree\n\n```\nAPI returning errors?\n|-- YES: curl -H \"Authorization: Bearer $KEY\" https://api.mistral.ai/v1/models\n|   |-- 401 \u2192 API key issue (Step 1 below)\n|   |-- 429 \u2192 Rate limited (Step 2 below)\n|   |-- 5xx \u2192 Mistral service issue (Step 3 below)\n|   +-- Timeout \u2192 Network issue (Step 4 below)\n+-- NO: Our service returning errors?\n    |-- YES \u2192 Check app logs and config\n    +-- NO \u2192 Resolved, continue monitoring\n```\n\n## Immediate Actions\n\n### Step 1: 401 \u2014 Authentication Failure (P1)\n\n```bash\nset -euo pipefail\n# Verify key\necho \"Key length: ${#MISTRAL_API_KEY}\"\necho \"Key prefix: ${MISTRAL_API_KEY:0:8}...\"\n\n# Test directly\ncurl -v -H \"Authorization: Bearer ${MISTRAL_API_KEY}\" \\\n  https://api.mistral.ai/v1/models\n\n# If invalid: rotate key at console.mistral.ai\n# Then update in your secret manager:\n# GCP: gcloud secrets versions add mistral-api-key --data-file=-\n# AWS: aws secretsmanager put-secret-value --secret-id mistral/api-key\n# K8s: kubectl create secret generic mistral --from-literal=api-key=\"$NEW_KEY\" --dry-run=client -o yaml | kubectl apply -f -\n```\n\n### Step 2: 429 \u2014 Rate Limited (P2)\n\n```bash\nset -euo pipefail\n# Check headers for limit info\ncurl -v -H \"Authorization: Bearer ${MISTRAL_API_KEY}\" \\\n  https://api.mistral.ai/v1/models 2>&1 | grep -i \"ratelimit\\|retry\"\n\n# Immediate mitigation: reduce concurrency\nkubectl set env deployment/app MAX_CONCURRENT_MISTRAL=3\n\n# Check workspace limits: https://admin.mistral.ai/plateforme/limits\n# Long-term: Contact Mistral to increase limits\n```\n\n### Step 3: 5xx \u2014 Mistral Service Error (P1/P2)\n\n```bash\nset -euo pipefail\n# Check Mistral status page\necho \"Check: https://status.mistral.ai/\"\n\n# Enable fallback/degradation\nkubectl set env deployment/app MISTRAL_FALLBACK=true\n\n# Monitor recovery (check every 30s)\nwatch -n 30 'curl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"Authorization: Bearer ${MISTRAL_API_KEY}\" \\\n  https://api.mistral.ai/v1/models'\n```\n\n### Step 4: Network/Timeout Error (P2)\n\n```bash\nset -euo pipefail\n# Test DNS\nnslookup api.mistral.ai\n\n# Test connectivity\ncurl -v --connect-timeout 5 https://api.mistral.ai/v1/models\n\n# Check egress policies\nkubectl get networkpolicy -A | grep mistral\n\n# Increase timeout if latency issue\nkubectl set env deployment/app MISTRAL_TIMEOUT_MS=120000\n```\n\n## Communication Templates\n\n### Internal (Slack)\n\n```\n:red_circle: P[1-4] INCIDENT: Mistral AI Integration\n**Status**: INVESTIGATING | MITIGATING | RESOLVED\n**Impact**: [Description of user-facing impact]\n**Action**: [Current action being taken]\n**Next update**: [HH:MM UTC]\n**IC**: @[name]\n```\n\n### External (Status Page)\n\n```\nAI Feature Degradation\n\nWe are experiencing issues with our AI-powered features.\nSome users may see slower responses or temporary unavailability.\n\nOur team is investigating with our AI provider.\n\nAffected: [list features]\nWorkaround: [if any]\nUpdated: [timestamp UTC]\n```\n\n## Post-Incident\n\n### Evidence Collection\n\n```bash\n#!/bin/bash\nset -euo pipefail\nDIR=\"incident-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$DIR\"\n\nkubectl logs -l app=mistral-service --since=2h > \"$DIR/app-logs.txt\" 2>/dev/null || true\nkubectl get events --sort-by=.lastTimestamp > \"$DIR/k8s-events.txt\" 2>/dev/null || true\nkubectl get deployment mistral-service -o yaml | grep -v api-key > \"$DIR/deployment.yaml\" 2>/dev/null || true\n\ntar -czf \"$DIR.tar.gz\" \"$DIR\" && rm -rf \"$DIR\"\necho \"Evidence: $DIR.tar.gz\"\n```\n\n### Postmortem Template\n\n```markdown\n## Incident: Mistral AI [Error Type]\n**Date:** YYYY-MM-DD  |  **Duration:** Xh Ym  |  **Severity:** P[1-4]\n\n### Summary\n[1-2 sentence description]\n\n### Timeline (UTC)\n| Time | Event |\n|------|-------|\n| HH:MM | Alert fired |\n| HH:MM | IC assigned |\n| HH:MM | Root cause identified |\n| HH:MM | Mitigated |\n| HH:MM | Resolved |\n\n### Root Cause\n[Technical explanation]\n\n### Impact\n- Users affected: [N]\n- Failed requests: [N]\n- Duration: [time]\n\n### Action Items\n| Priority | Action | Owner | Due |\n|----------|--------|-------|-----|\n| P1 | [Fix] | @name | date |\n| P2 | [Prevent] | @name | date |\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| kubectl auth expired | Token expired | Re-authenticate with cloud provider |\n| Metrics unavailable | Prometheus down | Fall back to app logs |\n| Secret rotation fails | IAM permissions | Escalate to admin |\n| Fallback not working | Not implemented | Return cached responses or error page |\n\n## Resources\n\n- [Mistral AI Status](https://status.mistral.ai/)\n- [Mistral Console](https://console.mistral.ai/)\n- [Discord Community](https://discord.gg/mistralai)\n\n## Output\n\n- Issue identified and severity classified\n- Mitigation applied per error type\n- Stakeholders notified with status updates\n- Evidence collected for postmortem\n- Action items documented\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "mistral-incident-runbook",
-    "description": "Execute Mistral AI incident response procedures with triage, mitigation,",
-    "allowed-tools": "Read, Grep, Bash(kubectl:*), Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

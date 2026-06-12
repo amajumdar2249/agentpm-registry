@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032823",
   "name": "oraclecloud-ci-integration",
   "slug": "oraclecloud-ci-integration",
   "description": "Configure CI/CD pipelines for OCI with Terraform and GitHub Actions.",
   "content": "# Oracle Cloud CI Integration\n\n## Overview\n\nSet up GitHub Actions workflows that authenticate to OCI, run Terraform plans, and execute tests against OCI services. The OCI Terraform provider has known bugs \u2014 notably ResourcePrincipal forcing the wrong region (#1761) \u2014 that require specific workarounds. This skill provides battle-tested CI patterns that avoid those pitfalls.\n\n**Purpose:** Get a working CI pipeline that authenticates to OCI, runs Terraform safely, and tests OCI-dependent code without flaky failures.\n\n## Prerequisites\n\n- **OCI tenancy** with an API signing key configured in `~/.oci/config`\n- **Terraform >= 1.5** and the OCI provider (`oracle/oci`)\n- **GitHub repository** with Actions enabled\n- **GitHub Secrets** configured: `OCI_USER_OCID`, `OCI_FINGERPRINT`, `OCI_TENANCY_OCID`, `OCI_REGION`, `OCI_PRIVATE_KEY` (PEM contents, base64-encoded)\n- **Python 3.8+** with `pip install oci` for SDK-based tests\n\n## Instructions\n\n### Step 1: Configure GitHub Secrets for OCI Auth\n\nOCI API key authentication requires five values. Store them as GitHub repository secrets:\n\n```bash\n# Encode your private key for safe storage in GitHub Secrets\nbase64 -w 0 ~/.oci/oci_api_key.pem\n# Copy output \u2192 GitHub Settings > Secrets > OCI_PRIVATE_KEY\n```\n\nThe remaining secrets come from your `~/.oci/config` file: `user`, `fingerprint`, `tenancy`, and `region`.\n\n### Step 2: GitHub Actions Workflow with Terraform\n\nCreate `.github/workflows/oci-terraform.yml`:\n\n```yaml\nname: OCI Terraform\non:\n  push:\n    branches: [main]\n  pull_request:\n\nenv:\n  TF_VAR_tenancy_ocid: ${{ secrets.OCI_TENANCY_OCID }}\n  TF_VAR_user_ocid: ${{ secrets.OCI_USER_OCID }}\n  TF_VAR_fingerprint: ${{ secrets.OCI_FINGERPRINT }}\n  TF_VAR_region: ${{ secrets.OCI_REGION }}\n\njobs:\n  plan:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n\n      - name: Write OCI private key\n        run: |\n          echo \"${{ secrets.OCI_PRIVATE_KEY }}\" | base64 -d > /tmp/oci_key.pem\n          chmod 600 /tmp/oci_key.pem\n\n      - uses: hashicorp/setup-terraform@v3\n        with:\n          terraform_version: \"1.7.0\"\n\n      - name: Terraform Init\n        run: terraform init\n\n      - name: Terraform Plan\n        run: terraform plan -out=tfplan\n        env:\n          TF_VAR_private_key_path: /tmp/oci_key.pem\n```\n\n### Step 3: Terraform Provider Configuration\n\nConfigure the OCI provider with explicit region to avoid the ResourcePrincipal region bug (#1761):\n\n```hcl\nterraform {\n  required_providers {\n    oci = {\n      source  = \"oracle/oci\"\n      version = \">= 5.0.0\"\n    }\n  }\n}\n\nprovider \"oci\" {\n  tenancy_ocid = var.tenancy_ocid\n  user_ocid    = var.user_ocid\n  fingerprint  = var.fingerprint\n  private_key_path = var.private_key_path\n  # CRITICAL: Always set region explicitly.\n  # ResourcePrincipal auth can force the wrong region (#1761).\n  region       = var.region\n}\n\nvariable \"tenancy_ocid\" {}\nvariable \"user_ocid\" {}\nvariable \"fingerprint\" {}\nvariable \"private_key_path\" {}\nvariable \"region\" { default = \"us-ashburn-1\" }\n```\n\n### Step 4: OCI CLI Commands in CI\n\nFor non-Terraform CI tasks, use the OCI CLI directly:\n\n```yaml\n      - name: Install OCI CLI\n        run: |\n          pip install oci-cli\n          mkdir -p ~/.oci\n          echo \"${{ secrets.OCI_PRIVATE_KEY }}\" | base64 -d > ~/.oci/oci_api_key.pem\n          chmod 600 ~/.oci/oci_api_key.pem\n          cat > ~/.oci/config << EOF\n          [DEFAULT]\n          user=${{ secrets.OCI_USER_OCID }}\n          fingerprint=${{ secrets.OCI_FINGERPRINT }}\n          tenancy=${{ secrets.OCI_TENANCY_OCID }}\n          region=${{ secrets.OCI_REGION }}\n          key_file=~/.oci/oci_api_key.pem\n          EOF\n\n      - name: List compute instances\n        run: oci compute instance list --compartment-id ${{ secrets.OCI_TENANCY_OCID }}\n```\n\n### Step 5: Python SDK Tests with Mocks\n\nWrite testable OCI code by mocking the SDK clients:\n\n```python\nimport oci\nfrom unittest.mock import MagicMock, patch\n\ndef list_instances(compartment_id: str) -> list:\n    \"\"\"List all compute instances in a compartment.\"\"\"\n    config = oci.config.from_file(\"~/.oci/config\")\n    client = oci.core.ComputeClient(config)\n    response = client.list_instances(compartment_id=compartment_id)\n    return response.data\n\n@patch(\"oci.core.ComputeClient\")\n@patch(\"oci.config.from_file\")\ndef test_list_instances(mock_config, mock_client_cls):\n    mock_client = MagicMock()\n    mock_client_cls.return_value = mock_client\n    mock_client.list_instances.return_value.data = [\n        MagicMock(display_name=\"web-server-1\", lifecycle_state=\"RUNNING\")\n    ]\n    instances = list_instances(\"ocid1.compartment.oc1..example\")\n    assert len(instances) == 1\n    assert instances[0].display_name == \"web-server-1\"\n```\n\n## Output\n\nSuccessful completion produces:\n\n- A GitHub Actions workflow that authenticates to OCI using API key secrets\n- Terraform provider configuration with the explicit region workaround\n- OCI CLI setup steps for non-Terraform CI tasks\n- A test pattern using mocked OCI SDK clients for unit testing\n\n## Error Handling\n\n| Error | Code | Cause | Solution |\n|-------|------|-------|----------|\n| NotAuthenticated | 401 | Bad API key or wrong fingerprint | Verify secrets match `~/.oci/config` values exactly |\n| NotAuthorizedOrNotFound | 404 | IAM policy missing or wrong OCID | Add required IAM policy for the API key user |\n| Provider crash on plan | N/A | ResourcePrincipal region bug (#1761) | Always set `region` explicitly in provider block |\n| TooManyRequests | 429 | Rate limited (no Retry-After header) | Add retry logic with exponential backoff |\n| CERTIFICATE_VERIFY_FAILED | N/A | SSL cert issue in CI runner | Run `pip install certifi` and set `REQUESTS_CA_BUNDLE` |\n| Terraform init fails | N/A | Provider version mismatch | Pin provider version: `version = \">= 5.0.0\"` |\n\n## Examples\n\n**Quick OCI auth test in CI:**\n\n```bash\n# Verify OCI credentials work in a GitHub Actions step\npip install oci\npython3 -c \"\nimport oci\nconfig = oci.config.from_file('~/.oci/config')\nidentity = oci.identity.IdentityClient(config)\nuser = identity.get_user(config['user']).data\nprint(f'Authenticated as: {user.name}')\n\"\n```\n\n**Terraform plan with JSON output for PR comments:**\n\n```bash\nterraform plan -out=tfplan\nterraform show -json tfplan | python3 -c \"\nimport sys, json\nplan = json.load(sys.stdin)\nchanges = plan.get('resource_changes', [])\nadds = sum(1 for c in changes if 'create' in c['change']['actions'])\ndels = sum(1 for c in changes if 'delete' in c['change']['actions'])\nprint(f'Plan: +{adds} -{dels} resources')\n\"\n```\n\n## Resources\n\n- [OCI Terraform Provider](https://registry.terraform.io/providers/oracle/oci/latest/docs) \u2014 official provider documentation\n- [OCI API Reference](https://docs.oracle.com/en-us/iaas/api/) \u2014 REST API specs for all services\n- [OCI Python SDK](https://docs.oracle.com/en-us/iaas/tools/python/latest/) \u2014 SDK reference and examples\n- [OCI CLI Reference](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/cliconcepts.htm) \u2014 command-line tool docs\n- [OCI SDK Troubleshooting](https://docs.oracle.com/en-us/iaas/Content/API/Concepts/sdk_troubleshooting.htm) \u2014 common error resolution\n\n## Next Steps\n\nAfter CI is working, proceed to `oraclecloud-deploy-integration` to set up container deployments via OKE or Container Instances, or see `oraclecloud-observability` to add monitoring to your CI-deployed infrastructure.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "oraclecloud-ci-integration",
-    "description": "Configure CI/CD pipelines for OCI with Terraform and GitHub Actions.",
-    "allowed-tools": "Read, Write, Edit, Bash(pip:*), Bash(terraform:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

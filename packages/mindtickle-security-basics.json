@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032618",
   "name": "mindtickle-security-basics",
   "slug": "mindtickle-security-basics",
   "description": "Security Basics for MindTickle.",
   "content": "# MindTickle Security Basics\n\n## Overview\n\nMindTickle integrations process employee PII through SCIM provisioning (names, emails, job titles, manager chains) and HR-sensitive data like course completion scores, certification status, and coaching assessments. The API uses bearer token authentication combined with a `Company-Id` header for multi-tenant isolation \u2014 omitting or spoofing this header can leak data across tenants. Webhook payloads carrying training completion events must be HMAC-verified to prevent injection of fraudulent compliance records.\n\n## Prerequisites\n\n- Secrets manager (AWS SSM, GCP Secret Manager, or Vault) for API tokens\n- HTTPS enforced on all SCIM and webhook endpoints\n- `Company-Id` validated against an allowlist of known tenant identifiers\n- `.env` files in `.gitignore` \u2014 never committed to version control\n- Data retention policy for employee training records (GDPR/SOC2)\n\n## API Key Management\n\n```typescript\n// MindTickle requires both bearer token and company ID for multi-tenant isolation\nconst MT_API_TOKEN = process.env.MINDTICKLE_API_KEY;\nconst MT_COMPANY_ID = process.env.MINDTICKLE_COMPANY_ID;\n\nfunction validateMindTickleConfig(): void {\n  if (!MT_API_TOKEN) throw new Error('Missing MINDTICKLE_API_KEY');\n  if (!MT_COMPANY_ID) throw new Error('Missing MINDTICKLE_COMPANY_ID');\n}\n\nfunction mindtickleHeaders(): Record<string, string> {\n  return {\n    Authorization: `Bearer ${MT_API_TOKEN}`,\n    'Company-Id': MT_COMPANY_ID!,\n    'Content-Type': 'application/json',\n  };\n}\n// Call validateMindTickleConfig() at startup \u2014 both values are required for every request\n```\n\n## Webhook Signature Verification\n\n```typescript\nimport crypto from 'node:crypto';\n\nconst MT_WEBHOOK_SECRET = process.env.MINDTICKLE_WEBHOOK_SECRET!;\n\nfunction verifyMindTickleWebhook(payload: string, signature: string, timestamp: string): boolean {\n  // Reject stale webhooks (>5 min) to prevent replay attacks\n  const age = Date.now() - parseInt(timestamp, 10) * 1000;\n  if (age > 300_000) return false;\n\n  const signedPayload = `${timestamp}.${payload}`;\n  const expected = crypto\n    .createHmac('sha256', MT_WEBHOOK_SECRET)\n    .update(signedPayload, 'utf8')\n    .digest('hex');\n  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));\n}\n\napp.post('/webhooks/mindtickle', (req, res) => {\n  const sig = req.headers['x-mindtickle-signature'] as string;\n  const ts = req.headers['x-mindtickle-timestamp'] as string;\n  if (!sig || !ts || !verifyMindTickleWebhook(JSON.stringify(req.body), sig, ts)) {\n    return res.status(401).json({ error: 'Invalid signature or stale timestamp' });\n  }\n  // Process verified training completion event\n});\n```\n\n## Input Validation\n\n```typescript\n// Validate SCIM user payloads \u2014 employee PII requires strict schema enforcement\ninterface ScimUser {\n  userName: string;\n  name: { givenName: string; familyName: string };\n  emails: { value: string; primary: boolean }[];\n}\n\nfunction validateScimUser(user: unknown): user is ScimUser {\n  const u = user as Record<string, unknown>;\n  if (typeof u.userName !== 'string' || u.userName.length > 254) return false;\n  const emails = u.emails as { value: string }[] | undefined;\n  if (!emails?.every(e => /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(e.value))) return false;\n  return true;\n}\n```\n\n## Data Protection\n\n```typescript\nfunction redactEmployeeData(record: Record<string, unknown>): Record<string, unknown> {\n  const piiFields = ['email', 'userName', 'phone', 'manager_email', 'employee_id'];\n  const hrFields = ['score', 'certification_status', 'coaching_notes'];\n  const redacted = { ...record };\n  for (const field of [...piiFields, ...hrFields]) {\n    if (redacted[field]) redacted[field] = '[REDACTED]';\n  }\n  return redacted;\n}\n// Redact before logging \u2014 course scores and coaching data are HR-confidential\n```\n\n## Access Control\n\n```typescript\n// Enforce tenant isolation \u2014 Company-Id must match the authenticated context\nconst ALLOWED_COMPANY_IDS = new Set(process.env.MT_ALLOWED_COMPANIES?.split(',') ?? []);\n\nfunction assertTenantAccess(companyId: string): void {\n  if (!ALLOWED_COMPANY_IDS.has(companyId)) {\n    throw new Error(`Unauthorized tenant: ${companyId}`);\n  }\n}\n\nfunction assertScimWriteAccess(operation: string, hasScimScope: boolean): void {\n  const writeOps = ['createUser', 'updateUser', 'deactivateUser'];\n  if (writeOps.includes(operation) && !hasScimScope) {\n    throw new Error(`SCIM write operation \"${operation}\" requires scim:write scope`);\n  }\n}\n```\n\n## Security Checklist\n\n- [ ] Bearer token and Company-Id stored in secrets manager\n- [ ] Company-Id validated against tenant allowlist on every request\n- [ ] Webhook HMAC-SHA256 verified with timestamp replay protection\n- [ ] SCIM payloads validated against strict schema before processing\n- [ ] Employee PII (email, name, phone) redacted in all logs\n- [ ] Course scores and coaching data classified as HR-confidential\n- [ ] SCIM write operations gated behind explicit scope checks\n- [ ] Data retention policy enforced for training completion records\n- [ ] Token rotation scheduled quarterly with zero-downtime swap\n\n## Error Handling\n\n| Vulnerability | Risk | Mitigation |\n|---|---|---|\n| Missing Company-Id header | Cross-tenant data leakage | Reject requests without validated Company-Id |\n| Unverified webhooks | Fraudulent training completion records | HMAC-SHA256 + timestamp validation on every webhook |\n| SCIM PII in logs | Employee data breach (GDPR/SOC2) | Redact all PII fields before logging |\n| Stale webhook replay | Duplicate or backdated compliance events | Reject webhooks older than 5 minutes |\n| Over-permissioned SCIM token | Unauthorized user provisioning | Enforce scim:write scope check for mutations |\n\n## Resources\n\n- [MindTickle Developer Platform](https://www.mindtickle.com/platform/integrations/)\n- [OWASP API Security Top 10](https://owasp.org/www-project-api-security/)\n\n## Next Steps\n\nSee `mindtickle-prod-checklist`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "mindtickle-security-basics",
-    "description": "Security Basics for MindTickle.",
-    "Trigger": "mindtickle security basics\".",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

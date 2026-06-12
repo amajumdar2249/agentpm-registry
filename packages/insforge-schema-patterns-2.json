@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000038923",
   "name": "insforge-schema-patterns",
   "slug": "insforge-schema-patterns-2",
   "description": "Database schema patterns for InsForge including social graphs, e-commerce, content publishing, and multi-tenancy with RLS policies. Use when designing data models with relationships, foreign keys, or Row Level Security.",
   "content": "\n# InsForge Schema Patterns\n\nExpert patterns for designing PostgreSQL schemas optimized for InsForge's PostgREST backend.\n\n## Pattern 1: Social Graph (Follows)\n\n**Use when:** Building social features like Twitter, Instagram, LinkedIn connections\n\n**Schema:**\n```sql\nCREATE TABLE follows (\n  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  follower_id UUID REFERENCES users(id) ON DELETE CASCADE,\n  following_id UUID REFERENCES users(id) ON DELETE CASCADE,\n  created_at TIMESTAMPTZ DEFAULT NOW(),\n  UNIQUE(follower_id, following_id)\n);\n\n-- Index for fast lookups\nCREATE INDEX idx_follows_follower ON follows(follower_id);\nCREATE INDEX idx_follows_following ON follows(following_id);\n\n-- RLS: Users can read all follows but only create their own\nALTER TABLE follows ENABLE ROW LEVEL SECURITY;\n\nCREATE POLICY \"Anyone can read follows\" ON follows\n  FOR SELECT USING (true);\n\nCREATE POLICY \"Users can follow others\" ON follows\n  FOR INSERT\n  TO authenticated\n  WITH CHECK (uid() = follower_id);\n\nCREATE POLICY \"Users can unfollow\" ON follows\n  FOR DELETE\n  TO authenticated\n  USING (uid() = follower_id);\n```\n\n**Query with InsForge SDK:**\n```javascript\n// Get users I follow with their profiles\nconst { data: following } = await client.database\n  .from('follows')\n  .select('*, following:following_id(id, nickname, avatar_url, bio)')\n  .eq('follower_id', currentUserId);\n\n// Get my followers\nconst { data: followers } = await client.database\n  .from('follows')\n  .select('*, follower:follower_id(id, nickname, avatar_url, bio)')\n  .eq('following_id', currentUserId);\n\n// Check if user1 follows user2\nconst { data: isFollowing } = await client.database\n  .from('follows')\n  .select()\n  .eq('follower_id', user1Id)\n  .eq('following_id', user2Id)\n  .single();\n\n// Follow a user\nawait client.database\n  .from('follows')\n  .insert([{ follower_id: currentUserId, following_id: targetUserId }]);\n```\n\n---\n\n## Pattern 2: Likes (Many-to-Many Junction Table)\n\n**Use when:** Users can like posts, comments, or other content\n\n**Schema:**\n```sql\nCREATE TABLE likes (\n  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  user_id UUID REFERENCES users(id) ON DELETE CASCADE,\n  post_id UUID REFERENCES posts(id) ON DELETE CASCADE,\n  created_at TIMESTAMPTZ DEFAULT NOW(),\n  UNIQUE(user_id, post_id)  -- Prevent duplicate likes\n);\n\nCREATE INDEX idx_likes_post ON likes(post_id);\nCREATE INDEX idx_likes_user ON likes(user_id);\n\nALTER TABLE likes ENABLE ROW LEVEL SECURITY;\n\nCREATE POLICY \"Anyone can read likes\" ON likes\n  FOR SELECT USING (true);\n\nCREATE POLICY \"Users can like posts\" ON likes\n  FOR INSERT\n  TO authenticated\n  WITH CHECK (uid() = user_id);\n\nCREATE POLICY \"Users can unlike their likes\" ON likes\n  FOR DELETE\n  TO authenticated\n  USING (uid() = user_id);\n```\n\n**Query with InsForge SDK:**\n```javascript\n// Get post with like count and whether current user liked it\nconst { data: post } = await client.database\n  .from('posts')\n  .select(`\n    *,\n    likes(count),\n    user_like:likes!inner(id, user_id)\n  `)\n  .eq('id', postId)\n  .eq('user_like.user_id', currentUserId)\n  .single();\n\n// Like a post\nawait client.database\n  .from('likes')\n  .insert([{ user_id: currentUserId, post_id: postId }]);\n\n// Unlike a post\nawait client.database\n  .from('likes')\n  .delete()\n  .eq('user_id', currentUserId)\n  .eq('post_id', postId);\n```\n\n---\n\n## Pattern 3: Nested Comments (Self-Referential)\n\n**Use when:** Building comment threads, nested replies\n\n**Schema:**\n```sql\nCREATE TABLE comments (\n  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  post_id UUID REFERENCES posts(id) ON DELETE CASCADE,\n  user_id UUID REFERENCES users(id) ON DELETE CASCADE,\n  parent_comment_id UUID REFERENCES comments(id) ON DELETE CASCADE,\n  content TEXT NOT NULL,\n  created_at TIMESTAMPTZ DEFAULT NOW(),\n  updated_at TIMESTAMPTZ DEFAULT NOW()\n);\n\nCREATE INDEX idx_comments_post ON comments(post_id);\nCREATE INDEX idx_comments_parent ON comments(parent_comment_id);\n\nALTER TABLE comments ENABLE ROW LEVEL SECURITY;\n\nCREATE POLICY \"Anyone can read comments\" ON comments\n  FOR SELECT USING (true);\n\nCREATE POLICY \"Authenticated users can comment\" ON comments\n  FOR INSERT\n  TO authenticated\n  WITH CHECK (uid() = user_id);\n\nCREATE POLICY \"Users can edit their comments\" ON comments\n  FOR UPDATE\n  TO authenticated\n  USING (uid() = user_id)\n  WITH CHECK (uid() = user_id);\n\nCREATE POLICY \"Users can delete their comments\" ON comments\n  FOR DELETE\n  TO authenticated\n  USING (uid() = user_id);\n```\n\n**Query with InsForge SDK:**\n```javascript\n// Get top-level comments with author info\nconst { data: comments } = await client.database\n  .from('comments')\n  .select('*, author:user_id(nickname, avatar_url)')\n  .eq('post_id', postId)\n  .is('parent_comment_id', null)\n  .order('created_at', { ascending: false });\n\n// Get replies to a comment\nconst { data: replies } = await client.database\n  .from('comments')\n  .select('*, author:user_id(nickname, avatar_url)')\n  .eq('parent_comment_id', commentId)\n  .order('created_at', { ascending: true });\n```\n\n---\n\n## Pattern 4: Multi-Tenant (Organization Scoped)\n\n**Use when:** Building SaaS apps where data is scoped to organizations/workspaces\n\n**Schema:**\n```sql\nCREATE TABLE organizations (\n  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  name TEXT NOT NULL,\n  created_at TIMESTAMPTZ DEFAULT NOW()\n);\n\nCREATE TABLE organization_members (\n  organization_id UUID REFERENCES organizations(id) ON DELETE CASCADE,\n  user_id UUID REFERENCES users(id) ON DELETE CASCADE,\n  role TEXT NOT NULL CHECK (role IN ('owner', 'admin', 'member')),\n  joined_at TIMESTAMPTZ DEFAULT NOW(),\n  PRIMARY KEY (organization_id, user_id)\n);\n\nCREATE TABLE projects (\n  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  organization_id UUID REFERENCES organizations(id) ON DELETE CASCADE,\n  name TEXT NOT NULL,\n  created_at TIMESTAMPTZ DEFAULT NOW()\n);\n\n-- RLS: Users can only see projects in their organizations\nALTER TABLE projects ENABLE ROW LEVEL SECURITY;\n\nCREATE POLICY \"Users see org projects\" ON projects\n  FOR SELECT\n  TO authenticated\n  USING (\n    organization_id IN (\n      SELECT organization_id\n      FROM organization_members\n      WHERE user_id = uid()\n    )\n  );\n\nCREATE POLICY \"Admins can create projects\" ON projects\n  FOR INSERT\n  TO authenticated\n  WITH CHECK (\n    organization_id IN (\n      SELECT organization_id\n      FROM organization_members\n      WHERE user_id = uid()\n      AND role IN ('owner', 'admin')\n    )\n  );\n```\n\n---\n\n## Best Practices\n\n1. **Always add indexes** on foreign key columns for performance\n2. **Use UNIQUE constraints** on junction tables to prevent duplicates\n3. **Enable RLS** on all user-facing tables\n4. **Use ON DELETE CASCADE** for automatic cleanup\n5. **Foreign key expansion** in SDK uses the syntax: `table:column(fields)`\n6. **Count aggregations** use: `table(count)`\n7. **Filter nested tables** with: `nested_table!inner()` for inner join behavior\n\n## Common Mistakes to Avoid\n\n- \u274c Forgetting indexes on foreign keys \u2192 Slow queries\n- \u274c Not using UNIQUE on junction tables \u2192 Duplicate likes/follows\n- \u274c Missing RLS policies \u2192 Data leaks\n- \u274c Using `.single()` on queries that might return multiple rows \u2192 Errors\n- \u274c Not wrapping INSERT data in arrays \u2192 PostgREST error\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "insforge-schema-patterns",
-    "description": "Database schema patterns for InsForge including social graphs, e-commerce, content publishing, and multi-tenancy with RLS policies. Use when designing data models with relationships, foreign keys, or Row Level Security."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

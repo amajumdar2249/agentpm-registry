@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031473",
   "name": "clari-performance-tuning",
   "slug": "clari-performance-tuning",
   "description": "Optimize Clari API performance with caching, batch exports, and data",
   "content": "# Clari Performance Tuning\n\n## Overview\n\nOptimize Clari export pipelines: reduce export times, cache forecast data, and parallelize multi-period exports.\n\n## Instructions\n\n### Parallel Multi-Period Export\n\n```python\nfrom concurrent.futures import ThreadPoolExecutor, as_completed\n\ndef parallel_export(\n    client,\n    forecast_name: str,\n    periods: list[str],\n    max_workers: int = 3,\n) -> dict[str, list[dict]]:\n    results = {}\n\n    def export_period(period: str) -> tuple[str, list[dict]]:\n        data = client.export_and_download(forecast_name, period)\n        return period, data.get(\"entries\", [])\n\n    with ThreadPoolExecutor(max_workers=max_workers) as executor:\n        futures = {\n            executor.submit(export_period, p): p for p in periods\n        }\n        for future in as_completed(futures):\n            period, entries = future.result()\n            results[period] = entries\n            print(f\"  {period}: {len(entries)} entries\")\n\n    return results\n```\n\n### Cache Export Results\n\n```python\nimport json\nimport hashlib\nfrom pathlib import Path\nfrom datetime import datetime, timedelta\n\nclass ExportCache:\n    def __init__(self, cache_dir: str = \".cache/clari\", ttl_hours: int = 4):\n        self.cache_dir = Path(cache_dir)\n        self.cache_dir.mkdir(parents=True, exist_ok=True)\n        self.ttl = timedelta(hours=ttl_hours)\n\n    def _key(self, forecast: str, period: str) -> str:\n        return hashlib.md5(f\"{forecast}:{period}\".encode()).hexdigest()\n\n    def get(self, forecast: str, period: str) -> list[dict] | None:\n        path = self.cache_dir / f\"{self._key(forecast, period)}.json\"\n        if not path.exists():\n            return None\n        meta = json.loads(path.read_text())\n        cached_at = datetime.fromisoformat(meta[\"cached_at\"])\n        if datetime.utcnow() - cached_at > self.ttl:\n            return None\n        return meta[\"entries\"]\n\n    def set(self, forecast: str, period: str, entries: list[dict]):\n        path = self.cache_dir / f\"{self._key(forecast, period)}.json\"\n        path.write_text(json.dumps({\n            \"cached_at\": datetime.utcnow().isoformat(),\n            \"entries\": entries,\n        }))\n```\n\n### Incremental Load to Warehouse\n\n```sql\n-- Use MERGE for incremental updates instead of full reload\nMERGE INTO clari_forecasts AS target\nUSING staging_clari AS source\nON target.owner_email = source.owner_email\n   AND target.time_period = source.time_period\n   AND target.forecast_name = source.forecast_name\nWHEN MATCHED THEN UPDATE SET\n    forecast_amount = source.forecast_amount,\n    quota_amount = source.quota_amount,\n    crm_total = source.crm_total,\n    crm_closed = source.crm_closed,\n    exported_at = source.exported_at\nWHEN NOT MATCHED THEN INSERT VALUES (\n    source.owner_name, source.owner_email, source.forecast_amount,\n    source.quota_amount, source.crm_total, source.crm_closed,\n    source.adjustment_amount, source.time_period,\n    source.exported_at, source.forecast_name\n);\n```\n\n## Performance Benchmarks\n\n| Optimization | Before | After |\n|--------------|--------|-------|\n| Sequential 4-period export | 2 min | 40s (parallel) |\n| Cache hit | 5-10s API call | <1ms |\n| Full table reload | 30s | 5s (MERGE) |\n\n## Resources\n\n- [Clari API Reference](https://developer.clari.com/documentation/external_spec)\n\n## Next Steps\n\nFor cost optimization, see `clari-cost-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clari-performance-tuning",
-    "description": "Optimize Clari API performance with caching, batch exports, and data",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

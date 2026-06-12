@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032158",
   "name": "grammarly-upgrade-migration",
   "slug": "grammarly-upgrade-migration",
   "description": "Upgrade and migration guidance for Grammarly API version changes. Use",
   "content": "# Grammarly Upgrade & Migration\n\n## Overview\n\nGrammarly exposes versioned APIs for writing analysis, AI detection, and plagiarism checking. Each API family versions independently \u2014 the Writing Score API may be on v2 while AI Detection remains on v1. Tracking these versions matters because Grammarly deprecates older API versions on a fixed timeline, and the response schemas differ significantly between versions (score breakdowns, suggestion categories, and confidence thresholds all change). Missing a version cutover means silent failures or degraded writing feedback quality.\n\n## Version Detection\n\n```typescript\nconst GRAMMARLY_BASE = \"https://api.grammarly.com/ecosystem/api\";\n\ninterface GrammarlyVersionMap {\n  scores: string;\n  aiDetection: string;\n  plagiarism: string;\n  latestAvailable: Record<string, string>;\n}\n\nasync function detectGrammarlyVersions(apiKey: string): Promise<GrammarlyVersionMap> {\n  const endpoints = {\n    scores: `${GRAMMARLY_BASE}/v2/scores`,\n    aiDetection: `${GRAMMARLY_BASE}/v1/ai-detection`,\n    plagiarism: `${GRAMMARLY_BASE}/v1/plagiarism`,\n  };\n\n  const versions: Record<string, string> = {};\n  for (const [api, url] of Object.entries(endpoints)) {\n    const res = await fetch(url, {\n      method: \"HEAD\",\n      headers: { Authorization: `Bearer ${apiKey}` },\n    });\n    versions[api] = res.headers.get(\"x-grammarly-api-version\") ?? \"unknown\";\n    const deprecated = res.headers.get(\"x-grammarly-deprecated\");\n    if (deprecated) console.warn(`${api} endpoint deprecated: ${deprecated}`);\n  }\n  return { scores: \"v2\", aiDetection: \"v1\", plagiarism: \"v1\", latestAvailable: versions };\n}\n```\n\n## Migration Checklist\n\n- [ ] Audit codebase for all `api.grammarly.com` endpoint references\n- [ ] Map each endpoint to its current API version (v1 vs. v2)\n- [ ] Check if Writing Score v2 response includes new sub-score categories\n- [ ] Verify AI Detection confidence threshold changes between versions\n- [ ] Update plagiarism check response parser if source attribution format changed\n- [ ] Test OAuth token flow \u2014 scope names may differ between API versions\n- [ ] Validate suggestion category enums (clarity, engagement, delivery, correctness)\n- [ ] Update error handling for new rate limit headers in v2\n- [ ] Check if text submission size limits changed between versions\n- [ ] Run A/B comparison of v1 vs. v2 scores on sample corpus to verify parity\n\n## Schema Migration\n\n```typescript\n// Grammarly scores response changed from flat scores to structured breakdown\ninterface OldScoreResponse {\n  overall: number;\n  correctness: number;\n  clarity: number;\n  engagement: number;\n  delivery: number;\n}\n\ninterface NewScoreResponse {\n  overall: { score: number; label: string };\n  dimensions: Array<{\n    name: \"correctness\" | \"clarity\" | \"engagement\" | \"delivery\";\n    score: number;\n    label: string;\n    suggestions: Array<{ category: string; message: string; severity: \"critical\" | \"warning\" | \"info\" }>;\n  }>;\n  metadata: { wordCount: number; readingTime: number; apiVersion: string };\n}\n\nfunction migrateScoreResponse(old: OldScoreResponse): NewScoreResponse {\n  const toLabel = (s: number) => (s >= 80 ? \"Strong\" : s >= 60 ? \"Good\" : \"Needs work\");\n  return {\n    overall: { score: old.overall, label: toLabel(old.overall) },\n    dimensions: ([\"correctness\", \"clarity\", \"engagement\", \"delivery\"] as const).map((name) => ({\n      name,\n      score: old[name],\n      label: toLabel(old[name]),\n      suggestions: [],\n    })),\n    metadata: { wordCount: 0, readingTime: 0, apiVersion: \"v1-migrated\" },\n  };\n}\n```\n\n## Rollback Strategy\n\n```typescript\nclass GrammarlyClient {\n  private versionMap: Record<string, string> = { scores: \"v2\", aiDetection: \"v1\", plagiarism: \"v1\" };\n  private fallbackMap: Record<string, string> = { scores: \"v1\", aiDetection: \"v1\", plagiarism: \"v1\" };\n\n  constructor(private apiKey: string) {}\n\n  async checkText(text: string, api: \"scores\" | \"aiDetection\" | \"plagiarism\"): Promise<any> {\n    const version = this.versionMap[api];\n    try {\n      const res = await fetch(`https://api.grammarly.com/ecosystem/api/${version}/${api}`, {\n        method: \"POST\",\n        headers: { Authorization: `Bearer ${this.apiKey}`, \"Content-Type\": \"application/json\" },\n        body: JSON.stringify({ text }),\n      });\n      if (!res.ok) throw new Error(`Grammarly ${api} ${res.status}`);\n      return await res.json();\n    } catch (err) {\n      const fallback = this.fallbackMap[api];\n      if (fallback !== version) {\n        console.warn(`Falling back ${api} from ${version} to ${fallback}`);\n        this.versionMap[api] = fallback;\n        return this.checkText(text, api);\n      }\n      throw err;\n    }\n  }\n}\n```\n\n## Error Handling\n\n| Migration Issue | Symptom | Fix |\n|----------------|---------|-----|\n| Score dimension renamed | Response missing `engagement`, has `tone` instead | Update parser to map new dimension names to internal schema |\n| API version sunset | `410 Gone` on v1 scores endpoint | Migrate all calls to v2 and update response parsing |\n| OAuth scope mismatch | `403` after upgrading API version | Re-authorize with scopes matching new version requirements |\n| Text length limit changed | `413 Payload Too Large` on previously working requests | Chunk text into smaller segments per new version limits |\n| Rate limit structure changed | `429` without `X-RateLimit-Reset` header | Switch to `Retry-After` header or implement exponential backoff |\n\n## Resources\n\n- [Grammarly Developer Portal](https://developer.grammarly.com/)\n- [Grammarly API Changelog](https://developer.grammarly.com/changelog)\n\n## Next Steps\n\nFor CI pipeline integration, see `grammarly-ci-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "grammarly-upgrade-migration",
-    "description": "Upgrade and migration guidance for Grammarly API version changes. Use",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

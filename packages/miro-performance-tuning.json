@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032637",
   "name": "miro-performance-tuning",
   "slug": "miro-performance-tuning",
   "description": "Optimize Miro REST API v2 performance with caching, cursor pagination,",
   "content": "# Miro Performance Tuning\n\n## Overview\n\nOptimize Miro REST API v2 throughput and latency. Key levers: minimize API calls with cursor pagination, cache board/item data, batch writes with controlled concurrency, and use connection pooling.\n\n## Latency Benchmarks\n\nTypical latencies for `api.miro.com` (US region):\n\n| Operation | Endpoint | P50 | P95 | Credits |\n|-----------|----------|-----|-----|---------|\n| Get board | `GET /v2/boards/{id}` | 80ms | 200ms | Level 1 |\n| List items (50) | `GET /v2/boards/{id}/items?limit=50` | 120ms | 350ms | Level 1 |\n| Create sticky note | `POST /v2/boards/{id}/sticky_notes` | 150ms | 400ms | Level 2 |\n| Create connector | `POST /v2/boards/{id}/connectors` | 160ms | 420ms | Level 2 |\n| Update item | `PATCH /v2/boards/{id}/items/{id}` | 130ms | 350ms | Level 2 |\n| Delete item | `DELETE /v2/boards/{id}/items/{id}` | 100ms | 280ms | Level 2 |\n\n## Cursor Pagination (Eliminate Over-Fetching)\n\nMiro v2 uses cursor-based pagination. Fetch only what you need.\n\n```typescript\n// Efficient paginated iterator\nasync function* paginateItems(\n  boardId: string,\n  options: { type?: string; limit?: number } = {}\n): AsyncGenerator<MiroBoardItem> {\n  const limit = options.limit ?? 50;  // Max 50 per page\n  let cursor: string | undefined;\n\n  do {\n    const params = new URLSearchParams({ limit: String(limit) });\n    if (options.type) params.set('type', options.type);\n    if (cursor) params.set('cursor', cursor);\n\n    const response = await fetch(\n      `https://api.miro.com/v2/boards/${boardId}/items?${params}`,\n      { headers: { 'Authorization': `Bearer ${token}` } }\n    );\n\n    const page = await response.json();\n    for (const item of page.data) {\n      yield item;\n    }\n\n    cursor = page.cursor;  // undefined when no more pages\n  } while (cursor);\n}\n\n// Usage: process items without loading entire board into memory\nfor await (const item of paginateItems(boardId, { type: 'sticky_note' })) {\n  await processItem(item);\n}\n```\n\n## Caching Strategy\n\n### In-Memory Cache (Single Instance)\n\n```typescript\nimport { LRUCache } from 'lru-cache';\n\nconst boardCache = new LRUCache<string, unknown>({\n  max: 500,                    // Max 500 cached entries\n  ttl: 60_000,                 // 1 minute TTL\n  updateAgeOnGet: true,        // Extend TTL on access\n  updateAgeOnHas: false,\n});\n\nasync function getCachedBoard(boardId: string): Promise<MiroBoard> {\n  const cacheKey = `board:${boardId}`;\n  const cached = boardCache.get(cacheKey);\n  if (cached) return cached as MiroBoard;\n\n  const board = await miroFetch(`/v2/boards/${boardId}`);\n  boardCache.set(cacheKey, board);\n  return board;\n}\n\n// Invalidate on webhook events\nfunction onBoardEvent(event: MiroBoardEvent) {\n  boardCache.delete(`board:${event.boardId}`);\n  boardCache.delete(`items:${event.boardId}`);\n}\n```\n\n### Redis Cache (Distributed)\n\n```typescript\nimport Redis from 'ioredis';\n\nconst redis = new Redis(process.env.REDIS_URL);\n\nasync function getCachedItems(boardId: string): Promise<MiroBoardItem[]> {\n  const key = `miro:items:${boardId}`;\n  const cached = await redis.get(key);\n  if (cached) return JSON.parse(cached);\n\n  // Fetch all items\n  const items: MiroBoardItem[] = [];\n  for await (const item of paginateItems(boardId)) {\n    items.push(item);\n  }\n\n  // Cache for 2 minutes (boards with active editing should use shorter TTL)\n  await redis.setex(key, 120, JSON.stringify(items));\n  return items;\n}\n\n// Webhook-driven cache invalidation\nasync function invalidateOnEvent(event: MiroBoardEvent) {\n  const keys = [\n    `miro:items:${event.boardId}`,\n    `miro:board:${event.boardId}`,\n  ];\n  await redis.del(...keys);\n}\n```\n\n## Controlled Concurrency for Bulk Operations\n\n```typescript\nimport PQueue from 'p-queue';\n\n// Create items in parallel with controlled concurrency\nasync function bulkCreateStickyNotes(\n  boardId: string,\n  notes: Array<{ content: string; color: string; x: number; y: number }>\n): Promise<string[]> {\n  const queue = new PQueue({\n    concurrency: 5,       // Max 5 parallel requests\n    interval: 1000,       // Per-second window\n    intervalCap: 10,      // Max 10 requests per second\n  });\n\n  const ids: string[] = [];\n\n  for (const note of notes) {\n    queue.add(async () => {\n      const result = await miroFetch(`/v2/boards/${boardId}/sticky_notes`, 'POST', {\n        data: { content: note.content, shape: 'square' },\n        style: { fillColor: note.color },\n        position: { x: note.x, y: note.y },\n      });\n      ids.push(result.id);\n    });\n  }\n\n  await queue.onIdle();  // Wait for all to complete\n  return ids;\n}\n\n// Example: Create a grid of 50 sticky notes efficiently\nconst notes = Array.from({ length: 50 }, (_, i) => ({\n  content: `Note ${i + 1}`,\n  color: 'light_yellow',\n  x: (i % 10) * 250,\n  y: Math.floor(i / 10) * 250,\n}));\n\nconst createdIds = await bulkCreateStickyNotes(boardId, notes);\nconsole.log(`Created ${createdIds.length} sticky notes`);\n```\n\n## Connection Pooling\n\n```typescript\nimport { Agent } from 'https';\n\n// Reuse TCP connections across requests\nconst httpsAgent = new Agent({\n  keepAlive: true,\n  maxSockets: 10,        // Max 10 concurrent connections to api.miro.com\n  maxFreeSockets: 5,     // Keep 5 idle connections in pool\n  timeout: 30000,        // Socket timeout\n});\n\nasync function miroFetchPooled(path: string, options: RequestInit = {}) {\n  // Note: Node.js native fetch doesn't support custom agents directly.\n  // Use undici or node-fetch for connection pooling.\n  const { default: fetch } = await import('node-fetch');\n\n  return fetch(`https://api.miro.com${path}`, {\n    ...options,\n    agent: httpsAgent,\n    headers: {\n      'Authorization': `Bearer ${token}`,\n      'Content-Type': 'application/json',\n      ...options.headers,\n    },\n  });\n}\n```\n\n## Performance Monitoring\n\n```typescript\nasync function instrumentedMiroFetch<T>(\n  operation: string,\n  path: string,\n  method = 'GET',\n  body?: unknown,\n): Promise<{ data: T; metrics: RequestMetrics }> {\n  const start = performance.now();\n  const response = await fetch(`https://api.miro.com${path}`, {\n    method,\n    headers: {\n      'Authorization': `Bearer ${token}`,\n      'Content-Type': 'application/json',\n    },\n    ...(body ? { body: JSON.stringify(body) } : {}),\n  });\n\n  const duration = performance.now() - start;\n  const metrics: RequestMetrics = {\n    operation,\n    path,\n    method,\n    status: response.status,\n    durationMs: Math.round(duration),\n    rateLimitRemaining: parseInt(response.headers.get('X-RateLimit-Remaining') ?? '0', 10),\n    rateLimitReset: response.headers.get('X-RateLimit-Reset') ?? '',\n  };\n\n  // Log for dashboarding\n  console.log('[MIRO_PERF]', JSON.stringify(metrics));\n\n  const data = response.status !== 204 ? await response.json() : null;\n  return { data: data as T, metrics };\n}\n```\n\n## Optimization Checklist\n\n| Technique | Impact | Effort | When to Use |\n|-----------|--------|--------|-------------|\n| Type-filtered queries | High | Low | Always \u2014 `?type=sticky_note` reduces payload |\n| LRU cache | High | Low | Read-heavy workloads |\n| Redis cache + webhook invalidation | Very High | Medium | Multi-instance deployments |\n| Controlled concurrency | High | Low | Bulk create/update operations |\n| Connection pooling | Medium | Low | High request volume |\n| Cursor pagination | High | Low | Always \u2014 avoid loading full board |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Cache stale data | Long TTL + frequent edits | Shorten TTL or use webhook invalidation |\n| Concurrency errors | Too many parallel requests | Reduce `concurrency` in PQueue |\n| Connection pool exhausted | Max sockets too low | Increase `maxSockets` |\n| Pagination cursor expired | Long gap between pages | Re-start pagination from beginning |\n\n## Resources\n\n- [Get Items on Board](https://developers.miro.com/reference/get-items)\n- [Rate Limiting](https://developers.miro.com/reference/rate-limiting)\n- [LRU Cache](https://github.com/isaacs/node-lru-cache)\n- [p-queue](https://github.com/sindresorhus/p-queue)\n\n## Next Steps\n\nFor cost optimization, see `miro-cost-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "miro-performance-tuning",
-    "description": "Optimize Miro REST API v2 performance with caching, cursor pagination,",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032586",
   "name": "maintainx-deploy-integration",
   "slug": "maintainx-deploy-integration",
   "description": "Deploy MaintainX integrations to production environments.",
   "content": "# MaintainX Deploy Integration\n\n## Overview\n\nDeploy MaintainX integrations to production using Docker, Google Cloud Run, and Kubernetes with proper health checks and secret management.\n\n## Prerequisites\n\n- MaintainX integration tested and passing CI\n- Docker installed\n- Cloud platform account (GCP recommended)\n- `MAINTAINX_API_KEY` for production environment\n\n## Instructions\n\n### Step 1: Dockerfile\n\n```dockerfile\n# Dockerfile\nFROM node:20-slim AS builder\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci --production=false\nCOPY tsconfig.json ./\nCOPY src/ ./src/\nRUN npm run build\n\nFROM node:20-slim\nWORKDIR /app\nRUN addgroup --system app && adduser --system --ingroup app app\nCOPY --from=builder /app/dist ./dist\nCOPY --from=builder /app/node_modules ./node_modules\nCOPY package*.json ./\nUSER app\nEXPOSE 3000\nHEALTHCHECK --interval=30s --timeout=5s --retries=3 \\\n  CMD curl -f http://localhost:3000/health || exit 1\nCMD [\"node\", \"dist/index.js\"]\n```\n\n### Step 2: Health Check Endpoint\n\n```typescript\n// src/health.ts\nimport express from 'express';\nimport { MaintainXClient } from './client';\n\nconst app = express();\n\napp.get('/health', async (req, res) => {\n  const checks: Record<string, string> = {\n    server: 'ok',\n    apiKey: process.env.MAINTAINX_API_KEY ? 'configured' : 'missing',\n  };\n\n  try {\n    const client = new MaintainXClient();\n    await client.getUsers({ limit: 1 });\n    checks.maintainxApi = 'ok';\n  } catch (err: any) {\n    checks.maintainxApi = `error: ${err.response?.status || err.message}`;\n  }\n\n  const allOk = Object.values(checks).every((v) => v === 'ok' || v === 'configured');\n  res.status(allOk ? 200 : 503).json({\n    status: allOk ? 'healthy' : 'degraded',\n    checks,\n    uptime: process.uptime(),\n    timestamp: new Date().toISOString(),\n  });\n});\n\napp.get('/ready', (req, res) => {\n  res.status(process.env.MAINTAINX_API_KEY ? 200 : 503).json({\n    ready: !!process.env.MAINTAINX_API_KEY,\n  });\n});\n\nexport { app };\n```\n\n### Step 3: Deploy to Google Cloud Run\n\n```bash\n# Build and push container\nPROJECT_ID=\"your-gcp-project\"\nREGION=\"us-central1\"\nSERVICE=\"maintainx-integration\"\n\ngcloud builds submit --tag gcr.io/$PROJECT_ID/$SERVICE\n\n# Deploy with secrets\ngcloud run deploy $SERVICE \\\n  --image gcr.io/$PROJECT_ID/$SERVICE \\\n  --region $REGION \\\n  --platform managed \\\n  --set-secrets \"MAINTAINX_API_KEY=maintainx-api-key:latest\" \\\n  --min-instances 1 \\\n  --max-instances 10 \\\n  --memory 512Mi \\\n  --cpu 1 \\\n  --port 3000 \\\n  --allow-unauthenticated  # Only if webhook endpoint\n```\n\n### Step 4: Docker Compose for Multi-Service\n\n```yaml\n# docker-compose.yml\nservices:\n  maintainx-sync:\n    build: .\n    env_file: .env.production\n    ports: [\"3000:3000\"]\n    restart: unless-stopped\n    healthcheck:\n      test: [\"CMD\", \"curl\", \"-f\", \"http://localhost:3000/health\"]\n      interval: 30s\n      timeout: 5s\n      retries: 3\n\n  redis:\n    image: redis:7-alpine\n    ports: [\"6379:6379\"]\n    volumes: [\"redis-data:/data\"]\n\nvolumes:\n  redis-data:\n```\n\n### Step 5: Kubernetes Deployment\n\n```yaml\n# k8s/deployment.yaml\napiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: maintainx-integration\nspec:\n  replicas: 2\n  selector:\n    matchLabels:\n      app: maintainx-integration\n  template:\n    metadata:\n      labels:\n        app: maintainx-integration\n    spec:\n      containers:\n        - name: app\n          image: gcr.io/your-project/maintainx-integration:latest\n          ports:\n            - containerPort: 3000\n          env:\n            - name: MAINTAINX_API_KEY\n              valueFrom:\n                secretKeyRef:\n                  name: maintainx-secrets\n                  key: api-key\n          livenessProbe:\n            httpGet:\n              path: /health\n              port: 3000\n            initialDelaySeconds: 10\n            periodSeconds: 30\n          readinessProbe:\n            httpGet:\n              path: /ready\n              port: 3000\n            initialDelaySeconds: 5\n            periodSeconds: 10\n          resources:\n            requests:\n              memory: \"256Mi\"\n              cpu: \"250m\"\n            limits:\n              memory: \"512Mi\"\n              cpu: \"500m\"\n---\napiVersion: v1\nkind: Service\nmetadata:\n  name: maintainx-integration\nspec:\n  selector:\n    app: maintainx-integration\n  ports:\n    - port: 80\n      targetPort: 3000\n  type: ClusterIP\n```\n\n```bash\n# Create secret and deploy\nkubectl create secret generic maintainx-secrets \\\n  --from-literal=api-key=\"$MAINTAINX_API_KEY\"\n\nkubectl apply -f k8s/deployment.yaml\nkubectl rollout status deployment/maintainx-integration\n```\n\n## Output\n\n- Multi-stage Dockerfile with non-root user and health check\n- `/health` and `/ready` endpoints for container orchestration\n- Google Cloud Run deployment with Secret Manager integration\n- Docker Compose setup for local production testing\n- Kubernetes manifests with probes, secrets, and resource limits\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Container crashes on start | Missing `MAINTAINX_API_KEY` | Verify secret is mounted correctly |\n| Health check fails | API key expired or network issue | Check `/health` response, rotate key |\n| High memory usage | Unbounded caching or data retention | Set memory limits, add cache eviction |\n| Cold start latency | Cloud Run scaling from zero | Set `min-instances: 1` |\n\n## Resources\n\n- [MaintainX API Reference](https://developer.maintainx.com/reference)\n- [Google Cloud Run Docs](https://cloud.google.com/run/docs)\n- [Kubernetes Deployments](https://kubernetes.io/docs/concepts/workloads/controllers/deployment/)\n- [Docker Best Practices](https://docs.docker.com/build/building/best-practices/)\n\n## Next Steps\n\nFor webhook integration, see `maintainx-webhooks-events`.\n\n## Examples\n\n**AWS Lambda deployment (serverless)**:\n\n```typescript\n// lambda.ts\nimport { APIGatewayProxyHandler } from 'aws-lambda';\nimport { MaintainXClient } from './client';\n\nexport const handler: APIGatewayProxyHandler = async (event) => {\n  const client = new MaintainXClient(process.env.MAINTAINX_API_KEY);\n\n  if (event.path === '/webhook' && event.httpMethod === 'POST') {\n    const body = JSON.parse(event.body || '{}');\n    await processWebhook(body);\n    return { statusCode: 200, body: '{\"ok\":true}' };\n  }\n\n  return { statusCode: 404, body: '{\"error\":\"not found\"}' };\n};\n```\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "maintainx-deploy-integration",
-    "description": "Deploy MaintainX integrations to production environments.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(docker:*), Bash(kubectl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

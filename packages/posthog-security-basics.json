@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032952",
   "name": "posthog-security-basics",
   "slug": "posthog-security-basics",
   "description": "Secure PostHog integration: API key management, project key vs personal",
   "content": "# PostHog Security Basics\n\n## Overview\n\nSecure PostHog API key management, least-privilege access, and secret rotation. PostHog has two key types with very different security profiles: the Project API Key (`phc_...`) is intentionally public and safe to include in frontend bundles, while the Personal API Key (`phx_...`) grants admin access and must never be exposed.\n\n## Prerequisites\n\n- PostHog account with admin access\n- Understanding of environment variable management\n- `.gitignore` configured\n\n## Instructions\n\n### Step 1: Understand Key Security Profiles\n\n| Key Type | Prefix | Exposure Risk | Capabilities |\n|----------|--------|--------------|-------------|\n| Project API Key | `phc_` | **Low** (designed to be public) | Capture events, evaluate flags, identify users |\n| Personal API Key | `phx_` | **Critical** (full admin access) | CRUD flags, read persons, query insights, delete data |\n\n```bash\n# .env (NEVER commit)\nNEXT_PUBLIC_POSTHOG_KEY=phc_abc123   # Safe for frontend (NEXT_PUBLIC_ prefix)\nPOSTHOG_PERSONAL_API_KEY=phx_xyz789  # Server-only \u2014 NEVER in frontend code\nPOSTHOG_PROJECT_ID=12345\n\n# .gitignore\n.env\n.env.local\n.env.*.local\n```\n\n### Step 2: Create Scoped Personal API Keys\n\n```bash\nset -euo pipefail\n# Create a read-only key for BI dashboards\ncurl -X POST \"https://app.posthog.com/api/personal_api_keys/\" \\\n  -H \"Authorization: Bearer $POSTHOG_PERSONAL_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"label\": \"bi-dashboard-readonly\",\n    \"scopes\": [\"insight:read\", \"dashboard:read\", \"query:read\"]\n  }'\n\n# Create a key scoped to feature flags only\ncurl -X POST \"https://app.posthog.com/api/personal_api_keys/\" \\\n  -H \"Authorization: Bearer $POSTHOG_PERSONAL_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"label\": \"feature-flag-service\",\n    \"scopes\": [\"feature_flag:read\", \"feature_flag:write\"]\n  }'\n```\n\n### Step 3: Rotate Personal API Keys\n\n```bash\nset -euo pipefail\n# 1. Create new key in PostHog Settings > Personal API Keys\n# 2. Update secret in your deployment platform\n# Vercel:\nvercel env rm POSTHOG_PERSONAL_API_KEY production\nvercel env add POSTHOG_PERSONAL_API_KEY production\n\n# GitHub Actions:\ngh secret set POSTHOG_PERSONAL_API_KEY --body \"phx_new_key_here\"\n\n# 3. Verify new key works\ncurl -s \"https://app.posthog.com/api/projects/\" \\\n  -H \"Authorization: Bearer $POSTHOG_PERSONAL_API_KEY\" | jq '.[0].name'\n\n# 4. Delete old key in PostHog dashboard\n```\n\n### Step 4: Prevent Key Leaks\n\n```bash\n# Git pre-commit hook to catch PostHog personal keys\n# .git/hooks/pre-commit (or use husky)\n#!/bin/bash\nif git diff --cached --diff-filter=ACM | grep -qE 'phx_[a-zA-Z0-9]{20,}'; then\n  echo \"ERROR: PostHog personal API key (phx_) detected in staged files!\"\n  echo \"Remove it and use environment variables instead.\"\n  exit 1\nfi\n```\n\n```yaml\n# .github/secret-scanning.yml (or use GitHub's built-in secret scanning)\npatterns:\n  - name: PostHog Personal API Key\n    regex: 'phx_[a-zA-Z0-9]{20,}'\n    severity: critical\n```\n\n### Step 5: Server-Side Key Isolation\n\n```typescript\n// lib/posthog-server.ts \u2014 Personal key never leaves the server\nimport { PostHog } from 'posthog-node';\n\nconst posthog = new PostHog(process.env.NEXT_PUBLIC_POSTHOG_KEY!, {\n  host: 'https://us.i.posthog.com',\n  // personalApiKey ONLY used server-side for local flag evaluation\n  personalApiKey: process.env.POSTHOG_PERSONAL_API_KEY,\n});\n\n// API routes that proxy admin operations\n// Never expose the personal key to the client\nexport async function getFeatureFlagsForUser(userId: string) {\n  return posthog.getAllFlags(userId);\n}\n```\n\n### Step 6: Audit API Key Usage\n\n```bash\nset -euo pipefail\n# Check activity log for API key operations\ncurl \"https://app.posthog.com/api/projects/$POSTHOG_PROJECT_ID/activity_log/\" \\\n  -H \"Authorization: Bearer $POSTHOG_PERSONAL_API_KEY\" | \\\n  jq '[.results[] | select(.scope == \"PersonalAPIKey\") | {\n    user: .user.email,\n    activity: .activity,\n    created_at\n  }]'\n```\n\n## Security Checklist\n\n- [ ] Project key (`phc_`) used for all frontend/capture code\n- [ ] Personal key (`phx_`) only on server, never in frontend bundles\n- [ ] `.env` files in `.gitignore`\n- [ ] Separate keys per environment (dev/staging/prod)\n- [ ] Scoped personal keys (not full admin for every service)\n- [ ] Git pre-commit hook scanning for `phx_` keys\n- [ ] Key rotation documented and scheduled (quarterly)\n\n## Error Handling\n\n| Issue | Detection | Fix |\n|-------|-----------|-----|\n| Personal key in git history | GitHub secret scanning alert | Rotate key immediately, revoke old one |\n| Wrong key type | 401 on admin API | Use `phx_` for admin, `phc_` for capture |\n| Overprivileged key | Audit log shows unexpected operations | Create scoped key, revoke broad one |\n| Key exposed in logs | Log scrubbing finds `phx_` | Redact logs, rotate key |\n\n## Output\n\n- Environment-specific API key configuration\n- Scoped personal API keys for least privilege\n- Key rotation procedure\n- Git pre-commit hook for leak prevention\n- Audit log queries for key usage monitoring\n\n## Resources\n\n- [PostHog API Overview](https://posthog.com/docs/api)\n- [PostHog Privacy & Security](https://posthog.com/docs/privacy)\n\n## Next Steps\n\nFor production deployment, see `posthog-prod-checklist`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "posthog-security-basics",
-    "description": "Secure PostHog integration: API key management, project key vs personal",
-    "Trigger": "posthog security\", \"posthog secrets\", \"secure posthog\",",
-    "allowed-tools": "Read, Write, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

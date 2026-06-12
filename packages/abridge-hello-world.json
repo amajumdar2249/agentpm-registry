@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031128",
   "name": "abridge-hello-world",
   "slug": "abridge-hello-world",
   "description": "Create a minimal Abridge ambient AI clinical documentation example.",
   "content": "# Abridge Hello World\n\n## Overview\n\nMinimal working example demonstrating Abridge's ambient clinical documentation. This creates a simulated encounter session, sends audio/transcript data, and receives a structured clinical note.\n\n## Prerequisites\n\n- Completed `abridge-install-auth` setup\n- Abridge sandbox credentials configured\n- Node.js 18+ with TypeScript\n\n## Instructions\n\n### Step 1: Create Project Structure\n\n```bash\nmkdir abridge-hello-world && cd abridge-hello-world\nnpm init -y\nnpm install axios dotenv typescript @types/node\nnpx tsc --init --target ES2022 --module NodeNext --moduleResolution NodeNext\n```\n\n### Step 2: Build the Encounter Session Client\n\n```typescript\n// src/encounter-session.ts\nimport axios, { AxiosInstance } from 'axios';\n\ninterface EncounterSession {\n  session_id: string;\n  patient_id: string;\n  provider_id: string;\n  encounter_type: 'outpatient' | 'inpatient' | 'emergency';\n  status: 'active' | 'processing' | 'completed';\n  created_at: string;\n}\n\ninterface ClinicalNote {\n  note_id: string;\n  session_id: string;\n  sections: {\n    chief_complaint: string;\n    history_present_illness: string;\n    review_of_systems: string;\n    physical_exam: string;\n    assessment: string;\n    plan: string;\n  };\n  icd10_codes: Array<{ code: string; description: string }>;\n  cpt_codes: Array<{ code: string; description: string }>;\n  confidence_score: number;\n  source_citations: Array<{\n    section: string;\n    text: string;\n    audio_timestamp_start: number;\n    audio_timestamp_end: number;\n  }>;\n}\n\nclass AbridgeClient {\n  private api: AxiosInstance;\n\n  constructor() {\n    this.api = axios.create({\n      baseURL: process.env.ABRIDGE_SANDBOX_URL || 'https://sandbox.api.abridge.com/v1',\n      headers: {\n        'Authorization': `Bearer ${process.env.ABRIDGE_CLIENT_SECRET}`,\n        'X-Org-Id': process.env.ABRIDGE_ORG_ID!,\n        'Content-Type': 'application/json',\n      },\n      timeout: 30000,\n    });\n  }\n\n  async createSession(\n    patientId: string,\n    providerId: string,\n    encounterType: EncounterSession['encounter_type'] = 'outpatient'\n  ): Promise<EncounterSession> {\n    const { data } = await this.api.post('/sessions', {\n      patient_id: patientId,\n      provider_id: providerId,\n      encounter_type: encounterType,\n      specialty: 'internal_medicine',\n      language: 'en',\n    });\n    return data;\n  }\n\n  async submitTranscript(sessionId: string, transcript: string): Promise<void> {\n    await this.api.post(`/sessions/${sessionId}/transcript`, {\n      text: transcript,\n      format: 'plain_text',\n    });\n  }\n\n  async generateNote(sessionId: string): Promise<ClinicalNote> {\n    // Trigger note generation\n    await this.api.post(`/sessions/${sessionId}/generate`);\n\n    // Poll for completion (Abridge processes asynchronously)\n    let attempts = 0;\n    while (attempts < 30) {\n      const { data: session } = await this.api.get(`/sessions/${sessionId}`);\n      if (session.status === 'completed') {\n        const { data: note } = await this.api.get(`/sessions/${sessionId}/note`);\n        return note;\n      }\n      await new Promise(r => setTimeout(r, 2000));\n      attempts++;\n    }\n    throw new Error('Note generation timed out after 60s');\n  }\n}\n\nexport { AbridgeClient, EncounterSession, ClinicalNote };\n```\n\n### Step 3: Run the Hello World Example\n\n```typescript\n// src/main.ts\nimport 'dotenv/config';\nimport { AbridgeClient } from './encounter-session';\n\n// Sample clinical conversation transcript (de-identified)\nconst SAMPLE_TRANSCRIPT = `\nDoctor: Good morning, what brings you in today?\nPatient: I've been having this persistent cough for about two weeks now.\nDoctor: Is it a dry cough or are you producing any sputum?\nPatient: It's mostly dry, but sometimes I cough up a little clear mucus.\nDoctor: Any fever, chills, or shortness of breath?\nPatient: No fever, but I do feel a little short of breath when I climb stairs.\nDoctor: Are you a smoker?\nPatient: No, I quit about five years ago. I smoked for about ten years before that.\nDoctor: Let me listen to your lungs. Take a deep breath... Okay, I hear some mild\n  wheezing in both lung fields. Your oxygen saturation is 97%.\nDoctor: I think this is likely a post-viral cough, possibly with some mild reactive\n  airway disease given your smoking history. I'd like to start you on an inhaler\n  and have you come back in two weeks. If the cough persists, we'll get a chest X-ray.\nPatient: Sounds good, thank you.\n`;\n\nasync function main() {\n  const client = new AbridgeClient();\n\n  // 1. Create encounter session\n  console.log('Creating encounter session...');\n  const session = await client.createSession('patient_demo_001', 'provider_demo_001');\n  console.log(`Session created: ${session.session_id}`);\n\n  // 2. Submit transcript\n  console.log('Submitting transcript...');\n  await client.submitTranscript(session.session_id, SAMPLE_TRANSCRIPT);\n  console.log('Transcript submitted');\n\n  // 3. Generate clinical note\n  console.log('Generating clinical note (this may take 10-30 seconds)...');\n  const note = await client.generateNote(session.session_id);\n\n  console.log('\\n=== Generated Clinical Note ===');\n  console.log(`Chief Complaint: ${note.sections.chief_complaint}`);\n  console.log(`Assessment: ${note.sections.assessment}`);\n  console.log(`Plan: ${note.sections.plan}`);\n  console.log(`\\nICD-10 Codes: ${note.icd10_codes.map(c => c.code).join(', ')}`);\n  console.log(`Confidence: ${(note.confidence_score * 100).toFixed(1)}%`);\n  console.log(`Source Citations: ${note.source_citations.length} segments linked`);\n}\n\nmain().catch(console.error);\n```\n\n## Output\n\n- Encounter session created in Abridge sandbox\n- Transcript processed through Abridge's ambient AI engine\n- Structured SOAP note with ICD-10/CPT codes\n- Source citations mapping AI output to conversation segments\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `401 Unauthorized` | Invalid sandbox credentials | Re-check `.env.local` credentials |\n| `422 Invalid specialty` | Unsupported specialty code | Use supported values from API docs |\n| Note generation timeout | Large/complex transcript | Increase polling timeout beyond 60s |\n| Empty note sections | Transcript too short | Provide at least 30 seconds of conversation |\n| Missing ICD codes | Ambiguous clinical content | Ensure transcript includes clear diagnoses |\n\n## Resources\n\n- [Abridge Product Overview](https://www.abridge.com/product)\n- [Abridge AI Technology](https://www.abridge.com/ai)\n- [HL7 FHIR Clinical Notes](https://hl7.org/fhir/clinicalnotes.html)\n\n## Next Steps\n\nProceed to `abridge-local-dev-loop` for development workflow with live audio capture.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "abridge-hello-world",
-    "description": "Create a minimal Abridge ambient AI clinical documentation example.",
-    "Trigger": "abridge hello world\", \"abridge example\", \"abridge quick start\", \"test",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

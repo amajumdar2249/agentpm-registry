@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031459",
   "name": "castai-sdk-patterns",
   "slug": "castai-sdk-patterns",
   "description": "Production-ready CAST AI REST API wrapper patterns in TypeScript and",
   "content": "# CAST AI SDK Patterns\n\n## Overview\n\nCAST AI uses a REST API with `X-API-Key` header authentication. There is no official SDK -- build typed wrappers around `fetch` or `requests`. These patterns cover singleton clients, typed responses, retry with backoff, and multi-cluster management.\n\n## Prerequisites\n\n- Completed `castai-install-auth` setup\n- TypeScript 5+ or Python 3.10+\n- Familiarity with async/await patterns\n\n## Instructions\n\n### Step 1: TypeScript API Client\n\n```typescript\n// src/castai/client.ts\ninterface CastAIConfig {\n  apiKey: string;\n  baseUrl?: string;\n  timeoutMs?: number;\n}\n\ninterface CastAICluster {\n  id: string;\n  name: string;\n  status: string;\n  providerType: \"eks\" | \"gke\" | \"aks\";\n  agentStatus: string;\n  createdAt: string;\n}\n\ninterface CastAISavings {\n  monthlySavings: number;\n  savingsPercentage: number;\n  currentMonthlyCost: number;\n  optimizedMonthlyCost: number;\n}\n\ninterface CastAINode {\n  name: string;\n  instanceType: string;\n  lifecycle: \"on-demand\" | \"spot\";\n  allocatableCpu: string;\n  allocatableMemory: string;\n  zone: string;\n}\n\nclass CastAIClient {\n  private apiKey: string;\n  private baseUrl: string;\n  private timeoutMs: number;\n\n  constructor(config: CastAIConfig) {\n    this.apiKey = config.apiKey;\n    this.baseUrl = config.baseUrl ?? \"https://api.cast.ai\";\n    this.timeoutMs = config.timeoutMs ?? 30000;\n  }\n\n  private async request<T>(path: string, options?: RequestInit): Promise<T> {\n    const controller = new AbortController();\n    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);\n\n    try {\n      const response = await fetch(`${this.baseUrl}${path}`, {\n        ...options,\n        headers: {\n          \"X-API-Key\": this.apiKey,\n          \"Content-Type\": \"application/json\",\n          ...options?.headers,\n        },\n        signal: controller.signal,\n      });\n\n      if (!response.ok) {\n        const body = await response.text();\n        throw new CastAIError(response.status, body, path);\n      }\n\n      return response.json();\n    } finally {\n      clearTimeout(timeout);\n    }\n  }\n\n  async listClusters(): Promise<CastAICluster[]> {\n    const data = await this.request<{ items: CastAICluster[] }>(\n      \"/v1/kubernetes/external-clusters\"\n    );\n    return data.items;\n  }\n\n  async getSavings(clusterId: string): Promise<CastAISavings> {\n    return this.request(`/v1/kubernetes/clusters/${clusterId}/savings`);\n  }\n\n  async listNodes(clusterId: string): Promise<CastAINode[]> {\n    const data = await this.request<{ items: CastAINode[] }>(\n      `/v1/kubernetes/external-clusters/${clusterId}/nodes`\n    );\n    return data.items;\n  }\n\n  async updatePolicies(clusterId: string, policies: Record<string, unknown>): Promise<void> {\n    await this.request(`/v1/kubernetes/clusters/${clusterId}/policies`, {\n      method: \"PUT\",\n      body: JSON.stringify(policies),\n    });\n  }\n}\n\nclass CastAIError extends Error {\n  constructor(\n    public readonly status: number,\n    public readonly body: string,\n    public readonly path: string\n  ) {\n    super(`CAST AI ${status} on ${path}: ${body}`);\n    this.name = \"CastAIError\";\n  }\n\n  get retryable(): boolean {\n    return this.status === 429 || this.status >= 500;\n  }\n}\n```\n\n### Step 2: Singleton with Retry\n\n```typescript\n// src/castai/index.ts\nlet instance: CastAIClient | null = null;\n\nexport function getCastAIClient(): CastAIClient {\n  if (!instance) {\n    if (!process.env.CASTAI_API_KEY) {\n      throw new Error(\"CASTAI_API_KEY environment variable required\");\n    }\n    instance = new CastAIClient({ apiKey: process.env.CASTAI_API_KEY });\n  }\n  return instance;\n}\n\nexport async function withRetry<T>(\n  fn: () => Promise<T>,\n  maxRetries = 3\n): Promise<T> {\n  for (let attempt = 0; attempt <= maxRetries; attempt++) {\n    try {\n      return await fn();\n    } catch (err) {\n      if (attempt === maxRetries) throw err;\n      if (err instanceof CastAIError && !err.retryable) throw err;\n      const delay = 1000 * Math.pow(2, attempt) + Math.random() * 500;\n      await new Promise((r) => setTimeout(r, delay));\n    }\n  }\n  throw new Error(\"Unreachable\");\n}\n```\n\n### Step 3: Python Client\n\n```python\n# castai_client.py\nimport os\nimport time\nimport requests\nfrom dataclasses import dataclass\nfrom typing import Optional\n\n@dataclass\nclass CastAIConfig:\n    api_key: str\n    base_url: str = \"https://api.cast.ai\"\n    timeout: int = 30\n\nclass CastAIClient:\n    def __init__(self, config: Optional[CastAIConfig] = None):\n        self.config = config or CastAIConfig(\n            api_key=os.environ[\"CASTAI_API_KEY\"]\n        )\n        self.session = requests.Session()\n        self.session.headers.update({\n            \"X-API-Key\": self.config.api_key,\n            \"Content-Type\": \"application/json\",\n        })\n\n    def _get(self, path: str) -> dict:\n        resp = self.session.get(\n            f\"{self.config.base_url}{path}\",\n            timeout=self.config.timeout,\n        )\n        resp.raise_for_status()\n        return resp.json()\n\n    def list_clusters(self) -> list[dict]:\n        return self._get(\"/v1/kubernetes/external-clusters\")[\"items\"]\n\n    def get_savings(self, cluster_id: str) -> dict:\n        return self._get(f\"/v1/kubernetes/clusters/{cluster_id}/savings\")\n\n    def list_nodes(self, cluster_id: str) -> list[dict]:\n        return self._get(\n            f\"/v1/kubernetes/external-clusters/{cluster_id}/nodes\"\n        )[\"items\"]\n\n    def get_policies(self, cluster_id: str) -> dict:\n        return self._get(f\"/v1/kubernetes/clusters/{cluster_id}/policies\")\n```\n\n## Error Handling\n\n| Status | Meaning | Action |\n|--------|---------|--------|\n| 401 | Invalid API key | Rotate key at console.cast.ai |\n| 403 | Insufficient permissions | Use Full Access key |\n| 404 | Cluster not found | Verify cluster ID |\n| 429 | Rate limited | Backoff and retry |\n| 5xx | Server error | Retry with exponential backoff |\n\n## Resources\n\n- [CAST AI OpenAPI Spec](https://api.cast.ai/v1/spec/openapi.json)\n- [CAST AI Terraform Provider Source](https://github.com/castai/terraform-provider-castai)\n\n## Next Steps\n\nApply these patterns in `castai-core-workflow-a` to manage cluster optimization.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "castai-sdk-patterns",
-    "description": "Production-ready CAST AI REST API wrapper patterns in TypeScript and",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

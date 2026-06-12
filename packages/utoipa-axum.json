@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000018919",
   "name": "utoipa-axum",
   "slug": "utoipa-axum",
   "description": "|",
   "content": "\n# OpenAPI with utoipa + Axum\n\nutoipa provides compile-time OpenAPI documentation for Rust REST APIs. Code-first approach: annotate handlers and types, get OpenAPI 3.1 spec automatically.\n\n## Core Concepts\n\n1. **ToSchema** \u2014 Derive for request/response body types\n2. **#[utoipa::path]** \u2014 Annotate handlers with path, method, params, responses\n3. **OpenApi** \u2014 Combine all paths and schemas into spec\n4. **Scalar** \u2014 Serve interactive API documentation\n\n## Cargo.toml Setup\n\n```toml\n[dependencies]\naxum = \"0.8\"\ntokio = { version = \"1\", features = [\"full\"] }\nserde = { version = \"1\", features = [\"derive\"] }\nserde_json = \"1\"\nuuid = { version = \"1\", features = [\"serde\", \"v4\"] }\nchrono = { version = \"0.4\", features = [\"serde\"] }\n\n# utoipa with axum integration\nutoipa = { version = \"5\", features = [\"axum_extras\", \"uuid\", \"chrono\"] }\nutoipa-scalar = { version = \"0.3\", features = [\"axum\"] }\n```\n\n## ToSchema \u2014 Request/Response Types\n\n```rust\nuse serde::{Deserialize, Serialize};\nuse utoipa::ToSchema;\nuse uuid::Uuid;\n\n#[derive(Debug, Deserialize, ToSchema)]\npub struct CreateUserRequest {\n    /// User's email address\n    pub email: String,\n    /// Password (min 8 characters)\n    #[schema(min_length = 8)]\n    pub password: String,\n}\n\n#[derive(Debug, Serialize, ToSchema)]\npub struct UserResponse {\n    pub id: Uuid,\n    pub email: String,\n    #[serde(skip_serializing_if = \"Option::is_none\")]\n    pub name: Option<String>,\n}\n\n#[derive(Debug, Serialize, ToSchema)]\npub struct ErrorResponse {\n    pub error: String,\n}\n```\n\n## #[utoipa::path] \u2014 Documenting Handlers\n\n```rust\nuse axum::{extract::{Path, State}, http::StatusCode, Json};\n\n#[utoipa::path(\n    get,\n    path = \"/api/users/{id}\",\n    tag = \"users\",\n    params((\"id\" = Uuid, Path, description = \"User ID\")),\n    responses(\n        (status = 200, description = \"User found\", body = UserResponse),\n        (status = 404, description = \"Not found\", body = ErrorResponse)\n    ),\n    security((\"bearer\" = []))\n)]\npub async fn get_user(\n    State(state): State<AppState>,\n    Path(id): Path<Uuid>,\n) -> Result<Json<UserResponse>, (StatusCode, Json<ErrorResponse>)> {\n    // handler logic\n}\n\n#[utoipa::path(\n    post,\n    path = \"/api/users\",\n    tag = \"users\",\n    request_body = CreateUserRequest,\n    responses(\n        (status = 201, description = \"Created\", body = UserResponse),\n        (status = 400, description = \"Bad request\", body = ErrorResponse)\n    )\n)]\npub async fn create_user(\n    State(state): State<AppState>,\n    Json(req): Json<CreateUserRequest>,\n) -> Result<(StatusCode, Json<UserResponse>), (StatusCode, Json<ErrorResponse>)> {\n    // handler logic\n}\n```\n\n## OpenApi \u2014 Combining Everything\n\n```rust\nuse utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};\nuse utoipa::{Modify, OpenApi};\n\n#[derive(OpenApi)]\n#[openapi(\n    info(\n        title = \"My API\",\n        version = \"1.0.0\",\n        description = \"API description\"\n    ),\n    tags(\n        (name = \"users\", description = \"User management\"),\n        (name = \"health\", description = \"Health checks\")\n    ),\n    paths(\n        get_user,\n        create_user,\n        health_check\n    ),\n    components(\n        schemas(\n            CreateUserRequest,\n            UserResponse,\n            ErrorResponse\n        )\n    ),\n    modifiers(&SecurityAddon)\n)]\npub struct ApiDoc;\n\nstruct SecurityAddon;\n\nimpl Modify for SecurityAddon {\n    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {\n        if let Some(components) = openapi.components.as_mut() {\n            components.add_security_scheme(\n                \"bearer\",\n                SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),\n            );\n        }\n    }\n}\n```\n\n## Serving Scalar UI\n\n```rust\nuse axum::{routing::get, Router};\nuse utoipa::OpenApi;\nuse utoipa_scalar::{Scalar, Servable};\n\npub fn create_router(state: AppState) -> Router {\n    Router::new()\n        .route(\"/health\", get(health_check))\n        .route(\"/api/users\", get(list_users).post(create_user))\n        .route(\"/api/users/{id}\", get(get_user).put(update_user).delete(delete_user))\n        // Scalar UI at /api/docs\n        .merge(Scalar::with_url(\"/api/docs\", ApiDoc::openapi()))\n        .with_state(state)\n}\n```\n\n## IntoParams \u2014 Query Parameters\n\n```rust\nuse utoipa::IntoParams;\n\n#[derive(Debug, Deserialize, IntoParams)]\npub struct PaginationParams {\n    /// Page number (1-indexed)\n    #[param(minimum = 1, default = 1)]\n    pub page: Option<u32>,\n    /// Items per page\n    #[param(minimum = 1, maximum = 100, default = 20)]\n    pub per_page: Option<u32>,\n}\n\n#[derive(Debug, Deserialize, IntoParams)]\npub struct UserFilters {\n    /// Filter by email contains\n    pub email: Option<String>,\n    /// Filter by status\n    pub status: Option<UserStatus>,\n}\n\n#[utoipa::path(\n    get,\n    path = \"/api/users\",\n    tag = \"users\",\n    params(PaginationParams, UserFilters),\n    responses((status = 200, body = Vec<UserResponse>))\n)]\npub async fn list_users(\n    Query(pagination): Query<PaginationParams>,\n    Query(filters): Query<UserFilters>,\n) -> Json<Vec<UserResponse>> {\n    // handler logic\n}\n```\n\n## Enums in Schema\n\n```rust\n#[derive(Debug, Serialize, Deserialize, ToSchema)]\n#[serde(rename_all = \"snake_case\")]\npub enum UserStatus {\n    Active,\n    Inactive,\n    Pending,\n}\n\n#[derive(Debug, Serialize, Deserialize, ToSchema)]\n#[serde(tag = \"type\", rename_all = \"snake_case\")]\npub enum Event {\n    UserCreated { user_id: Uuid },\n    UserDeleted { user_id: Uuid, reason: String },\n}\n```\n\n## Common Patterns\n\nSee [references/patterns.md](references/patterns.md) for error handling, authentication middleware, and response types.\n\n## API Reference\n\nSee [references/api_reference.md](references/api_reference.md) for complete ToSchema and path attribute options.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "utoipa-axum",
-    "description": "|",
-    "Covers": "(1) ToSchema derive for request/response types, (2) #[utoipa::path] for endpoint documentation,",
-    "Triggers": "utoipa, openapi, scalar, axum api, ToSchema, IntoParams, rust api docs."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

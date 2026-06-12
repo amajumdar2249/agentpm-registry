@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031285",
   "name": "apollo-enterprise-rbac",
   "slug": "apollo-enterprise-rbac",
   "description": "Enterprise role-based access control for Apollo.io.",
   "content": "# Apollo Enterprise RBAC\n\n## Overview\n\nRole-based access control for Apollo.io API integrations. Apollo API keys are all-or-nothing (standard vs master), so RBAC must be implemented in your application layer as a proxy between users and the Apollo API. This skill builds a permission matrix, scoped API key system, Express middleware, and admin audit endpoints.\n\n## Prerequisites\n\n- Apollo master API key\n- Node.js 18+ with Express\n\n## Instructions\n\n### Step 1: Define Roles and Permission Matrix\n\nMap Apollo API operations to team roles. Apollo's API has two main categories:\n\n- **Read-only**: search (free), enrichment (credits)\n- **Write**: contacts CRUD, sequences, deals, tasks\n\n```typescript\n// src/rbac/roles.ts\nexport type Role = 'viewer' | 'analyst' | 'sales_rep' | 'sales_manager' | 'admin';\n\nexport interface Permission {\n  searchPeople: boolean;       // /mixed_people/api_search (free)\n  searchOrganizations: boolean; // /mixed_companies/search (free)\n  enrichPerson: boolean;       // /people/match (1 credit)\n  bulkEnrich: boolean;         // /people/bulk_match (credits)\n  enrichOrg: boolean;          // /organizations/enrich (1 credit)\n  manageContacts: boolean;     // /contacts CRUD (master key)\n  manageSequences: boolean;    // /emailer_campaigns/* (master key)\n  manageDeals: boolean;        // /opportunities/* (master key)\n  exportPII: boolean;          // download contacts with email/phone\n  viewAnalytics: boolean;      // sequence stats, usage\n  manageTeam: boolean;         // create/revoke scoped keys\n}\n\nexport const PERMISSIONS: Record<Role, Permission> = {\n  viewer: {\n    searchPeople: true, searchOrganizations: true, enrichPerson: false,\n    bulkEnrich: false, enrichOrg: false, manageContacts: false,\n    manageSequences: false, manageDeals: false, exportPII: false,\n    viewAnalytics: true, manageTeam: false,\n  },\n  analyst: {\n    searchPeople: true, searchOrganizations: true, enrichPerson: true,\n    bulkEnrich: false, enrichOrg: true, manageContacts: false,\n    manageSequences: false, manageDeals: false, exportPII: false,\n    viewAnalytics: true, manageTeam: false,\n  },\n  sales_rep: {\n    searchPeople: true, searchOrganizations: true, enrichPerson: true,\n    bulkEnrich: false, enrichOrg: true, manageContacts: true,\n    manageSequences: true, manageDeals: true, exportPII: false,\n    viewAnalytics: false, manageTeam: false,\n  },\n  sales_manager: {\n    searchPeople: true, searchOrganizations: true, enrichPerson: true,\n    bulkEnrich: true, enrichOrg: true, manageContacts: true,\n    manageSequences: true, manageDeals: true, exportPII: true,\n    viewAnalytics: true, manageTeam: true,\n  },\n  admin: {\n    searchPeople: true, searchOrganizations: true, enrichPerson: true,\n    bulkEnrich: true, enrichOrg: true, manageContacts: true,\n    manageSequences: true, manageDeals: true, exportPII: true,\n    viewAnalytics: true, manageTeam: true,\n  },\n};\n```\n\n### Step 2: Scoped API Key System\n\n```typescript\n// src/rbac/api-keys.ts\nimport crypto from 'crypto';\n\ninterface ScopedKey {\n  key: string;\n  teamId: string;\n  role: Role;\n  createdBy: string;\n  createdAt: string;\n  expiresAt: string;\n}\n\n// In production: store in database\nconst keys = new Map<string, ScopedKey>();\n\nexport function createScopedKey(teamId: string, role: Role, createdBy: string, ttlDays: number = 90): ScopedKey {\n  const entry: ScopedKey = {\n    key: `ak_${teamId}_${crypto.randomBytes(16).toString('hex')}`,\n    teamId, role, createdBy,\n    createdAt: new Date().toISOString(),\n    expiresAt: new Date(Date.now() + ttlDays * 86400000).toISOString(),\n  };\n  keys.set(entry.key, entry);\n  return entry;\n}\n\nexport function resolveKey(apiKey: string): ScopedKey | null {\n  const entry = keys.get(apiKey);\n  if (!entry) return null;\n  if (new Date(entry.expiresAt) < new Date()) { keys.delete(apiKey); return null; }\n  return entry;\n}\n\nexport function revokeKey(apiKey: string) { keys.delete(apiKey); }\n```\n\n### Step 3: Permission Middleware\n\n```typescript\n// src/rbac/middleware.ts\nimport { Request, Response, NextFunction } from 'express';\nimport { PERMISSIONS, Permission } from './roles';\nimport { resolveKey } from './api-keys';\n\n// Map Apollo API paths to required permissions\nconst ENDPOINT_PERMISSIONS: Record<string, keyof Permission> = {\n  '/mixed_people/api_search': 'searchPeople',\n  '/mixed_companies/search': 'searchOrganizations',\n  '/people/match': 'enrichPerson',\n  '/people/bulk_match': 'bulkEnrich',\n  '/organizations/enrich': 'enrichOrg',\n  '/contacts': 'manageContacts',\n  '/emailer_campaigns': 'manageSequences',\n  '/opportunities': 'manageDeals',\n};\n\nexport function requirePermission(action: keyof Permission) {\n  return (req: Request, res: Response, next: NextFunction) => {\n    const apiKey = req.headers['x-api-key'] as string;\n    if (!apiKey) return res.status(401).json({ error: 'x-api-key header required' });\n\n    const key = resolveKey(apiKey);\n    if (!key) return res.status(401).json({ error: 'Invalid or expired API key' });\n\n    if (!PERMISSIONS[key.role][action]) {\n      return res.status(403).json({\n        error: `Permission denied: ${action} requires role upgrade`,\n        currentRole: key.role,\n      });\n    }\n\n    (req as any).apolloCtx = { teamId: key.teamId, role: key.role, user: key.createdBy };\n    next();\n  };\n}\n```\n\n### Step 4: Apollo API Proxy with RBAC\n\n```typescript\n// src/rbac/proxy.ts\nimport express from 'express';\nimport axios from 'axios';\n\nconst app = express();\napp.use(express.json());\n\n// Proxy all /apollo/* requests through RBAC\napp.all('/apollo/*', (req, res, next) => {\n  const apolloPath = req.path.replace('/apollo', '');\n  const matchedKey = Object.keys(ENDPOINT_PERMISSIONS).find((p) => apolloPath.startsWith(p));\n  if (!matchedKey) return res.status(404).json({ error: 'Unknown Apollo endpoint' });\n\n  requirePermission(ENDPOINT_PERMISSIONS[matchedKey])(req, res, next);\n}, async (req, res) => {\n  const apolloPath = req.path.replace('/apollo', '');\n  try {\n    const response = await axios({\n      method: req.method as any,\n      url: `https://api.apollo.io/api/v1${apolloPath}`,\n      data: req.body,\n      params: req.query,\n      headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.APOLLO_API_KEY! },\n    });\n    res.status(response.status).json(response.data);\n  } catch (err: any) {\n    res.status(err.response?.status ?? 500).json(err.response?.data ?? { error: err.message });\n  }\n});\n```\n\n### Step 5: Admin Endpoints\n\n```typescript\n// src/rbac/admin.ts\nimport { Router } from 'express';\nimport { requirePermission } from './middleware';\nimport { createScopedKey, revokeKey } from './api-keys';\n\nconst admin = Router();\nadmin.use(requirePermission('manageTeam'));\n\nadmin.post('/keys', (req, res) => {\n  const { teamId, role, ttlDays } = req.body;\n  const ctx = (req as any).apolloCtx;\n  const key = createScopedKey(teamId, role, ctx.user, ttlDays);\n  res.json({ key: key.key, role: key.role, expiresAt: key.expiresAt });\n});\n\nadmin.delete('/keys/:key', (req, res) => {\n  revokeKey(req.params.key);\n  res.json({ revoked: true });\n});\n\nadmin.get('/usage', async (req, res) => {\n  // Check Apollo's usage stats\n  const { data } = await axios.get('https://api.apollo.io/api/v1/usage', {\n    headers: { 'x-api-key': process.env.APOLLO_API_KEY! },\n  });\n  res.json(data);\n});\n\nexport { admin };\n```\n\n## Output\n\n- Five-tier role system mapping to Apollo API operations\n- Scoped API key creation with configurable TTL and revocation\n- Express middleware enforcing per-endpoint permissions\n- Apollo API proxy routing all requests through RBAC\n- Admin endpoints for key management and usage stats\n\n## Error Handling\n\n| Issue | Resolution |\n|-------|------------|\n| 403 Permission denied | Check role matrix; request upgrade from admin |\n| Key expired | Admin creates new key via `POST /keys` |\n| Wrong role for bulk enrichment | Only `sales_manager` and `admin` have `bulkEnrich` |\n| Proxy timeout | Increase timeout, check Apollo API latency |\n\n## Resources\n\n- [Apollo API Overview](https://docs.apollo.io/docs/api-overview)\n- [Create API Keys](https://docs.apollo.io/docs/create-api-key)\n- [RBAC Best Practices (Auth0)](https://auth0.com/docs/manage-users/access-control/rbac)\n- [View API Usage Stats](https://docs.apollo.io/reference/view-api-usage-stats)\n\n## Next Steps\n\nProceed to `apollo-migration-deep-dive` for migration strategies.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "apollo-enterprise-rbac",
-    "description": "Enterprise role-based access control for Apollo.io.",
-    "allowed-tools": "Read, Write, Edit, Bash(kubectl:*), Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

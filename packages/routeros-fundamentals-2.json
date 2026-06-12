@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000024615",
   "name": "routeros-fundamentals",
   "slug": "routeros-fundamentals-2",
   "description": "RouterOS v7 domain knowledge for AI agents. Use when: working with MikroTik RouterOS, writing RouterOS CLI/script commands, calling RouterOS REST API, debugging why a Linux command fails on RouterOS, or when the user mentions MikroTik, RouterOS, CHR, or /ip /system /interface paths. Scope: RouterOS 7.x (long-term and newer) only \u2014 v6 is NOT covered and accuracy for v6 problems will be low.",
   "content": "\n# RouterOS Fundamentals\n\n## RouterOS Is NOT GNU/Linux\n\nRouterOS runs a Linux kernel (5.6.3) but **everything above the kernel is MikroTik's proprietary `nova` system**. This is the single most important fact for agents to internalize.\n\n**What does NOT exist on RouterOS:**\n- No `/bin`, `/usr`, `/etc`, `/var` \u2014 no FHS layout\n- No bash, sh, ash, zsh \u2014 no Unix shell at all\n- No coreutils (`ls`, `cat`, `grep`, `ps`, `mount`, `ip`, `iptables`, etc.)\n- No glibc, musl, busybox\n- No apt, pkg, opkg \u2014 no package manager (packages are `.npk` files installed via upload + reboot)\n- No `systemctl`, `service`, init system\n- No `/proc` or `/sys` accessible from userland\n- No `docker`, `podman` \u2014 RouterOS has its own `/container` subsystem (7.x+)\n\n**What DOES exist:**\n- RouterOS CLI \u2014 its own language, not shell. Accessed via SSH, serial, WinBox, or WebFig\n- REST API at `/rest/` (HTTP, port 80 by default) \u2014 the primary programmatic interface\n- RouterOS scripting language (`.rsc` files) \u2014 its own syntax, not bash. See [Scripting reference](./references/scripting.md)\n- WebFig (web UI) on port 80\n- WinBox protocol on port 8291\n\n**Common agent mistakes to avoid:**\n- Do NOT try `ssh admin@host 'ls /'` \u2014 it opens RouterOS CLI, not a shell\n- Do NOT suggest `mount`, `fdisk`, `mkfs` \u2014 use `/disk` commands instead\n- Do NOT look for config files at `/etc/` \u2014 configuration is in the RouterOS database\n- Do NOT assume `ping` works the same \u2014 it's `/tool/ping` or `/ping` in CLI\n- Do NOT suggest installing packages via `apt` or `opkg` \u2014 upload `.npk` via SCP then `/system/package/apply-changes` (7.18+) or `/system/reboot` (<7.18)\n- See [Extra packages reference](./references/extra-packages.md) for the full package list and installation pattern\n\n## RouterOS CLI Syntax\n\nRouterOS CLI uses path-based navigation, not Unix command pipelines:\n\n```routeros\n# Navigation\n/ip/address/print\n/interface/print\n/system/resource/print\n\n# Adding entries\n/ip/address/add address=192.168.1.1/24 interface=ether1\n\n# Modifying (by internal ID or find expression)\n/ip/address/set [find interface=ether1] address=10.0.0.1/24\n\n# Removing\n/ip/address/remove [find address=\"192.168.1.1/24\"]\n\n# Running a command\n/system/reboot\n/tool/fetch url=\"http://example.com/file.npk\" dst-path=\"/\"\n```\n\n**Key syntax differences from shell:**\n- `=` assigns properties (no spaces around it)\n- `[find ...]` is the query expression (like WHERE)\n- Strings use `\"\"` (double quotes only)\n- Comments use `#`\n- Variables: `:local myVar \"value\"` and `$myVar`\n- No pipes, no redirection, no subshell\n\n## REST API\n\nRouterOS REST API at `http://HOST:PORT/rest/`. HTTP verbs map non-standardly:\n\n| HTTP | RouterOS Action | CLI Equiv |\n|---|---|---|\n| `GET` | print (list/read) | `/path/print` |\n| `PUT` | **add (create)** | `/path/add` |\n| `PATCH` | set (update) | `/path/set` |\n| `DELETE` | remove | `/path/remove` |\n| `POST` | command (execute) | `/path/command` |\n\n**Key gotchas:**\n- `PUT` creates (NOT updates) \u2014 opposite of many REST APIs\n- Empty password auth: `admin:` (colon required, nothing after)\n- WebFig root (`GET /`) returns HTTP 200 without auth \u2014 use as health check\n- REST API (`/rest/`) requires auth (HTTP 401 without it)\n- `.id` field is `*HEX` format (e.g., `*1`, `*A`)\n\nSee [REST API reference](./references/rest-api-patterns.md) for full patterns, error handling, filtering, POST commands, and `/console/inspect`.\n\n## Version Scheme\n\nFormat: `MAJOR.MINOR[.PATCH][betaN|rcN]` \u2014 e.g., `7.22`, `7.22.1`, `7.23beta2`, `7.22rc1`\n\n**Channels:** `stable` / `long-term` / `testing` / `development`\n\nVersion endpoint (plain text): `https://upgrade.mikrotik.com/routeros/NEWESTa7.<channel>`\n\nFor version parsing, comparison, download URLs, and package naming: see [Version parsing reference](./references/version-parsing.md).\n\n## Architecture Names\n\nMikroTik uses these architecture identifiers (not standard Linux arch names):\n\n| MikroTik name | CPU | Common hardware |\n|---|---|---|\n| `x86` | x86_64 | CHR, x86-based RouterBOARDs |\n| `arm64` | aarch64 | Modern ARM boards (RB5009, Chateau) |\n| `arm` | ARMv7 | Older ARM boards |\n| `mipsbe` | MIPS big-endian | Legacy RouterBOARDs |\n| `mmips` | MIPS multi-core | hAP ac, RB4011 |\n| `smips` | MIPS single-core | hAP lite, mAP |\n| `ppc` | PowerPC | CCR1xxx series |\n| `tile` | Tilera | CCR (older models) |\n\nCHR (Cloud Hosted Router) is available only for `x86` and `arm64`.\n\n## Default Credentials\n\n- Username: `admin`\n- Password: (empty \u2014 no password)\n- On first login via SSH/console, RouterOS 7.x prompts to set a password or press `a` to skip\n- REST API and WebFig allow empty-password access\n\n## Inspecting Hardware from RouterOS CLI\n\n```routeros\n# PCI devices (the RouterOS equivalent of lspci)\n/system/resource/hardware/print\n\n# IRQ assignments (shows driver binding)\n/system/resource/irq/print\n\n# System overview\n/system/resource/print\n\n# Disk info\n/disk/print\n\n# Installed packages\n/system/package/print\n\n# IP services and ports\n/ip/service/print\n\n# Network interfaces\n/interface/print\n```\n\n## Additional Resources\n\n**Reference files:**\n- For REST API details and `/console/inspect` command tree: see [REST API reference](./references/rest-api-patterns.md)\n- For version parsing, comparison, and download URL logic: see [Version parsing reference](./references/version-parsing.md)\n- For extra packages (container, iot, zerotier, etc.): see [Extra packages reference](./references/extra-packages.md)\n- For device-mode (modes, feature matrix, physical confirmation): see [Device-mode reference](./references/device-mode.md)\n- For RouterOS scripting language syntax: see [Scripting reference](./references/scripting.md)\n- For user management, SSH keys, admin account: see [Users REST reference](./references/routeros-users-rest.md)\n- For IP addressing, routing, DHCP, DNS, interfaces: see [Networking REST reference](./references/routeros-networking-rest.md)\n- For firewall filter/NAT/mangle and rule ordering: see [Firewall REST reference](./references/routeros-firewall-rest.md)\n- For Bun runtime bugs affecting HTTP (req.destroy, pool, secrets): see [Bun runtime gotchas](./references/bun-runtime-gotchas.md)\n\n**Related skills:**\n- For the /container subsystem (VETH, device-mode, lifecycle): see the `routeros-container` skill\n- For netinstall-cli and device flashing: see the `routeros-netinstall` skill\n- For the /app YAML container format (7.22+): see the `routeros-app-yaml` skill\n- For /console/inspect tree traversal and schema generation: see the `routeros-command-tree` skill\n- For running CHR in QEMU (local or CI): see the `routeros-qemu-chr` skill\n- For packet capture, /tool/sniffer, and TZSP streaming: see the `routeros-sniffer` skill\n\n**MCP tools:**\n- For command tree browsing and property lookups: use the `rosetta` MCP server tools (`routeros_search`, `routeros_get_page`, `routeros_command_tree`)\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "routeros-fundamentals",
-    "description": "RouterOS v7 domain knowledge for AI agents. Use when: working with MikroTik RouterOS, writing RouterOS CLI/script commands, calling RouterOS REST API, debugging why a Linux command fails on RouterOS, or when the user mentions MikroTik, RouterOS, CHR, or /ip /system /interface paths. Scope: RouterOS 7.x (long-term and newer) only \u2014 v6 is NOT covered and accuracy for v6 problems will be low."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

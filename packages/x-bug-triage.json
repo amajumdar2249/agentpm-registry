@@ -1,21 +1,46 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031042",
   "name": "x-bug-triage",
   "slug": "x-bug-triage",
   "description": "|",
   "content": "\n# X Bug Triage\n\nClosed-loop bug triage from public X/Twitter complaints to clustered, evidence-backed GitHub issues.\n\n## Overview\n\nProduct teams learn about bugs from X/Twitter hours before internal monitoring catches them. This skill automates the pipeline: ingest complaints, classify and cluster them by bug family, scan repos for corroborating evidence, route to owners, and file issues \u2014 all with human confirmation gates. Results display directly in the terminal with optional Slack delivery for team review.\n\n## Prerequisites\n\n- X API bearer token configured at `~/.claude/channels/x-triage/.env`\n- SQLite database initialized (`bun run db:migrate`)\n- `config/approved-accounts.json` and `config/approved-searches.json` populated\n- GitHub CLI (`gh`) for issue filing\n\nVerify environment before starting:\n\n```\n!test -f data/triage.db && echo \"DB ready\" || echo \"Run: bun run db:migrate\"\n```\n\n```\n!test -f config/approved-accounts.json && echo \"Accounts configured\" || echo \"Missing: config/approved-accounts.json\"\n```\n\n## Instructions\n\n### Step 1: Intake\n\n1. Resolve account username to ID: `mcp__triage__resolve_username`\n2. Fetch mention timeline: `mcp__triage__fetch_mentions`\n3. Run approved searches: `mcp__triage__search_recent`\n4. Cross-reference mentions with search results for completeness\n5. Hydrate conversation threads for posts with conversation_id: `mcp__triage__fetch_conversation`\n6. Fetch quote tweets for high-engagement posts: `mcp__triage__fetch_quote_tweets`\n\nAfter intake completes:\n\n1. Call `assessFreshness()` from `lib/freshness.ts` with the combined post set and the requested window boundaries. If `date_confidence` is `\"low\"` or `\"medium\"`, pass the `warning` string to the display step for rendering.\n2. Collect all `DegradationReport` objects from intake tool responses. Call `buildSourceStatusReport()` from `lib/source-status.ts` to aggregate into a `SourceStatusReport`. Pass to the display step for rendering between the header and cluster list.\n\n### Step 2: Normalize\n\nFor each ingested post:\n\n- Parse into BugCandidate (all 33 fields) using `lib/parser.ts`\n- Classify into 12 categories using `lib/classifier.ts`\n- Redact PII (6 types) using `lib/redactor.ts`\n- Score reporter reliability (4 dimensions) using `lib/reporter-scorer.ts`\n- Tag reporter_category from `config/approved-accounts.json`\n\n### Step 3: Match Existing Clusters\n\n- Load active clusters from DB\n- Load active overrides and suppression rules\n- For each candidate, compute bug signature and match against existing clusters at >=70% overlap\n- Family-first guard: different families NEVER cluster\n\n### Step 4: Create/Update Clusters\n\n- New matches: create cluster with initial severity \"low\"\n- Existing matches: update report_count, last_seen, sub_status\n- Resolved matches: set state to \"open\", sub_status to \"regression_reopened\"\n- Suppressed candidates: skip with audit log\n\n### Step 5: Repo Scan\n\nFor each cluster (top 3 repos per cluster):\n\n- `mcp__triage__search_issues` \u2014 Match symptoms/errors\n- `mcp__triage__inspect_recent_commits` \u2014 7-day commit window\n- `mcp__triage__inspect_code_paths` \u2014 Affected paths\n- `mcp__triage__check_recent_deploys` \u2014 Recent releases\n\nAssign evidence tiers (1-4) per [evidence-policy.md](references/evidence-policy.md).\n\nLoad evidence tier definitions:\n\n```\n!cat ${CLAUDE_SKILL_DIR}/references/evidence-policy.md\n```\n\n### Step 6: Route Ownership\n\nFor each cluster, use strict 6-level precedence:\n\n1. `mcp__triage__lookup_service_owner`\n2. `mcp__triage__lookup_oncall`\n3. `mcp__triage__parse_codeowners`\n4. `mcp__triage__lookup_recent_assignees`\n5. `mcp__triage__lookup_recent_committers`\n6. Fallback mapping from config\n\nApply routing overrides from prior runs. Flag stale signals (>30 days).\n\nLoad routing precedence rules:\n\n```\n!cat ${CLAUDE_SKILL_DIR}/references/routing-rules.md\n```\n\n### Step 7: Evaluate Severity + Escalation\n\nCompute severity (low/medium/high/critical) based on:\n\n- Report velocity, data loss signals, security/privacy, auth/billing lockout\n- Cross-surface failure, enterprise impact, reproducibility quality\n- Apply severity overrides from prior runs\n\nLoad escalation trigger definitions:\n\n```\n!cat ${CLAUDE_SKILL_DIR}/references/escalation-rules.md\n```\n\n### Step 8: Display Results\n\nDisplay triage results directly in the terminal as formatted markdown:\n\n- Severity icons: red_circle critical/high, yellow_circle medium, green_circle low\n- Top 5 clusters by severity (or all if <=5)\n- Per cluster: report count, severity, status, assigned team, top evidence tier\n- Available commands listed at the bottom\n\n### Step 9: Optional Slack Delivery\n\nCheck if `claude-code-slack-channel` plugin is available via `mcp__slack__reply` tool. If available, also deliver summary to Slack. If not, skip \u2014 terminal output is sufficient. Not an error.\n\n### Step 10: Interactive Review\n\nAccept review commands from the user in the terminal. Parse via `mcp__triage__parse_review_command`.\n\n| Command | Action |\n|---------|--------|\n| `details <#>` | Display full cluster detail |\n| `file <#>` | Generate draft via `mcp__triage__create_draft_issue` |\n| `dismiss <#> <reason>` | Create noise_suppression override |\n| `merge <#> <issue>` | Link cluster to existing issue |\n| `escalate <#>` | Raise severity |\n| `monitor <#>` | Set cluster to monitoring |\n| `snooze <#> <duration>` | Temporarily suppress |\n| `split <#>` | Split cluster |\n| `reroute <#>` | Change routing |\n| `full-report` | Display all clusters |\n| `confirm file <#>` | File via `mcp__triage__confirm_and_file` |\n\nAfter each command executes successfully, display the confirmation message from `formatActionConfirmation()` (in `mcp/triage-server/lib.ts`). This provides immediate user feedback for all review actions.\n\nLoad override and memory policy when processing review commands:\n\n```\n!cat ${CLAUDE_SKILL_DIR}/references/review-memory-policy.md\n```\n\n### Step 11: Persist Learning\n\n- All overrides stored in DB for future runs\n- Audit log captures all actions (12 event types)\n- Suppression rules created from dismiss commands\n- Issue-family links created from file/merge commands\n\n## Output\n\nTerminal markdown summary with severity-ranked clusters, evidence tiers, team assignments, and interactive command menu. Optionally mirrored to Slack.\n\n## Examples\n\n```\n/x-bug-triage @AnthropicAI --window 24h\n```\n\nProduces cluster summary, then user interacts:\n\n```\n> details 1\n> file 2\n> dismiss 3 noise\n> confirm file 2\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| X_BEARER_TOKEN not set | Missing env config | Create `~/.claude/channels/x-triage/.env` |\n| Rate limited (429) | X API quota exhausted | Automatic retry with backoff, degrades gracefully |\n| No clusters found | No bug-like posts in window | Widen `--window` or check `approved-searches.json` |\n| Routing uncertain | No routing signals | Manual assignment required \u2014 flagged in output |\n| Duplicate detected | Issue already filed | Use `merge` command instead of `file` |\n\n## Resources\n\n**References:** `${CLAUDE_SKILL_DIR}/references/`\n\n- [schemas.md](references/schemas.md) \u2014 Data model reference (BugCandidate, BugCluster, 9 DB tables)\n- [routing-rules.md](references/routing-rules.md) \u2014 6-level routing precedence\n- [escalation-rules.md](references/escalation-rules.md) \u2014 6 escalation triggers\n- [evidence-policy.md](references/evidence-policy.md) \u2014 4-tier evidence hierarchy\n- [review-memory-policy.md](references/review-memory-policy.md) \u2014 Override types and application order\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "x-bug-triage",
-    "description": "|",
-    "allowed-tools": "Read,Write,Edit,Glob,Grep,Bash(bun:*)",
-    "version": "0.3.0",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "license": "SEE LICENSE IN LICENSE",
-    "user-invocable": "true",
-    "argument-hint": "<account> [--window 24h]",
-    "model": "inherit",
-    "effort": "high",
-    "compatibility": "Designed for Claude Code",
-    "tags": "[triage, x-api, bug-tracking, social-monitoring]"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "0.3.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "SEE LICENSE IN LICENSE",
+  "category": "automation",
+  "tags": [
+    "[triage",
+    "x-api",
+    "bug-tracking",
+    "social-monitoring]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

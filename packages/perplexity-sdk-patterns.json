@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032899",
   "name": "perplexity-sdk-patterns",
   "slug": "perplexity-sdk-patterns",
   "description": "Apply production-ready Perplexity Sonar API patterns for TypeScript",
   "content": "# Perplexity SDK Patterns\n\n## Overview\n\nProduction-ready patterns for Perplexity Sonar API. Since Perplexity uses the OpenAI wire format, you build wrappers around the `openai` client library with Perplexity-specific response handling (citations, search results, related questions).\n\n## Prerequisites\n\n- `openai` package installed (`npm install openai` or `pip install openai`)\n- API key configured in `PERPLEXITY_API_KEY`\n- Understanding of OpenAI chat completions format\n\n## Instructions\n\n### Step 1: Typed Client Singleton (TypeScript)\n\n```typescript\n// src/perplexity/client.ts\nimport OpenAI from \"openai\";\n\nexport interface PerplexityChatCompletion extends OpenAI.ChatCompletion {\n  citations?: string[];\n  search_results?: Array<{\n    title: string;\n    url: string;\n    date?: string;\n    snippet: string;\n  }>;\n  related_questions?: string[];\n}\n\nexport interface PerplexityUsage extends OpenAI.CompletionUsage {\n  citation_tokens?: number;\n  num_search_queries?: number;\n  reasoning_tokens?: number;\n}\n\nlet instance: OpenAI | null = null;\n\nexport function getClient(): OpenAI {\n  if (!instance) {\n    if (!process.env.PERPLEXITY_API_KEY) {\n      throw new Error(\"PERPLEXITY_API_KEY not set\");\n    }\n    instance = new OpenAI({\n      apiKey: process.env.PERPLEXITY_API_KEY,\n      baseURL: \"https://api.perplexity.ai\",\n    });\n  }\n  return instance;\n}\n```\n\n### Step 2: Search with Full Response Parsing\n\n```typescript\n// src/perplexity/search.ts\nimport { getClient, PerplexityChatCompletion } from \"./client\";\n\nexport type SearchModel = \"sonar\" | \"sonar-pro\" | \"sonar-reasoning-pro\" | \"sonar-deep-research\";\nexport type RecencyFilter = \"hour\" | \"day\" | \"week\" | \"month\";\n\nexport interface SearchOptions {\n  model?: SearchModel;\n  systemPrompt?: string;\n  maxTokens?: number;\n  temperature?: number;\n  searchRecencyFilter?: RecencyFilter;\n  searchDomainFilter?: string[];   // max 20 domains\n  returnRelatedQuestions?: boolean;\n  returnImages?: boolean;\n}\n\nexport interface SearchResult {\n  answer: string;\n  citations: string[];\n  relatedQuestions: string[];\n  usage: {\n    promptTokens: number;\n    completionTokens: number;\n    totalTokens: number;\n    citationTokens?: number;\n    searchQueries?: number;\n  };\n  model: string;\n}\n\nexport async function search(\n  query: string,\n  opts: SearchOptions = {}\n): Promise<SearchResult> {\n  const client = getClient();\n\n  const response = (await client.chat.completions.create({\n    model: opts.model || \"sonar\",\n    messages: [\n      ...(opts.systemPrompt\n        ? [{ role: \"system\" as const, content: opts.systemPrompt }]\n        : []),\n      { role: \"user\" as const, content: query },\n    ],\n    max_tokens: opts.maxTokens,\n    temperature: opts.temperature,\n    ...(opts.searchRecencyFilter && { search_recency_filter: opts.searchRecencyFilter }),\n    ...(opts.searchDomainFilter && { search_domain_filter: opts.searchDomainFilter }),\n    ...(opts.returnRelatedQuestions && { return_related_questions: true }),\n    ...(opts.returnImages && { return_images: true }),\n  } as any)) as unknown as PerplexityChatCompletion;\n\n  return {\n    answer: response.choices[0].message.content || \"\",\n    citations: response.citations || [],\n    relatedQuestions: response.related_questions || [],\n    usage: {\n      promptTokens: response.usage?.prompt_tokens || 0,\n      completionTokens: response.usage?.completion_tokens || 0,\n      totalTokens: response.usage?.total_tokens || 0,\n      citationTokens: (response.usage as any)?.citation_tokens,\n      searchQueries: (response.usage as any)?.num_search_queries,\n    },\n    model: response.model,\n  };\n}\n```\n\n### Step 3: Retry with Exponential Backoff\n\n```typescript\n// src/perplexity/retry.ts\nexport async function withRetry<T>(\n  operation: () => Promise<T>,\n  opts = { maxRetries: 3, baseDelayMs: 1000, maxDelayMs: 30000 }\n): Promise<T> {\n  for (let attempt = 0; attempt <= opts.maxRetries; attempt++) {\n    try {\n      return await operation();\n    } catch (err: any) {\n      if (attempt === opts.maxRetries) throw err;\n\n      const status = err.status || err.response?.status;\n      // Only retry on rate limit (429), timeout (408), or server errors (5xx)\n      if (status && status !== 429 && status !== 408 && status < 500) throw err;\n\n      const delay = Math.min(\n        opts.baseDelayMs * Math.pow(2, attempt) + Math.random() * 500,\n        opts.maxDelayMs\n      );\n      await new Promise((r) => setTimeout(r, delay));\n    }\n  }\n  throw new Error(\"Unreachable\");\n}\n\n// Usage\nconst result = await withRetry(() =>\n  search(\"latest AI developments\", { model: \"sonar-pro\" })\n);\n```\n\n### Step 4: Python Patterns\n\n```python\n# perplexity_client.py\nimport os, hashlib, json\nfrom openai import OpenAI\nfrom functools import lru_cache\n\n@lru_cache(maxsize=1)\ndef get_client() -> OpenAI:\n    return OpenAI(\n        api_key=os.environ[\"PERPLEXITY_API_KEY\"],\n        base_url=\"https://api.perplexity.ai\",\n    )\n\ndef search(\n    query: str,\n    model: str = \"sonar\",\n    system_prompt: str | None = None,\n    max_tokens: int | None = None,\n    search_recency_filter: str | None = None,\n    search_domain_filter: list[str] | None = None,\n) -> dict:\n    client = get_client()\n    messages = []\n    if system_prompt:\n        messages.append({\"role\": \"system\", \"content\": system_prompt})\n    messages.append({\"role\": \"user\", \"content\": query})\n\n    kwargs = {\"model\": model, \"messages\": messages}\n    if max_tokens:\n        kwargs[\"max_tokens\"] = max_tokens\n    if search_recency_filter:\n        kwargs[\"search_recency_filter\"] = search_recency_filter\n    if search_domain_filter:\n        kwargs[\"search_domain_filter\"] = search_domain_filter\n\n    response = client.chat.completions.create(**kwargs)\n    raw = response.model_dump()\n\n    return {\n        \"answer\": response.choices[0].message.content,\n        \"citations\": raw.get(\"citations\", []),\n        \"usage\": {\n            \"prompt_tokens\": response.usage.prompt_tokens,\n            \"completion_tokens\": response.usage.completion_tokens,\n            \"total_tokens\": response.usage.total_tokens,\n        },\n        \"model\": response.model,\n    }\n```\n\n### Step 5: Citation Formatter\n\n```typescript\n// src/perplexity/citations.ts\nexport function formatCitationsAsMarkdown(\n  answer: string,\n  citations: string[]\n): string {\n  // Replace [1], [2], etc. with markdown links\n  let formatted = answer;\n  citations.forEach((url, i) => {\n    const marker = `[${i + 1}]`;\n    formatted = formatted.replaceAll(marker, `[${i + 1}](${url})`);\n  });\n  return formatted;\n}\n\nexport function formatCitationsAsFootnotes(\n  answer: string,\n  citations: string[]\n): string {\n  const footnotes = citations\n    .map((url, i) => `[${i + 1}]: ${url}`)\n    .join(\"\\n\");\n  return `${answer}\\n\\n---\\n${footnotes}`;\n}\n```\n\n## Error Handling\n\n| Pattern | Use Case | Benefit |\n|---------|----------|---------|\n| Typed response wrapper | All API calls | Access citations without `any` casts |\n| Retry with backoff | Transient failures | Handles 429 rate limits gracefully |\n| Citation formatter | User-facing output | Converts `[1]` markers to clickable links |\n| Python `@lru_cache` | Client reuse | Single client instance across calls |\n\n## Output\n\n- Type-safe Perplexity client with full response typing\n- Search function with all Perplexity-specific parameters\n- Automatic retry with exponential backoff and jitter\n- Citation formatting utilities\n\n## Resources\n\n- [Perplexity API Reference](https://docs.perplexity.ai/api-reference/chat-completions-post)\n- [OpenAI Compatibility](https://docs.perplexity.ai/guides/chat-completions-guide)\n- [Sonar Model Guide](https://docs.perplexity.ai/getting-started/models)\n\n## Next Steps\n\nApply patterns in `perplexity-core-workflow-a` for real-world usage.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "perplexity-sdk-patterns",
-    "description": "Apply production-ready Perplexity Sonar API patterns for TypeScript",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

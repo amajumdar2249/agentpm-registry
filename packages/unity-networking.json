@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000011171",
   "name": "unity-networking",
   "slug": "unity-networking",
   "description": "|",
   "content": "\n# Unity Networking and Multiplayer\n\n## Overview\n\nReference for implementing multiplayer systems and backend services in Unity. Covers the major networking frameworks, authority models, common multiplayer patterns, and Unity Gaming Services integration.\n\n## Networking Framework Comparison\n\n| Framework | Type | Best For | License |\n|-----------|------|----------|---------|\n| Netcode for GameObjects (NGO) | Client-hosted / Dedicated | Unity-native projects, UGS integration | Free (Unity) |\n| Mirror | Client-hosted / Dedicated | Open-source alternative, mature ecosystem | MIT |\n| Photon PUN 2 | Cloud-hosted | Quick prototyping, room-based games | Free tier + paid |\n| Photon Fusion 2 | Cloud/Self-hosted | Competitive games, tick-based simulation | Free tier + paid |\n| Fish-Net | Client-hosted / Dedicated | Performance-critical, Mirror alternative | MIT |\n\n## Netcode for GameObjects (NGO)\n\n### Setup\n\n1. Install via Package Manager: `com.unity.netcode.gameobjects`\n2. Add `NetworkManager` to a scene GameObject\n3. Select transport (Unity Transport is default)\n4. Mark networked prefabs with `NetworkObject` component\n5. Register prefabs in NetworkManager's prefab list\n\n### Core Components\n\n| Component | Purpose |\n|-----------|---------|\n| `NetworkManager` | Manages connections, spawning, scene management |\n| `NetworkObject` | Required on all networked GameObjects |\n| `NetworkBehaviour` | Base class for networked scripts (replaces MonoBehaviour) |\n| `NetworkVariable<T>` | Synchronized variable with ownership/permissions |\n| `NetworkTransform` | Automatic position/rotation sync |\n| `NetworkAnimator` | Automatic Animator parameter sync |\n\n### RPCs (Remote Procedure Calls)\n\n```csharp\npublic class PlayerCombat : NetworkBehaviour\n{\n    NetworkVariable<int> _health = new(100,\n        NetworkVariableReadPermission.Everyone,\n        NetworkVariableWritePermission.Server);\n\n    [ServerRpc]\n    void AttackServerRpc(ulong targetId)\n    {\n        // Runs on server - validate and apply damage\n        if (!IsServer) return;\n        var target = NetworkManager.SpawnManager.SpawnedObjects[targetId];\n        target.GetComponent<PlayerCombat>().TakeDamage(10);\n    }\n\n    [ClientRpc]\n    void PlayHitEffectClientRpc(Vector3 position)\n    {\n        // Runs on all clients - visual feedback only\n        Instantiate(hitVFX, position, Quaternion.identity);\n    }\n\n    void TakeDamage(int amount)\n    {\n        _health.Value -= amount;\n        PlayHitEffectClientRpc(transform.position);\n    }\n}\n```\n\n| RPC Type | Direction | Use For |\n|----------|-----------|---------|\n| `[ServerRpc]` | Client -> Server | Player actions, requests |\n| `[ClientRpc]` | Server -> All Clients | VFX, sound, UI updates |\n| `[ClientRpc(SendTo.Owner)]` | Server -> Owner Client | Owner-specific feedback |\n\n### NetworkVariable Permissions\n\n```csharp\n// Server-writable (default) - authoritative state\nNetworkVariable<int> score = new(0, writePerm: NetworkVariableWritePermission.Server);\n\n// Owner-writable - client-authoritative (use sparingly)\nNetworkVariable<Vector3> cursorPos = new(writePerm: NetworkVariableWritePermission.Owner);\n```\n\nUse `OnValueChanged` callback for UI reactions:\n```csharp\n_health.OnValueChanged += (oldVal, newVal) => healthBar.value = newVal;\n```\n\n## Authority Models\n\n| Model | Description | When to Use |\n|-------|-------------|-------------|\n| Server-Authoritative | Server validates all actions, clients are thin | Competitive, anti-cheat critical |\n| Client-Authoritative | Clients own their state, server relays | Cooperative, trust-based |\n| Client Prediction + Server Reconciliation | Client predicts locally, server corrects | FPS, fast-paced action |\n| Relay / Listen Server | One player hosts, others connect via relay | Casual, small lobbies |\n\n### Server-Authoritative Flow\n\n```text\nClient: Press \"Attack\" -> Send ServerRpc(targetId)\nServer: Validate range/cooldown -> Apply damage -> Update NetworkVariable\nServer: Send ClientRpc for VFX\nAll Clients: Play hit effect\n```\n\nNever trust client data. Validate positions, cooldowns, ammunition, and line-of-sight on the server.\n\n## Common Multiplayer Patterns\n\n### Lobby System\n\n```text\n1. Player authenticates (UGS Auth / custom)\n2. Player creates or joins lobby (UGS Lobby / custom)\n3. Lobby fills -> host starts game\n4. Relay allocation for NAT traversal (UGS Relay)\n5. All players connect to relay\n6. NetworkManager starts host/client\n```\n\n### Spawn and Despawn\n\n```csharp\n// Server-side spawning\nvar instance = Instantiate(prefab, spawnPoint, Quaternion.identity);\ninstance.GetComponent<NetworkObject>().SpawnWithOwnership(clientId);\n\n// Server-side despawning\nnetworkObject.Despawn(); // Removes from all clients\n```\n\n### Scene Management\n\nUse `NetworkManager.SceneManager.LoadScene(\"GameScene\", LoadSceneMode.Single)` for synchronized scene loading. Only the server/host should call this.\n\n## REST API and WebSocket Integration\n\n### REST API (UnityWebRequest)\n\n```csharp\nasync Awaitable<T> GetAsync<T>(string url)\n{\n    using var request = UnityWebRequest.Get(url);\n    request.SetRequestHeader(\"Authorization\", $\"Bearer {token}\");\n    await request.SendWebRequest();\n    if (request.result != UnityWebRequest.Result.Success)\n        throw new Exception(request.error);\n    return JsonUtility.FromJson<T>(request.downloadHandler.text);\n}\n```\n\nUse `JsonUtility` for simple types or Newtonsoft.Json (`com.unity.nuget.newtonsoft-json`) for complex serialization. Always use `using` with UnityWebRequest to prevent memory leaks.\n\n### WebSocket (NativeWebSocket / WebSocketSharp)\n\nFor real-time non-game communication (chat, notifications), use a WebSocket library. NativeWebSocket works across platforms including WebGL.\n\n## Unity Gaming Services (UGS)\n\n| Service | Package | Purpose |\n|---------|---------|---------|\n| Authentication | `com.unity.services.authentication` | Anonymous/platform sign-in |\n| Lobby | `com.unity.services.lobby` | Room creation, matchmaking |\n| Relay | `com.unity.services.relay` | NAT traversal for P2P |\n| Cloud Save | `com.unity.services.cloudsave` | Server-side player data |\n| Leaderboards | `com.unity.services.leaderboards` | Ranked scoreboards |\n| Economy | `com.unity.services.economy` | Virtual currencies, purchases |\n| Analytics | `com.unity.services.analytics` | Player behavior tracking |\n| Matchmaker | `com.unity.services.matchmaker` | Skill-based matchmaking |\n\nInitialize UGS before using any service:\n```csharp\nawait UnityServices.InitializeAsync();\nawait AuthenticationService.Instance.SignInAnonymouslyAsync();\n```\n\n## Firebase and PlayFab\n\nUse Firebase for indie/mobile projects needing Realtime Database, Cloud Functions, and FCM push notifications. Use PlayFab for LiveOps-heavy games needing player segmentation, A/B testing, and automated rule processing. Both provide Unity SDKs via their respective download pages.\n\n## Additional Resources\n\n### Reference Files\n- **`references/netcode-advanced.md`** -- Client prediction and reconciliation implementation, interest management, network LOD, bandwidth optimization, custom serialization, transport layer configuration\n- **`references/backend-services.md`** -- Detailed UGS setup walkthroughs, Firebase/PlayFab integration patterns, REST API architecture, authentication flows, leaderboard and economy implementation\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "unity-networking",
-    "description": "|",
-    "PROACTIVELY activate for": "(1) building Unity multiplayer games, (2) Netcode for GameObjects (NGO) setup and patterns, (3) Mirror networking, (4) Photon PUN and Photon Fusion, (5) Fish-Net networking, (6) RPCs (ClientRpc, ServerRpc), (7) NetworkVariable and network synchronization, (8) lobby and matchmaking systems, (9) dedicated server hosting and Relay, (10) server-authoritative architecture, (11) lag compensation and prediction.",
-    "Provides": "networking-stack comparison, NGO templates, RPC patterns, NetworkVariable usage, lobby/matchmaking setup, and authoritative-server design."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009443",
   "name": "bio-spatial-transcriptomics-spatial-multiomics",
   "slug": "bio-spatial-transcriptomics-spatial-multiomics",
   "description": "Analyze high-resolution spatial platforms like Slide-seq, Stereo-seq, and Visium HD. Use when working with subcellular resolution or high-density spatial data.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: Cellpose 3.0+, matplotlib 3.8+, numpy 1.26+, scanpy 1.10+, scipy 1.12+, spatialdata 0.1+, squidpy 1.3+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Spatial Multi-omics Analysis\n\n**\"Analyze my high-resolution spatial data\"** \u2192 Process subcellular-resolution spatial platforms (Xenium, MERFISH, Slide-seq, Stereo-seq) including cell segmentation, binning strategies, and multi-modal integration.\n- Python: `spatialdata` + `squidpy` for unified multi-platform analysis\n\n## Platform Comparison\n\n| Platform | Resolution | Spots/Beads | Coverage |\n|----------|------------|-------------|----------|\n| Visium | 55 \u00b5m | ~5,000 | Tissue-wide |\n| Visium HD | 2 \u00b5m | ~11M | Subcellular |\n| Slide-seq | 10 \u00b5m | ~100,000 | High-density |\n| Stereo-seq | 0.5 \u00b5m | >200M | Subcellular |\n| MERFISH | Single-molecule | N/A | Targeted genes |\n\n## Squidpy for High-Resolution Data\n\n**Goal:** Run standard spatial analyses (autocorrelation, neighborhood enrichment, ligand-receptor) on high-resolution spatial data.\n\n**Approach:** Adjust neighbor graph density for high-resolution platforms, then apply standard Squidpy workflows.\n\n```python\nimport squidpy as sq\nimport scanpy as sc\n\n# Load spatial data\nadata = sc.read_h5ad('spatial_multiomics.h5ad')\n\n# Spatial neighbors (for high-resolution, adjust n_neighs based on density)\nsq.gr.spatial_neighbors(adata, coord_type='generic', n_neighs=10, spatial_key='spatial')\n\n# Spatial autocorrelation (Moran's I)\nsq.gr.spatial_autocorr(adata, mode='moran', genes=adata.var_names[:100])\n\n# Neighborhood enrichment analysis\nsq.gr.nhood_enrichment(adata, cluster_key='cell_type')\nsq.pl.nhood_enrichment(adata, cluster_key='cell_type')\n\n# Ligand-receptor analysis\nsq.gr.ligrec(adata, n_perms=100, cluster_key='cell_type')\n```\n\n## SpatialData Framework\n\n**Goal:** Load and query multi-modal spatial data using the SpatialData unified representation.\n\n**Approach:** Use spatialdata-io readers per platform, then access images, points, shapes, and tables through a single object with spatial queries.\n\n```python\nimport spatialdata as sd\nfrom spatialdata_io import read_visium, read_xenium\n\n# Read Visium data\nsdata = read_visium('visium_output/')\n\n# Read Xenium data (10x Genomics subcellular)\nsdata = read_xenium('xenium_output/')\n\n# Read from Zarr\nsdata = sd.read_zarr('experiment.zarr')\n\n# Access different elements\nimages = sdata.images['morphology']\npoints = sdata.points['transcripts']\nshapes = sdata.shapes['cell_boundaries']\ntable = sdata.tables['adata']\n\n# Query by region\nfrom spatialdata import bounding_box_query\nroi = bounding_box_query(sdata, min_coordinate=[0, 0], max_coordinate=[1000, 1000], axes=['x', 'y'])\n```\n\n## Slide-seq/Stereo-seq Processing\n\n```python\n# For high-density data, bin spots into hexagonal grids\nimport numpy as np\n\n# Create hexagonal bins\ndef hexbin_data(adata, gridsize=50):\n    coords = adata.obsm['spatial']\n    from matplotlib.pyplot import hexbin\n    hb = hexbin(coords[:, 0], coords[:, 1], C=None, gridsize=gridsize, reduce_C_function=np.sum)\n    return hb\n\n# Squidpy visualization with hex binning\nsq.pl.spatial_scatter(adata, shape='hex', size=50, color='cluster')\n\n# Grid-based spatial neighbors for regular patterns\nsq.gr.spatial_neighbors(adata, coord_type='grid', n_rings=1)\n```\n\n## Subcellular Analysis (MERFISH/Xenium)\n\n**Goal:** Perform transcript-level and subcellular compartment analysis for single-molecule platforms.\n\n**Approach:** Segment cells with Cellpose, then assign individual transcripts to cells based on mask coordinates.\n\n```python\n# Transcript-level analysis\n# Assign transcripts to compartments\nsq.gr.co_occurrence(adata, cluster_key='compartment', spatial_key='spatial')\n\n# Cell segmentation integration\nfrom cellpose import models\nmodel = models.Cellpose(model_type='cyto2')\nmasks, flows, styles, diams = model.eval(image, diameter=30, channels=[0, 0])\n\n# Map transcripts to cells\ndef assign_transcripts_to_cells(transcripts_df, masks):\n    x, y = transcripts_df['x'].values.astype(int), transcripts_df['y'].values.astype(int)\n    transcripts_df['cell_id'] = masks[y, x]\n    return transcripts_df[transcripts_df['cell_id'] > 0]\n```\n\n## Multi-Modal Integration\n\n**Goal:** Combine spatial gene expression with histological image features for integrated analysis.\n\n**Approach:** Process and segment tissue images, extract image features, then correlate with gene expression.\n\n```python\n# Combine spatial transcriptomics with histology\nsq.im.process(adata, layer='image', method='smooth', sigma=2)\nsq.im.segment(adata, layer='image', method='watershed', thresh=0.1)\n\n# Extract image features\nsq.im.calculate_image_features(\n    adata, layer='image', features=['texture', 'summary'],\n    key_added='img_features', n_jobs=4\n)\n\n# Correlate image features with gene expression\nfrom scipy.stats import pearsonr\nfor gene in ['marker1', 'marker2']:\n    r, p = pearsonr(adata.obs['img_feature'], adata[:, gene].X.flatten())\n    print(f'{gene}: r={r:.3f}, p={p:.3e}')\n```\n\n## Visium HD Specific\n\n```python\n# Visium HD produces bin files at multiple resolutions\n# Load 8\u00b5m binned data (recommended starting point)\nadata = sc.read_h5ad('visium_hd_8um.h5ad')\n\n# Downsample to 16\u00b5m if needed for initial analysis\n# Original 2\u00b5m data available for detailed analysis\n```\n\n## Quality Metrics\n\n| Metric | Visium | High-Resolution |\n|--------|--------|-----------------|\n| Genes/spot | >2000 | >500 |\n| UMI/spot | >5000 | >1000 |\n| Spatial coverage | >80% | >50% |\n\n## Related Skills\n\n- spatial-transcriptomics/spatial-preprocessing - Standard spatial analysis\n- single-cell/preprocessing - scRNA-seq concepts\n- spatial-transcriptomics/image-analysis - Morphology processing\n- single-cell/cell-annotation - Cell type assignment\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-spatial-transcriptomics-spatial-multiomics",
-    "description": "Analyze high-resolution spatial platforms like Slide-seq, Stereo-seq, and Visium HD. Use when working with subcellular resolution or high-density spatial data.",
-    "tool_type": "python",
-    "primary_tool": "squidpy"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

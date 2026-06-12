@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032018",
   "name": "flexport-migration-deep-dive",
   "slug": "flexport-migration-deep-dive",
   "description": "Execute major migration strategies for Flexport including migrating",
   "content": "# Flexport Migration Deep Dive\n\n## Overview\n\nGuide for migrating to Flexport from legacy freight forwarders, manual spreadsheet workflows, or other logistics platforms. Uses a strangler fig pattern to gradually move operations to the Flexport API while maintaining existing systems.\n\n## Migration Scenarios\n\n| From | To | Complexity | Timeline |\n|------|----|-----------|----------|\n| Spreadsheet/email | Flexport API | Low | 2-4 weeks |\n| Legacy freight forwarder API | Flexport API | Medium | 4-8 weeks |\n| ERP (SAP, Oracle) | ERP + Flexport | High | 8-16 weeks |\n| Multiple forwarders | Flexport consolidated | High | 6-12 weeks |\n\n## Instructions\n\n### Phase 1: Data Migration \u2014 Product Catalog\n\n```typescript\n// Migrate product catalog from legacy system to Flexport Product Library\nasync function migrateProducts(legacyProducts: LegacyProduct[]) {\n  const results = { success: 0, failed: 0, errors: [] as string[] };\n\n  for (const legacy of legacyProducts) {\n    try {\n      await fetch('https://api.flexport.com/products', {\n        method: 'POST',\n        headers,\n        body: JSON.stringify({\n          name: legacy.description,\n          sku: legacy.partNumber,\n          hs_code: legacy.tariffCode,\n          country_of_origin: legacy.originCountry,\n          unit_cost: { amount: legacy.unitCost, currency: legacy.currency },\n          weight: { value: legacy.weightKg, unit: 'kg' },\n        }),\n      });\n      results.success++;\n    } catch (err) {\n      results.failed++;\n      results.errors.push(`${legacy.partNumber}: ${err}`);\n    }\n  }\n\n  console.log(`Products migrated: ${results.success}/${legacyProducts.length}`);\n  return results;\n}\n```\n\n### Phase 2: Strangler Fig \u2014 Dual-Write\n\n```typescript\n// During migration, write to both systems\nclass DualWriteShipmentService {\n  constructor(\n    private legacy: LegacyForwarderClient,\n    private flexport: FlexportClient,\n    private featureFlags: FeatureFlags,\n  ) {}\n\n  async createBooking(params: BookingParams) {\n    // Always write to legacy during migration\n    const legacyResult = await this.legacy.createBooking(params);\n\n    // Write to Flexport if enabled for this route\n    if (this.featureFlags.isEnabled('flexport_booking', { route: params.route })) {\n      try {\n        const fpResult = await this.flexport.createBooking(params);\n        // Compare results for validation\n        this.compareResults(legacyResult, fpResult);\n      } catch (err) {\n        // Log but don't fail \u2014 legacy is still primary\n        logger.warn({ err, route: params.route }, 'Flexport dual-write failed');\n      }\n    }\n\n    return legacyResult;  // Legacy is source of truth during migration\n  }\n}\n```\n\n### Phase 3: Cutover \u2014 Route by Route\n\n```typescript\n// Migrate routes one at a time, validate, then cut over\nconst MIGRATION_PHASES = [\n  { routes: ['CNSHA-USLAX'], startDate: '2025-04-01', description: 'Shanghai-LA (highest volume)' },\n  { routes: ['CNSHA-DEHAM', 'CNSHA-NLRTM'], startDate: '2025-05-01', description: 'Asia-Europe' },\n  { routes: ['*'], startDate: '2025-06-01', description: 'All remaining routes' },\n];\n\n// Validate migration readiness per route\nasync function validateRoute(route: string): Promise<{\n  productsCovered: boolean;\n  webhooksWorking: boolean;\n  dataParity: boolean;\n}> {\n  // Check all products on this route exist in Flexport\n  const products = await db.products.findMany({ where: { routes: { has: route } } });\n  const fpProducts = await flexport('/products?per=100');\n  const fpSkus = new Set(fpProducts.data.records.map((p: any) => p.sku));\n  const productsCovered = products.every(p => fpSkus.has(p.sku));\n\n  return { productsCovered, webhooksWorking: true, dataParity: true };\n}\n```\n\n### Phase 4: Decommission Legacy\n\n```typescript\n// After all routes migrated and validated\nasync function decommissionLegacy() {\n  // Final data sync \u2014 export all historical data\n  const allShipments = await legacy.exportAllShipments();\n  await archiveToS3(allShipments, 'legacy-forwarder-archive');\n\n  // Disable legacy API keys\n  // Remove dual-write code paths\n  // Update monitoring to Flexport-only alerts\n  logger.info('Legacy forwarder decommissioned');\n}\n```\n\n## Migration Checklist\n\n- [ ] Product catalog migrated and validated\n- [ ] Purchase order history exported\n- [ ] Webhook endpoints configured and tested\n- [ ] Dual-write enabled for first route\n- [ ] Data parity validated between systems\n- [ ] Stakeholders notified of cutover schedule\n- [ ] Rollback procedure documented and tested\n- [ ] Legacy system archived (not deleted)\n\n## Resources\n\n- [Flexport Developer Portal](https://developers.flexport.com/)\n- [Flexport API Reference](https://apidocs.flexport.com/)\n- [Products API Tutorial](https://developers.flexport.com/tutorials/products-api-tutorial/)\n\n## Next Steps\n\nThis completes the Flexport skill pack. Start with `flexport-install-auth` for new integrations.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "flexport-migration-deep-dive",
-    "description": "Execute major migration strategies for Flexport including migrating",
-    "Trigger": "flexport migration\", \"migrate to flexport\", \"flexport ERP integration\".",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

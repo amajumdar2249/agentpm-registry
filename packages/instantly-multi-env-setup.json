@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032302",
   "name": "instantly-multi-env-setup",
   "slug": "instantly-multi-env-setup",
   "description": "Configure Instantly.ai across development, staging, and production environments.",
   "content": "# Instantly Multi-Environment Setup\n\n## Overview\n\nConfigure Instantly API v2 integrations across development, staging, and production environments. Instantly uses workspace-level isolation \u2014 each workspace has its own accounts, campaigns, leads, and API keys. This skill covers workspace separation, environment-specific configuration, mock server for dev, and safe promotion workflows.\n\n## Environment Strategy\n\n| Environment | Instantly Backend | API Keys | Webhooks | Purpose |\n|-------------|------------------|----------|----------|---------|\n| Development | Mock server | `mock-key` | localhost:3000 | Code iteration |\n| Staging | Separate workspace | Staging key | staging.yourapp.com | Integration testing |\n| Production | Production workspace | Prod key | prod.yourapp.com | Live outreach |\n\n## Instructions\n\n### Step 1: Environment Configuration\n\n```typescript\n// src/config.ts\nimport \"dotenv/config\";\n\ntype Env = \"development\" | \"staging\" | \"production\";\n\ninterface InstantlyConfig {\n  env: Env;\n  apiKey: string;\n  baseUrl: string;\n  webhookSecret: string;\n  useMock: boolean;\n  dailyLimitCap: number;\n  enableRealSending: boolean;\n}\n\nexport function getConfig(): InstantlyConfig {\n  const env = (process.env.NODE_ENV || \"development\") as Env;\n\n  const configs: Record<Env, InstantlyConfig> = {\n    development: {\n      env: \"development\",\n      apiKey: process.env.INSTANTLY_API_KEY_DEV || \"mock-key\",\n      baseUrl: \"https://developer.instantly.ai/_mock/api/v2\",\n      webhookSecret: \"dev-secret\",\n      useMock: true,\n      dailyLimitCap: 5,\n      enableRealSending: false,\n    },\n    staging: {\n      env: \"staging\",\n      apiKey: process.env.INSTANTLY_API_KEY_STAGING || \"\",\n      baseUrl: \"https://api.instantly.ai/api/v2\",\n      webhookSecret: process.env.INSTANTLY_WEBHOOK_SECRET_STAGING || \"\",\n      useMock: false,\n      dailyLimitCap: 10,\n      enableRealSending: true,\n    },\n    production: {\n      env: \"production\",\n      apiKey: process.env.INSTANTLY_API_KEY_PROD || \"\",\n      baseUrl: \"https://api.instantly.ai/api/v2\",\n      webhookSecret: process.env.INSTANTLY_WEBHOOK_SECRET_PROD || \"\",\n      useMock: false,\n      dailyLimitCap: 100,\n      enableRealSending: true,\n    },\n  };\n\n  const config = configs[env];\n  if (!config.useMock && !config.apiKey) {\n    throw new Error(`INSTANTLY_API_KEY_${env.toUpperCase()} is required for ${env}`);\n  }\n\n  return config;\n}\n```\n\n### Step 2: Environment-Specific .env Files\n\n```bash\n# .env.development\nNODE_ENV=development\nINSTANTLY_API_KEY_DEV=mock-key\nINSTANTLY_BASE_URL=https://developer.instantly.ai/_mock/api/v2\nINSTANTLY_WEBHOOK_SECRET=dev-secret-123\n\n# .env.staging\nNODE_ENV=staging\nINSTANTLY_API_KEY_STAGING=your-staging-workspace-key\nINSTANTLY_BASE_URL=https://api.instantly.ai/api/v2\nINSTANTLY_WEBHOOK_SECRET_STAGING=staging-secret-456\n\n# .env.production\nNODE_ENV=production\nINSTANTLY_API_KEY_PROD=your-production-workspace-key\nINSTANTLY_BASE_URL=https://api.instantly.ai/api/v2\nINSTANTLY_WEBHOOK_SECRET_PROD=prod-secret-789\n```\n\n### Step 3: Safe Campaign Creation with Environment Guards\n\n```typescript\nimport { getConfig } from \"./config\";\nimport { InstantlyClient } from \"./instantly/client\";\n\nconst config = getConfig();\nconst client = new InstantlyClient(config.apiKey, config.baseUrl);\n\nasync function createCampaignSafe(name: string, sequences: any[]) {\n  // Guard: add environment prefix to campaign names\n  const envPrefix = config.env === \"production\" ? \"\" : `[${config.env.toUpperCase()}] `;\n  const safeName = `${envPrefix}${name}`;\n\n  // Guard: cap daily limit per environment\n  const campaign = await client.campaigns.create({\n    name: safeName,\n    daily_limit: Math.min(50, config.dailyLimitCap),\n    sequences,\n    campaign_schedule: {\n      start_date: new Date().toISOString().split(\"T\")[0],\n      schedules: [{\n        name: \"Business Hours\",\n        timing: { from: \"09:00\", to: \"17:00\" },\n        days: { \"1\": true, \"2\": true, \"3\": true, \"4\": true, \"5\": true, \"0\": false, \"6\": false },\n        timezone: \"America/New_York\",\n      }],\n    },\n    stop_on_reply: true,\n  });\n\n  console.log(`[${config.env}] Campaign created: ${campaign.name} (${campaign.id})`);\n\n  // Guard: never auto-activate in production\n  if (config.env !== \"production\") {\n    await client.campaigns.activate(campaign.id);\n    console.log(`[${config.env}] Campaign auto-activated (non-prod)`);\n  } else {\n    console.log(`[production] Campaign created in DRAFT \u2014 manual activation required`);\n  }\n\n  return campaign;\n}\n```\n\n### Step 4: Workspace Isolation Verification\n\n```typescript\nasync function verifyWorkspaceIsolation() {\n  const config = getConfig();\n\n  // Get current workspace info\n  const workspace = await client.request<{\n    id: string; name: string;\n  }>(\"/workspaces/current\");\n\n  console.log(`Environment: ${config.env}`);\n  console.log(`Workspace: ${workspace.name} (${workspace.id})`);\n\n  // Safety check: verify workspace matches expected environment\n  const expectedWorkspaceNames: Record<string, string[]> = {\n    development: [\"dev\", \"test\", \"mock\"],\n    staging: [\"staging\", \"stage\", \"qa\"],\n    production: [\"prod\", \"production\", \"live\"],\n  };\n\n  const expected = expectedWorkspaceNames[config.env] || [];\n  const nameMatch = expected.some((n) =>\n    workspace.name.toLowerCase().includes(n)\n  );\n\n  if (!nameMatch && config.env !== \"development\") {\n    console.warn(`WARNING: Workspace name \"${workspace.name}\" doesn't match expected ${config.env} pattern`);\n    console.warn(\"Verify you're using the correct API key for this environment\");\n  }\n\n  // List accounts to verify correct workspace\n  const accounts = await client.accounts.list(5);\n  console.log(`Accounts in workspace: ${accounts.length}`);\n}\n```\n\n### Step 5: Webhook Registration Per Environment\n\n```typescript\nasync function setupWebhooksForEnv() {\n  const config = getConfig();\n\n  const webhookBaseUrls: Record<string, string> = {\n    development: \"http://localhost:3000\",\n    staging: \"https://staging-webhooks.yourapp.com\",\n    production: \"https://webhooks.yourapp.com\",\n  };\n\n  const baseUrl = webhookBaseUrls[config.env];\n\n  // Clean up existing webhooks\n  const existing = await client.webhooks.list();\n  for (const w of existing) {\n    if (w.name.startsWith(`[${config.env}]`)) {\n      await client.webhooks.delete(w.id);\n    }\n  }\n\n  // Register environment-specific webhooks\n  const events = [\"reply_received\", \"email_bounced\", \"lead_interested\", \"lead_meeting_booked\"];\n\n  for (const event of events) {\n    await client.webhooks.create({\n      name: `[${config.env}] ${event}`,\n      target_hook_url: `${baseUrl}/webhooks/instantly`,\n      event_type: event,\n      headers: { \"X-Webhook-Secret\": config.webhookSecret },\n    });\n  }\n\n  console.log(`[${config.env}] Registered ${events.length} webhooks -> ${baseUrl}`);\n}\n```\n\n## Promotion Workflow\n\n```\nDevelopment (mock)  \u2192  Staging (real API, test data)  \u2192  Production (live)\n    |                        |                               |\n    |  Code changes          |  Integration test             |  Manual activation\n    |  Unit tests            |  Small lead list (10)         |  Full lead list\n    |  Mock server           |  Staging workspace            |  Production workspace\n    |                        |  Webhook verification         |  Monitoring + alerts\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Wrong workspace | API key mismatch | Run `verifyWorkspaceIsolation()` |\n| Prod campaign auto-launched | Missing environment guard | Add `if (env !== \"production\")` check |\n| Webhook pointing to wrong env | Stale webhook registration | Re-run `setupWebhooksForEnv()` |\n| Staging data in production | Cross-env contamination | Use separate workspaces with separate API keys |\n\n## Resources\n\n- [Instantly Workspaces](https://developer.instantly.ai/api/v2/schemas)\n- [Instantly API v2 Docs](https://developer.instantly.ai/)\n- [Instantly Mock Server](https://developer.instantly.ai/_mock/api/v2/)\n\n## Next Steps\n\nFor observability and monitoring, see `instantly-observability`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "instantly-multi-env-setup",
-    "description": "Configure Instantly.ai across development, staging, and production environments.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000000676",
   "name": "git-protocol",
   "slug": "git-protocol",
   "description": "Git protocol implementation patterns using gitoxide for Guts repository operations",
   "content": "\n# Git Protocol Skill for Guts\n\nYou are implementing Git-compatible repository operations using gitoxide (gix).\n\n## Gitoxide Overview\n\nGitoxide is a pure-Rust Git implementation. Key crates:\n\n- `gix`: High-level Git operations\n- `gix-object`: Git object types\n- `gix-hash`: Object ID handling\n- `gix-pack`: Pack file operations\n- `gix-transport`: Git protocol transport\n\n## Repository Operations\n\n### Opening/Creating Repositories\n\n```rust\nuse gix::Repository;\nuse std::path::Path;\n\npub async fn open_or_create(path: &Path) -> Result<Repository> {\n    match gix::open(path) {\n        Ok(repo) => Ok(repo),\n        Err(_) => {\n            // Create new bare repository\n            gix::init_bare(path)?\n        }\n    }\n}\n```\n\n### Working with Objects\n\n```rust\nuse gix::ObjectId;\nuse gix::object::Kind;\n\npub struct ObjectStore {\n    repo: Repository,\n}\n\nimpl ObjectStore {\n    pub fn get_object(&self, id: &ObjectId) -> Result<Object> {\n        let object = self.repo.find_object(id)?;\n\n        match object.kind {\n            Kind::Blob => self.decode_blob(object),\n            Kind::Tree => self.decode_tree(object),\n            Kind::Commit => self.decode_commit(object),\n            Kind::Tag => self.decode_tag(object),\n        }\n    }\n\n    pub fn write_blob(&self, data: &[u8]) -> Result<ObjectId> {\n        let id = self.repo.write_blob(data)?;\n        Ok(id)\n    }\n}\n```\n\n### Commits\n\n```rust\nuse gix::actor::Signature;\n\npub struct CommitBuilder<'a> {\n    repo: &'a Repository,\n    tree: ObjectId,\n    parents: Vec<ObjectId>,\n    message: String,\n    author: Signature,\n}\n\nimpl<'a> CommitBuilder<'a> {\n    pub fn new(repo: &'a Repository) -> Self {\n        let now = gix::date::Time::now_local_or_utc();\n        let default_sig = Signature {\n            name: \"Guts User\".into(),\n            email: \"user@guts.local\".into(),\n            time: now,\n        };\n\n        Self {\n            repo,\n            tree: ObjectId::null(),\n            parents: vec![],\n            message: String::new(),\n            author: default_sig,\n        }\n    }\n\n    pub fn tree(mut self, tree: ObjectId) -> Self {\n        self.tree = tree;\n        self\n    }\n\n    pub fn parent(mut self, parent: ObjectId) -> Self {\n        self.parents.push(parent);\n        self\n    }\n\n    pub fn message(mut self, msg: impl Into<String>) -> Self {\n        self.message = msg.into();\n        self\n    }\n\n    pub fn commit(self) -> Result<ObjectId> {\n        let commit = gix::objs::CommitRef {\n            tree: self.tree,\n            parents: self.parents.into(),\n            author: self.author.clone(),\n            committer: self.author,\n            encoding: None,\n            message: self.message.into(),\n            extra_headers: vec![],\n        };\n\n        let id = self.repo.write_object(&commit)?;\n        Ok(id)\n    }\n}\n```\n\n## Git Protocol Implementation\n\n### Smart HTTP Protocol\n\n```rust\nuse axum::{Router, routing::post, extract::Path};\n\npub fn git_http_router() -> Router {\n    Router::new()\n        .route(\"/:owner/:repo/git-upload-pack\", post(upload_pack))\n        .route(\"/:owner/:repo/git-receive-pack\", post(receive_pack))\n        .route(\"/:owner/:repo/info/refs\", get(info_refs))\n}\n\nasync fn upload_pack(\n    Path((owner, repo)): Path<(String, String)>,\n    body: Bytes,\n) -> Result<impl IntoResponse> {\n    let repo = get_repository(&owner, &repo).await?;\n\n    // Parse want/have lines\n    let request = parse_upload_pack_request(&body)?;\n\n    // Generate packfile with requested objects\n    let packfile = generate_packfile(&repo, &request).await?;\n\n    Ok((\n        [(header::CONTENT_TYPE, \"application/x-git-upload-pack-result\")],\n        packfile,\n    ))\n}\n\nasync fn receive_pack(\n    Path((owner, repo)): Path<(String, String)>,\n    body: Bytes,\n) -> Result<impl IntoResponse> {\n    let repo = get_repository(&owner, &repo).await?;\n\n    // Parse commands and packfile\n    let (commands, packfile) = parse_receive_pack(&body)?;\n\n    // Verify permissions\n    verify_push_permissions(&owner, &repo).await?;\n\n    // Apply packfile\n    apply_packfile(&repo, &packfile).await?;\n\n    // Update refs\n    for cmd in commands {\n        update_ref(&repo, &cmd).await?;\n    }\n\n    Ok((\n        [(header::CONTENT_TYPE, \"application/x-git-receive-pack-result\")],\n        \"ok\\n\",\n    ))\n}\n```\n\n### Pack File Generation\n\n```rust\nuse gix::pack;\n\npub async fn generate_packfile(\n    repo: &Repository,\n    wants: &[ObjectId],\n    haves: &[ObjectId],\n) -> Result<Vec<u8>> {\n    // Find all objects to include\n    let objects = repo.rev_walk(wants)\n        .sorting(Sorting::ByCommitTimeNewestFirst)\n        .ancestors()\n        .filter(|id| !haves.contains(id))\n        .collect::<Vec<_>>();\n\n    // Create pack file\n    let mut pack_data = Vec::new();\n    let mut writer = pack::data::output::bytes::Writer::new(&mut pack_data);\n\n    for oid in objects {\n        let object = repo.find_object(oid)?;\n        writer.write_entry(object)?;\n    }\n\n    writer.finish()?;\n\n    Ok(pack_data)\n}\n```\n\n## Reference Management\n\n```rust\npub struct RefStore {\n    repo: Repository,\n}\n\nimpl RefStore {\n    pub fn list_refs(&self) -> Result<Vec<(String, ObjectId)>> {\n        let refs = self.repo.references()?;\n\n        refs.all()?\n            .map(|r| {\n                let r = r?;\n                Ok((r.name().to_string(), r.target().id()))\n            })\n            .collect()\n    }\n\n    pub fn update_ref(&self, name: &str, new_id: ObjectId, old_id: Option<ObjectId>) -> Result<()> {\n        let ref_log_message = format!(\"guts: update {}\", name);\n\n        if let Some(old) = old_id {\n            // Atomic compare-and-swap\n            self.repo\n                .reference(name, new_id, PreviousValue::MustExistAndMatch(old.into()))?;\n        } else {\n            // Create new ref\n            self.repo\n                .reference(name, new_id, PreviousValue::MustNotExist)?;\n        }\n\n        Ok(())\n    }\n\n    pub fn get_head(&self) -> Result<ObjectId> {\n        let head = self.repo.head_commit()?;\n        Ok(head.id)\n    }\n}\n```\n\n## Guts Extensions to Git\n\n```rust\n/// Extended commit with Guts-specific metadata\n#[derive(Debug, Clone)]\npub struct GutsCommit {\n    /// Standard Git commit\n    pub git_commit: gix::Commit,\n\n    /// Ed25519 signature of commit hash\n    pub signature: Signature,\n\n    /// Signer's public key\n    pub signer: PublicKey,\n\n    /// Consensus round when commit was accepted\n    pub consensus_round: Option<u64>,\n}\n\nimpl GutsCommit {\n    pub fn verify(&self) -> Result<bool> {\n        let commit_hash = self.git_commit.id.as_bytes();\n        self.signer.verify(commit_hash, &self.signature)\n    }\n}\n```\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "git-protocol",
-    "description": "Git protocol implementation patterns using gitoxide for Guts repository operations"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

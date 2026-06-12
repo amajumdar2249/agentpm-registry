@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031252",
   "name": "anth-rate-limits",
   "slug": "anth-rate-limits",
   "description": "Implement Anthropic Claude API rate limiting, backoff, and quota management.",
   "content": "# Anthropic Rate Limits\n\n## Overview\n\nThe Claude API uses token-bucket rate limiting measured in three dimensions: requests per minute (RPM), input tokens per minute (ITPM), and output tokens per minute (OTPM). Limits increase automatically as you move through usage tiers.\n\n## Rate Limit Dimensions\n\n| Dimension | Header | Description |\n|-----------|--------|-------------|\n| RPM | `anthropic-ratelimit-requests-limit` | Requests per minute |\n| ITPM | `anthropic-ratelimit-tokens-limit` | Input tokens per minute |\n| OTPM | `anthropic-ratelimit-tokens-limit` | Output tokens per minute |\n\nLimits are per-organization and per-model-class. Cached input tokens do NOT count toward ITPM limits.\n\n## Usage Tiers (Auto-Upgrade)\n\n| Tier | Monthly Spend | Key Benefit |\n|------|---------------|-------------|\n| Tier 1 (Free) | $0 | Evaluation access |\n| Tier 2 | $40+ | Higher RPM |\n| Tier 3 | $200+ | Production-grade limits |\n| Tier 4 | $2,000+ | High-throughput access |\n| Scale | Custom | Custom limits via sales |\n\nCheck your current tier and limits at [console.anthropic.com](https://console.anthropic.com/settings/limits).\n\n## SDK Built-In Retry\n\n```python\nimport anthropic\n\n# The SDK retries 429 and 5xx errors automatically (2 retries by default)\nclient = anthropic.Anthropic(max_retries=5)  # Increase for high-traffic apps\n\n# Disable auto-retry for manual control\nclient = anthropic.Anthropic(max_retries=0)\n```\n\n```typescript\nconst client = new Anthropic({ maxRetries: 5 });\n```\n\n## Custom Rate Limiter with Header Awareness\n\n```python\nimport time\nimport anthropic\n\nclass RateLimitedClient:\n    def __init__(self):\n        self.client = anthropic.Anthropic(max_retries=0)  # We handle retries\n        self.remaining_requests = 100\n        self.remaining_tokens = 100000\n        self.reset_at = 0.0\n\n    def create_message(self, **kwargs):\n        # Pre-check: wait if near limit\n        if self.remaining_requests < 3 and time.time() < self.reset_at:\n            wait = self.reset_at - time.time()\n            print(f\"Pre-throttle: waiting {wait:.1f}s\")\n            time.sleep(wait)\n\n        for attempt in range(5):\n            try:\n                response = self.client.messages.create(**kwargs)\n\n                # Update from response headers (via _response)\n                headers = response._response.headers\n                self.remaining_requests = int(headers.get(\"anthropic-ratelimit-requests-remaining\", 100))\n                self.remaining_tokens = int(headers.get(\"anthropic-ratelimit-tokens-remaining\", 100000))\n                reset = headers.get(\"anthropic-ratelimit-requests-reset\")\n                if reset:\n                    from datetime import datetime\n                    self.reset_at = datetime.fromisoformat(reset.replace(\"Z\", \"+00:00\")).timestamp()\n\n                return response\n            except anthropic.RateLimitError as e:\n                retry_after = float(e.response.headers.get(\"retry-after\", 2 ** attempt))\n                print(f\"429 \u2014 retry in {retry_after}s (attempt {attempt + 1})\")\n                time.sleep(retry_after)\n\n        raise Exception(\"Exhausted rate limit retries\")\n```\n\n## Queue-Based Throughput Control\n\n```typescript\nimport PQueue from 'p-queue';\nimport Anthropic from '@anthropic-ai/sdk';\n\nconst client = new Anthropic();\n\n// Enforce 50 RPM with concurrency limit\nconst queue = new PQueue({\n  concurrency: 10,\n  interval: 60_000,\n  intervalCap: 50,\n});\n\nasync function rateLimitedCall(prompt: string) {\n  return queue.add(() =>\n    client.messages.create({\n      model: 'claude-sonnet-4-20250514',\n      max_tokens: 1024,\n      messages: [{ role: 'user', content: prompt }],\n    })\n  );\n}\n\n// Process 200 prompts without hitting limits\nconst results = await Promise.all(\n  prompts.map(p => rateLimitedCall(p))\n);\n```\n\n## Cost-Saving: Use Batches for Bulk Work\n\n```python\n# Message Batches API: 50% cheaper, no rate limit pressure on real-time quota\nbatch = client.messages.batches.create(\n    requests=[\n        {\"custom_id\": f\"req-{i}\", \"params\": {\n            \"model\": \"claude-sonnet-4-20250514\",\n            \"max_tokens\": 1024,\n            \"messages\": [{\"role\": \"user\", \"content\": prompt}]\n        }}\n        for i, prompt in enumerate(prompts)\n    ]\n)\n```\n\n## Error Handling\n\n| Header | Description | Action |\n|--------|-------------|--------|\n| `retry-after` | Seconds until next request allowed | Sleep this duration exactly |\n| `anthropic-ratelimit-requests-remaining` | Requests left in window | Throttle if < 5 |\n| `anthropic-ratelimit-tokens-remaining` | Tokens left in window | Reduce `max_tokens` if low |\n| `anthropic-ratelimit-requests-reset` | ISO timestamp of window reset | Schedule retry after this time |\n\n## Resources\n\n- [Rate Limits Documentation](https://docs.anthropic.com/en/api/rate-limits)\n- [Usage Tiers](https://docs.anthropic.com/en/api/service-tiers)\n- [Message Batches API](https://docs.anthropic.com/en/api/creating-message-batches)\n\n## Next Steps\n\nFor security configuration, see `anth-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "anth-rate-limits",
-    "description": "Implement Anthropic Claude API rate limiting, backoff, and quota management.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000030963",
   "name": "implementing-database-caching",
   "slug": "implementing-database-caching",
   "description": "Process use when you need to implement multi-tier caching to improve",
   "content": "# Database Cache Layer\n\n## Overview\n\nImplement multi-tier caching strategies using Redis, application-level in-memory caches, and query result caching to reduce database load and improve read latency. This skill covers cache-aside, write-through, and write-behind patterns with proper invalidation strategies, TTL configuration, and cache stampede prevention.\n\n## Prerequisites\n\n- Redis server (6.x+) available or Docker for running `docker run redis:7-alpine`\n- `redis-cli` installed for cache inspection and debugging\n- Application framework with Redis client library (ioredis, redis-py, Jedis, go-redis)\n- Database query profiling data identifying read-heavy and slow queries\n- Understanding of data freshness requirements (how stale can cached data be)\n- Monitoring tools for cache hit rate and Redis memory usage\n\n## Instructions\n\n1. Profile database queries to identify caching candidates. Focus on queries that: execute more than 100 times per minute, take longer than 50ms, return data that changes less frequently than every 5 minutes, and produce results smaller than 1MB. Use `pg_stat_statements` or MySQL slow query log.\n\n2. Design the cache key schema with a consistent naming convention: `service:entity:identifier:variant`. Examples: `app:user:12345:profile`, `app:products:category:electronics:page:1`. Include a version prefix to enable bulk invalidation: `v2:app:user:12345`.\n\n3. Implement the cache-aside pattern for read-heavy data:\n   - Check Redis first: `GET app:user:12345:profile`\n   - On cache miss: query database, then `SET app:user:12345:profile <json> EX 3600`\n   - On data update: `DEL app:user:12345:profile` to invalidate\n   - Wrap in a helper function that abstracts cache-then-database logic\n\n4. Configure TTL values based on data change frequency:\n   - Static reference data (countries, categories): TTL 24 hours or longer\n   - User profile data: TTL 15-60 minutes\n   - Product listings: TTL 5-15 minutes\n   - Session data: TTL matching session timeout\n   - Real-time data (inventory counts, prices): TTL 30-60 seconds or skip caching\n\n5. Implement cache stampede prevention for high-traffic cache keys:\n   - **Probabilistic early expiration**: Refresh cache at `TTL * 0.8` with probability `1 / concurrent_requests`\n   - **Distributed lock**: Use `SET key:lock NX EX 5` to let one request refresh while others serve stale data\n   - **Stale-while-revalidate**: Serve expired cache while refreshing in background\n\n6. Add application-level L1 cache using an in-memory LRU cache (Node.js: `lru-cache`, Python: `cachetools`, Java: Caffeine) for per-process caching of ultra-hot data. Set L1 TTL shorter than Redis TTL (e.g., 60 seconds L1, 5 minutes Redis).\n\n7. Configure Redis for production:\n   - Set `maxmemory` to 75% of available RAM\n   - Set `maxmemory-policy allkeys-lru` for cache workloads\n   - Enable `save \"\"` (disable RDB persistence) for pure cache use\n   - Configure `tcp-keepalive 60` and `timeout 300`\n\n8. Implement cache invalidation on data mutations. After INSERT, UPDATE, or DELETE operations, delete the corresponding cache key and any aggregate/list cache keys that include the modified data. Use Redis key patterns or tag-based invalidation for related keys.\n\n9. Add cache metrics instrumentation: track cache hit rate (`hits / (hits + misses)`), cache miss latency (time to populate from DB), Redis memory usage, eviction rate, and average key TTL remaining. Alert when hit rate drops below 80%.\n\n10. Test cache behavior under load: verify cache hit rate reaches 90%+ for targeted queries, confirm cache invalidation works correctly on updates, and measure end-to-end latency improvement compared to direct database queries.\n\n## Output\n\n- **Redis configuration file** with memory limits, eviction policy, and persistence settings\n- **Cache wrapper module** with get/set/invalidate functions and stampede prevention\n- **Cache key schema documentation** with naming conventions and TTL values per data type\n- **Invalidation logic** integrated with data access layer for automatic cache clearing on mutations\n- **Monitoring dashboard queries** for cache hit rate, memory usage, and eviction tracking\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|---------|\n| Redis connection refused | Redis server down or network issue | Implement circuit breaker pattern; fall through to database on cache unavailability; retry with exponential backoff |\n| Cache stampede on popular key expiration | Many concurrent requests hit cache miss simultaneously | Use distributed locking or probabilistic early refresh; extend TTL with jitter (`TTL + random(0, TTL*0.1)`) |\n| Stale data served after database update | Cache invalidation missed or delayed | Audit invalidation paths; use publish/subscribe for cache invalidation events; reduce TTL for sensitive data |\n| Redis out of memory (OOM) | Cache size exceeds `maxmemory` setting | Enable `allkeys-lru` eviction; reduce TTLs; audit large keys with `redis-cli --bigkeys`; increase maxmemory |\n| Cache key collision | Different data stored under the same key pattern | Include all discriminating parameters in the cache key; add content hash to key for variant detection |\n\n## Examples\n\n**Caching product catalog for an e-commerce site**: Product detail pages query 3 tables (products, categories, reviews_summary). Cache the assembled product JSON in Redis with TTL of 10 minutes. Cache hit rate reaches 95% since products change rarely. Category pages use list cache keys `app:products:category:electronics:sort:price:page:1` with 5-minute TTL. On product update, invalidate both the product key and all category list keys containing that product.\n\n**User session caching with Redis**: Store session data as Redis hashes (`HSET session:abc123 userId 456 role admin lastAccess 1705341234`). Set TTL to 30 minutes with sliding expiration on each access (`EXPIRE session:abc123 1800`). Session reads drop from 2ms (PostgreSQL) to 0.1ms (Redis), eliminating 50,000 database queries per minute.\n\n**API response caching with stale-while-revalidate**: Dashboard endpoint takes 3 seconds to compute. Cache the response with 5-minute TTL. When TTL expires, the first request triggers an async background refresh while serving the stale cached response. Subsequent requests within the refresh window also receive the stale response. Dashboard always loads in under 5ms from the client perspective.\n\n## Resources\n\n- Redis documentation: https://redis.io/docs/\n- Redis caching patterns: https://redis.io/docs/manual/patterns/\n- Cache-aside pattern: https://docs.microsoft.com/en-us/azure/architecture/patterns/cache-aside\n- ioredis (Node.js client): https://github.com/redis/ioredis\n- redis-py (Python client): https://redis-py.readthedocs.io/\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "implementing-database-caching",
-    "description": "Process use when you need to implement multi-tier caching to improve",
-    "allowed-tools": "Read, Write, Edit, Grep, Glob, Bash(redis-cli:*), Bash(docker:redis:*)",
-    "version": "1.0.0",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "license": "MIT",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

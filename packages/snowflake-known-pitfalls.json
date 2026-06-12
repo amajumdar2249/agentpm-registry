@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033289",
   "name": "snowflake-known-pitfalls",
   "slug": "snowflake-known-pitfalls",
   "description": "Identify and avoid Snowflake anti-patterns and common mistakes in SQL,",
   "content": "# Snowflake Known Pitfalls\n\n## Overview\n\nCommon mistakes and anti-patterns when using Snowflake, with real SQL examples and fixes.\n\n## Pitfall #1: Leaving Warehouses Running (Cost Killer)\n\n**Anti-Pattern:**\n\n```sql\n-- Warehouse with auto_suspend = 0 (never suspends)\nCREATE WAREHOUSE ALWAYS_ON_WH\n  WAREHOUSE_SIZE = 'XLARGE'\n  AUTO_SUSPEND = 0;\n-- 16 credits/hour = ~$1,152/day at $3/credit\n```\n\n**Fix:**\n\n```sql\nALTER WAREHOUSE ALWAYS_ON_WH SET\n  AUTO_SUSPEND = 120,    -- Suspend after 2 min idle\n  AUTO_RESUME = TRUE;    -- Resume on next query\n\n-- Audit all warehouses for high auto_suspend\nSELECT name, size, auto_suspend, state\nFROM INFORMATION_SCHEMA.WAREHOUSES\nWHERE auto_suspend > 600 OR auto_suspend = 0;\n```\n\n---\n\n## Pitfall #2: Using ACCOUNTADMIN for Everything\n\n**Anti-Pattern:**\n\n```sql\n-- Human users with ACCOUNTADMIN default role\nALTER USER analyst SET DEFAULT_ROLE = 'ACCOUNTADMIN';\n-- One bad query can drop production databases\n```\n\n**Fix:**\n\n```sql\n-- Use least-privilege roles\nALTER USER analyst SET DEFAULT_ROLE = 'DATA_ANALYST';\n\n-- Audit ACCOUNTADMIN usage\nSELECT grantee_name, role\nFROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS\nWHERE role = 'ACCOUNTADMIN' AND deleted_on IS NULL;\n-- Should be < 3 users, all named admins\n```\n\n---\n\n## Pitfall #3: SELECT * on Wide Tables\n\n**Anti-Pattern:**\n\n```sql\n-- Scans ALL columns (Snowflake stores columnar \u2014 unused cols waste I/O)\nSELECT * FROM events;  -- 200 columns, only need 3\n```\n\n**Fix:**\n\n```sql\n-- Select only needed columns \u2014 dramatically reduces bytes scanned\nSELECT event_id, event_type, event_timestamp FROM events;\n\n-- Check column pruning impact\nSELECT bytes_scanned FROM TABLE(INFORMATION_SCHEMA.QUERY_HISTORY_BY_SESSION())\nORDER BY start_time DESC LIMIT 1;\n```\n\n---\n\n## Pitfall #4: Clustering Keys on Small Tables\n\n**Anti-Pattern:**\n\n```sql\n-- Clustering key on a 10,000 row table\nALTER TABLE config_settings CLUSTER BY (category);\n-- Costs credits for reclustering with zero performance benefit\n```\n\n**Fix:**\n\n```sql\n-- Only cluster tables > 1TB with frequent filter queries\n-- Check table size before clustering\nSELECT table_name, row_count, bytes / 1e9 AS gb\nFROM INFORMATION_SCHEMA.TABLES\nWHERE table_name = 'CONFIG_SETTINGS';\n-- If < 1 GB, clustering is waste\n\n-- Remove unnecessary clustering\nALTER TABLE config_settings DROP CLUSTERING KEY;\n```\n\n---\n\n## Pitfall #5: Not Using MERGE for Idempotent Loads\n\n**Anti-Pattern:**\n\n```sql\n-- INSERT creates duplicates on retry\nINSERT INTO dim_orders SELECT * FROM staging_orders;\n-- Network blip \u2192 retry \u2192 duplicate rows\n```\n\n**Fix:**\n\n```sql\n-- MERGE is idempotent \u2014 safe to retry\nMERGE INTO dim_orders AS target\nUSING staging_orders AS source\nON target.order_id = source.order_id\nWHEN MATCHED THEN UPDATE SET\n  target.amount = source.amount,\n  target.updated_at = CURRENT_TIMESTAMP()\nWHEN NOT MATCHED THEN INSERT\n  (order_id, amount, created_at)\nVALUES (source.order_id, source.amount, CURRENT_TIMESTAMP());\n```\n\n---\n\n## Pitfall #6: Ignoring Stale Streams\n\n**Anti-Pattern:**\n\n```sql\n-- Stream goes stale when retention period is exceeded\n-- (source table changes exceed DATA_RETENTION_TIME_IN_DAYS)\n-- Result: DATA LOSS \u2014 changes between old and new offset are gone\n```\n\n**Fix:**\n\n```sql\n-- Monitor stream staleness\nSELECT stream_name, stale\nFROM INFORMATION_SCHEMA.STREAMS\nWHERE stale = TRUE;\n\n-- Increase retention on source tables\nALTER TABLE raw_orders SET DATA_RETENTION_TIME_IN_DAYS = 14;\n\n-- Set up alert for stale streams\nCREATE ALERT stale_stream_alert\n  WAREHOUSE = ADMIN_WH\n  SCHEDULE = '30 MINUTE'\n  IF (EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.STREAMS WHERE stale = TRUE))\n  THEN CALL SYSTEM$SEND_EMAIL(...);\n```\n\n---\n\n## Pitfall #7: Loading Many Small Files\n\n**Anti-Pattern:**\n\n```bash\n# 100,000 small files (< 100KB each) in stage\n# Each file = separate micro-partition = metadata overhead\n```\n\n**Fix:**\n\n```sql\n-- Combine small files before loading\n-- Or use Snowpipe with recommended file sizes (100-250 MB)\n\n-- Check COPY history for file size issues\nSELECT file_name, file_size, row_count\nFROM TABLE(INFORMATION_SCHEMA.COPY_HISTORY(\n  TABLE_NAME => 'MY_TABLE',\n  START_TIME => DATEADD(hours, -24, CURRENT_TIMESTAMP())\n))\nWHERE file_size < 100000  -- Files under 100KB\nORDER BY file_size;\n```\n\n---\n\n## Pitfall #8: No Resource Monitors\n\n**Anti-Pattern:**\n\n```sql\n-- No resource monitors = unlimited credit consumption\n-- A runaway query or always-on warehouse can burn thousands of credits\n```\n\n**Fix:**\n\n```sql\nCREATE RESOURCE MONITOR monthly_budget\n  WITH CREDIT_QUOTA = 2000\n  FREQUENCY = MONTHLY\n  START_TIMESTAMP = IMMEDIATELY\n  TRIGGERS\n    ON 75 PERCENT DO NOTIFY\n    ON 100 PERCENT DO SUSPEND\n    ON 110 PERCENT DO SUSPEND_IMMEDIATE;\n\nALTER ACCOUNT SET RESOURCE_MONITOR = monthly_budget;\n```\n\n---\n\n## Pitfall #9: Using Transient Tables for Important Data\n\n**Anti-Pattern:**\n\n```sql\n-- Transient tables have NO Fail-safe (7 days of extra recovery)\n-- and max 1 day of Time Travel\nCREATE TRANSIENT TABLE critical_orders (...);\n-- Data loss risk if table is accidentally dropped after 1 day\n```\n\n**Fix:**\n\n```sql\n-- Use permanent tables for important data\nCREATE TABLE critical_orders (...);\nALTER TABLE critical_orders SET DATA_RETENTION_TIME_IN_DAYS = 14;\n\n-- Use transient only for truly temporary data\nCREATE TRANSIENT TABLE temp_staging_batch (...);\n```\n\n---\n\n## Pitfall #10: Wrong Account Identifier Format\n\n**Anti-Pattern:**\n\n```typescript\n// Using the full URL instead of account identifier\nconst conn = snowflake.createConnection({\n  account: 'myaccount.us-east-1.snowflakecomputing.com',  // WRONG\n});\n// Results in: \"Could not connect to Snowflake backend\"\n```\n\n**Fix:**\n\n```typescript\nconst conn = snowflake.createConnection({\n  account: 'myorg-myaccount',  // Correct: orgname-accountname format\n});\n// For legacy locator format: 'xy12345.us-east-1' (include region)\n```\n\n## Quick Audit Script\n\n```sql\n-- Run this monthly to catch common pitfalls\nSELECT 'Always-on warehouses' AS check,\n       COUNT(*) AS issues\nFROM INFORMATION_SCHEMA.WAREHOUSES\nWHERE auto_suspend = 0 OR auto_suspend > 3600\n\nUNION ALL\n\nSELECT 'ACCOUNTADMIN default role',\n       COUNT(*)\nFROM SNOWFLAKE.ACCOUNT_USAGE.USERS\nWHERE default_role = 'ACCOUNTADMIN' AND disabled = 'false'\n\nUNION ALL\n\nSELECT 'Stale streams',\n       COUNT(*)\nFROM INFORMATION_SCHEMA.STREAMS\nWHERE stale = TRUE\n\nUNION ALL\n\nSELECT 'No resource monitor',\n       CASE WHEN COUNT(*) = 0 THEN 1 ELSE 0 END\nFROM INFORMATION_SCHEMA.RESOURCE_MONITORS\n\nUNION ALL\n\nSELECT 'Tables without clustering (>1TB)',\n       COUNT(*)\nFROM INFORMATION_SCHEMA.TABLES\nWHERE bytes > 1e12\n  AND auto_clustering_on = 'NO';\n```\n\n## Quick Reference Card\n\n| Pitfall | Detection | Prevention |\n|---------|-----------|------------|\n| Always-on warehouse | `auto_suspend = 0` | Set 60-300s |\n| ACCOUNTADMIN abuse | `GRANTS_TO_USERS` audit | Enforce least privilege |\n| SELECT * | High `bytes_scanned` | Column pruning |\n| Unnecessary clustering | Small table < 1TB | Only cluster large tables |\n| INSERT duplicates | Row count mismatch | Use MERGE |\n| Stale streams | `stale = TRUE` | Increase retention |\n| Small files | COPY_HISTORY file_size | Batch files to 100-250MB |\n| No resource monitor | Account check | Create immediately |\n| Transient for critical data | Table type audit | Use permanent tables |\n| Wrong account format | Connection error | Use `orgname-accountname` |\n\n## Resources\n\n- [Warehouse Considerations](https://docs.snowflake.com/en/user-guide/warehouses-considerations)\n- [Access Control Best Practices](https://docs.snowflake.com/en/user-guide/security-access-control-considerations)\n- [Data Loading Best Practices](https://docs.snowflake.com/en/user-guide/data-load-considerations-prepare)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "snowflake-known-pitfalls",
-    "description": "Identify and avoid Snowflake anti-patterns and common mistakes in SQL,",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

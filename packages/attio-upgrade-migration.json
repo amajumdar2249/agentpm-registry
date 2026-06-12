@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031377",
   "name": "attio-upgrade-migration",
   "slug": "attio-upgrade-migration",
   "description": "Migrate between Attio API versions, handle breaking changes in the",
   "content": "# Attio Upgrade & Migration\n\n## Overview\n\nAttio has two API generations: v1 (legacy, deprecated) and v2 (current). This skill covers the v1-to-v2 migration, community SDK upgrade paths, and how to detect and adapt to API changes since Attio does not publish a traditional SDK changelog.\n\n## V1 to V2 Migration Reference\n\n### Endpoint Changes\n\n| Operation | V1 Endpoint | V2 Endpoint |\n|-----------|------------|------------|\n| List objects | `GET /v1/objects` | `GET /v2/objects` |\n| Query records | `GET /v1/objects/{id}/records` | `POST /v2/objects/{slug}/records/query` |\n| Create record | `POST /v1/objects/{id}/records` | `POST /v2/objects/{slug}/records` |\n| Get record | `GET /v1/objects/{id}/records/{rid}` | `GET /v2/objects/{slug}/records/{rid}` |\n| List entries | `GET /v1/lists/{id}/entries` | `POST /v2/lists/{slug}/entries/query` |\n| Create webhook | `POST /v1/webhooks` | `POST /v2/webhooks` |\n| Search | N/A | `POST /v2/records/search` |\n\n### Key Differences\n\n| Aspect | V1 | V2 |\n|--------|----|----|\n| Identifiers | UUIDs only | Slugs (preferred) or UUIDs |\n| Record query | GET with query params | POST with JSON body (filters, sorts) |\n| Filtering | Basic query params | Rich operators (`$eq`, `$contains`, `$gt`, `$and`, `$or`) |\n| Pagination | `page` + `per_page` | `limit` + `offset` or cursor-based |\n| Webhook payloads | Custom format | Consistent with v2 response shapes |\n| Webhook filtering | None | Event-type and attribute-level filters |\n\n### Step 1: Update Base URL\n\n```typescript\n// Before\nconst BASE = \"https://api.attio.com/v1\";\n\n// After\nconst BASE = \"https://api.attio.com/v2\";\n```\n\n### Step 2: Migrate Record Queries\n\n```typescript\n// V1: GET with query params\nconst v1 = await fetch(\n  `${BASE}/objects/${objectId}/records?page=1&per_page=50`,\n  { headers: { Authorization: `Bearer ${token}` } }\n);\n\n// V2: POST with filter body, using slug instead of UUID\nconst v2 = await fetch(\n  `${BASE}/objects/people/records/query`,\n  {\n    method: \"POST\",\n    headers: {\n      Authorization: `Bearer ${token}`,\n      \"Content-Type\": \"application/json\",\n    },\n    body: JSON.stringify({\n      filter: {\n        email_addresses: { email_address: { $contains: \"@example.com\" } },\n      },\n      sorts: [{ attribute: \"created_at\", field: \"created_at\", direction: \"desc\" }],\n      limit: 50,\n      offset: 0,\n    }),\n  }\n);\n```\n\n### Step 3: Update Record Creation\n\n```typescript\n// V1: values as flat key-value pairs\nconst v1Body = {\n  name: \"Ada Lovelace\",\n  email: \"ada@example.com\",\n};\n\n// V2: values nested under data.values, always arrays\nconst v2Body = {\n  data: {\n    values: {\n      name: [{ first_name: \"Ada\", last_name: \"Lovelace\", full_name: \"Ada Lovelace\" }],\n      email_addresses: [\"ada@example.com\"],\n    },\n  },\n};\n```\n\n### Step 4: Migrate Webhooks from V1 to V2\n\n```typescript\n// V1 webhook event types\n\"object.record.created\"\n\n// V2 webhook event types\n\"record.created\"\n\"record.updated\"\n\"record.deleted\"\n\"record.merged\"\n\"list-entry.created\"\n\"note.created\"\n\"task.created\"\n// ... plus filtering support\n```\n\nV2 webhooks support event filtering to reduce volume:\n\n```typescript\nawait client.post(\"/webhooks\", {\n  target_url: \"https://yourapp.com/webhooks/attio\",\n  subscriptions: [\n    {\n      event_type: \"record.updated\",\n      filter: {\n        // Only trigger for updates to the \"stage\" attribute on deals\n        $and: [\n          { object: { $eq: \"deals\" } },\n          { attribute: { $eq: \"stage\" } },\n        ],\n      },\n    },\n  ],\n});\n```\n\n## Community SDK Migration\n\nSince there is no official Attio SDK, you may be using community packages:\n\n### attio-js (most popular community SDK)\n\n```bash\n# Check current version\nnpm list attio-js\n\n# Upgrade\nnpm install attio-js@latest\n```\n\n```typescript\n// attio-js uses the v2 API natively\nimport { AttioClient } from \"attio-js\";\n\nconst client = new AttioClient({ accessToken: process.env.ATTIO_API_KEY });\nconst people = await client.records.query(\"people\", { limit: 10 });\n```\n\n### Direct fetch (recommended for control)\n\nNo upgrade risk -- you control the endpoint URLs directly. See `attio-sdk-patterns` for a typed wrapper.\n\n## Detecting API Changes\n\nAttio does not publish a traditional changelog for the REST API. Monitor for changes:\n\n```typescript\n// Save the OpenAPI spec hash and check periodically\nimport crypto from \"crypto\";\n\nasync function checkForApiChanges(): Promise<boolean> {\n  const spec = await fetch(\"https://docs.attio.com/openapi.json\").then(r => r.text());\n  const hash = crypto.createHash(\"sha256\").update(spec).digest(\"hex\");\n\n  const previousHash = await readStoredHash(); // From file or DB\n  if (previousHash && hash !== previousHash) {\n    console.warn(\"Attio OpenAPI spec changed! Review for breaking changes.\");\n    await storeHash(hash);\n    return true;\n  }\n  await storeHash(hash);\n  return false;\n}\n```\n\n## Migration Checklist\n\n```\n[ ] Base URL updated to /v2\n[ ] Object references use slugs instead of UUIDs where possible\n[ ] Record queries migrated from GET to POST with filter body\n[ ] Record creation uses data.values wrapper with arrays\n[ ] Webhook subscriptions recreated with v2 event types\n[ ] Webhook handlers updated for v2 payload format\n[ ] Pagination migrated from page/per_page to limit/offset\n[ ] Error handling updated for v2 error response format\n[ ] Tests updated and passing against v2 endpoints\n[ ] OpenAPI spec monitoring configured for future changes\n```\n\n## Error Handling\n\n| Migration issue | Symptom | Fix |\n|----------------|---------|-----|\n| Old v1 URL | 404 on all calls | Update base URL to `/v2` |\n| UUID instead of slug | 404 on object endpoints | Use `api_slug` from `GET /v2/objects` |\n| Flat values (v1 format) | 422 validation error | Wrap in `{ data: { values: { ... } } }` |\n| Old webhook event types | Webhook never fires | Recreate with v2 event types |\n| Old pagination params | Ignored, only first page returned | Switch to `limit` + `offset` |\n\n## Resources\n\n- [Attio REST API Overview](https://docs.attio.com/rest-api/overview)\n- [Attio OpenAPI Spec](https://docs.attio.com/rest-api/endpoint-reference/openapi)\n- [Attio Slugs and IDs](https://docs.attio.com/docs/slugs-and-ids)\n- [attio-js on GitHub](https://github.com/d-stoll/attio-js)\n\n## Next Steps\n\nFor CI integration during upgrades, see `attio-ci-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "attio-upgrade-migration",
-    "description": "Migrate between Attio API versions, handle breaking changes in the",
-    "Trigger": "upgrade attio\", \"attio migration\", \"attio v1 to v2\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(git:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032653",
   "name": "mistral-enterprise-rbac",
   "slug": "mistral-enterprise-rbac",
   "description": "Configure Mistral AI enterprise access control and workspace management.",
   "content": "# Mistral AI Enterprise RBAC\n\n## Overview\n\nControl access to Mistral AI at the organization level using La Plateforme workspace management: scoped API keys per team, model access restrictions, spending limits, key auditing, and automated rotation. Mistral organizes access via **Organizations > Workspaces > API Keys**, with rate limits set at the workspace level.\n\n## Prerequisites\n\n- Mistral La Plateforme organization account ([console.mistral.ai](https://console.mistral.ai/))\n- Organization admin or owner role\n- Understanding of workspace vs key-level controls\n\n## Instructions\n\n### Step 1: Workspace Strategy\n\n| Workspace | Team | Models Allowed | RPM | Monthly Budget |\n|-----------|------|----------------|-----|----------------|\n| dev-workspace | All developers | mistral-small, codestral | 60 | $50 |\n| ml-workspace | ML engineers | All models | 200 | $500 |\n| prod-workspace | CI/CD only | Per-service scoped | 500 | $2000 |\n\nCreate workspaces via La Plateforme console: Organization > Workspaces > Create.\n\n### Step 2: Scoped API Keys per Team\n\nCreate keys with model restrictions and rate limits in the console, or via API:\n\n```bash\nset -euo pipefail\n# Dev team \u2014 restricted to cost-effective models\ncurl -X POST https://api.mistral.ai/v1/api-keys \\\n  -H \"Authorization: Bearer $MISTRAL_ADMIN_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"name\": \"dev-team-key\",\n    \"description\": \"Dev team \u2014 small models only\",\n    \"workspace_id\": \"ws_dev_xxx\"\n  }'\n\n# ML team \u2014 full model access\ncurl -X POST https://api.mistral.ai/v1/api-keys \\\n  -H \"Authorization: Bearer $MISTRAL_ADMIN_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"name\": \"ml-team-key\",\n    \"description\": \"ML team \u2014 all models\",\n    \"workspace_id\": \"ws_ml_xxx\"\n  }'\n```\n\n### Step 3: Application-Level Model Gateway\n\nEnforce model access in your application layer:\n\n```typescript\nconst ROLE_PERMISSIONS: Record<string, {\n  allowedModels: string[];\n  maxTokensPerRequest: number;\n  dailyTokenBudget: number;\n}> = {\n  analyst: {\n    allowedModels: ['mistral-small-latest', 'mistral-embed'],\n    maxTokensPerRequest: 500,\n    dailyTokenBudget: 100_000,\n  },\n  developer: {\n    allowedModels: ['mistral-small-latest', 'codestral-latest', 'mistral-embed'],\n    maxTokensPerRequest: 2000,\n    dailyTokenBudget: 500_000,\n  },\n  senior: {\n    allowedModels: ['mistral-small-latest', 'mistral-large-latest', 'codestral-latest', 'mistral-embed'],\n    maxTokensPerRequest: 4000,\n    dailyTokenBudget: 1_000_000,\n  },\n  admin: {\n    allowedModels: ['*'],\n    maxTokensPerRequest: 8000,\n    dailyTokenBudget: Infinity,\n  },\n};\n\nfunction authorizeRequest(role: string, model: string, estimatedTokens: number): boolean {\n  const perms = ROLE_PERMISSIONS[role];\n  if (!perms) return false;\n\n  const modelAllowed = perms.allowedModels.includes('*') || perms.allowedModels.includes(model);\n  const tokensAllowed = estimatedTokens <= perms.maxTokensPerRequest;\n\n  return modelAllowed && tokensAllowed;\n}\n```\n\n### Step 4: Spending Limits\n\nConfigure in La Plateforme console: Organization > Billing > Budget Alerts.\n\n```typescript\n// Application-level budget enforcement\nclass SpendingGuard {\n  private hourlySpend = 0;\n  private hourStart = Date.now();\n  private readonly maxHourlyUsd: number;\n\n  constructor(maxHourlyUsd: number) {\n    this.maxHourlyUsd = maxHourlyUsd;\n  }\n\n  recordCost(costUsd: number): void {\n    if (Date.now() - this.hourStart > 3_600_000) {\n      this.hourlySpend = 0;\n      this.hourStart = Date.now();\n    }\n    this.hourlySpend += costUsd;\n  }\n\n  canSpend(estimatedCostUsd: number): boolean {\n    return this.hourlySpend + estimatedCostUsd <= this.maxHourlyUsd;\n  }\n}\n```\n\n### Step 5: Key Audit\n\n```bash\nset -euo pipefail\n# List all API keys with metadata\ncurl -s https://api.mistral.ai/v1/api-keys \\\n  -H \"Authorization: Bearer $MISTRAL_ADMIN_KEY\" | \\\n  jq '.data[] | {name, id, created_at, last_used_at}'\n\n# Identify unused keys (not used in 30+ days)\ncurl -s https://api.mistral.ai/v1/api-keys \\\n  -H \"Authorization: Bearer $MISTRAL_ADMIN_KEY\" | \\\n  jq '.data[] | select(.last_used_at < (now - 2592000 | todate)) | {name, id, last_used_at}'\n```\n\n### Step 6: Automated Key Rotation\n\n```typescript\n// Rotate keys on a 90-day schedule\nasync function rotateApiKey(oldKeyId: string, keyName: string): Promise<string> {\n  // 1. Create new key\n  const newKey = await createApiKey({ name: `${keyName}-${Date.now()}` });\n\n  // 2. Update consuming services (secret manager)\n  await updateSecret('mistral-api-key', newKey.apiKey);\n\n  // 3. Wait for propagation (services pick up new secret)\n  await new Promise(r => setTimeout(r, 60_000));\n\n  // 4. Verify new key works\n  const client = new Mistral({ apiKey: newKey.apiKey });\n  await client.models.list(); // throws if invalid\n\n  // 5. Revoke old key\n  await revokeApiKey(oldKeyId);\n\n  console.log(`Rotated key: ${keyName} (old: ${oldKeyId}, new: ${newKey.id})`);\n  return newKey.id;\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `401 Unauthorized` | Key revoked or invalid | Regenerate on La Plateforme |\n| `403 Model not allowed` | Key restricted from model | Use key with broader scope |\n| `429 Rate limit` | Workspace RPM exceeded | Distribute across workspaces |\n| Spending alert | Monthly budget near cap | Review per-key usage, restrict heavy consumers |\n\n## Resources\n\n- [La Plateforme Console](https://console.mistral.ai/)\n- [Organizations & Workspaces](https://docs.mistral.ai/deployment/ai-studio/organization/)\n- [Rate Limits & Tiers](https://docs.mistral.ai/deployment/ai-studio/tier/)\n\n## Output\n\n- Workspace-based team isolation\n- Scoped API keys with model restrictions\n- Application-level model access gateway\n- Spending limits and budget alerts\n- Key audit and rotation automation\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "mistral-enterprise-rbac",
-    "description": "Configure Mistral AI enterprise access control and workspace management.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

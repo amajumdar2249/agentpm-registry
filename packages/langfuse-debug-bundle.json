@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032453",
   "name": "langfuse-debug-bundle",
   "slug": "langfuse-debug-bundle",
   "description": "Collect Langfuse debug evidence for support tickets and troubleshooting.",
   "content": "# Langfuse Debug Bundle\n\n## Current State\n\n!`node --version 2>/dev/null || echo 'N/A'`\n!`python3 --version 2>/dev/null || echo 'N/A'`\n!`npm list langfuse @langfuse/client @langfuse/tracing 2>/dev/null | head -5 || echo 'No langfuse packages'`\n\n## Overview\n\nCollect all diagnostic information needed for Langfuse support tickets: environment versions, SDK config, API connectivity, redacted logs, and a reproduction template.\n\n## Prerequisites\n\n- Langfuse SDK installed\n- Access to application logs\n- Bash shell available\n\n## Instructions\n\n### Step 1: Run the Full Debug Bundle Script\n\nSave this as `langfuse-debug.sh` and run it:\n\n```bash\n#!/bin/bash\nset -euo pipefail\n\nBUNDLE_DIR=\"langfuse-debug-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE_DIR\"\n\necho \"=== Langfuse Debug Bundle ===\" | tee \"$BUNDLE_DIR/summary.txt\"\necho \"Generated: $(date)\" | tee -a \"$BUNDLE_DIR/summary.txt\"\n\n# --- Environment ---\n{\n  echo \"\"\n  echo \"--- Environment ---\"\n  echo \"Node.js: $(node --version 2>/dev/null || echo 'not installed')\"\n  echo \"Python: $(python3 --version 2>/dev/null || echo 'not installed')\"\n  echo \"npm: $(npm --version 2>/dev/null || echo 'not installed')\"\n  echo \"OS: $(uname -srm)\"\n} >> \"$BUNDLE_DIR/summary.txt\"\n\n# --- SDK Versions ---\n{\n  echo \"\"\n  echo \"--- SDK Versions ---\"\n  npm list langfuse @langfuse/client @langfuse/tracing @langfuse/otel @langfuse/openai @langfuse/langchain 2>/dev/null || echo \"npm: no langfuse packages\"\n  pip show langfuse 2>/dev/null | grep -E \"Name|Version\" || echo \"pip: langfuse not found\"\n} >> \"$BUNDLE_DIR/summary.txt\"\n\n# --- Config (redacted) ---\n{\n  echo \"\"\n  echo \"--- Langfuse Config ---\"\n  echo \"LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:+SET (${LANGFUSE_PUBLIC_KEY:0:12}...)}\"\n  echo \"LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:+SET}\"\n  echo \"LANGFUSE_BASE_URL: ${LANGFUSE_BASE_URL:-NOT SET}\"\n  echo \"LANGFUSE_HOST: ${LANGFUSE_HOST:-NOT SET}\"\n} >> \"$BUNDLE_DIR/summary.txt\"\n\n# --- Network Connectivity ---\n{\n  echo \"\"\n  echo \"--- Network Test ---\"\n  HOST=\"${LANGFUSE_BASE_URL:-${LANGFUSE_HOST:-https://cloud.langfuse.com}}\"\n  echo \"Target host: $HOST\"\n  echo -n \"Health endpoint: \"\n  curl -s -o /dev/null -w \"%{http_code} (%{time_total}s)\" \"$HOST/api/public/health\" 2>/dev/null || echo \"FAILED\"\n  echo \"\"\n\n  if [ -n \"${LANGFUSE_PUBLIC_KEY:-}\" ] && [ -n \"${LANGFUSE_SECRET_KEY:-}\" ]; then\n    AUTH=$(echo -n \"$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY\" | base64)\n    echo -n \"Auth test: \"\n    curl -s -o /dev/null -w \"%{http_code}\" \\\n      -H \"Authorization: Basic $AUTH\" \\\n      \"$HOST/api/public/traces?limit=1\" 2>/dev/null || echo \"FAILED\"\n    echo \"\"\n  fi\n} >> \"$BUNDLE_DIR/summary.txt\"\n\n# --- Application Logs (redacted) ---\nif [ -d \"logs\" ]; then\n  grep -i \"langfuse\\|trace\\|generation\\|flush\" logs/*.log 2>/dev/null | \\\n    tail -100 | \\\n    sed 's/sk-lf-[a-zA-Z0-9]*/sk-lf-***REDACTED***/g' | \\\n    sed 's/pk-lf-[a-zA-Z0-9]*/pk-lf-***REDACTED***/g' \\\n    > \"$BUNDLE_DIR/app-logs-redacted.txt\" 2>/dev/null || true\nfi\n\n# --- Package Dependencies ---\nif [ -f \"package.json\" ]; then\n  grep -A 100 '\"dependencies\"' package.json | head -60 > \"$BUNDLE_DIR/package-deps.txt\" 2>/dev/null || true\nfi\n\n# --- Reproduction Template ---\ncat > \"$BUNDLE_DIR/reproduction-steps.md\" << 'REPRO'\n# Bug Report\n\n## Environment\n- Node.js version:\n- Langfuse SDK version:\n- Langfuse host: Cloud / Self-hosted (version: )\n\n## Steps to Reproduce\n1.\n2.\n3.\n\n## Expected Behavior\n\n\n## Actual Behavior\n\n\n## Error Messages\n```\n\nPaste error output here\n\n```\n\n## Relevant Code\n```typescript\n// Paste minimal reproduction here\n```\n\nREPRO\n\n# --- Package ---\n\ntar -czf \"$BUNDLE_DIR.tar.gz\" \"$BUNDLE_DIR\" 2>/dev/null\necho \"\"\necho \"Bundle created: $BUNDLE_DIR.tar.gz\"\necho \"Contents:\"\nls -la \"$BUNDLE_DIR/\"\n\n```\n\n### Step 2: Review Before Sharing\n\n**Always redact before submitting:**\n\n| Include | Redact |\n|---------|--------|\n| Error messages and stack traces | API keys (`pk-lf-*`, `sk-lf-*`) |\n| SDK versions and config structure | Secret keys and passwords |\n| HTTP status codes | PII (emails, user IDs) |\n| Timing and latency data | Internal URLs and IPs |\n| OS and runtime versions | Database connection strings |\n\n### Step 3: Submit to Support\n\n1. Run: `bash langfuse-debug.sh`\n2. Review bundle contents for leaked secrets\n3. Fill in `reproduction-steps.md`\n4. Submit via:\n   - [GitHub Issues](https://github.com/langfuse/langfuse/issues) (public)\n   - [Discord](https://langfuse.com/discord) (community)\n   - Email support (enterprise customers)\n\n### Step 4: Quick Inline Diagnostic (No File)\n\nFor a fast check without creating files:\n\n```bash\nset -euo pipefail\necho \"=== Quick Langfuse Check ===\"\necho \"Node: $(node --version 2>/dev/null || echo N/A)\"\nnpm list langfuse @langfuse/client 2>/dev/null | head -5\necho \"\"\necho \"Public Key: ${LANGFUSE_PUBLIC_KEY:+SET} | Secret Key: ${LANGFUSE_SECRET_KEY:+SET}\"\nHOST=\"${LANGFUSE_BASE_URL:-${LANGFUSE_HOST:-https://cloud.langfuse.com}}\"\necho \"Health: $(curl -s -o /dev/null -w '%{http_code}' $HOST/api/public/health)\"\n```\n\n## Error Handling\n\n| Collected Item | Why It Matters |\n|----------------|---------------|\n| SDK version | Version-specific bugs, breaking changes between v3/v4/v5 |\n| Environment versions | Node 18+ required, Python 3.9+ |\n| Network test | Firewall, DNS, self-hosted connectivity |\n| Auth test | Key validity, project mismatch |\n| Redacted logs | Trace errors, flush failures, rate limits |\n| Package deps | Conflicting versions, missing peer deps |\n\n## Resources\n\n- [GitHub Issues](https://github.com/langfuse/langfuse/issues)\n- [Discord Community](https://langfuse.com/discord)\n- [Langfuse Status](https://status.langfuse.com)\n- [Self-Hosting Troubleshooting](https://langfuse.com/self-hosting/configuration)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "langfuse-debug-bundle",
-    "description": "Collect Langfuse debug evidence for support tickets and troubleshooting.",
-    "allowed-tools": "Read, Bash(grep:*), Bash(curl:*), Bash(tar:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

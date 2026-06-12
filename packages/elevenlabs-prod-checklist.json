@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031824",
   "name": "elevenlabs-prod-checklist",
   "slug": "elevenlabs-prod-checklist",
   "description": "Execute ElevenLabs production deployment checklist with health checks",
   "content": "# ElevenLabs Production Checklist\n\n## Overview\n\nComplete checklist for deploying ElevenLabs TTS/voice integrations to production. Covers API configuration, health checks, circuit breakers, monitoring, and rollback procedures.\n\n## Prerequisites\n\n- Staging environment tested and verified\n- Production API key (separate from dev/staging)\n- Monitoring and alerting infrastructure ready\n\n## Instructions\n\n### Step 1: Pre-Deployment Verification\n\n**Configuration:**\n\n- [ ] Production API key stored in secure vault (not in code)\n- [ ] `ELEVENLABS_API_KEY` set in deployment platform's secrets\n- [ ] Webhook secret configured (if using webhooks)\n- [ ] Using production model ID (`eleven_multilingual_v2` or `eleven_v3`)\n\n**Code Quality:**\n\n- [ ] All tests passing with mocked ElevenLabs SDK\n- [ ] No hardcoded API keys (scan with `grep -r \"sk_\" src/`)\n- [ ] Error handling covers 400, 401, 404, 429, 5xx responses\n- [ ] Rate limiting implemented matching plan concurrency limit\n- [ ] Text splitting handles inputs > 5,000 characters\n- [ ] Audio output format appropriate for use case\n\n**Quota Planning:**\n\n- [ ] Estimated monthly character usage fits within plan limit\n- [ ] Usage-based billing enabled (Creator+ plans) if needed\n- [ ] Flash/Turbo models used where latency matters more than quality\n\n### Step 2: Health Check Endpoint\n\n```typescript\n// src/api/health.ts\nimport { ElevenLabsClient } from \"@elevenlabs/elevenlabs-js\";\n\ninterface HealthStatus {\n  status: \"healthy\" | \"degraded\" | \"unhealthy\";\n  elevenlabs: {\n    connected: boolean;\n    latencyMs: number;\n    quotaRemaining: number | null;\n    quotaPctUsed: number | null;\n  };\n  timestamp: string;\n}\n\nexport async function healthCheck(): Promise<HealthStatus> {\n  const client = new ElevenLabsClient();\n  const start = Date.now();\n\n  try {\n    const user = await client.user.get();\n    const latency = Date.now() - start;\n    const { character_count, character_limit } = user.subscription;\n    const remaining = character_limit - character_count;\n    const pctUsed = Math.round((character_count / character_limit) * 100);\n\n    return {\n      status: pctUsed > 90 ? \"degraded\" : \"healthy\",\n      elevenlabs: {\n        connected: true,\n        latencyMs: latency,\n        quotaRemaining: remaining,\n        quotaPctUsed: pctUsed,\n      },\n      timestamp: new Date().toISOString(),\n    };\n  } catch (error) {\n    return {\n      status: \"unhealthy\",\n      elevenlabs: {\n        connected: false,\n        latencyMs: Date.now() - start,\n        quotaRemaining: null,\n        quotaPctUsed: null,\n      },\n      timestamp: new Date().toISOString(),\n    };\n  }\n}\n```\n\n### Step 3: Circuit Breaker\n\n```typescript\n// src/elevenlabs/circuit-breaker.ts\ntype CircuitState = \"closed\" | \"open\" | \"half-open\";\n\nexport class ElevenLabsCircuitBreaker {\n  private state: CircuitState = \"closed\";\n  private failures = 0;\n  private lastFailure = 0;\n\n  constructor(\n    private failureThreshold = 5,       // Open after N consecutive failures\n    private resetTimeMs = 30_000,       // Try again after 30s\n  ) {}\n\n  async execute<T>(operation: () => Promise<T>, fallback?: () => T): Promise<T> {\n    if (this.state === \"open\") {\n      if (Date.now() - this.lastFailure > this.resetTimeMs) {\n        this.state = \"half-open\";\n      } else {\n        if (fallback) return fallback();\n        throw new Error(\"ElevenLabs circuit breaker is open \u2014 service unavailable\");\n      }\n    }\n\n    try {\n      const result = await operation();\n      this.onSuccess();\n      return result;\n    } catch (error) {\n      this.onFailure();\n      if (fallback) return fallback();\n      throw error;\n    }\n  }\n\n  private onSuccess() {\n    this.failures = 0;\n    this.state = \"closed\";\n  }\n\n  private onFailure() {\n    this.failures++;\n    this.lastFailure = Date.now();\n    if (this.failures >= this.failureThreshold) {\n      this.state = \"open\";\n      console.error(`[ElevenLabs] Circuit breaker OPEN after ${this.failures} failures`);\n    }\n  }\n\n  getState(): CircuitState {\n    return this.state;\n  }\n}\n\n// Usage: graceful degradation when ElevenLabs is down\nconst breaker = new ElevenLabsCircuitBreaker();\n\nasync function generateSpeechWithFallback(text: string, voiceId: string) {\n  return breaker.execute(\n    () => client.textToSpeech.convert(voiceId, {\n      text,\n      model_id: \"eleven_multilingual_v2\",\n    }),\n    () => {\n      // Fallback: return pre-generated placeholder audio or null\n      console.warn(\"[ElevenLabs] Using fallback \u2014 TTS unavailable\");\n      return null;\n    }\n  );\n}\n```\n\n### Step 4: Monitoring & Alerting\n\n```typescript\n// src/elevenlabs/monitor.ts\ninterface TTSMetric {\n  operation: string;\n  voiceId: string;\n  modelId: string;\n  textLength: number;\n  latencyMs: number;\n  success: boolean;\n  errorCode?: string;\n}\n\nfunction emitMetric(metric: TTSMetric) {\n  // Send to your monitoring system (Datadog, CloudWatch, Prometheus, etc.)\n  console.log(JSON.stringify({\n    ...metric,\n    timestamp: new Date().toISOString(),\n    service: \"elevenlabs\",\n  }));\n}\n\n// Alert thresholds\nconst ALERT_RULES = {\n  p99_latency_ms: 5000,       // Alert if p99 > 5 seconds\n  error_rate_pct: 5,           // Alert if error rate > 5%\n  quota_used_pct: 80,          // Alert when 80% quota used\n  circuit_breaker_open: true,  // Alert on circuit breaker trip\n};\n```\n\n### Step 5: Pre-Flight Check Script\n\n```bash\n#!/bin/bash\n# pre-flight-check.sh \u2014 Run before deploying\n\necho \"=== ElevenLabs Pre-Flight Check ===\"\n\n# 1. API connectivity\nHTTP=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n  https://api.elevenlabs.io/v1/user \\\n  -H \"xi-api-key: ${ELEVENLABS_API_KEY}\")\necho \"API connectivity: HTTP $HTTP\"\n[ \"$HTTP\" != \"200\" ] && echo \"FAIL: API not reachable\" && exit 1\n\n# 2. Quota check\nQUOTA=$(curl -s https://api.elevenlabs.io/v1/user \\\n  -H \"xi-api-key: ${ELEVENLABS_API_KEY}\" | \\\n  jq '.subscription | (.character_limit - .character_count)')\necho \"Characters remaining: $QUOTA\"\n[ \"$QUOTA\" -lt 10000 ] && echo \"WARN: Low quota\"\n\n# 3. Voice availability\nVOICE_COUNT=$(curl -s https://api.elevenlabs.io/v1/voices \\\n  -H \"xi-api-key: ${ELEVENLABS_API_KEY}\" | jq '.voices | length')\necho \"Voices available: $VOICE_COUNT\"\n\n# 4. TTS smoke test\nTTS_STATUS=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n  -X POST \"https://api.elevenlabs.io/v1/text-to-speech/21m00Tcm4TlvDq8ikWAM\" \\\n  -H \"xi-api-key: ${ELEVENLABS_API_KEY}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"text\":\"Pre-flight check.\",\"model_id\":\"eleven_flash_v2_5\"}')\necho \"TTS smoke test: HTTP $TTS_STATUS\"\n[ \"$TTS_STATUS\" != \"200\" ] && echo \"FAIL: TTS not working\" && exit 1\n\necho \"=== All checks passed ===\"\n```\n\n## Deployment Monitoring\n\n| Alert | Condition | Severity |\n|-------|-----------|----------|\n| API unreachable | Health check fails 3x | P1 \u2014 Critical |\n| Quota exhausted | 401 `quota_exceeded` | P1 \u2014 Critical |\n| High error rate | 5xx > 5% of requests | P2 \u2014 High |\n| Rate limited | 429 > 10/min sustained | P2 \u2014 High |\n| High latency | p99 > 5000ms | P3 \u2014 Medium |\n| Quota warning | > 80% used | P3 \u2014 Medium |\n\n## Error Handling\n\n| Scenario | Response |\n|----------|----------|\n| ElevenLabs API down | Circuit breaker opens; fallback to cached/placeholder audio |\n| Quota exhausted mid-day | Alert team; switch to Flash model (0.5x cost); queue non-urgent requests |\n| Voice deleted | Return 404 to caller; alert; fall back to default voice |\n| Webhook delivery failing | Monitor ElevenLabs webhook health; webhooks auto-disable after 10 failures |\n\n## Resources\n\n- [ElevenLabs Status](https://status.elevenlabs.io)\n- [ElevenLabs API Reference](https://elevenlabs.io/docs/api-reference/introduction)\n- [Usage Dashboard](https://elevenlabs.io/app/usage)\n\n## Next Steps\n\nFor version upgrades, see `elevenlabs-upgrade-migration`. For cost optimization, see `elevenlabs-cost-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "elevenlabs-prod-checklist",
-    "description": "Execute ElevenLabs production deployment checklist with health checks",
-    "Trigger": "elevenlabs production\", \"deploy elevenlabs\",",
-    "allowed-tools": "Read, Bash(curl:*), Bash(node:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

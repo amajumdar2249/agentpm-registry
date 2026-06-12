@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009366",
   "name": "bio-proteomics-protein-inference",
   "slug": "bio-proteomics-protein-inference",
   "description": "Protein grouping and inference from peptide identifications. Use when resolving protein ambiguity from shared peptides. Handles protein groups and protein-level FDR control using parsimony and probabilistic approaches.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: pyOpenMS 3.1+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n- R: `packageVersion(\"<pkg>\")` then `?function_name` to verify parameters\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Protein Inference\n\n**\"Resolve protein groups from my peptide identifications\"** \u2192 Group peptide-spectrum matches into protein groups, resolving shared-peptide ambiguity using parsimony or probabilistic methods, then apply protein-level FDR.\n- Python: `pyopenms.ProteinInference()` for parsimony-based grouping\n- R: Bioconductor protein inference workflows\n\n## The Protein Inference Problem\n\nPeptides can map to multiple proteins (shared peptides), making protein identification ambiguous.\n\n```python\n# Example: Peptide mapping\npeptide_to_proteins = {\n    'PEPTIDEK': ['P12345', 'P67890'],      # Shared between paralogs\n    'UNIQUER': ['P12345'],                  # Unique to P12345\n    'ANOTHERONE': ['P12345'],               # Unique to P12345\n    'SHAREDK': ['P67890', 'P11111'],        # Shared\n}\n\n# P12345 has 2 unique peptides -> confident identification\n# P67890 has 0 unique peptides -> subset, may be grouped with P12345\n```\n\n## Parsimony Principle\n\n**Goal:** Resolve protein identification ambiguity from shared peptides by finding the minimal protein set explaining all observed peptides.\n\n**Approach:** Build a peptide-to-protein mapping, then greedily select proteins that cover the most unassigned peptides until all peptides are accounted for, producing a minimal explanatory protein list.\n\n```python\ndef apply_parsimony(peptide_protein_map):\n    '''Find minimal set of proteins explaining all peptides'''\n    proteins = set()\n    for prots in peptide_protein_map.values():\n        proteins.update(prots)\n\n    protein_peptides = {p: set() for p in proteins}\n    for pep, prots in peptide_protein_map.items():\n        for p in prots:\n            protein_peptides[p].add(pep)\n\n    covered_peptides = set()\n    selected_proteins = []\n\n    # Greedy: select protein covering most uncovered peptides\n    while covered_peptides != set(peptide_protein_map.keys()):\n        best_protein = max(protein_peptides.keys(),\n                          key=lambda p: len(protein_peptides[p] - covered_peptides))\n        new_coverage = protein_peptides[best_protein] - covered_peptides\n        if not new_coverage:\n            break\n        selected_proteins.append(best_protein)\n        covered_peptides.update(new_coverage)\n\n    return selected_proteins\n```\n\n## Protein Groups\n\n```python\ndef create_protein_groups(peptide_protein_map):\n    '''Group proteins with identical peptide evidence'''\n    protein_peptides = {}\n    for pep, prots in peptide_protein_map.items():\n        for p in prots:\n            protein_peptides.setdefault(p, set()).add(pep)\n\n    # Group by peptide set\n    peptide_set_to_proteins = {}\n    for protein, peptides in protein_peptides.items():\n        key = frozenset(peptides)\n        peptide_set_to_proteins.setdefault(key, []).append(protein)\n\n    groups = []\n    for peptides, proteins in peptide_set_to_proteins.items():\n        groups.append({\n            'proteins': proteins,\n            'peptides': list(peptides),\n            'n_peptides': len(peptides),\n            'is_group': len(proteins) > 1\n        })\n\n    return groups\n```\n\n## pyOpenMS Protein Inference\n\n```python\nfrom pyopenms import ProteinIdentification, PeptideIdentification\nfrom pyopenms import BasicProteinInferenceAlgorithm\n\n# Load identifications\nprotein_ids = []\npeptide_ids = []\nIdXMLFile().load('search_results.idXML', protein_ids, peptide_ids)\n\n# Run inference\ninference = BasicProteinInferenceAlgorithm()\ninference.run(peptide_ids, protein_ids)\n\n# Results include protein groups and scores\nfor protein_id in protein_ids:\n    for hit in protein_id.getHits():\n        accession = hit.getAccession()\n        score = hit.getScore()\n```\n\n## R: Protein Inference with ProteinInference\n\n```r\nlibrary(ProteinInference)\n\n# From peptide-protein mapping\nprotein_groups <- infer_proteins(\n    peptides = psm_data$peptide,\n    proteins = psm_data$protein,\n    method = 'parsimony'\n)\n\n# Count unique peptides per group\nprotein_groups$n_unique <- sapply(protein_groups$peptides, function(p) {\n    sum(sapply(p, function(pep) length(peptide_to_protein[[pep]]) == 1))\n})\n```\n\n## Protein-Level FDR\n\n```python\ndef protein_fdr(protein_groups, target_fdr=0.01):\n    '''Calculate protein-level FDR from group scores'''\n    sorted_groups = sorted(protein_groups, key=lambda x: x['score'], reverse=True)\n\n    target_count = 0\n    decoy_count = 0\n\n    for group in sorted_groups:\n        if group['is_decoy']:\n            decoy_count += 1\n        else:\n            target_count += 1\n        group['fdr'] = decoy_count / target_count if target_count > 0 else 1.0\n\n    # Q-value\n    min_fdr = 1.0\n    for group in reversed(sorted_groups):\n        min_fdr = min(min_fdr, group['fdr'])\n        group['qvalue'] = min_fdr\n\n    return [g for g in sorted_groups if g['qvalue'] <= target_fdr and not g['is_decoy']]\n```\n\n## Related Skills\n\n- peptide-identification - Input for protein inference\n- quantification - Quantify inferred proteins\n- database-access/uniprot-access - Protein annotations\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-proteomics-protein-inference",
-    "description": "Protein grouping and inference from peptide identifications. Use when resolving protein ambiguity from shared peptides. Handles protein groups and protein-level FDR control using parsimony and probabilistic approaches.",
-    "tool_type": "mixed",
-    "primary_tool": "pyOpenMS"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

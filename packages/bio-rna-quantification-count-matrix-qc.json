@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009397",
   "name": "bio-rna-quantification-count-matrix-qc",
   "slug": "bio-rna-quantification-count-matrix-qc",
   "description": "Quality control and exploration of RNA-seq count matrices before differential expression. Check for outliers, batch effects, and sample relationships. Use when assessing count matrix quality before DE analysis.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: DESeq2 1.42+, ggplot2 3.5+, matplotlib 3.8+, numpy 1.26+, pandas 2.2+, scanpy 1.10+, scikit-learn 1.4+, scipy 1.12+, seaborn 0.13+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n- R: `packageVersion('<pkg>')` then `?function_name` to verify parameters\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Count Matrix QC\n\n**\"Check my count matrix for outliers and batch effects\"** \u2192 Perform PCA, sample-sample correlation, library size assessment, and outlier detection before running differential expression.\n- R: `DESeq2::vst()` \u2192 `plotPCA()`, sample distance heatmap\n- Python: `sklearn.decomposition.PCA`, `seaborn.clustermap`\n\nQuality control and exploratory analysis of count matrices before differential expression.\n\n## Load and Inspect Counts\n\n**Goal:** Assess count matrix quality before differential expression by detecting outliers, batch effects, and sample relationship problems.\n\n**Approach:** Load counts into DESeq2 or pandas, compute per-sample library size statistics, apply variance-stabilizing transformation, then run PCA and sample-sample correlation to identify outliers and batch structure.\n\n### R\n\n```r\nlibrary(DESeq2)\n\n# From tximport\ndds <- DESeqDataSetFromTximport(txi, colData = coldata, design = ~ condition)\n\n# From count matrix\ncounts <- read.csv('count_matrix.csv', row.names = 1)\ncoldata <- data.frame(condition = factor(c('ctrl', 'ctrl', 'treat', 'treat')),\n                      row.names = colnames(counts))\ndds <- DESeqDataSetFromMatrix(countData = counts, colData = coldata,\n                              design = ~ condition)\n```\n\n### Python\n\n```python\nimport pandas as pd\nimport numpy as np\n\ncounts = pd.read_csv('count_matrix.csv', index_col=0)\nmetadata = pd.read_csv('sample_info.csv', index_col=0)\n```\n\n## Basic Statistics\n\n### R\n\n```r\n# Total counts per sample\ncolSums(counts(dds))\n\n# Genes detected per sample\ncolSums(counts(dds) > 0)\n\n# Counts summary\nsummary(colSums(counts(dds)))\n```\n\n### Python\n\n```python\ntotal_counts = counts.sum()\ngenes_detected = (counts > 0).sum()\n\nprint('Total counts per sample:')\nprint(total_counts)\nprint('\\nGenes detected:')\nprint(genes_detected)\n```\n\n## Filter Low-Count Genes\n\n### R\n\n```r\n# Remove genes with low counts across samples\nkeep <- rowSums(counts(dds)) >= 10\ndds <- dds[keep, ]\n\n# More stringent: at least N samples with count >= M\nkeep <- rowSums(counts(dds) >= 10) >= 3\ndds <- dds[keep, ]\n```\n\n### Python\n\n```python\nmin_counts = 10\nmin_samples = 3\n\ngene_filter = (counts >= min_counts).sum(axis=1) >= min_samples\ncounts_filtered = counts[gene_filter]\n```\n\n## Normalize for Visualization\n\n### R (DESeq2 VST)\n\n```r\n# Variance stabilizing transformation\nvsd <- vst(dds, blind = TRUE)\n\n# Or regularized log (slower, better for small n)\nrld <- rlog(dds, blind = TRUE)\n\n# Get transformed values\nvst_matrix <- assay(vsd)\n```\n\n### Python (log2 CPM)\n\n```python\nfrom sklearn.preprocessing import StandardScaler\n\ncpm = counts * 1e6 / counts.sum()\nlog_cpm = np.log2(cpm + 1)\n```\n\n## Sample Correlation\n\n### R\n\n```r\nlibrary(pheatmap)\n\n# Sample correlation heatmap\nsample_cor <- cor(assay(vsd))\npheatmap(sample_cor, annotation_col = coldata)\n\n# Sample distance heatmap\nsample_dist <- dist(t(assay(vsd)))\npheatmap(as.matrix(sample_dist), annotation_col = coldata)\n```\n\n### Python\n\n```python\nimport seaborn as sns\nimport matplotlib.pyplot as plt\n\nsample_cor = log_cpm.corr()\nsns.clustermap(sample_cor, annot=True, cmap='RdBu_r', center=0.9,\n               vmin=0.8, vmax=1.0)\nplt.savefig('sample_correlation.png')\n```\n\n## PCA Analysis\n\n### R\n\n```r\n# PCA plot\nplotPCA(vsd, intgroup = 'condition')\n\n# Custom PCA\npca <- prcomp(t(assay(vsd)))\npca_df <- data.frame(PC1 = pca$x[,1], PC2 = pca$x[,2],\n                     condition = coldata$condition)\n\nlibrary(ggplot2)\nggplot(pca_df, aes(PC1, PC2, color = condition)) +\n    geom_point(size = 3) +\n    geom_text(aes(label = rownames(pca_df)), vjust = -0.5)\n```\n\n### Python\n\n```python\nfrom sklearn.decomposition import PCA\n\npca = PCA(n_components=2)\npca_result = pca.fit_transform(log_cpm.T)\n\nplt.figure(figsize=(8, 6))\nfor condition in metadata['condition'].unique():\n    mask = metadata['condition'] == condition\n    plt.scatter(pca_result[mask, 0], pca_result[mask, 1], label=condition)\nplt.xlabel(f'PC1 ({pca.explained_variance_ratio_[0]:.1%})')\nplt.ylabel(f'PC2 ({pca.explained_variance_ratio_[1]:.1%})')\nplt.legend()\nplt.savefig('pca_plot.png')\n```\n\n## Detect Outliers\n\n### R\n\n```r\n# Cook's distance (after DESeq)\ndds <- DESeq(dds)\nW <- results(dds)$cooksd\nboxplot(W, main = \"Cook's Distance\")\n\n# Identify outlier samples from PCA\npca <- prcomp(t(assay(vsd)))\noutliers <- abs(scale(pca$x[,1])) > 3 | abs(scale(pca$x[,2])) > 3\n```\n\n### Python\n\n```python\nfrom scipy import stats\n\nz_scores = stats.zscore(pca_result, axis=0)\noutliers = (np.abs(z_scores) > 3).any(axis=1)\nprint('Potential outliers:', counts.columns[outliers].tolist())\n```\n\n## Check for Batch Effects\n\n### R\n\n```r\n# Color PCA by batch\nplotPCA(vsd, intgroup = c('condition', 'batch'))\n\n# Test for batch effect\ndesign(dds) <- ~ batch + condition\ndds <- DESeq(dds)\n```\n\n### Python\n\n```python\n# Color by batch in PCA\nfor batch in metadata['batch'].unique():\n    mask = metadata['batch'] == batch\n    plt.scatter(pca_result[mask, 0], pca_result[mask, 1],\n                marker=['o', 's', '^'][list(metadata['batch'].unique()).index(batch)],\n                label=f'Batch {batch}')\n```\n\n## Library Complexity\n\n### R\n\n```r\n# Genes detected vs library size\nplot(colSums(counts(dds)), colSums(counts(dds) > 0),\n     xlab = 'Library Size', ylab = 'Genes Detected')\n\n# Saturation check\n```\n\n### Python\n\n```python\nplt.scatter(counts.sum(), (counts > 0).sum())\nplt.xlabel('Total Counts')\nplt.ylabel('Genes Detected')\nplt.savefig('library_complexity.png')\n```\n\n## Gene-Level QC\n\n### R\n\n```r\n# Most variable genes\nrv <- rowVars(assay(vsd))\ntop_var <- order(rv, decreasing = TRUE)[1:500]\n\n# Expression distribution\nboxplot(log2(counts(dds) + 1), las = 2)\n```\n\n### Python\n\n```python\ngene_var = log_cpm.var(axis=1).sort_values(ascending=False)\ntop_var_genes = gene_var.head(500).index\n\ncounts[top_var_genes].boxplot(figsize=(12, 6))\nplt.xticks(rotation=45)\nplt.savefig('gene_expression_dist.png')\n```\n\n## Summary Report\n\n```r\n# Quick summary\ncat('Samples:', ncol(dds), '\\n')\ncat('Genes before filter:', nrow(counts), '\\n')\ncat('Genes after filter:', nrow(dds), '\\n')\ncat('Median library size:', median(colSums(counts(dds))), '\\n')\ncat('Median genes detected:', median(colSums(counts(dds) > 0)), '\\n')\n```\n\n## Related Skills\n\n- rna-quantification/featurecounts-counting - Generate counts\n- rna-quantification/tximport-workflow - Import transcript counts\n- differential-expression/de-visualization - Downstream visualization\n- differential-expression/deseq2-basics - DE analysis\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-rna-quantification-count-matrix-qc",
-    "description": "Quality control and exploration of RNA-seq count matrices before differential expression. Check for outliers, batch effects, and sample relationships. Use when assessing count matrix quality before DE analysis.",
-    "tool_type": "mixed",
-    "primary_tool": "DESeq2"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

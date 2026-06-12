@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000035279",
   "name": "feishu-e2e-test",
   "slug": "feishu-e2e-test",
   "description": "Local E2E debug and test framework for clawd-feishu plugin development. Use when debugging message flow, testing bot responses, verifying Feishu web UI interactions, or performing end-to-end validation of the OpenClaw-Feishu integration during development.",
   "content": "\n# Feishu E2E Test Framework\n\nLocal development testing using `agent-browser` CLI to interact with Feishu web app.\n\n## Prerequisites\n\n- Feishu web logged in at `https://feishu.cn/next/messenger`\n- `agent-browser` CLI available\n- OpenClaw locally installed\n- Feishu bot appid/secret given in chat or in .env\n- User given bot name which will display in Feishu web UI\n\n## Important Notes\n\n**Every time you modify extension code, you MUST restart OpenClaw Gateway for changes to take effect.**\n\n```bash\n# Restart gateway (required after code changes)\nopenclaw gateway restart\n\n# Check if gateway is running\nps aux | grep openclaw\n\n# View gateway logs\ntail -f ~/.openclaw/logs/gateway.log\n```\n\n## agent-browser Usage\n\nAlways use `--headed` mode so user can see the browser and help with login:\n\n```bash\nagent-browser --headed --session feishu-test open \"https://feishu.cn/next/messenger\"\n```\n\n## Feishu Web UI Tips\n\nFeishu web has complex UI that makes direct clicking unreliable. Use these strategies:\n\n### 1. Use Search (Cmd+K) Instead of Clicking\n\nClicking on chat list items often misses or selects wrong item. Use global search:\n\n```bash\n# Open search\nagent-browser --session feishu-test press \"Meta+k\"\n\n# Type bot name letter by letter\nagent-browser --session feishu-test press \"o\"\nagent-browser --session feishu-test press \"p\"\nagent-browser --session feishu-test press \"e\"\nagent-browser --session feishu-test press \"n\"\n\n# Select first result\nagent-browser --session feishu-test press \"Enter\"\n```\n\n### 2. Focus Input with \"/\" Key\n\nAfter entering a chat, press \"/\" to focus the message input:\n\n```bash\nagent-browser --session feishu-test press \"/\"\nagent-browser --session feishu-test press \"Backspace\"  # Remove the \"/\"\n# Then type your message\n```\n\n### 3. Type Characters One by One\n\nThe `type` command often fails with special characters. Use `press` for each character:\n\n```bash\n# Instead of: agent-browser type \"ping\"\nagent-browser --session feishu-test press \"p\"\nagent-browser --session feishu-test press \"i\"\nagent-browser --session feishu-test press \"n\"\nagent-browser --session feishu-test press \"g\"\n```\n\n### 4. Chinese Characters Do NOT Work\n\n**Chinese characters cannot be typed with `press` command.** Use English only:\n\n```bash\n# BAD - Chinese won't render\nfor char in $(echo \"\u8bfb\u53d6\u6587\u6863\" | grep -o .); do\n  agent-browser --session feishu-test press \"$char\"  # Will fail silently\ndone\n\n# GOOD - Use English\nfor char in r e a d \" \" d o c; do\n  agent-browser --session feishu-test press \"$char\"\ndone\n```\n\n### 5. Typing Spaces\n\nSpaces must be quoted as `\" \"`:\n\n```bash\n# Type \"read doc\"\nfor char in r e a d \" \" d o c; do\n  agent-browser --session feishu-test press \"$char\"\ndone\n```\n\n### 6. Typing Long Strings Efficiently\n\nUse a for loop to type URLs or long text:\n\n```bash\n# Type a full URL\nurl=\"https://feishu.cn/docx/YOUR_DOC_TOKEN\"\nfor char in $(echo \"$url\" | grep -o .); do\n  agent-browser --session feishu-test press \"$char\" 2>/dev/null || true\ndone\n```\n\n### 7. Avoid JS eval on Feishu\n\nDo NOT use `eval` to set input values - it can break the page:\n\n```bash\n# BAD - will corrupt page\nagent-browser eval \"document.activeElement.innerText = 'text'\"\n\n# GOOD - use keyboard input\nagent-browser press \"t\" && agent-browser press \"e\" ...\n```\n\n### 8. Full URLs Work Better Than IDs\n\nWhen testing document tools, send full URLs rather than just document IDs:\n\n```bash\n# Better - bot recognizes as document link\n\"https://feishu.cn/docx/YOUR_DOC_TOKEN\"\n\n# Less reliable - may not trigger tool\n\"read YOUR_DOC_TOKEN\"\n```\n\n## Verifying Tool Calls\n\n### Log Patterns\n\nMonitor gateway logs to verify tool execution:\n\n```bash\ntail -f ~/.openclaw/logs/gateway.log\n```\n\nKey log entries:\n- `[feishu] received message from ...` - incoming message\n- `[feishu] dispatching to agent` - sent to agent\n- `[feishu] added typing indicator reaction` - bot is processing\n- `[feishu] deliver called: text=...` - agent response\n- `[feishu] dispatch complete` - response sent\n\n### Verify Tool Usage\n\nAsk bot explicitly to confirm tool usage:\n\n```\nuse feishu_doc tool to read YOUR_DOC_TOKEN\n```\n\nLook for confirmation in response like:\n> \"\u6211\u5df2\u7ecf\u7528 **Feishu Doc Tool** \u8bfb\u8fc7\u4e86\u8fd9\u4e2a\u6587\u6863\"\n\n## Common Errors\n\n### Permission Error (99991672)\n\n```\nAccess denied. One of the following scopes is required: [contact:contact.base:readonly...]\n```\n\nThis means bot lacks contact permission. Doesn't affect core messaging but prevents resolving sender names.\n\n### Other Log Locations\n\n```bash\n# Error logs\ntail -f ~/.openclaw/logs/gateway.err.log\n\n# All log files\nls -la ~/.openclaw/logs/\n\n# Raw agent session records (tool calls, responses, etc.)\nls ~/.openclaw/agents/main/sessions/\n# View specific session\ncat ~/.openclaw/agents/main/sessions/<session-id>.json\n```\n\n## Test Workflow\n\n1. Start browser: `agent-browser --headed --session feishu-test open \"https://feishu.cn/next/messenger\"`\n2. User scans QR to login\n3. Search for bot: `Cmd+K` \u2192 type bot name \u2192 `Enter`\n4. Focus input: press `/` then `Backspace`\n5. Type message (English only, letter by letter)\n6. Press `Enter` to send\n7. Wait 10-20 seconds for response\n8. Take screenshot and check logs to verify\n\n## Testing feishu_doc Tool\n\n```bash\n# 1. Focus input\nagent-browser --session feishu-test press \"/\" && \\\nagent-browser --session feishu-test press \"Backspace\"\n\n# 2. Type full doc URL\nurl=\"https://feishu.cn/docx/YOUR_DOC_ID\"\nfor char in $(echo \"$url\" | grep -o .); do\n  agent-browser --session feishu-test press \"$char\" 2>/dev/null || true\ndone\n\n# 3. Send\nagent-browser --session feishu-test press \"Enter\"\n\n# 4. Wait and check logs\nsleep 15 && tail -30 ~/.openclaw/logs/gateway.log\n```\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "feishu-e2e-test",
-    "description": "Local E2E debug and test framework for clawd-feishu plugin development. Use when debugging message flow, testing bot responses, verifying Feishu web UI interactions, or performing end-to-end validation of the OpenClaw-Feishu integration during development.",
-    "allowed-tools": "Bash(agent-browser:*)"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

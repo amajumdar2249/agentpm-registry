@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031558",
   "name": "clerk-observability",
   "slug": "clerk-observability",
   "description": "Implement monitoring, logging, and observability for Clerk authentication.",
   "content": "# Clerk Observability\n\n## Overview\n\nImplement monitoring, logging, and observability for Clerk authentication. Covers structured auth logging, middleware performance tracking, webhook event monitoring, Sentry integration, and health check endpoints.\n\n## Prerequisites\n\n- Clerk integration working\n- Monitoring platform (Sentry, DataDog, or Pino logger at minimum)\n- Logging infrastructure (structured JSON logs recommended)\n\n## Instructions\n\n### Step 1: Structured Authentication Event Logging\n\n```typescript\n// lib/auth-logger.ts\nimport pino from 'pino'\n\nconst logger = pino({\n  level: process.env.LOG_LEVEL || 'info',\n  transport: process.env.NODE_ENV === 'development' ? { target: 'pino-pretty' } : undefined,\n})\n\nexport function logAuthEvent(event: {\n  type: 'sign_in' | 'sign_out' | 'sign_up' | 'permission_denied' | 'session_expired'\n  userId?: string | null\n  orgId?: string | null\n  path: string\n  metadata?: Record<string, any>\n}) {\n  logger.info({\n    category: 'auth',\n    ...event,\n    timestamp: new Date().toISOString(),\n  })\n}\n\nexport function logAuthError(error: Error, context: { userId?: string; path: string }) {\n  logger.error({\n    category: 'auth',\n    error: error.message,\n    stack: error.stack,\n    ...context,\n    timestamp: new Date().toISOString(),\n  })\n}\n```\n\n### Step 2: Middleware Performance Monitoring\n\n```typescript\n// middleware.ts\nimport { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server'\n\nconst isPublicRoute = createRouteMatcher(['/', '/sign-in(.*)', '/sign-up(.*)'])\n\nexport default clerkMiddleware(async (auth, req) => {\n  const start = Date.now()\n\n  if (!isPublicRoute(req)) {\n    await auth.protect()\n  }\n\n  const duration = Date.now() - start\n  const { userId } = await auth()\n\n  // Log slow auth checks\n  if (duration > 100) {\n    console.warn(`[Auth Perf] ${req.nextUrl.pathname} took ${duration}ms`, {\n      userId: userId || 'anonymous',\n      method: req.method,\n    })\n  }\n\n  // Add timing header for debugging\n  const response = new Response(null, { status: 200 })\n  response.headers.set('X-Auth-Duration', `${duration}ms`)\n})\n```\n\n### Step 3: Webhook Event Tracking\n\n```typescript\n// app/api/webhooks/clerk/route.ts\nimport { logAuthEvent } from '@/lib/auth-logger'\n\nasync function handleWebhookEvent(evt: WebhookEvent) {\n  const startTime = Date.now()\n\n  // Track webhook processing metrics\n  const metrics = {\n    eventType: evt.type,\n    receivedAt: new Date().toISOString(),\n    processingTimeMs: 0,\n  }\n\n  switch (evt.type) {\n    case 'user.created':\n      logAuthEvent({\n        type: 'sign_up',\n        userId: evt.data.id,\n        path: '/webhooks/clerk',\n        metadata: { email: evt.data.email_addresses[0]?.email_address },\n      })\n      await db.user.create({ data: { clerkId: evt.data.id } })\n      break\n\n    case 'session.created':\n      logAuthEvent({\n        type: 'sign_in',\n        userId: evt.data.user_id,\n        path: '/webhooks/clerk',\n      })\n      break\n\n    case 'session.ended':\n      logAuthEvent({\n        type: 'sign_out',\n        userId: evt.data.user_id,\n        path: '/webhooks/clerk',\n      })\n      break\n  }\n\n  metrics.processingTimeMs = Date.now() - startTime\n\n  // Alert on slow webhook processing\n  if (metrics.processingTimeMs > 5000) {\n    console.error('[Webhook] Slow processing:', metrics)\n  }\n\n  return Response.json({ received: true })\n}\n```\n\n### Step 4: Sentry Error Tracking Integration\n\n```typescript\n// lib/sentry-clerk.ts\nimport * as Sentry from '@sentry/nextjs'\nimport { auth, currentUser } from '@clerk/nextjs/server'\n\nexport async function initSentryUser() {\n  const { userId, orgId } = await auth()\n\n  if (userId) {\n    const user = await currentUser()\n    Sentry.setUser({\n      id: userId,\n      email: user?.emailAddresses[0]?.emailAddress,\n      username: user?.username || undefined,\n    })\n    Sentry.setTag('org_id', orgId || 'personal')\n  }\n}\n\n// Wrap API routes with Sentry + Clerk context\nexport function withAuthSentry(handler: Function) {\n  return async (...args: any[]) => {\n    await initSentryUser()\n    try {\n      return await handler(...args)\n    } catch (error) {\n      Sentry.captureException(error)\n      throw error\n    }\n  }\n}\n```\n\n```typescript\n// sentry.server.config.ts\nimport * as Sentry from '@sentry/nextjs'\n\nSentry.init({\n  dsn: process.env.SENTRY_DSN,\n  tracesSampleRate: 0.1,\n  beforeSend(event) {\n    // Scrub Clerk secret key if accidentally logged\n    if (event.extra) {\n      delete event.extra['CLERK_SECRET_KEY']\n    }\n    return event\n  },\n})\n```\n\n### Step 5: Health Check Endpoint\n\n```typescript\n// app/api/health/route.ts\nimport { clerkClient } from '@clerk/nextjs/server'\n\nexport async function GET() {\n  const checks: Record<string, { status: string; latencyMs: number; detail?: string }> = {}\n\n  // Check Clerk Backend API\n  const clerkStart = Date.now()\n  try {\n    const client = await clerkClient()\n    await client.users.getUserList({ limit: 1 })\n    checks.clerk = { status: 'healthy', latencyMs: Date.now() - clerkStart }\n  } catch (err: any) {\n    checks.clerk = { status: 'unhealthy', latencyMs: Date.now() - clerkStart, detail: err.message }\n  }\n\n  // Check database\n  const dbStart = Date.now()\n  try {\n    await db.$queryRaw`SELECT 1`\n    checks.database = { status: 'healthy', latencyMs: Date.now() - dbStart }\n  } catch (err: any) {\n    checks.database = { status: 'unhealthy', latencyMs: Date.now() - dbStart, detail: err.message }\n  }\n\n  const allHealthy = Object.values(checks).every((c) => c.status === 'healthy')\n  return Response.json(\n    { status: allHealthy ? 'healthy' : 'degraded', checks, timestamp: new Date().toISOString() },\n    { status: allHealthy ? 200 : 503 }\n  )\n}\n```\n\n### Step 6: Dashboard Metrics Query\n\n```typescript\n// app/api/admin/auth-metrics/route.ts\nimport { auth } from '@clerk/nextjs/server'\n\nexport async function GET() {\n  const { has } = await auth()\n  if (!has({ role: 'org:admin' })) {\n    return Response.json({ error: 'Forbidden' }, { status: 403 })\n  }\n\n  const now = new Date()\n  const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000)\n\n  const metrics = {\n    signIns24h: await db.auditLog.count({\n      where: { action: 'sign_in', timestamp: { gte: dayAgo } },\n    }),\n    signUps24h: await db.auditLog.count({\n      where: { action: 'sign_up', timestamp: { gte: dayAgo } },\n    }),\n    authErrors24h: await db.auditLog.count({\n      where: { action: 'permission_denied', timestamp: { gte: dayAgo } },\n    }),\n    webhookEvents24h: await db.webhookEvent.count({\n      where: { processedAt: { gte: dayAgo } },\n    }),\n  }\n\n  return Response.json(metrics)\n}\n```\n\n## Output\n\n- Structured auth event logging with Pino (sign-in, sign-out, sign-up, errors)\n- Middleware performance tracking with slow-request alerts\n- Webhook event monitoring with processing time metrics\n- Sentry integration with Clerk user context\n- Health check endpoint monitoring Clerk API and database\n- Admin metrics endpoint for auth dashboard\n\n## Error Handling\n\n| Issue | Monitoring Action |\n|-------|-------------------|\n| High auth latency (p95 > 200ms) | Alert via middleware timing logs, investigate caching |\n| Webhook failure rate > 1% | Alert on processing errors, check endpoint health |\n| Session anomalies | Track unusual sign-in patterns via audit log |\n| Clerk API errors | Capture with Sentry context, check status.clerk.com |\n\n## Examples\n\n### Quick Monitoring One-Liner\n\n```bash\n# Watch auth events in real-time (development)\nLOG_LEVEL=debug npm run dev 2>&1 | grep '\"category\":\"auth\"'\n```\n\n## Resources\n\n- [Clerk Dashboard Analytics](https://dashboard.clerk.com)\n- [Sentry Next.js Integration](https://docs.sentry.io/platforms/javascript/guides/nextjs/)\n- [Pino Logger](https://getpino.io/)\n\n## Next Steps\n\nProceed to `clerk-incident-runbook` for incident response procedures.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clerk-observability",
-    "description": "Implement monitoring, logging, and observability for Clerk authentication.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

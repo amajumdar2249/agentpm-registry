@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031919",
   "name": "figma-local-dev-loop",
   "slug": "figma-local-dev-loop",
   "description": "Set up a local development workflow for Figma plugin and REST API projects.",
   "content": "# Figma Local Dev Loop\n\n## Overview\n\nSet up fast local development for two workflows: building Figma plugins that run inside the Figma editor, and building external apps that consume the Figma REST API.\n\n## Prerequisites\n\n- Node.js 18+ with npm/pnpm\n- `FIGMA_PAT` configured (see `figma-install-auth`)\n- Figma desktop app (for plugin development)\n\n## Instructions\n\n### Step 1: REST API Project Structure\n\n```\nfigma-integration/\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 figma-client.ts       # Shared fetch wrapper\n\u2502   \u251c\u2500\u2500 extract-tokens.ts     # Design token extraction\n\u2502   \u2514\u2500\u2500 export-assets.ts      # Asset export pipeline\n\u251c\u2500\u2500 tests/\n\u2502   \u251c\u2500\u2500 figma-client.test.ts\n\u2502   \u2514\u2500\u2500 fixtures/             # Saved API responses for offline testing\n\u2502       \u2514\u2500\u2500 sample-file.json\n\u251c\u2500\u2500 .env.local                # FIGMA_PAT, FIGMA_FILE_KEY (git-ignored)\n\u251c\u2500\u2500 .env.example              # Template for team\n\u251c\u2500\u2500 tsconfig.json\n\u2514\u2500\u2500 package.json\n```\n\n### Step 2: Figma Plugin Project Structure\n\n```\nmy-figma-plugin/\n\u251c\u2500\u2500 manifest.json             # Plugin manifest (required by Figma)\n\u251c\u2500\u2500 code.ts                   # Plugin backend (runs in sandbox)\n\u251c\u2500\u2500 ui.html                   # Plugin UI (runs in iframe)\n\u251c\u2500\u2500 package.json\n\u2514\u2500\u2500 tsconfig.json\n```\n\n**manifest.json** (required):\n\n```json\n{\n  \"name\": \"My Plugin\",\n  \"id\": \"1234567890\",\n  \"api\": \"1.0.0\",\n  \"main\": \"dist/code.js\",\n  \"ui\": \"dist/ui.html\",\n  \"editorType\": [\"figma\"],\n  \"permissions\": [\"currentuser\"]\n}\n```\n\n### Step 3: Plugin Development with Watch Mode\n\n```json\n{\n  \"scripts\": {\n    \"build\": \"esbuild code.ts --bundle --outfile=dist/code.js --target=es2020\",\n    \"watch\": \"esbuild code.ts --bundle --outfile=dist/code.js --target=es2020 --watch\",\n    \"dev\": \"concurrently \\\"npm run watch\\\" \\\"npm run watch:ui\\\"\",\n    \"watch:ui\": \"esbuild ui.tsx --bundle --outfile=dist/ui.html --loader:.html=copy --watch\"\n  },\n  \"devDependencies\": {\n    \"@figma/plugin-typings\": \"^1.0.0\",\n    \"esbuild\": \"^0.20.0\",\n    \"typescript\": \"^5.0.0\"\n  }\n}\n```\n\nLoad the plugin in Figma:\n\n1. Figma desktop > Plugins > Development > Import plugin from manifest\n2. Select your `manifest.json`\n3. Run with `npm run watch` -- changes auto-reload\n\n### Step 4: REST API Dev Loop with Testing\n\n```json\n{\n  \"scripts\": {\n    \"dev\": \"tsx watch src/extract-tokens.ts\",\n    \"test\": \"vitest\",\n    \"test:watch\": \"vitest --watch\"\n  }\n}\n```\n\n```typescript\n// tests/figma-client.test.ts\nimport { describe, it, expect, vi, beforeEach } from 'vitest';\nimport { readFileSync } from 'fs';\n\n// Load a saved API response for offline testing\nconst sampleFile = JSON.parse(\n  readFileSync('tests/fixtures/sample-file.json', 'utf-8')\n);\n\ndescribe('Figma token extraction', () => {\n  beforeEach(() => {\n    // Mock fetch to return saved fixture\n    vi.spyOn(global, 'fetch').mockResolvedValue(\n      new Response(JSON.stringify(sampleFile), { status: 200 })\n    );\n  });\n\n  it('should extract color styles from file', async () => {\n    const res = await fetch('https://api.figma.com/v1/files/test-key');\n    const file = await res.json();\n    const styles = Object.values(file.styles);\n    expect(styles.length).toBeGreaterThan(0);\n  });\n});\n```\n\n### Step 5: Save API Fixtures for Offline Dev\n\n```bash\n# Snapshot a Figma file for offline testing\ncurl -s -H \"X-Figma-Token: ${FIGMA_PAT}\" \\\n  \"https://api.figma.com/v1/files/${FIGMA_FILE_KEY}\" \\\n  > tests/fixtures/sample-file.json\n\n# Snapshot specific nodes\ncurl -s -H \"X-Figma-Token: ${FIGMA_PAT}\" \\\n  \"https://api.figma.com/v1/files/${FIGMA_FILE_KEY}/nodes?ids=0:1,0:2\" \\\n  > tests/fixtures/sample-nodes.json\n```\n\n## Output\n\n- Working dev environment with hot reload\n- Test suite with mocked Figma API responses\n- Saved fixtures for offline development\n- Plugin manifest configured for Figma desktop loading\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Plugin not appearing in Figma | Wrong manifest path | Re-import from correct `manifest.json` |\n| `figma` global undefined | Running outside Figma sandbox | Use `@figma/plugin-typings` for types only |\n| Fixture stale | File changed since snapshot | Re-run fixture download script |\n| esbuild watch crash | Syntax error in TS | Fix error; watch auto-restarts |\n\n## Examples\n\n### Quick Plugin Skeleton\n\n```typescript\n// code.ts -- minimal Figma plugin\nfigma.showUI(__html__, { width: 300, height: 200 });\n\nfigma.ui.onmessage = (msg: { type: string; count: number }) => {\n  if (msg.type === 'create-rectangles') {\n    for (let i = 0; i < msg.count; i++) {\n      const rect = figma.createRectangle();\n      rect.x = i * 150;\n      rect.fills = [{ type: 'SOLID', color: { r: 1, g: 0.5, b: 0 } }];\n      figma.currentPage.appendChild(rect);\n    }\n    figma.closePlugin();\n  }\n};\n```\n\n## Resources\n\n- [Figma Plugin Development Guide](https://developers.figma.com/docs/plugins/)\n- [Plugin API Reference](https://developers.figma.com/docs/plugins/api/api-reference/)\n- [@figma/plugin-typings](https://www.npmjs.com/package/@figma/plugin-typings)\n- [Vitest Documentation](https://vitest.dev/)\n\n## Next Steps\n\nSee `figma-sdk-patterns` for production-ready code patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "figma-local-dev-loop",
-    "description": "Set up a local development workflow for Figma plugin and REST API projects.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(npx:*), Bash(pnpm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

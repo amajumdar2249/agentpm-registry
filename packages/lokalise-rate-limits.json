@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032555",
   "name": "lokalise-rate-limits",
   "slug": "lokalise-rate-limits",
   "description": "Implement Lokalise rate limiting, backoff, and request queuing patterns.",
   "content": "# Lokalise Rate Limits\n\n## Overview\n\nLokalise enforces a strict **6 requests per second** rate limit across all API endpoints (`https://api.lokalise.com/api2`). Exceeding this triggers a `429 Too Many Requests` response. This skill covers request queuing with 170ms minimum spacing, exponential backoff for 429 recovery, bulk operation throttling, and proactive quota monitoring via response headers.\n\n## Prerequisites\n\n- `@lokalise/node-api` SDK installed (`npm install @lokalise/node-api`)\n- API token configured (read or read/write scope depending on operations)\n- Node.js 18+ for native `AbortController` support in timeout handling\n\n## Instructions\n\n### 1. Understand the Rate Limit Headers\n\nEvery Lokalise API response includes rate limit headers:\n\n```\nX-RateLimit-Limit: 6          # Max requests per second\nX-RateLimit-Remaining: 4      # Requests remaining in current window\nX-RateLimit-Reset: 1700000000 # Unix timestamp when the window resets\nRetry-After: 1                # Seconds to wait (only on 429 responses)\n```\n\nAlways read these headers. Never hardcode assumptions about the window \u2014 Lokalise may adjust limits per plan tier.\n\n### 2. Implement a Request Queue with 170ms Spacing\n\nSpace requests at minimum 170ms apart (1000ms / 6 = ~167ms, rounded up). Use `p-queue` for concurrency control:\n\n```typescript\nimport PQueue from \"p-queue\";\n\nconst lokaliseQueue = new PQueue({\n  concurrency: 1,\n  interval: 170,\n  intervalCap: 1,\n});\n\nasync function queuedRequest<T>(fn: () => Promise<T>): Promise<T> {\n  return lokaliseQueue.add(fn, { throwOnTimeout: true });\n}\n\n// Usage with the SDK\nimport { LokaliseApi } from \"@lokalise/node-api\";\nconst lokalise = new LokaliseApi({ apiKey: process.env.LOKALISE_API_TOKEN });\n\nconst keys = await queuedRequest(() =>\n  lokalise.keys().list({\n    project_id: \"123456789.abcdefgh\",\n    limit: 500,\n    page: 1,\n  })\n);\n```\n\n### 3. Add Exponential Backoff for 429 Recovery\n\nWhen a 429 occurs, honor the `Retry-After` header first. If absent, use exponential backoff with jitter:\n\n```typescript\nasync function withBackoff<T>(\n  fn: () => Promise<T>,\n  maxRetries = 5\n): Promise<T> {\n  for (let attempt = 0; attempt <= maxRetries; attempt++) {\n    try {\n      return await fn();\n    } catch (error: any) {\n      if (error.code === 429 && attempt < maxRetries) {\n        const retryAfter = error.headers?.[\"retry-after\"];\n        const baseDelay = retryAfter\n          ? parseInt(retryAfter, 10) * 1000\n          : Math.pow(2, attempt) * 1000;\n        const jitter = Math.random() * 500;\n        const delay = baseDelay + jitter;\n\n        console.warn(\n          `Rate limited. Attempt ${attempt + 1}/${maxRetries}. ` +\n          `Waiting ${Math.round(delay)}ms...`\n        );\n        await new Promise((resolve) => setTimeout(resolve, delay));\n        continue;\n      }\n      throw error;\n    }\n  }\n  throw new Error(\"Max retries exceeded for Lokalise API request\");\n}\n```\n\n### 4. Throttle Bulk Operations\n\nFor operations that process many items (listing all keys, bulk translations), paginate with built-in throttling:\n\n```typescript\nasync function paginateAll<T>(\n  fetchPage: (page: number) => Promise<{ items: T[]; totalPages: number }>\n): Promise<T[]> {\n  const allItems: T[] = [];\n  let page = 1;\n  let totalPages = 1;\n\n  do {\n    const result = await queuedRequest(() => fetchPage(page));\n    allItems.push(...result.items);\n    totalPages = result.totalPages;\n    page++;\n  } while (page <= totalPages);\n\n  return allItems;\n}\n\n// Fetch all keys across pages\nconst allKeys = await paginateAll(async (page) => {\n  const response = await lokalise.keys().list({\n    project_id: projectId,\n    limit: 500, // max per page\n    page,\n  });\n  return {\n    items: response.items,\n    totalPages: response.totalCount\n      ? Math.ceil(response.totalCount / 500)\n      : 1,\n  };\n});\n```\n\nFor bulk key creation, batch into groups of 500 (API limit per request) and queue each batch:\n\n```typescript\nasync function bulkCreateKeys(\n  projectId: string,\n  keys: Array<{ key_name: string; platforms: string[] }>\n): Promise<void> {\n  const batchSize = 500;\n  for (let i = 0; i < keys.length; i += batchSize) {\n    const batch = keys.slice(i, i + batchSize);\n    await queuedRequest(() =>\n      lokalise.keys().create({\n        project_id: projectId,\n        keys: batch,\n      })\n    );\n    console.log(\n      `Created keys ${i + 1}-${Math.min(i + batchSize, keys.length)} ` +\n      `of ${keys.length}`\n    );\n  }\n}\n```\n\n### 5. Monitor Quota Proactively\n\nTrack remaining quota and preemptively slow down before hitting the limit:\n\n```typescript\nlet remainingRequests = 6;\nlet resetTimestamp = 0;\n\nfunction updateQuota(headers: Record<string, string>): void {\n  remainingRequests = parseInt(headers[\"x-ratelimit-remaining\"] ?? \"6\", 10);\n  resetTimestamp = parseInt(headers[\"x-ratelimit-reset\"] ?? \"0\", 10);\n}\n\nasync function throttleIfNeeded(): Promise<void> {\n  if (remainingRequests <= 1) {\n    const now = Math.floor(Date.now() / 1000);\n    const waitSeconds = Math.max(0, resetTimestamp - now) + 0.5;\n    console.warn(\n      `Quota nearly exhausted (${remainingRequests} remaining). ` +\n      `Pausing ${waitSeconds}s until reset.`\n    );\n    await new Promise((resolve) =>\n      setTimeout(resolve, waitSeconds * 1000)\n    );\n  }\n}\n```\n\n## Output\n\n- Request queue enforcing 6 req/sec with 170ms minimum spacing between calls\n- Automatic retry with exponential backoff + jitter on 429 responses\n- Paginated fetching with throttling for bulk data retrieval\n- Proactive throttling when `X-RateLimit-Remaining` drops to 1\n\n## Error Handling\n\n| Header | Description | Action |\n|--------|-------------|--------|\n| `X-RateLimit-Limit` | Max requests per window (always 6) | Use as concurrency ceiling |\n| `X-RateLimit-Remaining` | Requests left in current window | Pause proactively when <= 1 |\n| `X-RateLimit-Reset` | Unix timestamp of window reset | Sleep until this time on exhaustion |\n| `Retry-After` | Seconds to wait (only on 429) | Always honor this value exactly |\n\nIf you receive a 429 without `Retry-After`, default to 1 second then exponential backoff. Never retry more than 5 times \u2014 if consistently rate-limited, your architecture needs request consolidation, not more retries.\n\n## Examples\n\n### Complete Rate-Limited Client\n\n```typescript\nimport { LokaliseApi } from \"@lokalise/node-api\";\nimport PQueue from \"p-queue\";\n\nclass RateLimitedLokalise {\n  private api: LokaliseApi;\n  private queue: PQueue;\n\n  constructor(apiKey: string) {\n    this.api = new LokaliseApi({ apiKey });\n    this.queue = new PQueue({ concurrency: 1, interval: 170, intervalCap: 1 });\n  }\n\n  async request<T>(fn: (api: LokaliseApi) => Promise<T>): Promise<T> {\n    return this.queue.add(\n      () => withBackoff(() => fn(this.api)),\n      { throwOnTimeout: true }\n    );\n  }\n}\n\n// Usage\nconst client = new RateLimitedLokalise(process.env.LOKALISE_API_TOKEN!);\nconst keys = await client.request((api) =>\n  api.keys().list({ project_id: \"123456789.abcdefgh\", limit: 500 })\n);\n```\n\n### CLI with Rate Limiting\n\n```bash\n# The lokalise2 CLI respects rate limits internally, but for scripted\n# loops you need manual spacing:\nfor project_id in $(lokalise2 project list --token $TOKEN --format json \\\n  | jq -r '.[].project_id'); do\n  lokalise2 file download \\\n    --token \"$LOKALISE_API_TOKEN\" \\\n    --project-id \"$project_id\" \\\n    --format json \\\n    --dest ./locales/\"$project_id\"/\n  sleep 0.2  # 200ms spacing\ndone\n```\n\n## Resources\n\n- [Lokalise API Rate Limits](https://developers.lokalise.com/reference/api-rate-limits)\n- [p-queue](https://github.com/sindresorhus/p-queue) \u2014 Promise-based queue with concurrency control\n- [@lokalise/node-api SDK](https://github.com/lokalise/node-lokalise-api)\n\n## Next Steps\n\nFor handling specific API errors beyond rate limits, see `lokalise-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "lokalise-rate-limits",
-    "description": "Implement Lokalise rate limiting, backoff, and request queuing patterns.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000000575",
   "name": "golang-performance",
   "slug": "golang-performance",
   "description": "Go performance optimization techniques including profiling with pprof,",
   "content": "\n# Golang Performance\n\nThis skill provides guidance on optimizing Go application performance including profiling, memory management, concurrency optimization, and avoiding common performance pitfalls.\n\n## When to Use This Skill\n\n- When profiling Go applications for CPU or memory issues\n- When optimizing memory allocations and reducing GC pressure\n- When implementing efficient concurrency patterns\n- When analyzing escape analysis results\n- When optimizing hot paths in production code\n\n## Profiling with pprof\n\n### Enable Profiling in HTTP Server\n\n```go\nimport (\n    \"net/http\"\n    _ \"net/http/pprof\"\n)\n\nfunc main() {\n    // pprof endpoints available at /debug/pprof/\n    go func() {\n        http.ListenAndServe(\"localhost:6060\", nil)\n    }()\n\n    // Main application\n}\n```\n\n### CPU Profiling\n\n```bash\n# Collect 30-second CPU profile\ngo tool pprof http://localhost:6060/debug/pprof/profile?seconds=30\n\n# Interactive commands\n(pprof) top10          # Top 10 functions by CPU\n(pprof) list FuncName  # Show source with timing\n(pprof) web            # Open flame graph in browser\n```\n\n### Memory Profiling\n\n```bash\n# Heap profile\ngo tool pprof http://localhost:6060/debug/pprof/heap\n\n# Allocs profile (all allocations)\ngo tool pprof http://localhost:6060/debug/pprof/allocs\n\n# Interactive commands\n(pprof) top10 -cum     # Top by cumulative allocations\n(pprof) list FuncName  # Show allocation sites\n```\n\n### Programmatic Profiling\n\n```go\nimport (\n    \"os\"\n    \"runtime/pprof\"\n)\n\nfunc profileCPU() {\n    f, _ := os.Create(\"cpu.prof\")\n    defer f.Close()\n\n    pprof.StartCPUProfile(f)\n    defer pprof.StopCPUProfile()\n\n    // Code to profile\n}\n\nfunc profileMemory() {\n    f, _ := os.Create(\"mem.prof\")\n    defer f.Close()\n\n    runtime.GC() // Get accurate stats\n    pprof.WriteHeapProfile(f)\n}\n```\n\n## Memory Optimization\n\n### Reduce Allocations\n\n```go\n// BAD: Allocates on every call\nfunc Process(items []string) []string {\n    result := []string{}\n    for _, item := range items {\n        result = append(result, transform(item))\n    }\n    return result\n}\n\n// GOOD: Pre-allocate with known capacity\nfunc Process(items []string) []string {\n    result := make([]string, 0, len(items))\n    for _, item := range items {\n        result = append(result, transform(item))\n    }\n    return result\n}\n```\n\n### Use sync.Pool for Frequent Allocations\n\n```go\nvar bufferPool = sync.Pool{\n    New: func() interface{} {\n        return new(bytes.Buffer)\n    },\n}\n\nfunc ProcessRequest(data []byte) []byte {\n    buf := bufferPool.Get().(*bytes.Buffer)\n    defer func() {\n        buf.Reset()\n        bufferPool.Put(buf)\n    }()\n\n    // Use buffer\n    buf.Write(data)\n    return buf.Bytes()\n}\n```\n\n### Avoid String Concatenation in Loops\n\n```go\n// BAD: O(n^2) allocations\nfunc BuildString(parts []string) string {\n    result := \"\"\n    for _, part := range parts {\n        result += part\n    }\n    return result\n}\n\n// GOOD: Single allocation\nfunc BuildString(parts []string) string {\n    var builder strings.Builder\n    for _, part := range parts {\n        builder.WriteString(part)\n    }\n    return builder.String()\n}\n```\n\n### Slice Memory Leaks\n\n```go\n// BAD: Keeps entire backing array alive\nfunc GetFirst(data []byte) []byte {\n    return data[:10]\n}\n\n// GOOD: Copy to release backing array\nfunc GetFirst(data []byte) []byte {\n    result := make([]byte, 10)\n    copy(result, data[:10])\n    return result\n}\n```\n\n## Escape Analysis\n\n```bash\n# Show escape analysis decisions\ngo build -gcflags=\"-m\" ./...\n\n# More verbose\ngo build -gcflags=\"-m -m\" ./...\n```\n\n### Avoiding Heap Escapes\n\n```go\n// ESCAPES: Returned pointer\nfunc NewUser() *User {\n    return &User{}  // Allocated on heap\n}\n\n// STAYS ON STACK: Value return\nfunc NewUser() User {\n    return User{}  // May stay on stack\n}\n\n// ESCAPES: Interface conversion\nfunc Process(v interface{}) { ... }\n\nfunc main() {\n    x := 42\n    Process(x)  // x escapes to heap\n}\n```\n\n## Concurrency Optimization\n\n### Worker Pool Pattern\n\n```go\nfunc ProcessItems(items []Item, workers int) []Result {\n    jobs := make(chan Item, len(items))\n    results := make(chan Result, len(items))\n\n    // Start workers\n    var wg sync.WaitGroup\n    for i := 0; i < workers; i++ {\n        wg.Add(1)\n        go func() {\n            defer wg.Done()\n            for item := range jobs {\n                results <- process(item)\n            }\n        }()\n    }\n\n    // Send jobs\n    for _, item := range items {\n        jobs <- item\n    }\n    close(jobs)\n\n    // Wait and collect\n    go func() {\n        wg.Wait()\n        close(results)\n    }()\n\n    var output []Result\n    for r := range results {\n        output = append(output, r)\n    }\n    return output\n}\n```\n\n### Buffered Channels for Throughput\n\n```go\n// SLOW: Unbuffered causes blocking\nch := make(chan int)\n\n// FAST: Buffer reduces contention\nch := make(chan int, 100)\n```\n\n### Avoid Lock Contention\n\n```go\n// BAD: Global lock\nvar mu sync.Mutex\nvar cache = make(map[string]string)\n\nfunc Get(key string) string {\n    mu.Lock()\n    defer mu.Unlock()\n    return cache[key]\n}\n\n// GOOD: Sharded locks\ntype ShardedCache struct {\n    shards [256]struct {\n        mu    sync.RWMutex\n        items map[string]string\n    }\n}\n\nfunc (c *ShardedCache) getShard(key string) *struct {\n    mu    sync.RWMutex\n    items map[string]string\n} {\n    h := fnv.New32a()\n    h.Write([]byte(key))\n    return &c.shards[h.Sum32()%256]\n}\n\nfunc (c *ShardedCache) Get(key string) string {\n    shard := c.getShard(key)\n    shard.mu.RLock()\n    defer shard.mu.RUnlock()\n    return shard.items[key]\n}\n```\n\n### Use sync.Map for Specific Cases\n\n```go\n// Good for: keys written once, read many; disjoint key sets\nvar cache sync.Map\n\nfunc Get(key string) (string, bool) {\n    v, ok := cache.Load(key)\n    if !ok {\n        return \"\", false\n    }\n    return v.(string), true\n}\n\nfunc Set(key, value string) {\n    cache.Store(key, value)\n}\n```\n\n## Data Structure Optimization\n\n### Struct Field Ordering (Memory Alignment)\n\n```go\n// BAD: 24 bytes (padding)\ntype Bad struct {\n    a bool   // 1 byte + 7 padding\n    b int64  // 8 bytes\n    c bool   // 1 byte + 7 padding\n}\n\n// GOOD: 16 bytes (no padding)\ntype Good struct {\n    b int64  // 8 bytes\n    a bool   // 1 byte\n    c bool   // 1 byte + 6 padding\n}\n```\n\n### Avoid Interface{} When Possible\n\n```go\n// SLOW: Type assertions, boxing\nfunc Sum(values []interface{}) float64 {\n    var sum float64\n    for _, v := range values {\n        sum += v.(float64)\n    }\n    return sum\n}\n\n// FAST: Concrete types\nfunc Sum(values []float64) float64 {\n    var sum float64\n    for _, v := range values {\n        sum += v\n    }\n    return sum\n}\n```\n\n## Benchmarking Patterns\n\n```go\nfunc BenchmarkProcess(b *testing.B) {\n    data := generateTestData()\n    b.ResetTimer() // Exclude setup time\n\n    for i := 0; i < b.N; i++ {\n        Process(data)\n    }\n}\n\n// Memory benchmarks\nfunc BenchmarkAllocs(b *testing.B) {\n    b.ReportAllocs()\n    for i := 0; i < b.N; i++ {\n        _ = make([]byte, 1024)\n    }\n}\n\n// Compare implementations\nfunc BenchmarkComparison(b *testing.B) {\n    b.Run(\"old\", func(b *testing.B) {\n        for i := 0; i < b.N; i++ {\n            OldImplementation()\n        }\n    })\n    b.Run(\"new\", func(b *testing.B) {\n        for i := 0; i < b.N; i++ {\n            NewImplementation()\n        }\n    })\n}\n```\n\nRun with:\n\n```bash\ngo test -bench=. -benchmem ./...\ngo test -bench=. -benchtime=5s ./...  # Longer runs\n```\n\n## Common Pitfalls\n\n### Defer in Hot Loops\n\n```go\n// BAD: Defer overhead per iteration\nfor _, item := range items {\n    mu.Lock()\n    defer mu.Unlock()  // Defers stack up!\n    process(item)\n}\n\n// GOOD: Explicit unlock\nfor _, item := range items {\n    mu.Lock()\n    process(item)\n    mu.Unlock()\n}\n\n// BETTER: Extract to function\nfor _, item := range items {\n    processWithLock(item)\n}\n\nfunc processWithLock(item Item) {\n    mu.Lock()\n    defer mu.Unlock()\n    process(item)\n}\n```\n\n### JSON Encoding Performance\n\n```go\n// SLOW: Reflection on every call\njson.Marshal(v)\n\n// FAST: Reuse encoder\nvar buf bytes.Buffer\nencoder := json.NewEncoder(&buf)\nencoder.Encode(v)\n\n// FASTER: Code generation (easyjson, ffjson)\n```\n\n## Best Practices\n\n1. **Measure before optimizing** - Profile to find actual bottlenecks\n2. **Pre-allocate slices** - Use `make([]T, 0, capacity)` when size is known\n3. **Pool frequently allocated objects** - Use `sync.Pool` for buffers\n4. **Minimize allocations in hot paths** - Reuse objects, avoid interfaces\n5. **Right-size channels** - Buffer to reduce blocking without wasting memory\n6. **Avoid premature optimization** - Clarity first, optimize measured problems\n7. **Use value receivers for small structs** - Avoid pointer indirection\n8. **Order struct fields by size** - Largest to smallest reduces padding\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "golang-performance",
-    "description": "Go performance optimization techniques including profiling with pprof,",
-    "author": "Joseph OBrien",
-    "status": "unpublished",
-    "updated": "2025-12-23",
-    "version": "1.0.1",
-    "tag": "skill",
-    "type": "skill"
+  "author": "Joseph OBrien",
+  "version": "1.0.1",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000011166",
   "name": "query-optimization",
   "slug": "query-optimization",
   "description": "|",
   "content": "\n# Query Optimization\n\nComprehensive guide to T-SQL query optimization for SQL Server and Azure SQL Database. Optimize from verified evidence: schema, data types, indexes, row counts, partitioning, execution plans, and allowed change types.\n\n## Mandatory Workflow\n\n### 1. Schema-First Validation\n\nBefore recommending rewrites, indexes, or hints, verify or mark unknown:\n\n- SQL Server version, edition, compatibility level, and Azure SQL tier if applicable.\n- Full query/procedure text, parameter values, frequency, and runtime target.\n- DDL for tables, views, temp tables, table variables, and TVFs.\n- Data types for join, filter, grouping, ordering, and temp-table columns, including length, precision, scale, collation, and nullability.\n- Existing indexes, constraints, statistics age, partition function/scheme, and row counts.\n- Whether objects are local or linked-server/remote sources.\n- Allowed change types: query rewrite, new index, huge-table index change, stats update, staging table, computed column, or no code change.\n\nUse `../_shared/optimization-intake.md` and `../_shared/assumption-tracker.md`. If key facts are missing, provide conditional guidance plus diagnostics instead of final prescriptions.\n\n### 2. Identify the Root Bottleneck\n\nUse actual execution plans and `STATISTICS IO, TIME` when possible. Rank findings by measured impact, not just estimated plan percentage:\n\n- High logical reads or row reads.\n- Bad estimate vs actual row gaps.\n- Scans caused by non-SARGable predicates or missing access paths.\n- Key lookups multiplied by many executions.\n- Sort/hash/window spills from poor estimates or missing order.\n- Remote queries that fail to push predicates or joins to the linked server.\n\nFor detailed `.sqlplan` inspection, load `tsql-master:execution-plan-analysis`.\n\n### 3. Fix SARGability and Type Mismatches\n\nSARGable predicates can use ordered index access. Avoid functions or conversions on indexed columns.\n\n| Non-SARGable | Safer pattern |\n|---|---|\n| `WHERE YEAR(OrderDate) = 2026` | `WHERE OrderDate >= '20260101' AND OrderDate < '20270101'` |\n| `WHERE LEFT(Name, 3) = 'ABC'` | `WHERE Name LIKE 'ABC%'` |\n| `WHERE Amount * 1.1 > 1000` | `WHERE Amount > 1000 / 1.1` |\n| `WHERE CONVERT(date, Dt) = @d` | `WHERE Dt >= @d AND Dt < DATEADD(day, 1, @d)` |\n| `WHERE VarcharCol = 123` | `WHERE VarcharCol = '123'` |\n\nCheck actual data types. A syntactically SARGable predicate can still scan if a parameter, temp column, or join key has the wrong type or collation.\n\n### 4. Prove Join Changes\n\nNever remove or replace joins only because selected columns come from one table. Prove:\n\n- **Does the join filter rows?** Compare base count vs joined count and check trusted foreign keys.\n- **Does the join multiply rows?** Check uniqueness on the joined key and duplicates in the referenced table.\n- **Can it be replaced with `EXISTS`?** Use a semi-join when only existence is needed and row multiplication must be avoided.\n- **Are outer joins preserved?** Predicates in `WHERE` can accidentally convert `LEFT JOIN` to inner join.\n\nMove join-removal experiments into a proof harness and validate equivalence with `EXCEPT` in both directions. See `references/rewrite-proof-harnesses.md`.\n\n### 5. Check Temp Tables and Staging Types\n\nTemp tables are often the right optimization tool, but bad types can create hidden conversions.\n\nBefore using or recommending a temp table:\n\n- Compare staged column types against source metadata.\n- Match string length and collation for join/filter columns.\n- Match numeric precision/scale and date/time precision.\n- Add appropriate clustered or nonclustered indexes after load when row counts justify them.\n- Update temp-table statistics when phased optimization depends on accurate cardinality.\n\nFlag mismatches as first-order findings because they can invalidate plan analysis and index recommendations. Use the checker in `references/rewrite-proof-harnesses.md`.\n\n### 6. Select the Rewrite Template\n\nChoose the least invasive rewrite that addresses the verified bottleneck:\n\n| Situation | Template |\n|---|---|\n| Highly selective predicate before huge joins | Stage selective keys first, index the stage, then join. |\n| Huge detail table aggregated later | Aggregate early if grouping preserves semantics. |\n| Join only tests existence | Replace row-producing join with `EXISTS`. |\n| OR across different columns | Split into `UNION ALL` branches with duplicate guards. |\n| Catch-all optional predicates | Dynamic SQL or targeted recompilation; avoid `Col = @p OR @p IS NULL` for hot paths. |\n| Unsafe partition predicate | Rewrite to direct typed range on partition column. |\n| Bad estimates from table variables/TVFs | Use temp tables, inline TVFs, or recompile depending on version and workload. |\n\nDo not stage huge unfiltered tables or aggregate early unless the row reduction and semantic equivalence are proven.\n\n## Parameter Sensitivity\n\nParameter sniffing occurs when a plan compiled for one value is reused for a very different value. Confirm skew and compile/runtime values before applying fixes.\n\n| Option | Best for | Caution |\n|---|---|---|\n| `OPTION (RECOMPILE)` | Infrequent or highly variable statements | Adds compile CPU; plan not reused. |\n| `OPTIMIZE FOR (@p = value)` | Stable representative value | Can age badly as data changes. |\n| `OPTIMIZE FOR UNKNOWN` | Average distribution is acceptable | Can be mediocre for all cases. |\n| Dynamic SQL | Optional predicates and varied shapes | Requires safe parameterization. |\n| Query Store hints | SQL Server 2022+ or Azure SQL, no code change | Monitor regressions. |\n| PSP optimization | SQL Server 2022+ with compatibility 160 | Only applies to eligible patterns. |\n\n## Execution Plan Checks\n\nWatch these operators and warnings:\n\n| Plan evidence | Likely action |\n|---|---|\n| Scan with residual predicate | Fix SARGability, key order, or filtered index. |\n| Seek with high rows read | Add more selective key columns or rewrite residual predicate. |\n| Key lookup repeated many times | Cover query or reduce outer rows first. |\n| Sort spill or hash spill | Fix estimates, reduce rows/width, add order-compatible index. |\n| `CONVERT_IMPLICIT` on column | Align parameter/temp/source data types. |\n| Estimate off by 10x+ | Check stats, skew, table variables, predicates, constraints. |\n| Missing-index warning | Treat as candidate only; merge with existing indexes and workload. |\n\n## Statistics and Cardinality\n\nUse statistics work when evidence points to stale or insufficient estimates:\n\n```sql\nDBCC SHOW_STATISTICS('dbo.TableName', 'IndexOrStatsName');\nUPDATE STATISTICS dbo.TableName IndexOrStatsName WITH FULLSCAN;\n```\n\nFor large partitioned tables, evaluate incremental statistics and filtered stats. Do not run broad fullscan updates in production without maintenance-window and blocking considerations.\n\n## Output Format\n\nRespond with:\n\n1. **Intake status**: verified, unverified, disproved, needs diagnostic.\n2. **Bottleneck evidence**: plan nodes, reads, rows, estimates, warnings.\n3. **Recommendation path**: rewrite, index/stat change, or diagnostic, separated by allowed change type.\n4. **Proof harness**: result equivalence and before/after performance metrics.\n5. **Risks**: parameter sensitivity, write overhead, blocking, partition safety, remote pushdown.\n\n## References\n\n- `../_shared/optimization-intake.md` - mandatory intake checklist.\n- `../_shared/assumption-tracker.md` - assumption status protocol.\n- `references/rewrite-proof-harnesses.md` - join proof, temp type checker, and rewrite templates.\n- `references/dmv-diagnostic-queries.md` - DMV queries for performance analysis.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "query-optimization",
-    "description": "|",
-    "Provides": "evidence-first workflow, rewrite templates, parameter-sniffing playbook, and gating rules before recommending indexes or hints."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

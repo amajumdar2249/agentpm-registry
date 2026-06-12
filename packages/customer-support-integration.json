@@ -1,20 +1,51 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000008222",
   "name": "customer-support-integration",
   "slug": "customer-support-integration",
   "description": "Connect your helpdesk (Gorgias, Zendesk, Intercom) to your store so support agents see full order history and customer details without switching tools",
   "content": "\n# Customer Support Integration\n\n## Overview\n\nConnecting your helpdesk to your store automatically surfaces order history, tracking information, and customer spend inside every support ticket \u2014 reducing average handle time by 40\u201360% because agents don't switch between systems. For Shopify, Gorgias is the purpose-built helpdesk that's native to the platform. For other platforms and for Zendesk/Intercom users, dedicated integration apps connect the systems. Only build a custom integration if you need deep two-way automation (auto-create tickets from order events, VIP routing, CSAT sync back to CRM) that off-the-shelf apps don't provide.\n\n## When to Use This Skill\n\n- When support agents repeatedly ask customers for their order number because it doesn't auto-populate in the ticket\n- When implementing Zendesk Sunshine Apps or Intercom Canvas Kit to show order details inside the agent interface\n- When automating ticket creation from order events (failed delivery, fraud hold, backorder)\n- When routing tickets by order value to prioritize VIP customers\n- When syncing support CSAT scores back to your CRM for customer health scoring\n\n## Core Instructions\n\n### Step 1: Determine platform and choose the right helpdesk\n\n| Platform | Best Helpdesk | Why |\n|----------|--------------|-----|\n| **Shopify** | Gorgias | Purpose-built for Shopify; deep order data access, macro variables that pull order info, 1-click actions (refund, cancel, reorder) from within the ticket |\n| **Shopify** | Zendesk | Good for teams that already use Zendesk; install the Shopify app for Zendesk from the App Store |\n| **WooCommerce** | Gorgias or Freshdesk | Gorgias supports WooCommerce; Freshdesk + WooCommerce plugin for teams on Freshdesk |\n| **BigCommerce** | Gorgias or Zendesk | Both have BigCommerce integrations in their app marketplaces |\n| **Custom / Headless** | Zendesk or Intercom with custom integration | Build a sidebar app to inject order context into tickets |\n\n---\n\n### Step 2: Platform-specific setup\n\n---\n\n#### Shopify\n\n**Option A: Gorgias (recommended for Shopify)**\n\nGorgias is the most widely-used Shopify support helpdesk with the deepest platform integration.\n\n1. Install **Gorgias** from the Shopify App Store\n2. Authorize Gorgias to access your Shopify store data\n3. Gorgias automatically pulls order history, customer details, and shipping status into every ticket when a customer emails from the address on their Shopify account\n\n**What Gorgias shows agents automatically:**\n- Customer name, email, total spent, order count\n- All past orders with status, items, and tracking\n- Live chat history across all channels\n\n**Setting up automation rules:**\n1. Go to **Gorgias \u2192 Automation \u2192 Rules**\n2. Create rules like:\n   - Auto-tag tickets with \"VIP\" when customer lifetime value > $500\n   - Auto-assign VIP tickets to a senior support team\n   - Auto-reply with order status when ticket contains \"where is my order\"\n\n**1-click actions from within Gorgias:**\n- Refund, cancel, or duplicate an order directly from the ticket sidebar\n- Apply discount codes to orders without leaving Gorgias\n- Create a draft order for a replacement\n\n**Gorgias macros (template responses with dynamic variables):**\n- Create macros that pull in order data automatically: `Your order {{order.name}} is currently {{order.fulfillment_status}}`\n- Go to **Settings \u2192 Macros** to create and manage macros\n\n---\n\n#### WooCommerce\n\n**Gorgias for WooCommerce:**\n\n1. Install the **Gorgias** WooCommerce plugin from WordPress.org or connect via Gorgias integrations\n2. Connect your WooCommerce store \u2014 Gorgias pulls order history automatically\n\n**Freshdesk for WooCommerce:**\n1. Install **Freshdesk Help Desk for WooCommerce** from the WordPress plugin directory\n2. The plugin creates Freshdesk tickets from WooCommerce order events\n3. Freshdesk agents see customer order details in the ticket sidebar via the integration\n\n**Manual integration with Zendesk:**\n1. Install **Zendesk for WooCommerce** from the Zendesk App Marketplace\n2. Agents can search for customers by email and see their order history in the ticket sidebar\n\n---\n\n#### BigCommerce\n\n**Gorgias for BigCommerce:**\n1. Install **Gorgias** from the BigCommerce App Marketplace\n2. Connect your store \u2014 same deep integration as Shopify\n\n**Zendesk for BigCommerce:**\n1. Install the BigCommerce app from the Zendesk App Marketplace\n2. Agents see customer details and order history in the ticket sidebar\n\n---\n\n#### Custom / Headless\n\nBuild a Zendesk Sunshine App (sidebar panel) or Intercom Canvas Kit app that injects order context into every ticket:\n\n**Zendesk sidebar app \u2014 data endpoint:**\n\n```typescript\n// GET /api/support/zendesk-context?email=customer@example.com\nexport async function getZendeskContext(req: Request, res: Response) {\n  const customerEmail = (req.query.email as string)?.toLowerCase();\n  if (!customerEmail) return res.json({ customer: null, orders: [] });\n\n  const [customer, recentOrders] = await Promise.all([\n    db.customers.findByEmail(customerEmail, { include: ['segmentScore'] }),\n    db.orders.findMany({\n      where: { customerEmail },\n      orderBy: { createdAt: 'desc' },\n      take: 5,\n      include: { lineItems: { include: { product: true } }, shipments: true },\n    }),\n  ]);\n\n  res.json({\n    customer: customer ? {\n      lifetimeValue: customer.totalSpentCents / 100,\n      orderCount: customer.orderCount,\n      segment: customer.segmentScore?.segment,\n      tags: customer.tags,\n    } : null,\n    orders: recentOrders.map(o => ({\n      number: o.orderNumber,\n      status: o.status,\n      total: o.totalCents / 100,\n      createdAt: o.createdAt,\n      trackingUrl: o.shipments[0]?.trackingUrl,\n      items: o.lineItems.map(i => ({ name: i.product.name, quantity: i.quantity })),\n    })),\n  });\n}\n```\n\n**Route high-value tickets to VIP queue:**\n\n```typescript\n// Called when a new Zendesk ticket is created (via Zendesk webhook)\nexport async function applyTicketRouting(ticketId: string) {\n  const ticket = await fetchZendeskTicket(ticketId);\n  const customerEmail = ticket.requester?.email?.toLowerCase();\n  if (!customerEmail) return;\n\n  const customer = await db.customers.findByEmail(customerEmail, { include: ['segmentScore'] });\n  if (!customer) return;\n\n  const isVIP = ['champions', 'cannot_lose_them'].includes(customer.segmentScore?.segment ?? '');\n  const isHighValue = customer.totalSpentCents >= 100000;  // $1,000+\n\n  if (isVIP || isHighValue) {\n    await fetch(`https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticketId}.json`, {\n      method: 'PUT',\n      headers: { Authorization: getZendeskAuthHeader(), 'Content-Type': 'application/json' },\n      body: JSON.stringify({\n        ticket: {\n          priority: 'urgent',\n          group_id: process.env.ZENDESK_VIP_GROUP_ID,\n          tags: [...(ticket.tags ?? []), 'vip-customer'],\n        },\n      }),\n    });\n  }\n}\n\n// Auto-create ticket on delivery failure\nexport async function onDeliveryFailed(shipmentId: string) {\n  const shipment = await db.shipments.findById(shipmentId, { include: ['order.customer'] });\n  await fetch(`https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets.json`, {\n    method: 'POST',\n    headers: { Authorization: getZendeskAuthHeader(), 'Content-Type': 'application/json' },\n    body: JSON.stringify({\n      ticket: {\n        subject: `Delivery failed \u2014 Order #${shipment.order.orderNumber}`,\n        comment: { body: `Delivery attempt failed on ${new Date().toDateString()}. Carrier: ${shipment.carrier}. Tracking: ${shipment.trackingNumber}.` },\n        requester: { email: shipment.order.customer.email },\n        priority: 'high',\n        tags: ['delivery-failure', 'auto-created'],\n      },\n    }),\n  });\n}\n```\n\n---\n\n### Step 3: Set up ticket routing rules for VIP customers\n\nEnsure your most valuable customers get faster responses by routing their tickets to your best agents.\n\n**Gorgias routing rules:**\n1. Go to **Automation \u2192 Rules \u2192 Create Rule**\n2. Condition: `Customer \u2192 Total spent \u2192 is greater than \u2192 $500`\n3. Actions: `Add tag \u2192 vip`, `Assign to \u2192 VIP Support Team`, `Set priority \u2192 Urgent`\n\n**Zendesk trigger:**\n1. Go to **Admin \u2192 Business Rules \u2192 Triggers \u2192 Add trigger**\n2. Conditions: ticket tag contains \"vip-customer\"\n3. Actions: assign to group (VIP Support), set priority to Urgent\n\n**Define SLA targets:**\n- VIP customers: first response within 1 hour\n- Standard customers: first response within 24 hours\n- Set these in **Gorgias \u2192 Settings \u2192 Business hours and SLAs** or **Zendesk \u2192 Admin \u2192 SLAs**\n\n## Best Practices\n\n- **Use Gorgias for Shopify stores** \u2014 it's the purpose-built solution; the time saved on setup and the depth of integration are worth the subscription cost\n- **Never store helpdesk API tokens in client-side code** \u2014 Zendesk and Intercom API tokens have write access to all tickets; always proxy requests through your server\n- **Attach the order ID to every ticket** \u2014 this is the key that links your support system to your commerce database and enables two-way sync and automation\n- **Keep order context fresh in the sidebar** \u2014 cache data for 60 seconds maximum; an agent seeing stale order status is worse than a loading spinner\n- **Log every agent action taken on an order** \u2014 maintain an audit trail of refunds, order changes, and status updates initiated from within the helpdesk\n\n## Common Pitfalls\n\n| Problem | Solution |\n|---------|----------|\n| Agent sees wrong customer because email lookup is case-sensitive | Normalize all emails to lowercase before lookup; `Jane@example.com` and `jane@example.com` must resolve to the same customer |\n| Webhook payload not verified | Implement HMAC signature verification using the Zendesk/Gorgias webhook signing secret before processing any payload |\n| CSAT sync creates duplicate customer records | Always look up by email first; never create a new customer record from a support webhook \u2014 link to existing or skip |\n| Auto-created tickets missing order context | Set the order ID in a custom ticket field at creation time; this enables bidirectional sync and accurate routing |\n\n## Related Skills\n\n- @live-chat-commerce\n- @customer-segmentation\n- @customer-lifetime-value\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "customer-support-integration",
-    "description": "Connect your helpdesk (Gorgias, Zendesk, Intercom) to your store so support agents see full order history and customer details without switching tools",
-    "category": "customer-crm",
-    "risk": "safe",
-    "source": "curated",
-    "date_added": "2026-03-12",
-    "tags": "[zendesk, intercom, helpdesk, customer-support, order-context, ticket, crm-integration, support-automation, gorgias]",
-    "triggers": "[\"zendesk integration\", \"intercom integration\", \"helpdesk integration\", \"order context in support\", \"customer support integration\", \"inject order data into zendesk\", \"support ticket automation\"]",
-    "tools": "[claude-code, cursor, gemini-cli, copilot, codex-cli, kiro, opencode]",
-    "platforms": "[shopify, woocommerce, bigcommerce, custom]",
-    "difficulty": "intermediate"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "customer-crm",
+  "tags": [
+    "[zendesk",
+    "intercom",
+    "helpdesk",
+    "customer-support",
+    "order-context",
+    "ticket",
+    "crm-integration",
+    "support-automation",
+    "gorgias]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

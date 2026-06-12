@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000017848",
   "name": "clawsec-clawhub-checker",
   "slug": "clawsec-clawhub-checker",
   "description": "ClawHub reputation checker for clawsec-suite. Adds a standalone reputation gate before guarded skill installation.",
   "content": "\n# ClawSec ClawHub Checker\n\nAdds a reputation gate on top of the `clawsec-suite` guarded installer.\n\n## Operational Notes\n\n- Required runtime: `node`, `clawhub`, `openclaw`\n- Depends on: installed `clawsec-suite`\n- Side effects: none on other skills; this package does not rewrite installed suite files\n- Advisory-hook wiring is optional and manual in this release\n- Network behavior: reputation checks call ClawHub inspect/search endpoints\n- Trust model: scores are heuristic and confirmation-gated\n\n## What It Does\n\n1. Reads skill metadata from ClawHub (`inspect --json`)\n2. Evaluates scanner status (including VirusTotal summary when present)\n3. Applies additional reputation heuristics (age, updates, author history, downloads)\n4. Requires explicit `--confirm-reputation` when score is below threshold\n\n## Installation\n\nInstall after `clawsec-suite`:\n\n```bash\nnpx clawhub@latest install clawsec-suite\nnpx clawhub@latest install clawsec-clawhub-checker\n```\n\nOptional preflight check (validates local paths and prints recommended command):\n\n```bash\nnode ~/.openclaw/skills/clawsec-clawhub-checker/scripts/setup_reputation_hook.mjs\n```\n\n\n## Release Artifact Verification\n\nFor standalone installs, verify the signed release manifest before trusting `SKILL.md`, `skill.json`, or the archive. The `skill.json` file is the package metadata/SBOM source, and the release pipeline signs `checksums.json` with the ClawSec release key.\n\n```bash\nset -euo pipefail\n\nSKILL_NAME=\"clawsec-clawhub-checker\"\nVERSION=\"0.0.4\"\nREPO=\"prompt-security/clawsec\"\nTAG=\"${SKILL_NAME}-v${VERSION}\"\nBASE=\"https://github.com/${REPO}/releases/download/${TAG}\"\nZIP_NAME=\"${SKILL_NAME}-v${VERSION}.zip\"\nTMP_DIR=\"$(mktemp -d)\"\ntrap 'rm -rf \"$TMP_DIR\"' EXIT\n\nRELEASE_PUBKEY_SHA256=\"711424e4535f84093fefb024cd1ca4ec87439e53907b305b79a631d5befba9c8\"\n\ncurl -fsSL \"$BASE/checksums.json\" -o \"$TMP_DIR/checksums.json\"\ncurl -fsSL \"$BASE/checksums.sig\" -o \"$TMP_DIR/checksums.sig\"\ncurl -fsSL \"$BASE/signing-public.pem\" -o \"$TMP_DIR/signing-public.pem\"\ncurl -fsSL \"$BASE/$ZIP_NAME\" -o \"$TMP_DIR/$ZIP_NAME\"\ncurl -fsSL \"$BASE/SKILL.md\" -o \"$TMP_DIR/SKILL.md\"\ncurl -fsSL \"$BASE/skill.json\" -o \"$TMP_DIR/skill.json\"\n\nACTUAL_PUBKEY_SHA256=\"$(openssl pkey -pubin -in \"$TMP_DIR/signing-public.pem\" -outform DER | shasum -a 256 | awk '{print $1}')\"\nif [ \"$ACTUAL_PUBKEY_SHA256\" != \"$RELEASE_PUBKEY_SHA256\" ]; then\n  echo \"ERROR: signing-public.pem fingerprint mismatch\" >&2\n  exit 1\nfi\n\nopenssl base64 -d -A -in \"$TMP_DIR/checksums.sig\" -out \"$TMP_DIR/checksums.sig.bin\"\nopenssl pkeyutl -verify -rawin -pubin \\\n  -inkey \"$TMP_DIR/signing-public.pem\" \\\n  -sigfile \"$TMP_DIR/checksums.sig.bin\" \\\n  -in \"$TMP_DIR/checksums.json\" >/dev/null\n\nhash_file() {\n  if command -v shasum >/dev/null 2>&1; then\n    shasum -a 256 \"$1\" | awk '{print $1}'\n  else\n    sha256sum \"$1\" | awk '{print $1}'\n  fi\n}\n\nverify_manifest_file() {\n  asset=\"$1\"\n  path=\"$2\"\n  expected=\"$(jq -r --arg asset \"$asset\" '.files[$asset].sha256 // empty' \"$TMP_DIR/checksums.json\")\"\n  if [ -z \"$expected\" ]; then\n    echo \"ERROR: checksums.json missing $asset\" >&2\n    exit 1\n  fi\n  actual=\"$(hash_file \"$path\")\"\n  if [ \"$actual\" != \"$expected\" ]; then\n    echo \"ERROR: checksum mismatch for $asset\" >&2\n    exit 1\n  fi\n}\n\nexpected_archive=\"$(jq -r '.archive.sha256 // empty' \"$TMP_DIR/checksums.json\")\"\nif [ -z \"$expected_archive\" ]; then\n  echo \"ERROR: checksums.json missing archive.sha256\" >&2\n  exit 1\nfi\nactual_archive=\"$(hash_file \"$TMP_DIR/$ZIP_NAME\")\"\nif [ \"$actual_archive\" != \"$expected_archive\" ]; then\n  echo \"ERROR: archive checksum mismatch\" >&2\n  exit 1\nfi\n\nverify_manifest_file \"SKILL.md\" \"$TMP_DIR/SKILL.md\"\nverify_manifest_file \"skill.json\" \"$TMP_DIR/skill.json\"\n\necho \"Signed release manifest, archive, SKILL.md, and skill.json verified.\"\n```\n\nOnly install or extract the archive after this verification succeeds.\n\n## Usage\n\nRun the enhanced installer directly from this skill:\n\n```bash\nnode ~/.openclaw/skills/clawsec-clawhub-checker/scripts/enhanced_guarded_install.mjs \\\n  --skill some-skill \\\n  --version 1.0.0\n```\n\nIf a skill is below threshold, rerun only with explicit approval:\n\n```bash\nnode ~/.openclaw/skills/clawsec-clawhub-checker/scripts/enhanced_guarded_install.mjs \\\n  --skill some-skill \\\n  --version 1.0.0 \\\n  --confirm-reputation\n```\n\n## Optional Advisory-Hook Wiring (Manual)\n\nThis release does not auto-patch `clawsec-suite` hook files.  \nIf you rely on advisory alerts that include `reputationWarning` / `reputationWarnings`, wire the checker module manually:\n\n- Source module: `~/.openclaw/skills/clawsec-clawhub-checker/hooks/clawsec-advisory-guardian/lib/reputation.mjs`\n- Target hook file: `~/.openclaw/skills/clawsec-suite/hooks/clawsec-advisory-guardian/handler.ts`\n\nTreat that wiring as a deliberate local customization and review it before enabling.\n\n## Exit Codes\n\n- `0` safe to install\n- `42` advisory confirmation required (from clawsec-suite)\n- `43` reputation confirmation required\n- `1` error\n\n## Configuration\n\nEnvironment variables:\n\n- `CLAWHUB_REPUTATION_THRESHOLD` - Minimum score (0-100, default: 70)\n\n## Safety Notes\n\n- This is defense-in-depth, not a replacement for advisory matching\n- Scanner outputs can produce false positives and false negatives\n- Always review skill code before overriding warnings\n\n## Development\n\nKey files:\n\n- `scripts/enhanced_guarded_install.mjs`\n- `scripts/check_clawhub_reputation.mjs`\n- `scripts/setup_reputation_hook.mjs`\n- `hooks/clawsec-advisory-guardian/lib/reputation.mjs`\n\n## License\n\nGNU AGPL v3.0 or later - Part of the ClawSec security suite\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "clawsec-clawhub-checker",
-    "version": "0.0.4",
-    "description": "ClawHub reputation checker for clawsec-suite. Adds a standalone reputation gate before guarded skill installation.",
-    "homepage": "https://clawsec.prompt.security",
-    "clawdis": "",
-    "emoji": "\ud83d\udee1\ufe0f",
-    "requires": "",
-    "bins": "[node, clawhub, openclaw]",
-    "depends_on": "[clawsec-suite]"
+  "author": "agentpm",
+  "version": "0.0.4",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

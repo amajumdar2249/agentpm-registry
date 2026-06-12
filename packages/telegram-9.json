@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000034245",
   "name": "telegram",
   "slug": "telegram-9",
   "description": "Operate the joelclaw Telegram channel \u2014 primary mobile interface between Joel and the gateway. Covers grammy Bot API, text/media/reactions, inline buttons, callbacks, and streaming.",
   "content": "\n# Telegram Channel Skill\n\nOperate the joelclaw Telegram channel \u2014 the primary mobile interface between Joel and the gateway agent. Built on grammy (Bot API wrapper), supports text, media, reactions, replies, inline buttons, callbacks, and streaming.\n\n## Architecture\n\n```\nJoel (Telegram app)\n  \u2192 Bot API (long polling via grammy)\n    \u2192 telegram.ts channel adapter\n      \u2192 enrichPromptWithVaultContext()\n        \u2192 command-queue \u2192 pi session\n          \u2192 outbound router \u2192 telegram.ts send \u2192 Bot API \u2192 Joel\n```\n\n**Key files:**\n- `packages/gateway/src/channels/telegram.ts` \u2014 channel adapter (inbound + outbound)\n- `packages/gateway/src/telegram-stream.ts` \u2014 streaming UX (progressive text updates)\n- `packages/gateway/src/outbound/router.ts` \u2014 response routing\n- `packages/gateway/src/channels/types.ts` \u2014 `Channel` interface\n\n**SDK:** `grammy@1.40.0` \u2014 Bot instance at module scope, exposed via `getBot()`.\n\nMulti-instance poll ownership (2026-03-05): Telegram long polling now uses a Redis lease per bot token hash.\n\n- Owner key: `joelclaw:gateway:telegram:poll-owner:<tokenHash>`\n- Status key: `joelclaw:gateway:telegram:poll-status:<tokenHash>`\n- Only owner polls `getUpdates`; non-owners stay passive/send-only and retry lease acquisition with backoff.\n\nConflict guard still applies for non-cooperative pollers: `telegram.channel.start_failed` (with `conflict` metadata) + `telegram.channel.retry_scheduled` + `telegram.channel.polling_recovered`.\n\n## Capabilities\n\n### Sending Messages\n\n```typescript\n// Via channel adapter\nawait telegramChannel.send(\"telegram:7718912466\", \"Hello\", { format: \"html\" });\n\n// Direct grammy API (from telegram-stream or daemon)\nconst bot = getBot();\nawait bot.api.sendMessage(chatId, text, { parse_mode: \"HTML\" });\n```\n\n- Max message length: **4096 chars** (Telegram API limit)\n- Chunking: `TelegramConverter.chunk()` for HTML-aware splitting, `chunkMessage()` for raw text\n- Format: markdown\u2192HTML via `TelegramConverter.convert()`, with plain text fallback on validation failure\n- Buttons: `InlineButton[][]` \u2192 `inline_keyboard` reply markup\n\n### Reactions (ADR-0162)\n\n```typescript\n// grammy API\nawait bot.api.setMessageReaction(chatId, messageId, [\n  { type: \"emoji\", emoji: \"\ud83d\udc4d\" }\n]);\n```\n\nTelegram supports a [fixed set of emoji reactions](https://core.telegram.org/bots/api#reactiontypeemoji). Common ones: \ud83d\udc4d \ud83d\udc4e \u2764\ufe0f \ud83d\udd25 \ud83c\udf89 \ud83e\udd14 \ud83d\udc40 \u2705 \u274c \ud83e\udd2f \ud83d\udcaf\n\n**Agent convention:** Include `<<react:EMOJI>>` at the start of a response. The outbound router strips it and calls `setMessageReaction` before sending text.\n\n### Replies\n\n```typescript\n// grammy API \u2014 reply to a specific message\nawait bot.api.sendMessage(chatId, text, {\n  reply_parameters: { message_id: targetMessageId }\n});\n```\n\nAlready wired in the adapter via `RichSendOptions.replyTo`. The agent uses `<<reply:MSG_ID>>` directive.\n\n### Media\n\nSupports photo, video, audio, voice, and document sending/receiving:\n\n```typescript\n// Send\nawait telegramChannel.sendMedia(chatId, \"/path/to/file.jpg\", { caption: \"Look at this\" });\n\n// Receive \u2014 handled by bot.on(\"message:photo\") etc.\n// Downloads via Bot API getFile \u2192 local /tmp/joelclaw-media/\n// Emits media/received Inngest event for pipeline processing\n```\n\nFile size limit: 20MB download via Bot API (larger files need direct Telegram API).\n\n### Streaming (ADR-0160)\n\nProgressive text updates with cursor:\n\n```typescript\nimport { begin, pushDelta, finish, abort } from \"./telegram-stream\";\n\n// On prompt dispatch\nbegin({ chatId, bot, replyTo });\n\n// On each text_delta event\npushDelta(delta);\n\n// On message_end\nawait finish(fullText);\n```\n\n- Plain text during streaming (no parse_mode) \u2014 avoids broken HTML on partial content\n- HTML formatting only on `finish()` \u2014 final edit with `parse_mode: \"HTML\"`\n- Throttled edits: 800ms minimum between API calls\n- Cursor: ` \u258c` appended during streaming, removed on finish\n- `initialSendPromise` awaited in `finish()` to prevent race conditions\n\n### Inline Buttons & Callbacks (ADR-0070)\n\n```typescript\n// Send message with buttons\nawait sendTelegramMessage(chatId, \"Choose:\", {\n  buttons: [\n    [{ text: \"\u2705 Approve\", action: \"approve:item123\" }],\n    [{ text: \"\u274c Reject\", action: \"reject:item123\" }],\n  ]\n});\n\n// Callback handler fires telegram/callback.received Inngest event\n// Then edits message to show action taken + removes buttons\n```\n\nCallback data max: 64 bytes. Format: `action:context`.\n\n### Commands\n\n- `/stop` \u2014 abort current turn without killing the daemon.\n- `/esc` \u2014 alias for `/stop`.\n- `/kill` \u2014 hard stop: disables launchd service + kills process. Emergency use only.\n\n## Configuration\n\nCurrently via environment variables (migrating to `~/.joelclaw/channels.toml` per ADR-0162):\n\n| Env Var | Purpose |\n|---------|---------|\n| `TELEGRAM_BOT_TOKEN` | Grammy bot token |\n| `TELEGRAM_USER_ID` | Joel's Telegram user ID (only authorized user) |\n\n## Security\n\n- **Single-user lockdown** \u2014 middleware drops all messages from users other than `TELEGRAM_USER_ID`\n- **No token in config** \u2014 `channels.toml` references `agent-secrets` key names, not raw tokens\n- **Media downloads** to `/tmp/joelclaw-media/` with UUID filenames (no path traversal)\n\n## Troubleshooting\n\n### Bot not receiving messages\n1. Check gateway is running: `cat /tmp/joelclaw/gateway.pid && ps aux | grep daemon.ts`\n2. Check Telegram polling started: `grep \"telegram.*started\" /tmp/joelclaw/gateway.log`\n3. Verify token: `curl https://api.telegram.org/bot<TOKEN>/getMe`\n4. Check polling errors in stderr: `rg \"telegram.channel.start_failed|failed to start polling|getUpdates\" /tmp/joelclaw/gateway.err`\n5. Check ownership lifecycle telemetry:\n   - `joelclaw otel search \"telegram.channel.poll_owner\" --hours 1`\n   - `joelclaw otel search \"telegram.channel.retry_scheduled\" --hours 1`\n\nIf you see repeated 409 conflicts, another **bot process** is polling the same token. Telegram phone/desktop apps are not Bot API pollers and do not cause `getUpdates` contention.\n\n### Messages arriving but no response\n1. Check command queue: `grep \"command-queue\\|enqueue\" /tmp/joelclaw/gateway.log | tail -10`\n2. Check pi session health: `grep \"session\\|prompt\" /tmp/joelclaw/gateway.log | tail -10`\n3. Check outbound routing: `grep \"outbound\\|response ready\" /tmp/joelclaw/gateway.log | tail -10`\n\n### Streaming not working\n1. Verify `text_delta` events: `grep \"text_delta\" /tmp/joelclaw/gateway.log | tail -5`\n2. Check `telegram-stream` lifecycle: `grep \"telegram-stream\" /tmp/joelclaw/gateway.log | tail -10`\n3. Common issue: model does tool calls before text \u2192 no deltas until after tools complete\n4. Race condition fix: `initialSendPromise` in `finish()` (commit 175c6ca)\n\n### HTML formatting broken\n1. Check converter output: `TelegramConverter.convert(text)` + `.validate(result)`\n2. Fallback: adapter auto-strips HTML and sends plain text if validation fails\n3. Streaming path sends plain text (no parse_mode), only `finish()` adds HTML\n\n## Related ADRs\n\n- **ADR-0042** \u2014 Media download pipeline\n- **ADR-0070** \u2014 Inline buttons and callbacks\n- **ADR-0160** \u2014 Telegram streaming UX\n- **ADR-0162** \u2014 Reactions, replies, and channel configuration\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "telegram",
-    "description": "Operate the joelclaw Telegram channel \u2014 primary mobile interface between Joel and the gateway. Covers grammy Bot API, text/media/reactions, inline buttons, callbacks, and streaming."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000016820",
   "name": "implementing-jsc-classes-cpp",
   "slug": "implementing-jsc-classes-cpp",
   "description": "Implements JavaScript classes in C++ using JavaScriptCore. Use when creating new JS classes with C++ bindings, prototypes, or constructors.",
   "content": "\n# Implementing JavaScript Classes in C++\n\n## Class Structure\n\nFor publicly accessible Constructor and Prototype, create 3 classes:\n\n1. **`class Foo : public JSC::DestructibleObject`** - if C++ fields exist; otherwise use `JSC::constructEmptyObject` with `putDirectOffset`\n2. **`class FooPrototype : public JSC::JSNonFinalObject`**\n3. **`class FooConstructor : public JSC::InternalFunction`**\n\nNo public constructor? Only Prototype and class needed.\n\n## Iso Subspaces\n\nClasses with C++ fields need subspaces in:\n\n- `src/jsc/bindings/webcore/DOMClientIsoSubspaces.h`\n- `src/jsc/bindings/webcore/DOMIsoSubspaces.h`\n\n```cpp\ntemplate<typename MyClassT, JSC::SubspaceAccess mode>\nstatic JSC::GCClient::IsoSubspace* subspaceFor(JSC::VM& vm) {\n    if constexpr (mode == JSC::SubspaceAccess::Concurrently)\n        return nullptr;\n    return WebCore::subspaceForImpl<MyClassT, WebCore::UseCustomHeapCellType::No>(\n        vm,\n        [](auto& spaces) { return spaces.m_clientSubspaceForMyClassT.get(); },\n        [](auto& spaces, auto&& space) { spaces.m_clientSubspaceForMyClassT = std::forward<decltype(space)>(space); },\n        [](auto& spaces) { return spaces.m_subspaceForMyClassT.get(); },\n        [](auto& spaces, auto&& space) { spaces.m_subspaceForMyClassT = std::forward<decltype(space)>(space); });\n}\n```\n\n## Property Definitions\n\n```cpp\nstatic JSC_DECLARE_HOST_FUNCTION(jsFooProtoFuncMethod);\nstatic JSC_DECLARE_CUSTOM_GETTER(jsFooGetter_property);\n\nstatic const HashTableValue JSFooPrototypeTableValues[] = {\n    { \"property\"_s, static_cast<unsigned>(PropertyAttribute::ReadOnly | PropertyAttribute::CustomAccessor), NoIntrinsic, { HashTableValue::GetterSetterType, jsFooGetter_property, 0 } },\n    { \"method\"_s, static_cast<unsigned>(PropertyAttribute::Function), NoIntrinsic, { HashTableValue::NativeFunctionType, jsFooProtoFuncMethod, 1 } },\n};\n```\n\n## Prototype Class\n\n```cpp\nclass JSFooPrototype final : public JSC::JSNonFinalObject {\npublic:\n    using Base = JSC::JSNonFinalObject;\n    static constexpr unsigned StructureFlags = Base::StructureFlags;\n\n    static JSFooPrototype* create(JSC::VM& vm, JSC::JSGlobalObject* globalObject, JSC::Structure* structure) {\n        JSFooPrototype* prototype = new (NotNull, allocateCell<JSFooPrototype>(vm)) JSFooPrototype(vm, structure);\n        prototype->finishCreation(vm);\n        return prototype;\n    }\n\n    template<typename, JSC::SubspaceAccess>\n    static JSC::GCClient::IsoSubspace* subspaceFor(JSC::VM& vm) { return &vm.plainObjectSpace(); }\n\n    DECLARE_INFO;\n\n    static JSC::Structure* createStructure(JSC::VM& vm, JSC::JSGlobalObject* globalObject, JSC::JSValue prototype) {\n        auto* structure = JSC::Structure::create(vm, globalObject, prototype, JSC::TypeInfo(JSC::ObjectType, StructureFlags), info());\n        structure->setMayBePrototype(true);\n        return structure;\n    }\n\nprivate:\n    JSFooPrototype(JSC::VM& vm, JSC::Structure* structure) : Base(vm, structure) {}\n    void finishCreation(JSC::VM& vm);\n};\n\nvoid JSFooPrototype::finishCreation(VM& vm) {\n    Base::finishCreation(vm);\n    reifyStaticProperties(vm, JSFoo::info(), JSFooPrototypeTableValues, *this);\n    JSC_TO_STRING_TAG_WITHOUT_TRANSITION();\n}\n```\n\n## Getter/Setter/Function Definitions\n\n```cpp\n// Getter\nJSC_DEFINE_CUSTOM_GETTER(jsFooGetter_prop, (JSGlobalObject* globalObject, EncodedJSValue thisValue, PropertyName)) {\n    VM& vm = globalObject->vm();\n    auto scope = DECLARE_THROW_SCOPE(vm);\n    JSFoo* thisObject = jsDynamicCast<JSFoo*>(JSValue::decode(thisValue));\n    if (UNLIKELY(!thisObject)) {\n        Bun::throwThisTypeError(*globalObject, scope, \"JSFoo\"_s, \"prop\"_s);\n        return {};\n    }\n    return JSValue::encode(jsBoolean(thisObject->value()));\n}\n\n// Function\nJSC_DEFINE_HOST_FUNCTION(jsFooProtoFuncMethod, (JSGlobalObject* globalObject, CallFrame* callFrame)) {\n    VM& vm = globalObject->vm();\n    auto scope = DECLARE_THROW_SCOPE(vm);\n    auto* thisObject = jsDynamicCast<JSFoo*>(callFrame->thisValue());\n    if (UNLIKELY(!thisObject)) {\n        Bun::throwThisTypeError(*globalObject, scope, \"Foo\"_s, \"method\"_s);\n        return {};\n    }\n    return JSValue::encode(thisObject->doSomething(vm, globalObject));\n}\n```\n\n## Constructor Class\n\n```cpp\nclass JSFooConstructor final : public JSC::InternalFunction {\npublic:\n    using Base = JSC::InternalFunction;\n    static constexpr unsigned StructureFlags = Base::StructureFlags;\n\n    static JSFooConstructor* create(JSC::VM& vm, JSC::Structure* structure, JSC::JSObject* prototype) {\n        JSFooConstructor* constructor = new (NotNull, JSC::allocateCell<JSFooConstructor>(vm)) JSFooConstructor(vm, structure);\n        constructor->finishCreation(vm, prototype);\n        return constructor;\n    }\n\n    DECLARE_INFO;\n\n    template<typename CellType, JSC::SubspaceAccess>\n    static JSC::GCClient::IsoSubspace* subspaceFor(JSC::VM& vm) { return &vm.internalFunctionSpace(); }\n\n    static JSC::Structure* createStructure(JSC::VM& vm, JSC::JSGlobalObject* globalObject, JSC::JSValue prototype) {\n        return JSC::Structure::create(vm, globalObject, prototype, JSC::TypeInfo(JSC::InternalFunctionType, StructureFlags), info());\n    }\n\nprivate:\n    JSFooConstructor(JSC::VM& vm, JSC::Structure* structure) : Base(vm, structure, callFoo, constructFoo) {}\n\n    void finishCreation(JSC::VM& vm, JSC::JSObject* prototype) {\n        Base::finishCreation(vm, 0, \"Foo\"_s);\n        putDirectWithoutTransition(vm, vm.propertyNames->prototype, prototype, JSC::PropertyAttribute::DontEnum | JSC::PropertyAttribute::DontDelete | JSC::PropertyAttribute::ReadOnly);\n    }\n};\n```\n\n## Structure Caching\n\nAdd to `ZigGlobalObject.h`:\n\n```cpp\nJSC::LazyClassStructure m_JSFooClassStructure;\n```\n\nInitialize in `ZigGlobalObject.cpp`:\n\n```cpp\nm_JSFooClassStructure.initLater([](LazyClassStructure::Initializer& init) {\n    Bun::initJSFooClassStructure(init);\n});\n```\n\nVisit in `visitChildrenImpl`:\n\n```cpp\nm_JSFooClassStructure.visit(visitor);\n```\n\n## Expose to Zig\n\n```cpp\nextern \"C\" JSC::EncodedJSValue Bun__JSFooConstructor(Zig::GlobalObject* globalObject) {\n    return JSValue::encode(globalObject->m_JSFooClassStructure.constructor(globalObject));\n}\n\nextern \"C\" EncodedJSValue Bun__Foo__toJS(Zig::GlobalObject* globalObject, Foo* foo) {\n    auto* structure = globalObject->m_JSFooClassStructure.get(globalObject);\n    return JSValue::encode(JSFoo::create(globalObject->vm(), structure, globalObject, WTFMove(foo)));\n}\n```\n\nInclude `#include \"root.h\"` at the top of C++ files.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "implementing-jsc-classes-cpp",
-    "description": "Implements JavaScript classes in C++ using JavaScriptCore. Use when creating new JS classes with C++ bindings, prototypes, or constructors."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

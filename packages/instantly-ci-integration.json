@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032288",
   "name": "instantly-ci-integration",
   "slug": "instantly-ci-integration",
   "description": "Configure CI/CD pipelines for Instantly.ai integrations with GitHub",
   "content": "# Instantly CI Integration\n\n## Overview\n\nSet up CI/CD pipelines for Instantly API v2 integrations. Covers GitHub Actions workflows for testing against the Instantly mock server, validating API key scopes, and deploying webhook receivers. Uses the mock server at `https://developer.instantly.ai/_mock/api/v2/` so CI runs don't send real emails or consume production API limits.\n\n## Prerequisites\n\n- GitHub repository with Instantly integration code\n- `INSTANTLY_API_KEY` secret in GitHub repo settings (for production tests)\n- Node.js 18+ or Python 3.10+ in the project\n\n## Instructions\n\n### Step 1: GitHub Actions Workflow\n\n```yaml\n# .github/workflows/instantly-ci.yml\nname: Instantly Integration CI\n\non:\n  push:\n    branches: [main, develop]\n  pull_request:\n    branches: [main]\n\nenv:\n  INSTANTLY_USE_MOCK: \"true\"\n  INSTANTLY_BASE_URL: \"https://developer.instantly.ai/_mock/api/v2\"\n\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n\n      - uses: actions/setup-node@v4\n        with:\n          node-version: \"20\"\n          cache: \"npm\"\n\n      - run: npm ci\n\n      - name: Type check\n        run: npx tsc --noEmit\n\n      - name: Lint\n        run: npx eslint src/ --ext .ts\n\n      - name: Unit tests (mock server)\n        run: npx vitest run --reporter=verbose\n        env:\n          INSTANTLY_API_KEY: \"mock-key-for-ci\"\n          INSTANTLY_USE_MOCK: \"true\"\n\n      - name: Validate API client types\n        run: npx tsx scripts/validate-types.ts\n\n  integration-test:\n    runs-on: ubuntu-latest\n    needs: test\n    if: github.ref == 'refs/heads/main'\n    steps:\n      - uses: actions/checkout@v4\n\n      - uses: actions/setup-node@v4\n        with:\n          node-version: \"20\"\n          cache: \"npm\"\n\n      - run: npm ci\n\n      - name: Integration tests (live API, read-only)\n        run: npx vitest run tests/integration/ --reporter=verbose\n        env:\n          INSTANTLY_API_KEY: ${{ secrets.INSTANTLY_API_KEY }}\n          INSTANTLY_BASE_URL: \"https://api.instantly.ai/api/v2\"\n```\n\n### Step 2: API Scope Validation Script\n\n```typescript\n// scripts/validate-types.ts\n// Verifies the API client types match expected Instantly v2 schema\n\nimport { InstantlyClient } from \"../src/instantly/client\";\n\nasync function validateApiAccess() {\n  const client = new InstantlyClient();\n\n  // Validate read-only operations work\n  const campaigns = await client.getCampaigns({ limit: 1 });\n  console.log(\"campaigns: OK\");\n\n  const accounts = await client.getAccounts({ limit: 1 });\n  console.log(\"accounts: OK\");\n\n  console.log(\"All API validations passed\");\n}\n\nvalidateApiAccess().catch((err) => {\n  console.error(\"Validation failed:\", err.message);\n  process.exit(1);\n});\n```\n\n### Step 3: Integration Test Suite\n\n```typescript\n// tests/integration/instantly.test.ts\nimport { describe, it, expect } from \"vitest\";\nimport { InstantlyClient } from \"../../src/instantly/client\";\n\nconst client = new InstantlyClient();\n\ndescribe(\"Instantly API v2 Integration\", () => {\n  it(\"should authenticate and list campaigns\", async () => {\n    const campaigns = await client.getCampaigns({ limit: 5 });\n    expect(Array.isArray(campaigns)).toBe(true);\n  });\n\n  it(\"should list email accounts\", async () => {\n    const accounts = await client.getAccounts({ limit: 5 });\n    expect(Array.isArray(accounts)).toBe(true);\n  });\n\n  it(\"should fetch campaign analytics\", async () => {\n    const campaigns = await client.getCampaigns({ limit: 1 });\n    if (campaigns.length > 0) {\n      const analytics = await client.getCampaignAnalytics([campaigns[0].id]);\n      expect(Array.isArray(analytics)).toBe(true);\n    }\n  });\n\n  it(\"should handle 401 on invalid key\", async () => {\n    const badClient = new InstantlyClient({ apiKey: \"invalid-key\" });\n    await expect(badClient.getCampaigns({ limit: 1 })).rejects.toThrow();\n  });\n\n  it(\"should create and delete a lead list\", async () => {\n    const list = await client.request<{ id: string }>(\"/lead-lists\", {\n      method: \"POST\",\n      body: JSON.stringify({ name: `ci-test-${Date.now()}` }),\n    });\n    expect(list.id).toBeDefined();\n\n    await client.request(`/lead-lists/${list.id}`, { method: \"DELETE\" });\n  });\n});\n```\n\n### Step 4: Deployment Workflow\n\n```yaml\n# .github/workflows/deploy.yml\nname: Deploy Instantly Integration\n\non:\n  push:\n    branches: [main]\n\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    needs: test\n    steps:\n      - uses: actions/checkout@v4\n\n      - uses: actions/setup-node@v4\n        with:\n          node-version: \"20\"\n\n      - run: npm ci && npm run build\n\n      - name: Deploy webhook receiver\n        uses: google-github-actions/deploy-cloudrun@v2\n        with:\n          service: instantly-webhooks\n          region: us-central1\n          image: gcr.io/${{ secrets.GCP_PROJECT }}/instantly-webhooks\n          env_vars: |\n            INSTANTLY_API_KEY=${{ secrets.INSTANTLY_API_KEY }}\n            INSTANTLY_WEBHOOK_SECRET=${{ secrets.INSTANTLY_WEBHOOK_SECRET }}\n\n      - name: Verify deployment\n        run: |\n          curl -s -o /dev/null -w \"%{http_code}\" \\\n            https://instantly-webhooks-abc123.run.app/health | \\\n            grep -q \"200\" && echo \"Deploy OK\" || exit 1\n```\n\n### Step 5: Pre-Commit Hook\n\n```bash\n#!/bin/bash\n# .husky/pre-commit\nset -euo pipefail\n\n# Prevent committing API keys\nif grep -rn \"Bearer [a-zA-Z0-9_-]\\{20,\\}\" src/ --include=\"*.ts\" --include=\"*.js\" 2>/dev/null; then\n  echo \"ERROR: Possible API key found in source code\"\n  exit 1\nfi\n\n# Type check\nnpx tsc --noEmit\n\n# Run unit tests\nnpx vitest run --reporter=dot\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| CI fails on mock server | Mock schema doesn't match code | Update types to match v2 schema |\n| Integration tests `401` | Secret not set in GitHub | Add `INSTANTLY_API_KEY` to repo secrets |\n| Rate limited in CI | Too many parallel runs | Use mock server for PR checks |\n| Deploy fails | Missing env vars | Check secrets are set in deployment target |\n\n## Resources\n\n- [Instantly Mock Server](https://developer.instantly.ai/_mock/api/v2/)\n- [GitHub Actions Secrets](https://docs.github.com/en/actions/security-guides/encrypted-secrets)\n- [Instantly API v2 Docs](https://developer.instantly.ai/)\n\n## Next Steps\n\nFor deployment to cloud platforms, see `instantly-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "instantly-ci-integration",
-    "description": "Configure CI/CD pipelines for Instantly.ai integrations with GitHub",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

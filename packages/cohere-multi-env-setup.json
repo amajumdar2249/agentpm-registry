@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031653",
   "name": "cohere-multi-env-setup",
   "slug": "cohere-multi-env-setup",
   "description": "Configure Cohere across development, staging, and production environments.",
   "content": "# Cohere Multi-Environment Setup\n\n## Overview\n\nConfigure Cohere API v2 across dev/staging/prod with environment-specific API keys, model selection, and budget controls.\n\n## Prerequisites\n\n- Separate Cohere API keys per environment (trial for dev, production for staging/prod)\n- Secret management solution (Vault, AWS Secrets Manager, GCP Secret Manager)\n- Environment detection in application\n\n## Environment Strategy\n\n| Environment | API Key Type | Model | maxTokens | Caching |\n|-------------|-------------|-------|-----------|---------|\n| Development | Trial (free) | `command-r7b-12-2024` | 200 | Disabled |\n| Staging | Production | `command-r-08-2024` | 1000 | Enabled |\n| Production | Production | `command-a-03-2025` | 4096 | Enabled |\n\n## Instructions\n\n### Step 1: Configuration Structure\n\n```typescript\n// src/config/cohere.ts\ntype Environment = 'development' | 'staging' | 'production';\n\ninterface CohereEnvConfig {\n  chatModel: string;\n  embedModel: string;\n  rerankModel: string;\n  maxTokens: number;\n  cacheEnabled: boolean;\n  cacheTtlMs: number;\n  retries: number;\n  timeoutSeconds: number;\n}\n\nconst configs: Record<Environment, CohereEnvConfig> = {\n  development: {\n    chatModel: 'command-r7b-12-2024',    // Fastest, cheapest\n    embedModel: 'embed-v4.0',\n    rerankModel: 'rerank-v3.5',\n    maxTokens: 200,                       // Limit for dev\n    cacheEnabled: false,                   // See real responses\n    cacheTtlMs: 0,\n    retries: 1,                            // Fail fast in dev\n    timeoutSeconds: 30,\n  },\n  staging: {\n    chatModel: 'command-r-08-2024',       // Mid-tier for testing\n    embedModel: 'embed-v4.0',\n    rerankModel: 'rerank-v3.5',\n    maxTokens: 1000,\n    cacheEnabled: true,\n    cacheTtlMs: 5 * 60 * 1000,           // 5 minutes\n    retries: 3,\n    timeoutSeconds: 60,\n  },\n  production: {\n    chatModel: 'command-a-03-2025',       // Best quality\n    embedModel: 'embed-v4.0',\n    rerankModel: 'rerank-v3.5',\n    maxTokens: 4096,\n    cacheEnabled: true,\n    cacheTtlMs: 15 * 60 * 1000,          // 15 minutes\n    retries: 5,\n    timeoutSeconds: 120,\n  },\n};\n\nfunction detectEnvironment(): Environment {\n  const env = process.env.NODE_ENV ?? 'development';\n  if (['development', 'staging', 'production'].includes(env)) {\n    return env as Environment;\n  }\n  return 'development';\n}\n\nexport function getCohereConfig(): CohereEnvConfig & { environment: Environment } {\n  const env = detectEnvironment();\n  return { ...configs[env], environment: env };\n}\n```\n\n### Step 2: Environment-Aware Client\n\n```typescript\n// src/cohere/client.ts\nimport { CohereClientV2 } from 'cohere-ai';\nimport { getCohereConfig } from '../config/cohere';\n\nlet instance: CohereClientV2 | null = null;\n\nexport function getCohere(): CohereClientV2 {\n  if (!instance) {\n    const config = getCohereConfig();\n\n    if (!process.env.CO_API_KEY) {\n      throw new Error(`CO_API_KEY not set for ${config.environment} environment`);\n    }\n\n    instance = new CohereClientV2({\n      token: process.env.CO_API_KEY,\n      timeoutInSeconds: config.timeoutSeconds,\n    });\n\n    console.log(`[cohere] Initialized for ${config.environment} (model: ${config.chatModel})`);\n  }\n  return instance;\n}\n```\n\n### Step 3: Secret Management\n\n```bash\n# --- Local Development ---\n# .env.local (git-ignored)\nCO_API_KEY=trial-key-for-dev\n\n# --- GitHub Actions (CI) ---\ngh secret set CO_API_KEY --body \"production-key-for-ci\"\n\n# --- AWS Secrets Manager ---\naws secretsmanager create-secret \\\n  --name cohere/staging/api-key \\\n  --secret-string \"staging-production-key\"\n\naws secretsmanager create-secret \\\n  --name cohere/production/api-key \\\n  --secret-string \"prod-production-key\"\n\n# --- GCP Secret Manager ---\necho -n \"staging-key\" | gcloud secrets create cohere-api-key-staging --data-file=-\necho -n \"prod-key\" | gcloud secrets create cohere-api-key-prod --data-file=-\n\n# --- HashiCorp Vault ---\nvault kv put secret/cohere/staging api_key=\"staging-key\"\nvault kv put secret/cohere/production api_key=\"prod-key\"\n```\n\n### Step 4: Environment Guards\n\n```typescript\n// Prevent expensive operations in development\nfunction guardExpensiveOperation(operation: string): void {\n  const config = getCohereConfig();\n\n  if (config.environment === 'development') {\n    // In dev, warn but don't block\n    console.warn(`[cohere] ${operation} using trial key \u2014 limited to 20 calls/min`);\n  }\n}\n\n// Prevent development keys in production\nfunction validateKeyForEnv(): void {\n  const config = getCohereConfig();\n  const key = process.env.CO_API_KEY ?? '';\n\n  if (config.environment === 'production' && key.length < 30) {\n    throw new Error('Production requires a production API key (not trial)');\n  }\n}\n```\n\n### Step 5: Per-Environment API Calls\n\n```typescript\nimport { getCohereConfig } from '../config/cohere';\n\nexport async function chat(message: string): Promise<string> {\n  const config = getCohereConfig();\n  const cohere = getCohere();\n\n  const response = await cohere.chat({\n    model: config.chatModel,     // Environment-specific model\n    messages: [{ role: 'user', content: message }],\n    maxTokens: config.maxTokens, // Environment-specific limit\n  });\n\n  return response.message?.content?.[0]?.text ?? '';\n}\n\nexport async function embed(texts: string[]): Promise<number[][]> {\n  const config = getCohereConfig();\n  const cohere = getCohere();\n\n  const response = await cohere.embed({\n    model: config.embedModel,\n    texts,\n    inputType: 'search_document',\n    embeddingTypes: config.environment === 'development' ? ['float'] : ['int8'], // Cheaper in prod\n  });\n\n  return response.embeddings.float ?? response.embeddings.int8;\n}\n```\n\n### Step 6: Docker Compose for Local Multi-Env Testing\n\n```yaml\n# docker-compose.yml\nservices:\n  app-dev:\n    build: .\n    environment:\n      - NODE_ENV=development\n      - CO_API_KEY=${CO_API_KEY_DEV}\n    ports:\n      - \"3000:3000\"\n\n  app-staging:\n    build: .\n    environment:\n      - NODE_ENV=staging\n      - CO_API_KEY=${CO_API_KEY_STAGING}\n    ports:\n      - \"3001:3000\"\n```\n\n## Output\n\n- Per-environment Cohere configuration (model, tokens, timeout)\n- Secret management across dev/staging/prod\n- Environment guards preventing misuse\n- Docker compose for local multi-env testing\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Trial key in production | Wrong secret | Validate key length at startup |\n| Rate limited in dev | Trial key limits | Use 20 calls/min budget |\n| Model not found | Typo in config | Validate model IDs at startup |\n| Config merge fails | Missing environment | Default to development |\n\n## Resources\n\n- [Cohere API Keys](https://dashboard.cohere.com/api-keys)\n- [Cohere Rate Limits](https://docs.cohere.com/docs/rate-limits)\n- [12-Factor App Config](https://12factor.net/config)\n\n## Next Steps\n\nFor observability setup, see `cohere-observability`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "cohere-multi-env-setup",
-    "description": "Configure Cohere across development, staging, and production environments.",
-    "allowed-tools": "Read, Write, Edit, Bash(aws:*), Bash(gcloud:*), Bash(vault:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

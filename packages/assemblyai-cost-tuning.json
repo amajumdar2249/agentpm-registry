@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031347",
   "name": "assemblyai-cost-tuning",
   "slug": "assemblyai-cost-tuning",
   "description": "Optimize AssemblyAI costs through model selection, feature budgeting,",
   "content": "# AssemblyAI Cost Tuning\n\n## Overview\n\nOptimize AssemblyAI costs through model selection, feature-aware billing, and usage monitoring. AssemblyAI charges per audio hour with add-on pricing for intelligence features.\n\n## Prerequisites\n\n- Access to AssemblyAI billing dashboard at https://www.assemblyai.com/app\n- Understanding of current usage patterns\n\n## Actual Pricing (Pay-As-You-Go)\n\n### Speech-to-Text (Async)\n\n| Model | Price per Hour | Best For |\n|-------|---------------|----------|\n| **Best** (Universal-3) | $0.37/hr | Highest accuracy, production |\n| **Nano** | $0.12/hr | High volume, cost-sensitive |\n\n### Streaming Speech-to-Text\n\n| Model | Price per Hour |\n|-------|---------------|\n| Universal Streaming | $0.47/hr |\n\n### Audio Intelligence Add-Ons\n\n| Feature | Additional Cost per Hour |\n|---------|-------------------------|\n| Speaker Diarization | $0.02/hr |\n| Sentiment Analysis | $0.02/hr |\n| Entity Detection | $0.08/hr |\n| Auto Highlights | Included |\n| Content Safety | $0.02/hr |\n| IAB Categories | $0.02/hr |\n| Summarization | Included (uses LeMUR) |\n| PII Redaction | $0.02/hr |\n| PII Audio Redaction | +processing time |\n\n### LeMUR\n\n| Model | Price per Input Token | Price per Output Token |\n|-------|----------------------|----------------------|\n| Default | ~$0.003/1K tokens | ~$0.015/1K tokens |\n\n## Instructions\n\n### Step 1: Cost Estimation Calculator\n\n```typescript\ninterface CostEstimate {\n  baseTranscriptionCost: number;\n  featuresCost: number;\n  totalCost: number;\n  breakdown: Record<string, number>;\n}\n\nfunction estimateTranscriptionCost(\n  audioHours: number,\n  options: {\n    model?: 'best' | 'nano';\n    speakerLabels?: boolean;\n    sentimentAnalysis?: boolean;\n    entityDetection?: boolean;\n    contentSafety?: boolean;\n    iabCategories?: boolean;\n    piiRedaction?: boolean;\n  } = {}\n): CostEstimate {\n  const model = options.model ?? 'best';\n  const baseRate = model === 'best' ? 0.37 : 0.12;\n  const baseCost = audioHours * baseRate;\n\n  const breakdown: Record<string, number> = {\n    [`transcription (${model})`]: baseCost,\n  };\n\n  let featuresCost = 0;\n\n  if (options.speakerLabels) {\n    const cost = audioHours * 0.02;\n    breakdown['speaker_labels'] = cost;\n    featuresCost += cost;\n  }\n  if (options.sentimentAnalysis) {\n    const cost = audioHours * 0.02;\n    breakdown['sentiment_analysis'] = cost;\n    featuresCost += cost;\n  }\n  if (options.entityDetection) {\n    const cost = audioHours * 0.08;\n    breakdown['entity_detection'] = cost;\n    featuresCost += cost;\n  }\n  if (options.contentSafety) {\n    const cost = audioHours * 0.02;\n    breakdown['content_safety'] = cost;\n    featuresCost += cost;\n  }\n  if (options.iabCategories) {\n    const cost = audioHours * 0.02;\n    breakdown['iab_categories'] = cost;\n    featuresCost += cost;\n  }\n  if (options.piiRedaction) {\n    const cost = audioHours * 0.02;\n    breakdown['pii_redaction'] = cost;\n    featuresCost += cost;\n  }\n\n  return {\n    baseTranscriptionCost: baseCost,\n    featuresCost,\n    totalCost: baseCost + featuresCost,\n    breakdown,\n  };\n}\n\n// Example: 100 hours with Best model + diarization + sentiment\nconst estimate = estimateTranscriptionCost(100, {\n  model: 'best',\n  speakerLabels: true,\n  sentimentAnalysis: true,\n});\n// Result: $37 (transcription) + $2 (speakers) + $2 (sentiment) = $41\n```\n\n### Step 2: Model Selection Strategy\n\n```typescript\nimport { AssemblyAI } from 'assemblyai';\n\nconst client = new AssemblyAI({\n  apiKey: process.env.ASSEMBLYAI_API_KEY!,\n});\n\n// Use Nano for high-volume, cost-sensitive workloads\n// - 3x cheaper than Best ($0.12 vs $0.37)\n// - Good enough for search indexing, keyword detection\nconst cheapTranscript = await client.transcripts.transcribe({\n  audio: audioUrl,\n  speech_model: 'nano',\n});\n\n// Use Best for critical, accuracy-sensitive workloads\n// - Medical transcription, legal proceedings, compliance\n// - Supports word_boost for domain terminology\nconst accurateTranscript = await client.transcripts.transcribe({\n  audio: audioUrl,\n  speech_model: 'best',\n  word_boost: ['specialized', 'domain', 'terms'],\n  boost_param: 'high',\n});\n```\n\n### Step 3: Feature Budget \u2014 Only Enable What You Need\n\n```typescript\n// EXPENSIVE: All features enabled ($0.37 + $0.16 = $0.53/hr)\nconst expensive = await client.transcripts.transcribe({\n  audio: audioUrl,\n  speech_model: 'best',        // $0.37/hr\n  speaker_labels: true,         // +$0.02/hr\n  sentiment_analysis: true,     // +$0.02/hr\n  entity_detection: true,       // +$0.08/hr\n  content_safety: true,         // +$0.02/hr\n  iab_categories: true,         // +$0.02/hr\n});\n\n// CHEAP: Only what's needed ($0.12 + $0.02 = $0.14/hr)\nconst cheap = await client.transcripts.transcribe({\n  audio: audioUrl,\n  speech_model: 'nano',         // $0.12/hr\n  speaker_labels: true,         // +$0.02/hr\n  // Skip features you don't use\n});\n```\n\n### Step 4: Usage Tracking\n\n```typescript\nclass AssemblyAIUsageTracker {\n  private totalAudioHours = 0;\n  private totalCost = 0;\n  private transcriptionCount = 0;\n\n  track(audioDurationSeconds: number, model: 'best' | 'nano', features: string[]) {\n    const hours = audioDurationSeconds / 3600;\n    this.totalAudioHours += hours;\n    this.transcriptionCount++;\n\n    const estimate = estimateTranscriptionCost(hours, {\n      model,\n      speakerLabels: features.includes('speaker_labels'),\n      sentimentAnalysis: features.includes('sentiment_analysis'),\n      entityDetection: features.includes('entity_detection'),\n      contentSafety: features.includes('content_safety'),\n      iabCategories: features.includes('iab_categories'),\n      piiRedaction: features.includes('redact_pii'),\n    });\n\n    this.totalCost += estimate.totalCost;\n\n    return estimate;\n  }\n\n  getSummary() {\n    return {\n      totalAudioHours: this.totalAudioHours.toFixed(2),\n      totalCost: `$${this.totalCost.toFixed(2)}`,\n      transcriptionCount: this.transcriptionCount,\n      avgCostPerTranscription: `$${(this.totalCost / this.transcriptionCount).toFixed(4)}`,\n    };\n  }\n}\n```\n\n### Step 5: Cost Reduction Strategies\n\n| Strategy | Savings | Trade-off |\n|----------|---------|-----------|\n| Use Nano instead of Best | 68% cheaper | Slightly lower accuracy |\n| Disable unused features | Up to $0.16/hr | Missing insights |\n| Cache transcript results | Eliminate re-fetch costs | Stale data risk |\n| Use LeMUR instead of per-feature AI | Often cheaper for summaries | Different output format |\n| Pre-filter audio (skip silence) | Proportional savings | Requires preprocessing |\n| Batch with webhooks | No savings, but better throughput | More complex architecture |\n\n### Step 6: Budget Alerts\n\n```typescript\nconst MONTHLY_BUDGET = 100; // $100\nconst tracker = new AssemblyAIUsageTracker();\n\n// After each transcription\nconst estimate = tracker.track(transcript.audio_duration ?? 0, 'best', ['speaker_labels']);\nconst summary = tracker.getSummary();\n\nif (parseFloat(summary.totalCost.replace('$', '')) > MONTHLY_BUDGET * 0.8) {\n  console.warn(`Budget warning: ${summary.totalCost} of $${MONTHLY_BUDGET} used`);\n  // Send alert to Slack, email, etc.\n}\n```\n\n## Output\n\n- Accurate cost estimation with feature-level breakdown\n- Model selection strategy (Best vs. Nano)\n- Feature budgeting to eliminate unnecessary costs\n- Usage tracking with budget alerts\n- Cost reduction strategies ranked by impact\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Unexpected high bill | Entity detection enabled everywhere | Audit features per endpoint |\n| Nano accuracy too low | Wrong model for use case | Switch critical paths to Best |\n| Budget exceeded | No monitoring | Implement usage tracker + alerts |\n| Double billing | Re-transcribing same audio | Cache transcript IDs, check before submitting |\n\n## Resources\n\n- [AssemblyAI Pricing](https://www.assemblyai.com/pricing)\n- [AssemblyAI Billing Dashboard](https://www.assemblyai.com/app)\n- [Speech Model Comparison](https://www.assemblyai.com/docs/speech-to-text/speech-recognition)\n\n## Next Steps\n\nFor architecture patterns, see `assemblyai-reference-architecture`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "assemblyai-cost-tuning",
-    "description": "Optimize AssemblyAI costs through model selection, feature budgeting,",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

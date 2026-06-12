@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031542",
   "name": "clay-webhooks-events",
   "slug": "clay-webhooks-events",
   "description": "Implement Clay webhook receivers and HTTP API column callbacks for real-time",
   "content": "# Clay Webhooks & Events\n\n## Overview\n\nClay's event-driven architecture has two webhook patterns: (1) **Inbound webhooks** -- you POST data into Clay tables via unique webhook URLs, and (2) **Outbound HTTP API columns** -- Clay POSTs enriched data to your endpoint after enrichment completes. This skill covers both patterns with production-ready handlers.\n\n## Prerequisites\n\n- Clay table with webhook source configured (for inbound)\n- Clay table with HTTP API enrichment column (for outbound)\n- HTTPS endpoint accessible from the internet\n- Familiarity with Express.js or similar framework\n\n## Instructions\n\n### Step 1: Inbound Webhook -- Send Data into Clay\n\nEvery Clay table has a unique webhook URL. When you POST JSON to this URL, a new row appears in the table.\n\n```typescript\n// src/clay/inbound.ts \u2014 send data into Clay tables\nclass ClayInboundWebhook {\n  constructor(\n    private webhookUrl: string,\n    private submissionCount: number = 0,\n    private readonly LIMIT: number = 50_000,\n  ) {}\n\n  async sendRow(data: Record<string, unknown>): Promise<void> {\n    if (this.submissionCount >= this.LIMIT) {\n      throw new Error(`Webhook exhausted (${this.LIMIT} submissions). Create a new webhook in Clay.`);\n    }\n\n    const res = await fetch(this.webhookUrl, {\n      method: 'POST',\n      headers: { 'Content-Type': 'application/json' },\n      body: JSON.stringify(data),\n    });\n\n    if (!res.ok) {\n      throw new Error(`Clay webhook failed: ${res.status} ${res.statusText}`);\n    }\n\n    this.submissionCount++;\n  }\n\n  async sendBatch(rows: Record<string, unknown>[], delayMs = 200): Promise<{ sent: number; failed: number }> {\n    let sent = 0, failed = 0;\n    for (const row of rows) {\n      try {\n        await this.sendRow(row);\n        sent++;\n      } catch {\n        failed++;\n      }\n      await new Promise(r => setTimeout(r, delayMs));\n    }\n    return { sent, failed };\n  }\n}\n\n// Usage\nconst webhook = new ClayInboundWebhook(process.env.CLAY_WEBHOOK_URL!);\nawait webhook.sendRow({\n  email: 'cto@acme.com',\n  domain: 'acme.com',\n  first_name: 'Jane',\n  last_name: 'Doe',\n  source: 'website-form',\n});\n```\n\n### Step 2: Outbound Callback -- Receive Enriched Data from Clay\n\nClay's HTTP API enrichment column POSTs data to your endpoint after enrichment runs. Set up a handler:\n\n```typescript\n// src/clay/outbound-handler.ts \u2014 receive enriched data from Clay\nimport express from 'express';\nimport crypto from 'crypto';\n\nconst app = express();\napp.use(express.json({ limit: '1mb' }));\n\n// Signature verification middleware\nfunction verifyClaySignature(req: any, res: any, next: any) {\n  const signature = req.headers['x-clay-signature'];\n  const secret = process.env.CLAY_WEBHOOK_SECRET;\n\n  if (secret && signature) {\n    const expected = crypto.createHmac('sha256', secret)\n      .update(JSON.stringify(req.body))\n      .digest('hex');\n\n    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {\n      return res.status(401).json({ error: 'Invalid signature' });\n    }\n  }\n  next();\n}\n\n// Main callback endpoint\napp.post('/api/clay/enriched', verifyClaySignature, async (req, res) => {\n  // Respond 200 immediately \u2014 Clay expects fast response\n  res.json({ received: true, timestamp: new Date().toISOString() });\n\n  // Process enriched data async\n  try {\n    await processEnrichedLead(req.body);\n  } catch (err) {\n    console.error('Failed to process enriched lead:', err);\n  }\n});\n\ninterface EnrichedLead {\n  email?: string;\n  first_name?: string;\n  last_name?: string;\n  company_name?: string;\n  job_title?: string;\n  employee_count?: number;\n  industry?: string;\n  linkedin_url?: string;\n  icp_score?: number;\n  personalized_opener?: string;\n}\n\nasync function processEnrichedLead(lead: EnrichedLead): Promise<void> {\n  // Route based on ICP score\n  if (lead.icp_score && lead.icp_score >= 80 && lead.email) {\n    await pushToOutreachSequence(lead);\n  } else if (lead.icp_score && lead.icp_score >= 50) {\n    await addToNurtureCampaign(lead);\n  } else {\n    console.log(`Low-score lead skipped: ${lead.email} (score: ${lead.icp_score})`);\n  }\n}\n```\n\n### Step 3: Configure the HTTP API Column in Clay\n\nIn your Clay table, add an HTTP API enrichment column:\n\n1. **+ Add Column > HTTP API**\n2. **Method**: POST\n3. **URL**: `https://your-app.com/api/clay/enriched`\n4. **Headers**:\n   - `Content-Type: application/json`\n   - `X-Clay-Signature: {{shared-secret-hash}}` (optional)\n5. **Body** (map Clay columns to your schema):\n\n```json\n{\n  \"email\": \"{{Work Email}}\",\n  \"first_name\": \"{{first_name}}\",\n  \"last_name\": \"{{last_name}}\",\n  \"company_name\": \"{{Company Name}}\",\n  \"job_title\": \"{{Job Title}}\",\n  \"employee_count\": \"{{Employee Count}}\",\n  \"industry\": \"{{Industry}}\",\n  \"linkedin_url\": \"{{LinkedIn URL}}\",\n  \"icp_score\": \"{{ICP Score}}\",\n  \"personalized_opener\": \"{{Personalized Opener}}\"\n}\n```\n\n1. **Conditional run**: `ISNOTEMPTY(Work Email) AND ICP Score >= 50`\n2. **Auto-run on new rows**: ON\n\n### Step 4: Idempotent Processing\n\nClay may retry failed HTTP API calls. Ensure idempotent handling:\n\n```typescript\n// src/clay/idempotency.ts\nconst processedSet = new Set<string>();\n\nfunction getIdempotencyKey(lead: EnrichedLead): string {\n  return crypto.createHash('sha256')\n    .update(`${lead.email}:${lead.company_name}:${Date.now().toString().slice(0, -4)}`)\n    .digest('hex');\n}\n\nasync function processIdempotent(lead: EnrichedLead): Promise<boolean> {\n  const key = getIdempotencyKey(lead);\n  if (processedSet.has(key)) {\n    console.log(`Duplicate callback skipped: ${lead.email}`);\n    return false;\n  }\n  processedSet.add(key);\n  await processEnrichedLead(lead);\n  return true;\n}\n```\n\n### Step 5: Integration with External Services\n\n```typescript\n// src/clay/integrations.ts \u2014 push enriched leads to downstream tools\n\n// Zapier webhook trigger\nasync function triggerZapier(lead: EnrichedLead): Promise<void> {\n  await fetch(process.env.ZAPIER_WEBHOOK_URL!, {\n    method: 'POST',\n    headers: { 'Content-Type': 'application/json' },\n    body: JSON.stringify(lead),\n  });\n}\n\n// Slack notification for high-value leads\nasync function notifySlack(lead: EnrichedLead): Promise<void> {\n  if (!lead.icp_score || lead.icp_score < 90) return;\n\n  await fetch(process.env.SLACK_WEBHOOK_URL!, {\n    method: 'POST',\n    headers: { 'Content-Type': 'application/json' },\n    body: JSON.stringify({\n      text: `Hot lead from Clay: ${lead.first_name} ${lead.last_name} (${lead.job_title}) at ${lead.company_name} - ICP Score: ${lead.icp_score}`,\n    }),\n  });\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Webhook returns 404 | URL expired or table deleted | Re-create webhook in Clay table |\n| HTTP API column shows error | Your endpoint unreachable | Verify HTTPS URL is publicly accessible |\n| Duplicate callbacks | Clay retried failed request | Implement idempotency (Step 4) |\n| Webhook 50K limit hit | High volume usage | Create new webhook on same table |\n| Callback timeout | Slow processing | Respond 200 immediately, process async |\n\n## Resources\n\n- [Clay University -- Webhook Integration Guide](https://university.clay.com/docs/webhook-integration-guide)\n- [Clay University -- HTTP API Integration](https://university.clay.com/docs/http-api-integration-overview)\n- [Clay University -- Using Clay as an API](https://www.clay.com/university/guide/using-clay-as-an-api)\n\n## Next Steps\n\nFor performance optimization, see `clay-performance-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clay-webhooks-events",
-    "description": "Implement Clay webhook receivers and HTTP API column callbacks for real-time",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

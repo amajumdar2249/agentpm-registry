@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032313",
   "name": "intercom-common-errors",
   "slug": "intercom-common-errors",
   "description": "Diagnose and fix Intercom API errors by HTTP status code and error type.",
   "content": "# Intercom Common Errors\n\n## Overview\n\nQuick reference for Intercom API errors by HTTP status code, with real error response shapes and proven solutions.\n\n## Intercom Error Response Shape\n\nAll Intercom errors return this structure:\n\n```json\n{\n  \"type\": \"error.list\",\n  \"request_id\": \"req_abc123\",\n  \"errors\": [\n    {\n      \"code\": \"unauthorized\",\n      \"message\": \"Access Token Invalid\"\n    }\n  ]\n}\n```\n\n## Error Reference\n\n### 401 Unauthorized\n\n```json\n{\n  \"type\": \"error.list\",\n  \"errors\": [{ \"code\": \"unauthorized\", \"message\": \"Access Token Invalid\" }]\n}\n```\n\n**Causes:**\n\n- Access token is expired, revoked, or malformed\n- Using a test token against production (or vice versa)\n- Token was regenerated in Developer Hub but not updated in app\n\n**Fix:**\n\n```bash\n# Verify token works\ncurl -s https://api.intercom.io/me \\\n  -H \"Authorization: Bearer $INTERCOM_ACCESS_TOKEN\" \\\n  -H \"Accept: application/json\" | jq '.type'\n# Should return \"admin\"\n\n# If invalid, regenerate at:\n# app.intercom.com > Settings > Developer Hub > Your App > Authentication\n```\n\n---\n\n### 403 Forbidden\n\n```json\n{\n  \"type\": \"error.list\",\n  \"errors\": [{ \"code\": \"forbidden\", \"message\": \"You do not have permission to access this resource\" }]\n}\n```\n\n**Causes:**\n\n- OAuth app missing required scope\n- Trying to access a resource in another workspace\n- Admin permissions insufficient\n\n**Fix:** Add the required OAuth scope in Developer Hub > OAuth Scopes.\n\n---\n\n### 404 Not Found\n\n```json\n{\n  \"type\": \"error.list\",\n  \"errors\": [{ \"code\": \"not_found\", \"message\": \"User Not Found\" }]\n}\n```\n\n**Causes:**\n\n- Contact, conversation, or article ID is invalid\n- Resource was deleted\n- Using `user_id` where `contact_id` is expected (or vice versa)\n\n**Fix:**\n\n```typescript\n// Always check existence before operating\ntry {\n  const contact = await client.contacts.find({ contactId: id });\n} catch (err) {\n  if (err instanceof IntercomError && err.statusCode === 404) {\n    console.log(`Contact ${id} not found, skipping`);\n  }\n}\n```\n\n---\n\n### 409 Conflict\n\n```json\n{\n  \"type\": \"error.list\",\n  \"errors\": [{ \"code\": \"conflict\", \"message\": \"A contact matching those details already exists with id=abc123\" }]\n}\n```\n\n**Causes:**\n\n- Creating a contact with a duplicate `external_id` or `email`\n- Race condition in concurrent contact creation\n\n**Fix:**\n\n```typescript\n// Search first, create if not found\nasync function findOrCreateContact(email: string, externalId: string) {\n  const existing = await client.contacts.search({\n    query: { field: \"email\", operator: \"=\", value: email },\n  });\n\n  if (existing.data.length > 0) {\n    return existing.data[0];\n  }\n\n  return client.contacts.create({\n    role: \"user\",\n    email,\n    externalId,\n  });\n}\n```\n\n---\n\n### 422 Unprocessable Entity\n\n```json\n{\n  \"type\": \"error.list\",\n  \"errors\": [{ \"code\": \"parameter_invalid\", \"message\": \"email is not a valid email address\" }]\n}\n```\n\n**Causes:**\n\n- Invalid field value (bad email format, wrong type)\n- Missing required field\n- Custom attribute name exceeds 190 characters\n\n**Fix:** Validate inputs before sending. Check the `errors` array for specifics.\n\n---\n\n### 429 Rate Limit Exceeded\n\n```json\n{\n  \"type\": \"error.list\",\n  \"errors\": [{ \"code\": \"rate_limit_exceeded\", \"message\": \"Rate limit exceeded\" }]\n}\n```\n\n**Response headers:**\n\n```\nX-RateLimit-Limit: 10000\nX-RateLimit-Remaining: 0\nX-RateLimit-Reset: 1711100060\n```\n\n**Limits:** 10,000 req/min per app, 25,000 req/min per workspace.\n\n**Fix:**\n\n```typescript\nimport { IntercomError } from \"intercom-client\";\n\nasync function withBackoff<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {\n  for (let attempt = 0; attempt <= maxRetries; attempt++) {\n    try {\n      return await fn();\n    } catch (err) {\n      if (err instanceof IntercomError && err.statusCode === 429) {\n        if (attempt === maxRetries) throw err;\n        const resetAt = err.headers?.[\"x-ratelimit-reset\"];\n        const waitMs = resetAt\n          ? (parseInt(resetAt) * 1000) - Date.now() + 1000\n          : 1000 * Math.pow(2, attempt);\n        console.log(`Rate limited, waiting ${waitMs}ms`);\n        await new Promise(r => setTimeout(r, Math.max(waitMs, 1000)));\n      } else {\n        throw err;\n      }\n    }\n  }\n  throw new Error(\"Unreachable\");\n}\n```\n\n---\n\n### 500/502/503 Server Errors\n\n**Causes:** Intercom-side issue, not your fault.\n\n**Fix:**\n\n```bash\n# 1. Check Intercom status\ncurl -s https://status.intercom.com/api/v2/summary.json | jq '.status'\n\n# 2. Retry with backoff (same pattern as 429)\n# 3. If persistent, contact Intercom support with request_id\n```\n\n## Quick Diagnostic Script\n\n```bash\n#!/bin/bash\nTOKEN=\"${INTERCOM_ACCESS_TOKEN}\"\n\necho \"=== Intercom API Diagnostics ===\"\n\n# Test auth\necho -n \"Auth: \"\nSTATUS=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"Authorization: Bearer $TOKEN\" \\\n  https://api.intercom.io/me)\necho \"$STATUS $([ \"$STATUS\" = \"200\" ] && echo \"OK\" || echo \"FAIL\")\"\n\n# Check rate limits\necho -n \"Rate limit remaining: \"\ncurl -s -D - -o /dev/null \\\n  -H \"Authorization: Bearer $TOKEN\" \\\n  https://api.intercom.io/me 2>/dev/null | grep -i x-ratelimit-remaining\n\n# Intercom status\necho -n \"Intercom status: \"\ncurl -s https://status.intercom.com/api/v2/status.json | jq -r '.status.description'\n```\n\n## Error Handling\n\n| Error Code | HTTP | Retryable | Action |\n|------------|------|-----------|--------|\n| `unauthorized` | 401 | No | Regenerate token |\n| `forbidden` | 403 | No | Add OAuth scope |\n| `not_found` | 404 | No | Verify resource ID |\n| `conflict` | 409 | No | Search before create |\n| `parameter_invalid` | 422 | No | Fix input data |\n| `rate_limit_exceeded` | 429 | Yes | Backoff and retry |\n| `server_error` | 500+ | Yes | Retry, check status page |\n\n## Resources\n\n- [Error Codes](https://developers.intercom.com/docs/references/rest-api/errors/error-codes)\n- [HTTP Responses](https://developers.intercom.com/docs/references/rest-api/errors/http-responses)\n- [Rate Limiting](https://developers.intercom.com/docs/references/rest-api/errors/rate-limiting)\n- [Intercom Status](https://status.intercom.com)\n\n## Next Steps\n\nFor comprehensive debugging, see `intercom-debug-bundle`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "intercom-common-errors",
-    "description": "Diagnose and fix Intercom API errors by HTTP status code and error type.",
-    "allowed-tools": "Read, Grep, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

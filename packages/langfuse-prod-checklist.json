@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032464",
   "name": "langfuse-prod-checklist",
   "slug": "langfuse-prod-checklist",
   "description": "Langfuse production readiness checklist and verification.",
   "content": "# Langfuse Production Checklist\n\n## Overview\n\nComprehensive checklist for deploying Langfuse observability to production with verified configuration, error handling, graceful shutdown, monitoring, and a pre-deployment verification script.\n\n## Prerequisites\n\n- Development and staging testing completed\n- Production Langfuse project created with separate API keys\n- Secret management solution in place\n\n## Production Configuration\n\n### Recommended SDK Settings\n\n```typescript\n// v4+ Production Config\nimport { LangfuseSpanProcessor } from \"@langfuse/otel\";\nimport { NodeSDK } from \"@opentelemetry/sdk-node\";\n\nconst processor = new LangfuseSpanProcessor({\n  exportIntervalMillis: 5000,  // Flush every 5s\n  maxExportBatchSize: 50,      // Batch size\n  maxQueueSize: 2048,          // Buffer limit\n});\n\nconst sdk = new NodeSDK({ spanProcessors: [processor] });\nsdk.start();\n\n// Graceful shutdown on all signals\nfor (const signal of [\"SIGTERM\", \"SIGINT\", \"SIGUSR2\"]) {\n  process.on(signal, async () => {\n    await sdk.shutdown();\n    process.exit(0);\n  });\n}\n```\n\n```typescript\n// v3 Legacy Production Config\nimport { Langfuse } from \"langfuse\";\n\nconst langfuse = new Langfuse({\n  flushAt: 25,            // Balance between latency and efficiency\n  flushInterval: 5000,    // 5 second flush interval\n  requestTimeout: 15000,  // 15s timeout\n  enabled: true,          // Explicitly enable\n});\n\nprocess.on(\"beforeExit\", () => langfuse.shutdownAsync());\nprocess.on(\"SIGTERM\", () => langfuse.shutdownAsync().then(() => process.exit(0)));\n```\n\n### Production Error Handling\n\n```typescript\nimport { observe, updateActiveObservation, startActiveObservation } from \"@langfuse/tracing\";\n\n// Wrap all traced operations with error safety\nconst tracedEndpoint = observe({ name: \"api-endpoint\" }, async (req: Request) => {\n  try {\n    updateActiveObservation({\n      input: { path: req.url, method: req.method },\n      metadata: { userId: req.userId },\n    });\n\n    const result = await processRequest(req);\n\n    updateActiveObservation({ output: { status: 200 } });\n    return result;\n  } catch (error) {\n    // Log error to trace -- don't let tracing error mask app error\n    try {\n      updateActiveObservation({\n        output: { error: String(error) },\n        metadata: { level: \"ERROR\" },\n      });\n    } catch {\n      // Tracing failure must never break the app\n    }\n    throw error;\n  }\n});\n```\n\n## Pre-Deployment Verification Script\n\n```typescript\n// scripts/verify-langfuse-prod.ts\nimport { LangfuseClient } from \"@langfuse/client\";\nimport { startActiveObservation, updateActiveObservation } from \"@langfuse/tracing\";\n\nasync function verify() {\n  const checks: Array<{ name: string; pass: boolean; detail: string }> = [];\n\n  // 1. Environment variables\n  const requiredVars = [\"LANGFUSE_PUBLIC_KEY\", \"LANGFUSE_SECRET_KEY\"];\n  for (const v of requiredVars) {\n    checks.push({\n      name: `Env: ${v}`,\n      pass: !!process.env[v],\n      detail: process.env[v] ? `SET (${process.env[v]!.slice(0, 10)}...)` : \"MISSING\",\n    });\n  }\n\n  // 2. Key validation\n  const pk = process.env.LANGFUSE_PUBLIC_KEY || \"\";\n  const sk = process.env.LANGFUSE_SECRET_KEY || \"\";\n  checks.push({\n    name: \"Key format\",\n    pass: pk.startsWith(\"pk-lf-\") && sk.startsWith(\"sk-lf-\"),\n    detail: `Public: ${pk.startsWith(\"pk-lf-\")}, Secret: ${sk.startsWith(\"sk-lf-\")}`,\n  });\n\n  // 3. API connectivity\n  try {\n    const langfuse = new LangfuseClient();\n    // Try fetching prompts as a connectivity test\n    await langfuse.prompt.get(\"__health-check__\").catch(() => {});\n    checks.push({ name: \"API connectivity\", pass: true, detail: \"Connected\" });\n  } catch (error) {\n    checks.push({ name: \"API connectivity\", pass: false, detail: String(error) });\n  }\n\n  // 4. Trace creation\n  try {\n    await startActiveObservation(\"prod-verify\", async () => {\n      updateActiveObservation({\n        input: { test: true },\n        output: { verified: true },\n        metadata: { verification: \"pre-deploy\" },\n      });\n    });\n    checks.push({ name: \"Trace creation\", pass: true, detail: \"Trace created\" });\n  } catch (error) {\n    checks.push({ name: \"Trace creation\", pass: false, detail: String(error) });\n  }\n\n  // Report\n  console.log(\"\\n=== Langfuse Production Verification ===\\n\");\n  let allPassed = true;\n  for (const check of checks) {\n    const icon = check.pass ? \"PASS\" : \"FAIL\";\n    console.log(`  [${icon}] ${check.name}: ${check.detail}`);\n    if (!check.pass) allPassed = false;\n  }\n\n  console.log(`\\n${allPassed ? \"All checks passed.\" : \"SOME CHECKS FAILED.\"}\\n`);\n  if (!allPassed) process.exit(1);\n}\n\nverify();\n```\n\n## Production Checklist\n\n### Authentication & Security\n\n- [ ] Production API keys created (separate from dev/staging)\n- [ ] Keys stored in secret manager (not env files or code)\n- [ ] Key prefix validated at startup (`pk-lf-` / `sk-lf-`)\n- [ ] PII scrubbing enabled on trace inputs/outputs\n- [ ] Secret scanning in CI/CD pipeline\n\n### SDK Configuration\n\n- [ ] Singleton client pattern (no per-request instantiation)\n- [ ] Batch size tuned (`flushAt: 25-50`)\n- [ ] Flush interval set (`flushInterval: 5000`)\n- [ ] Request timeout configured (`requestTimeout: 15000`)\n\n### Reliability\n\n- [ ] Graceful shutdown on SIGTERM/SIGINT\n- [ ] All spans end in `try/finally` (v3) or use `observe`/`startActiveObservation` (v4+)\n- [ ] Tracing errors caught -- never crash the app\n- [ ] Circuit breaker for sustained failures\n\n### Monitoring\n\n- [ ] Trace creation success/failure logged\n- [ ] Flush latency tracked\n- [ ] Rate limit errors monitored\n- [ ] Dashboard alerts for quality score regression\n\n### Operations\n\n- [ ] Runbook documented for Langfuse outages\n- [ ] Fallback behavior defined (app works without Langfuse)\n- [ ] Data retention policy configured\n- [ ] Log rotation includes redaction of API keys\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Missing traces in prod | No flush on exit | Add shutdown handler for SIGTERM |\n| Memory growth | Client created per request | Use singleton pattern |\n| High latency | Small batches | Increase `flushAt` to 25-50 |\n| Lost traces on deploy | No graceful shutdown | Add SIGTERM handler with `sdk.shutdown()` |\n\n## Resources\n\n- [TypeScript SDK Setup](https://langfuse.com/docs/observability/sdk/typescript/setup)\n- [Advanced Configuration](https://langfuse.com/docs/observability/sdk/typescript/advanced-usage)\n- [Self-Hosting Guide](https://langfuse.com/self-hosting)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "langfuse-prod-checklist",
-    "description": "Langfuse production readiness checklist and verification.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

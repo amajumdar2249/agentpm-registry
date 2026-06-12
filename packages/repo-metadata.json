@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000001089",
   "name": "repo-metadata",
   "slug": "repo-metadata",
   "description": "This skill should be used when the user asks to \"generate repository metadata\", \"create catalog-info.yaml\", \"add repo metadata\", \"document repository structure\", or mentions generating structured metadata for service catalog or architecture documentation.",
   "content": "\n# Repository Metadata\n\nGenerate structured `catalog-info.yaml` metadata for repositories using industry-standard conventions (based on Backstage catalog format). This metadata enables cross-repository architecture analysis and service catalog functionality.\n\n## Purpose\n\nCreate and maintain `catalog-info.yaml` files that describe a repository's role in the broader architecture. This metadata feeds into architectural views, dependency graphs, and service groupings across the entire organization.\n\n## When to Use\n\nTrigger this skill when:\n- User asks to \"generate repo metadata\" or \"create catalog-info.yaml\"\n- User wants to document a repository for a service catalog\n- User needs to prepare a repository for cross-repo architecture analysis\n- User mentions \"service catalog\" or \"component metadata\"\n\n## Metadata Schema\n\nThe `catalog-info.yaml` file follows Backstage conventions with Astrabit-specific extensions:\n\n```yaml\napiVersion: astrabit.io/v1\nkind: Component\nmetadata:\n  name: service-name          # Required: Unique identifier\n  description: Brief description\n  tags:\n    - backend\n    - user-management\nspec:\n  # Service Classification\n  type: service               # Required: service, gateway, worker, library, frontend, database\n  category: backend           # Broader category\n  domain: trading             # Business domain\n  owner: platform-team        # Team responsible\n\n  # Dependencies (Upstream)\n  dependsOn:\n    - component: auth-service\n      type: service\n    - component: user-db\n      type: database\n\n  # APIs Provided\n  providesApis:\n    - name: User API\n      type: REST\n      definition: ./openapi.yaml\n\n  # APIs Consumed\n  consumesApis:\n    - name: Auth API\n      providedBy: auth-service\n\n  # Events Produced\n  eventProducers:\n    - name: user-events\n      type: kafka\n      topic: user.created\n      schema: avro\n\n  # Events Consumed\n  eventConsumers:\n    - name: order-events\n      type: kafka\n      topic: order.placed\n      group: user-service-group\n\n  # HTTP Routes (for gateways/services)\n  routes:\n    - path: /api/users/*\n      methods: [GET, POST, PUT, DELETE]\n      handler: this\n    - path: /api/auth/*\n      methods: [POST]\n      forwardsTo: auth-service\n\n  # Infrastructure\n  runtime: nodejs             # nodejs, python, go, java, etc.\n  framework: nestjs           # nestjs, fastapi, spring, etc.\n```\n\n## Generation Workflow\n\n### Phase 1: Analyze Repository\n\nGather information about the repository:\n\n1. **Use existing analysis scripts:**\n   ```bash\n   python skills/repo-docs/scripts/analyze-repo-structure.py /path/to/repo\n   python skills/repo-docs/scripts/find-integration-points.py /path/to/repo\n   ```\n\n2. **Read existing documentation:**\n   - Check for `INTEGRATIONS.md` - contains upstream/downstream relationships\n   - Check for `ARCHITECTURE.md` - contains service role and dependencies\n   - Check for `README.md` - contains basic description and tech stack\n\n3. **Detect from code:**\n   - Language from file extensions and package files\n   - Framework from dependencies\n   - Integration points from import patterns\n\n### Phase 2: Generate Metadata\n\nBased on analysis, generate `catalog-info.yaml` with detected values:\n\n| Field | Detection Method |\n|-------|------------------|\n| `name` | Repo name or `package.json` `name` field |\n| `description` | README title/description or generated from code |\n| `type` | Inferred from code patterns (gateway has routes, worker has consumers only) |\n| `runtime` | From package files (`package.json`, `pyproject.toml`, `go.mod`) |\n| `framework` | From dependencies (`nestjs`, `fastapi`, `spring-boot`, etc.) |\n| `dependsOn` | From integration point scanning |\n| `eventProducers` | From `kafka.producer` or similar patterns |\n| `eventConsumers` | From `@KafkaListener`, `@EventListener`, or similar patterns |\n| `routes` | From `@Controller`, `@GetMapping`, router definitions |\n\n### Phase 3: Present and Refine\n\nPresent the generated metadata to the user in a table format:\n\n```markdown\nGenerated catalog-info.yaml:\n\n| Field | Value | Source |\n|-------|-------|--------|\n| name | user-service | repo name |\n| type | service | detected: has routes and consumers |\n| runtime | nodejs | package.json |\n| framework | nestjs | dependencies |\n| domain | unknown | \u274c needs input |\n| owner | unknown | \u274c needs input |\n| dependsOn | auth-service, user-db | integration scan |\n```\n\nPrompt user to review and fill in missing fields (marked with \u274c).\n\n### Phase 4: Write Metadata File\n\nWrite `catalog-info.yaml` to the repository root.\n\n### Phase 5: Update Related Documentation\n\nOffer to update related docs to reference the new metadata file:\n- Add link to `catalog-info.yaml` in `README.md`\n- Update `INTEGRATIONS.md` to be consistent with metadata\n\n## Service Type Detection\n\n| Type | Indicators |\n|------|------------|\n| **gateway** | Has `routes` with `forwardsTo`, handles external requests, minimal business logic |\n| **service** | Has both `providesApis` and `consumesApis`, business logic |\n| **worker** | Only `eventConsumers`, no HTTP routes, background processing |\n| **library** | No APIs consumed, only provides, shared utilities |\n| **frontend** | `type: frontend` in package.json, has build artifacts |\n| **database** | Contains migrations, schemas, no application code |\n\n## Script Usage\n\nUse `scripts/generate-metadata.py` to automate metadata generation:\n\n```bash\n# Generate from current directory\npython skills/repo-metadata/scripts/generate-metadata.py\n\n# Generate from specific repo\npython skills/repo-metadata/scripts/generate-metadata.py /path/to/repo\n\n# Output as JSON for inspection\npython skills/repo-metadata/scripts/generate-metadata.py --format json\n```\n\nThe script:\n1. Runs repo structure analysis\n2. Scans for integration points\n3. Reads existing docs\n4. Outputs `catalog-info.yaml` content\n\n## Additional Resources\n\n### Reference Files\n\n- **`references/schema.md`** - Complete catalog-info.yaml schema reference\n- **`references/detection-patterns.md`** - Patterns for detecting service characteristics\n\n### Example Templates\n\n- **`examples/catalog-info-template.yaml`** - Full template with all fields\n- **`examples/catalog-info-gateway.yaml`** - Example gateway service\n- **`examples/catalog-info-worker.yaml`** - Example worker service\n- **`examples/catalog-info-library.yaml`** - Example shared library\n\n## Quality Checklist\n\nBefore finalizing metadata, verify:\n\n- [ ] `name` is unique across the organization\n- [ ] `type` correctly classifies the service\n- [ ] `domain` and `owner` are filled (not auto-detected)\n- [ ] `dependsOn` lists all upstream dependencies\n- [ ] `eventProducers` and `eventConsumers` are complete\n- [ ] Routes are documented if this is a gateway/service\n- [ ] File is valid YAML\n- [ ] File is at repository root (`catalog-info.yaml`)\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "repo-metadata",
-    "description": "This skill should be used when the user asks to \"generate repository metadata\", \"create catalog-info.yaml\", \"add repo metadata\", \"document repository structure\", or mentions generating structured metadata for service catalog or architecture documentation.",
-    "version": "1.0.0"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

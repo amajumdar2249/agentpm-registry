@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031828",
   "name": "elevenlabs-security-basics",
   "slug": "elevenlabs-security-basics",
   "description": "Apply ElevenLabs security best practices for API keys, webhook HMAC",
   "content": "# ElevenLabs Security Basics\n\n## Overview\n\nSecurity best practices for ElevenLabs API key management, webhook HMAC signature verification, and protecting cloned voice data. ElevenLabs uses a single API key (`xi-api-key`) and HMAC webhook authentication.\n\n## Prerequisites\n\n- ElevenLabs SDK installed\n- Understanding of environment variables\n- Access to ElevenLabs dashboard (Settings > API Keys)\n\n## Instructions\n\n### Step 1: API Key Management\n\n```bash\n# .env (NEVER commit to git)\nELEVENLABS_API_KEY=sk_your_key_here\n\n# .gitignore \u2014 MUST include these\n.env\n.env.local\n.env.*.local\n```\n\n**Git pre-commit hook** to prevent accidental key commits:\n\n```bash\n#!/bin/bash\n# .git/hooks/pre-commit\nif git diff --cached | grep -qE 'sk_[a-zA-Z0-9]{20,}'; then\n  echo \"ERROR: ElevenLabs API key detected in staged changes!\"\n  echo \"Remove the key and use environment variables instead.\"\n  exit 1\nfi\n```\n\n### Step 2: Environment-Specific Keys\n\n```typescript\n// src/elevenlabs/config.ts\ninterface ElevenLabsSecurityConfig {\n  apiKey: string;\n  webhookSecret: string;\n  environment: \"development\" | \"staging\" | \"production\";\n}\n\nexport function getSecurityConfig(): ElevenLabsSecurityConfig {\n  const env = (process.env.NODE_ENV || \"development\") as ElevenLabsSecurityConfig[\"environment\"];\n\n  const apiKey = process.env.ELEVENLABS_API_KEY;\n  if (!apiKey) {\n    throw new Error(\"ELEVENLABS_API_KEY is required\");\n  }\n\n  // Warn if production key is used in dev\n  if (env === \"development\" && apiKey.startsWith(\"sk_live_\")) {\n    console.warn(\"WARNING: Using production API key in development environment\");\n  }\n\n  return {\n    apiKey,\n    webhookSecret: process.env.ELEVENLABS_WEBHOOK_SECRET || \"\",\n    environment: env,\n  };\n}\n```\n\n### Step 3: Webhook HMAC Signature Verification\n\nElevenLabs webhooks include an `ElevenLabs-Signature` header for HMAC verification:\n\n```typescript\n// src/elevenlabs/webhook-verify.ts\nimport crypto from \"crypto\";\n\n/**\n * Verify ElevenLabs webhook signature using HMAC-SHA256.\n * The shared secret is generated when you create a webhook in the dashboard.\n */\nexport function verifyWebhookSignature(\n  payload: string | Buffer,\n  signatureHeader: string,\n  secret: string\n): boolean {\n  if (!signatureHeader || !secret) return false;\n\n  // ElevenLabs signature format: t=<timestamp>,v1=<signature>\n  const parts = signatureHeader.split(\",\");\n  const timestamp = parts.find(p => p.startsWith(\"t=\"))?.slice(2);\n  const signature = parts.find(p => p.startsWith(\"v1=\"))?.slice(3);\n\n  if (!timestamp || !signature) return false;\n\n  // Reject timestamps older than 5 minutes (replay protection)\n  const age = Math.floor(Date.now() / 1000) - parseInt(timestamp);\n  if (age > 300) {\n    console.error(\"Webhook timestamp too old:\", age, \"seconds\");\n    return false;\n  }\n\n  // Compute expected HMAC\n  const signedPayload = `${timestamp}.${payload.toString()}`;\n  const expected = crypto\n    .createHmac(\"sha256\", secret)\n    .update(signedPayload)\n    .digest(\"hex\");\n\n  // Timing-safe comparison to prevent timing attacks\n  try {\n    return crypto.timingSafeEqual(\n      Buffer.from(signature, \"hex\"),\n      Buffer.from(expected, \"hex\")\n    );\n  } catch {\n    return false;\n  }\n}\n```\n\n### Step 4: Express Webhook Endpoint with Verification\n\n```typescript\nimport express from \"express\";\nimport { verifyWebhookSignature } from \"./webhook-verify\";\n\nconst app = express();\n\n// IMPORTANT: Must use raw body for signature verification\napp.post(\"/webhooks/elevenlabs\",\n  express.raw({ type: \"application/json\" }),\n  (req, res) => {\n    const signature = req.headers[\"elevenlabs-signature\"] as string;\n    const secret = process.env.ELEVENLABS_WEBHOOK_SECRET!;\n\n    if (!verifyWebhookSignature(req.body, signature, secret)) {\n      console.error(\"Webhook signature verification failed\");\n      return res.status(401).json({ error: \"Invalid signature\" });\n    }\n\n    const event = JSON.parse(req.body.toString());\n\n    // Return 200 quickly to acknowledge receipt\n    // Process asynchronously to avoid webhook timeout/disable\n    res.status(200).json({ received: true });\n\n    processWebhookAsync(event).catch(console.error);\n  }\n);\n```\n\n### Step 5: API Key Rotation Procedure\n\n```bash\n# 1. Generate new API key in ElevenLabs dashboard\n#    Settings > API Keys > Create new key\n\n# 2. Test new key before rotating\ncurl -s https://api.elevenlabs.io/v1/user \\\n  -H \"xi-api-key: sk_new_key_here\" | jq '.subscription.tier'\n\n# 3. Update in all environments\n# Vercel:\nvercel env add ELEVENLABS_API_KEY production\n\n# Fly.io:\nfly secrets set ELEVENLABS_API_KEY=sk_new_key_here\n\n# GitHub Actions:\ngh secret set ELEVENLABS_API_KEY --body \"sk_new_key_here\"\n\n# 4. Deploy with new key\n# 5. Verify production works\n# 6. Delete old key in ElevenLabs dashboard\n```\n\n### Step 6: Voice Data Protection\n\n```typescript\n// Cloned voices contain biometric data \u2014 treat as PII\nconst voiceSecurityPolicy = {\n  // Restrict who can create/delete cloned voices\n  clonePermissions: \"admin_only\",\n\n  // Log all voice cloning operations\n  auditCloning: true,\n\n  // Require consent documentation before cloning\n  consentRequired: true,\n\n  // Auto-delete test clones after N days\n  testVoiceTtlDays: 30,\n};\n\n// Audit log for voice operations\nfunction logVoiceOperation(operation: string, voiceId: string, userId: string) {\n  console.log(JSON.stringify({\n    timestamp: new Date().toISOString(),\n    type: \"elevenlabs.voice.audit\",\n    operation,  // \"clone\", \"delete\", \"use\"\n    voiceId,\n    userId,\n  }));\n}\n```\n\n## Security Checklist\n\n- [ ] API keys in environment variables (never in source code)\n- [ ] `.env` files in `.gitignore`\n- [ ] Different API keys for dev/staging/prod\n- [ ] Pre-commit hook scanning for key patterns (`sk_`)\n- [ ] Webhook signatures verified with HMAC-SHA256\n- [ ] Replay protection on webhooks (5-minute timestamp check)\n- [ ] Webhook failures monitored (auto-disabled after 10 consecutive failures)\n- [ ] Voice cloning operations audit-logged\n- [ ] Cloned voice consent documented\n- [ ] API key rotation scheduled quarterly\n\n## Webhook Failure Policy\n\nElevenLabs auto-disables webhooks after:\n\n- 10+ consecutive delivery failures, AND\n- Last successful delivery was 7+ days ago (or never delivered)\n\nAlways return HTTP 200 quickly from your webhook handler.\n\n## Error Handling\n\n| Security Issue | Detection | Mitigation |\n|----------------|-----------|------------|\n| Exposed API key | Git scanning, CI check | Rotate immediately, revoke old key |\n| Invalid webhook signature | `verifyWebhookSignature()` returns false | Log and reject (HTTP 401) |\n| Replay attack | Timestamp > 5 minutes old | Reject with timestamp check |\n| Unauthorized voice cloning | Audit logs | Restrict clone permissions |\n\n## Resources\n\n- [ElevenLabs Webhooks](https://elevenlabs.io/docs/overview/administration/webhooks)\n- [ElevenLabs API Keys](https://elevenlabs.io/app/settings/api-keys)\n- [Voice Cloning Policy](https://elevenlabs.io/safety)\n\n## Next Steps\n\nFor production deployment, see `elevenlabs-prod-checklist`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "elevenlabs-security-basics",
-    "description": "Apply ElevenLabs security best practices for API keys, webhook HMAC",
-    "Trigger": "elevenlabs security\", \"elevenlabs secrets\",",
-    "allowed-tools": "Read, Write, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

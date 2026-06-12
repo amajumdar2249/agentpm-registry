@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000001135",
   "name": "api-route-design",
   "slug": "api-route-design",
   "description": "|",
   "content": "\n# API Route Design Skill\n\nExpert design and implementation of RESTful APIs with proper validation, response formatting, and HTTP semantics.\n\n## Quick Reference\n\n| Pattern | Example | Purpose |\n|---------|---------|---------|\n| List resource | `@router.get(\"/fees/\", response_model=List[FeeOut])` | Retrieve collection |\n| Get by ID | `@router.get(\"/fees/{fee_id}\")` | Retrieve single resource |\n| Create | `@router.post(\"/fees/\", response_model=FeeOut, status_code=201)` | Create new resource |\n| Update | `@router.put(\"/fees/{fee_id}\")` | Full resource update |\n| Patch | `@router.patch(\"/fees/{fee_id}\")` | Partial resource update |\n| Delete | `@router.delete(\"/fees/{fee_id}\", status_code=204)` | Remove resource |\n\n## URL Naming Conventions\n\n```\n/v1/{resource}           # Collection endpoints\n/v1/{resource}/{id}      # Single resource endpoints\n/v1/{resource}/{id}/sub  # Nested resource endpoints\n```\n\n**Rules:**\n- Use lowercase, hyphens for multi-word: `/student-fees` not `/studentFees`\n- Use plural nouns for collections: `/users` not `/user`\n- Use HTTP methods semantically: GET (read), POST (create), PUT/PATCH (update), DELETE (remove)\n\n## HTTP Status Codes\n\n| Code | Usage | Example |\n|------|-------|---------|\n| 200 | OK | Successful GET, PUT, PATCH |\n| 201 | Created | Successful POST (resource created) |\n| 202 | Accepted | Async operation started |\n| 204 | No Content | Successful DELETE |\n| 400 | Bad Request | Invalid input, validation failed |\n| 401 | Unauthorized | Missing or invalid auth |\n| 403 | Forbidden | Authenticated but not authorized |\n| 404 | Not Found | Resource doesn't exist |\n| 422 | Unprocessable Entity | Validation errors (Pydantic) |\n| 500 | Internal Server Error | Unexpected server error |\n\n## Request Validation Patterns\n\n### Path Parameters\n\n```python\nfrom fastapi import APIRouter, HTTPException\nfrom typing import Annotated\n\nrouter = APIRouter()\n\n@router.get(\"/fees/{fee_id}\")\nasync def get_fee(fee_id: int):\n    fee = await get_fee_by_id(fee_id)\n    if not fee:\n        raise HTTPException(status_code=404, detail=\"Fee not found\")\n    return fee\n```\n\n### Query Parameters (Pagination, Filtering, Sorting)\n\n```python\n@router.get(\"/fees/\", response_model=List[FeeOut])\nasync def list_fees(\n    skip: int = Query(0, ge=0),\n    limit: int = Query(100, ge=1, le=1000),\n    status: str | None = Query(None, pattern=\"^(pending|paid|overdue)$\"),\n    sort_by: str = Query(\"created_at\", enum=[\"created_at\", \"amount\", \"due_date\"]),\n    sort_order: str = Query(\"desc\", enum=[\"asc\", \"desc\"]),\n):\n    return await paginate_fees(\n        skip=skip,\n        limit=limit,\n        status=status,\n        sort_by=sort_by,\n        sort_order=sort_order,\n    )\n```\n\n### Request Body (Pydantic Models)\n\n```python\nfrom pydantic import BaseModel\nfrom datetime import datetime\n\nclass FeeCreate(BaseModel):\n    student_id: int\n    amount: float = Field(..., gt=0)\n    due_date: datetime\n    description: str | None = None\n\nclass FeeUpdate(BaseModel):\n    amount: float | None = Field(None, gt=0)\n    status: str | None = Field(None, pattern=\"^(pending|paid|overdue)$\")\n    due_date: datetime | None = None\n\n@router.post(\"/fees/\", response_model=FeeOut, status_code=201)\nasync def create_fee(fee_in: FeeCreate):\n    return await create_fee_db(fee_in)\n\n@router.patch(\"/fees/{fee_id}\", response_model=FeeOut)\nasync def update_fee(fee_id: int, fee_in: FeeUpdate):\n    return await update_fee_db(fee_id, fee_in)\n```\n\n## Response Models\n\n### Standard Response Envelope\n\n```python\nclass FeeOut(BaseModel):\n    id: int\n    student_id: int\n    amount: float\n    status: str\n    created_at: datetime\n    due_date: datetime\n\nclass PaginatedResponse(BaseModel):\n    data: List[FeeOut]\n    total: int\n    skip: int\n    limit: int\n    has_more: bool\n```\n\n### Error Response\n\n```python\nclass ErrorResponse(BaseModel):\n    error: str\n    detail: str | None = None\n    code: str | None = None\n```\n\n## Complete Endpoint Example\n\n```python\nfrom fastapi import APIRouter, Depends, HTTPException, Query, status\nfrom typing import List, Annotated\n\nrouter = APIRouter(prefix=\"/v1/fees\", tags=[\"fees\"])\n\n@router.get(\n    \"/\",\n    response_model=PaginatedResponse[FeeOut],\n    summary=\"List fees\",\n    description=\"Retrieve a paginated list of fees with optional filtering.\",\n)\nasync def list_fees(\n    skip: Annotated[int, Query(0, ge=0)] = 0,\n    limit: Annotated[int, Query(100, ge=1, le=1000)] = 100,\n    status: Annotated[str | None, Query(pattern=\"^(pending|paid|overdue)$\")] = None,\n    _current_user: User = Depends(get_current_user),\n) -> PaginatedResponse[FeeOut]:\n    fees, total = await get_fees(\n        skip=skip, limit=limit, status=status, user=_current_user\n    )\n    return PaginatedResponse(\n        data=fees,\n        total=total,\n        skip=skip,\n        limit=limit,\n        has_more=(skip + limit) < total,\n    )\n\n@router.get(\n    \"/{fee_id}\",\n    response_model=FeeOut,\n    responses={404: {\"model\": ErrorResponse}},\n)\nasync def get_fee(\n    fee_id: int,\n    _current_user: User = Depends(get_current_user),\n) -> FeeOut:\n    fee = await get_fee_by_id(fee_id)\n    if not fee:\n        raise HTTPException(\n            status_code=status.HTTP_404_NOT_FOUND,\n            detail=\"Fee not found\",\n        )\n    return fee\n\n@router.post(\n    \"/\",\n    response_model=FeeOut,\n    status_code=status.HTTP_201_CREATED,\n    responses={400: {\"model\": ErrorResponse}},\n)\nasync def create_fee(\n    fee_in: FeeCreate,\n    _current_user: User = Depends(get_current_user),\n) -> FeeOut:\n    return await create_fee_db(fee_in, created_by=_current_user.id)\n```\n\n## Integration with Other Skills\n\n| Skill | Integration Point |\n|-------|-------------------|\n| `@fastapi-app` | Router registration in `main.py` |\n| `@sqlmodel-crud` | Database operations in endpoints |\n| `@jwt-auth` | `Depends(get_current_user)` for protected routes |\n| `@api-client` | Consumer of this API design |\n\n## Quality Checklist\n\n- [ ] **Pagination standard**: Use `skip`/`limit` with `has_more` indicator\n- [ ] **Filtering**: Query params for common filter fields\n- [ ] **Sorting**: `sort_by` and `sort_order` parameters\n- [ ] **Status codes**: 201 for POST, 204 for DELETE, 404 for not found\n- [ ] **Response models**: All endpoints use `response_model`\n- [ ] **Documentation**: `summary` and `description` for OpenAPI\n- [ ] **Error handling**: Consistent error response format\n\n## Pagination Standard\n\n```python\n@router.get(\"/items/\", response_model=PaginatedResponse[ItemOut])\nasync def list_items(\n    skip: int = Query(0, ge=0),\n    limit: int = Query(100, ge=1, le=1000),\n) -> PaginatedResponse[ItemOut]:\n    items, total = await get_items(skip=skip, limit=limit)\n    return PaginatedResponse(\n        data=items,\n        total=total,\n        skip=skip,\n        limit=limit,\n        has_more=(skip + limit) < total,\n    )\n```\n\n## Filtering & Sorting Standard\n\n```python\n@router.get(\"/items/\")\nasync def list_items(\n    # Filtering\n    category: str | None = None,\n    status: str | None = Query(None, pattern=\"^(active|inactive)$\"),\n    min_amount: float | None = Query(None, ge=0),\n    # Sorting\n    sort_by: str = Query(\"created_at\", enum=[\"created_at\", \"amount\", \"name\"]),\n    sort_order: str = Query(\"desc\", enum=[\"asc\", \"desc\"]),\n):\n    return await get_items(\n        filters={\"category\": category, \"status\": status, \"min_amount\": min_amount},\n        order_by=f\"{sort_order} {sort_by.lstrip('-')}\",\n    )\n```\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "api-route-design",
-    "description": "|",
-    "Triggers for": "creating GET/POST/PUT/DELETE endpoints, request validation with Pydantic,",
-    "NOT for": "GraphQL APIs, WebSocket handlers, or non-RESTful endpoints."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

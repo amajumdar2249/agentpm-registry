@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032335",
   "name": "intercom-webhooks-events",
   "slug": "intercom-webhooks-events",
   "description": "Implement Intercom webhook handling and data event tracking.",
   "content": "# Intercom Webhooks & Events\n\n## Overview\n\nHandle incoming Intercom webhooks (notifications) with signature verification and implement outbound data event tracking via the Events API.\n\n## Prerequisites\n\n- HTTPS endpoint accessible from internet\n- Webhook secret from Intercom Developer Hub\n- `intercom-client` SDK installed\n- Redis or database for idempotency (recommended)\n\n## Part 1: Incoming Webhooks (Notifications)\n\n### Step 1: Webhook Endpoint with Signature Verification\n\nIntercom signs webhooks with HMAC-SHA1 via the `X-Hub-Signature` header.\n\n```typescript\nimport express from \"express\";\nimport crypto from \"crypto\";\n\nconst app = express();\n\n// IMPORTANT: Use raw body for signature verification\napp.post(\n  \"/webhooks/intercom\",\n  express.raw({ type: \"application/json\" }),\n  async (req, res) => {\n    const signature = req.headers[\"x-hub-signature\"] as string;\n    const secret = process.env.INTERCOM_WEBHOOK_SECRET!;\n\n    if (!signature) {\n      return res.status(401).json({ error: \"Missing X-Hub-Signature\" });\n    }\n\n    // Verify HMAC-SHA1 signature\n    const expected = \"sha1=\" + crypto\n      .createHmac(\"sha1\", secret)\n      .update(req.body)\n      .digest(\"hex\");\n\n    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {\n      console.error(\"Webhook signature verification failed\");\n      return res.status(401).json({ error: \"Invalid signature\" });\n    }\n\n    // MUST respond within 5 seconds or Intercom treats as failure\n    // Parse and queue for async processing\n    const notification = JSON.parse(req.body.toString());\n    res.status(200).json({ received: true });\n\n    // Process asynchronously after responding\n    processWebhookAsync(notification).catch(console.error);\n  }\n);\n```\n\n### Step 2: Notification Payload Shape\n\n```typescript\n// Every Intercom webhook notification follows this structure\ninterface IntercomNotification {\n  type: \"notification_event\";\n  id: string;                        // Unique notification ID\n  topic: string;                     // e.g., \"conversation.user.created\"\n  app_id: string;                    // Your app ID\n  created_at: number;                // Unix timestamp\n  delivery_attempts: number;         // 1 on first try, 2 on retry\n  data: {\n    type: \"notification_event_data\";\n    item: any;                       // The actual resource (conversation, contact, etc.)\n  };\n}\n\n// Example: conversation.user.created\n// {\n//   \"type\": \"notification_event\",\n//   \"id\": \"notif_abc123\",\n//   \"topic\": \"conversation.user.created\",\n//   \"created_at\": 1711100000,\n//   \"data\": {\n//     \"type\": \"notification_event_data\",\n//     \"item\": {\n//       \"type\": \"conversation\",\n//       \"id\": \"123\",\n//       \"state\": \"open\",\n//       \"source\": { \"body\": \"Hi, I need help!\" },\n//       \"contacts\": { \"contacts\": [{ \"id\": \"contact-1\", \"type\": \"contact\" }] }\n//     }\n//   }\n// }\n```\n\n### Step 3: Topic-Based Event Router\n\n```typescript\ntype WebhookHandler = (data: any) => Promise<void>;\n\nconst handlers: Record<string, WebhookHandler> = {\n  \"conversation.user.created\": async (data) => {\n    const conversation = data.item;\n    console.log(`New conversation: ${conversation.id}`);\n    // Notify support channel, auto-assign, etc.\n  },\n\n  \"conversation.user.replied\": async (data) => {\n    const conversation = data.item;\n    console.log(`Customer replied to: ${conversation.id}`);\n    // Update ticket system, escalate if needed\n  },\n\n  \"conversation.admin.closed\": async (data) => {\n    const conversation = data.item;\n    console.log(`Conversation closed: ${conversation.id}`);\n    // Send satisfaction survey, update CRM\n  },\n\n  \"contact.created\": async (data) => {\n    const contact = data.item;\n    console.log(`New contact: ${contact.id} (${contact.email})`);\n    // Sync to CRM, enrich data, trigger welcome flow\n  },\n\n  \"contact.tag.created\": async (data) => {\n    const contact = data.item;\n    console.log(`Contact tagged: ${contact.id}`);\n    // Trigger automation based on tag\n  },\n};\n\nasync function processWebhookAsync(notification: IntercomNotification): Promise<void> {\n  const handler = handlers[notification.topic];\n\n  if (!handler) {\n    console.log(`Unhandled topic: ${notification.topic}`);\n    return;\n  }\n\n  try {\n    await handler(notification.data);\n    console.log(`Processed ${notification.topic}: ${notification.id}`);\n  } catch (error) {\n    console.error(`Failed ${notification.topic}: ${notification.id}`, error);\n    // Dead-letter queue for failed events\n  }\n}\n```\n\n### Step 4: Idempotency (Prevent Duplicate Processing)\n\nIntercom retries failed webhooks once after 1 minute. Guard against duplicates:\n\n```typescript\nimport { Redis } from \"ioredis\";\n\nconst redis = new Redis(process.env.REDIS_URL);\n\nasync function processIdempotent(\n  notification: IntercomNotification,\n  handler: () => Promise<void>\n): Promise<void> {\n  const key = `intercom:webhook:${notification.id}`;\n\n  // SET NX: only succeeds if key doesn't exist\n  const acquired = await redis.set(key, \"processing\", \"EX\", 86400 * 7, \"NX\");\n\n  if (!acquired) {\n    console.log(`Duplicate webhook skipped: ${notification.id}`);\n    return;\n  }\n\n  try {\n    await handler();\n    await redis.set(key, \"completed\", \"EX\", 86400 * 7);\n  } catch (error) {\n    await redis.del(key); // Allow retry on failure\n    throw error;\n  }\n}\n```\n\n## Part 2: Outbound Data Events\n\nSubmit custom events to track contact activity in Intercom.\n\n### Step 5: Track Data Events\n\n```typescript\nimport { IntercomClient } from \"intercom-client\";\n\nconst client = new IntercomClient({\n  token: process.env.INTERCOM_ACCESS_TOKEN!,\n});\n\n// Submit a data event\nawait client.dataEvents.create({\n  eventName: \"completed-onboarding\",\n  createdAt: Math.floor(Date.now() / 1000),\n  userId: \"user-12345\", // External ID of the contact\n  metadata: {\n    steps_completed: 5,\n    time_to_complete_minutes: 12,\n    plan: \"pro\",\n  },\n});\n\n// Event naming convention: past-tense verb-noun\n// Good: \"placed-order\", \"upgraded-plan\", \"invited-teammate\"\n// Bad: \"order\", \"click\", \"page_view\"\n```\n\n### Step 6: Bulk Event Submission\n\n```typescript\n// Submit events for multiple users efficiently\nasync function trackBulkEvents(\n  client: IntercomClient,\n  events: Array<{ userId: string; eventName: string; metadata?: Record<string, any> }>\n): Promise<{ succeeded: number; failed: number }> {\n  let succeeded = 0;\n  let failed = 0;\n\n  // Intercom doesn't have a batch events endpoint; throttle individual calls\n  for (const event of events) {\n    try {\n      await client.dataEvents.create({\n        eventName: event.eventName,\n        createdAt: Math.floor(Date.now() / 1000),\n        userId: event.userId,\n        metadata: event.metadata,\n      });\n      succeeded++;\n\n      // Rate limit: slight delay between calls\n      if (succeeded % 50 === 0) {\n        await new Promise(r => setTimeout(r, 500));\n      }\n    } catch (error) {\n      failed++;\n      console.error(`Failed to track event for ${event.userId}:`, error);\n    }\n  }\n\n  return { succeeded, failed };\n}\n```\n\n## Available Webhook Topics\n\n| Topic | Description |\n|-------|-------------|\n| `conversation.user.created` | New conversation from contact |\n| `conversation.user.replied` | Contact replies to conversation |\n| `conversation.admin.replied` | Admin replies to conversation |\n| `conversation.admin.closed` | Conversation closed by admin |\n| `conversation.admin.opened` | Conversation reopened |\n| `conversation.admin.snoozed` | Conversation snoozed |\n| `conversation.admin.assigned` | Conversation reassigned |\n| `contact.created` | New contact created |\n| `contact.signed_up` | Lead converts to user |\n| `contact.tag.created` | Tag applied to contact |\n| `contact.tag.deleted` | Tag removed from contact |\n| `visitor.signed_up` | Visitor becomes lead |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Invalid signature | Secret mismatch | Verify secret matches Developer Hub |\n| Timeout (5s) | Slow processing | Queue events, respond immediately |\n| Duplicate events | Retry delivery | Implement idempotency with Redis |\n| Missing topic handler | New topic added | Log unhandled topics, add handler |\n| Event rejected (422) | Invalid user_id or event_name | Verify contact exists, use verb-noun naming |\n\n## Resources\n\n- [Webhook Setup](https://developers.intercom.com/docs/webhooks/setting-up-webhooks)\n- [Webhook Topics](https://developers.intercom.com/docs/references/webhooks/webhook-models)\n- [Webhook Notifications](https://developers.intercom.com/docs/webhooks/webhook-notifications)\n- [Data Events API](https://developers.intercom.com/docs/references/rest-api/api.intercom.io/data-events)\n\n## Next Steps\n\nFor performance optimization, see `intercom-performance-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "intercom-webhooks-events",
-    "description": "Implement Intercom webhook handling and data event tracking.",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

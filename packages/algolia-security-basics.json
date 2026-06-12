@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031208",
   "name": "algolia-security-basics",
   "slug": "algolia-security-basics",
   "description": "Apply Algolia security best practices: API key scoping, secured API",
   "content": "# Algolia Security Basics\n\n## Overview\n\nAlgolia's security model is built around **scoped API keys**. Every Algolia app has three default keys (Admin, Search-Only, Monitoring). For production, create custom keys with minimal permissions and use Secured API Keys for per-user/per-tenant restrictions.\n\n## Key Types and Where to Use Them\n\n| Key Type | ACL | Expose to Frontend? | Use Case |\n|----------|-----|---------------------|----------|\n| Admin | All operations | **NEVER** | Backend indexing, settings, key management |\n| Search-Only | `search` only | Yes (safe) | Frontend search widgets |\n| Monitoring | Read monitoring data | No | Health checks, dashboards |\n| Custom | You define ACL | Depends on ACL | Scoped backend services |\n| Secured | Derived from parent key | Yes | Per-user filtered search |\n\n## Instructions\n\n### Step 1: Environment Variable Setup\n\n```bash\n# .env (NEVER commit \u2014 add to .gitignore)\nALGOLIA_APP_ID=YourApplicationID\nALGOLIA_ADMIN_KEY=admin_api_key_here        # Backend only\nALGOLIA_SEARCH_KEY=search_only_key_here     # OK for frontend\n\n# .gitignore \u2014 MUST include:\n.env\n.env.local\n.env.*.local\n```\n\n### Step 2: Create Scoped API Keys\n\n```typescript\nimport { algoliasearch } from 'algoliasearch';\n\nconst client = algoliasearch(process.env.ALGOLIA_APP_ID!, process.env.ALGOLIA_ADMIN_KEY!);\n\n// Create a write-only key for a specific microservice\nconst { key: indexingKey } = await client.addApiKey({\n  apiKey: {\n    acl: ['addObject', 'deleteObject', 'editSettings'],\n    description: 'Product sync service \u2014 write only',\n    indexes: ['products', 'products_staging'],  // Restrict to specific indices\n    maxQueriesPerIPPerHour: 5000,\n    referers: [],  // Empty = no referer restriction (backend use)\n  },\n});\n\n// Create a search key restricted to specific referers (frontend)\nconst { key: frontendKey } = await client.addApiKey({\n  apiKey: {\n    acl: ['search'],\n    description: 'Frontend search \u2014 domain-restricted',\n    indexes: ['products'],\n    referers: ['https://mystore.com/*', 'https://*.mystore.com/*'],\n    maxQueriesPerIPPerHour: 1000,\n    maxHitsPerQuery: 50,\n  },\n});\n```\n\n### Step 3: Generate Secured API Keys (Per-User Filtering)\n\n```typescript\n// Secured API keys are generated on YOUR server, not via Algolia API.\n// They embed restrictions that the client can't bypass.\n\nfunction generateUserSearchKey(userId: string, tenantId: string): string {\n  const client = algoliasearch(process.env.ALGOLIA_APP_ID!, process.env.ALGOLIA_ADMIN_KEY!);\n\n  return client.generateSecuredApiKey({\n    parentApiKey: process.env.ALGOLIA_SEARCH_KEY!,\n    restrictions: {\n      // User can only see their tenant's data\n      filters: `tenant_id:${tenantId}`,\n      // Key expires in 1 hour\n      validUntil: Math.floor(Date.now() / 1000) + 3600,\n      // Restrict to specific indices\n      restrictIndices: ['products'],\n      // Optional: restrict sources (IPs)\n      restrictSources: '',\n    },\n  });\n}\n\n// Usage in your API endpoint:\n// const userKey = generateUserSearchKey(req.user.id, req.user.tenantId);\n// return { appId: process.env.ALGOLIA_APP_ID, searchKey: userKey };\n```\n\n### Step 4: Key Rotation Procedure\n\n```typescript\nasync function rotateApiKey(oldKeyDescription: string) {\n  const client = algoliasearch(process.env.ALGOLIA_APP_ID!, process.env.ALGOLIA_ADMIN_KEY!);\n\n  // 1. List keys to find the old one\n  const { keys } = await client.listApiKeys();\n  const oldKey = keys.find(k => k.description === oldKeyDescription);\n  if (!oldKey) throw new Error(`Key not found: ${oldKeyDescription}`);\n\n  // 2. Create new key with same ACL\n  const { key: newKey } = await client.addApiKey({\n    apiKey: {\n      acl: oldKey.acl,\n      description: `${oldKeyDescription} (rotated ${new Date().toISOString().split('T')[0]})`,\n      indexes: oldKey.indexes || [],\n      maxQueriesPerIPPerHour: oldKey.maxQueriesPerIPPerHour || 0,\n      referers: oldKey.referers || [],\n    },\n  });\n\n  console.log(`New key created: ...${newKey.slice(-8)}`);\n  console.log('Update your env vars, then delete the old key:');\n  console.log(`  client.deleteApiKey({ key: '${oldKey.value}' })`);\n\n  return newKey;\n}\n```\n\n## Security Checklist\n\n- [ ] Admin key in env vars, never in frontend code or git\n- [ ] `.env` files in `.gitignore`\n- [ ] Frontend uses Search-Only or Secured API key\n- [ ] Custom keys have minimal ACL (least privilege)\n- [ ] `referers` set on frontend keys to prevent abuse\n- [ ] `maxQueriesPerIPPerHour` set on all public keys\n- [ ] Secured API keys have `validUntil` (expiration)\n- [ ] Key rotation scheduled quarterly\n- [ ] Git history scanned for accidentally committed keys\n\n## Error Handling\n\n| Security Issue | Detection | Mitigation |\n|----------------|-----------|------------|\n| Admin key exposed in frontend | Code review, git scanning | Rotate immediately, restrict referers |\n| Key in git history | `git log -S 'ALGOLIA'` | Rotate key, use git-secrets or gitleaks |\n| Excessive ACL on key | Audit key permissions | Create scoped replacement key |\n| Expired secured key | `validUntil` in the past | Generate fresh secured key |\n\n## Resources\n\n- [API Keys Guide](https://www.algolia.com/doc/guides/security/api-keys/)\n- [Secured API Keys](https://www.algolia.com/doc/guides/security/api-keys/in-depth/secured-api-keys/)\n- [API Key Restrictions](https://www.algolia.com/doc/guides/security/api-keys/in-depth/api-key-restrictions/)\n\n## Next Steps\n\nFor production deployment, see `algolia-prod-checklist`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "algolia-security-basics",
-    "description": "Apply Algolia security best practices: API key scoping, secured API",
-    "Trigger": "algolia security\", \"algolia API key security\", \"secure algolia\",",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

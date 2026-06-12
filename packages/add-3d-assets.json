@@ -1,17 +1,48 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000016403",
   "name": "add-3d-assets",
   "slug": "add-3d-assets",
   "description": "Replace primitive 3D shapes with real GLB models \u2014 animated characters, world props, buildings, and scenery for Three.js games. Use when the user says \"add 3D models\", \"replace the boxes with real models\", \"add GLB assets\", or \"make the 3D game look real\". For 2D pixel art, use add-assets instead. Do NOT use for 2D pixel art (use add-assets) or gameplay changes (use add-feature).",
   "content": "\n## Performance Notes\n\n- Take your time to do this thoroughly\n- Quality is more important than speed\n- Do not skip validation steps\n\n# Add 3D Assets\n\nReplace basic geometric shapes (BoxGeometry, SphereGeometry) with real 3D models. Characters get custom Meshy AI-generated models with rigging and animation. World objects get generated or sourced from free libraries.\n\n## Instructions\n\nAnalyze the game at `$ARGUMENTS` (or the current directory if no path given).\n\nFirst, load the game-3d-assets skill and the meshyai skill for the full model pipeline, AssetLoader pattern, Meshy generation, and integration patterns.\n\n### Step 1: Get Meshy API Key\n\nCheck if `MESHY_API_KEY` is set. First check `.env`:\n`test -f .env && grep -q '^MESHY_API_KEY=.' .env && echo \"found\"`\nIf found, export it with `set -a; . .env; set +a` and skip the prompt.\n\nIf not set, ask the user:\n\n> I'll generate custom 3D models with Meshy AI for the best results. You can get a free API key in 30 seconds:\n> 1. Sign up at https://app.meshy.ai\n> 2. Go to Settings \u2192 API Keys\n> 3. Create a new API key\n>\n> Paste your key below like: `MESHY_API_KEY=your-key-here`\n> (It will be saved to .env and redacted from this conversation automatically.)\n>\n> Or type \"skip\" to use free model libraries instead.\n\n### Step 2: Audit\n\n- Read `package.json` to confirm this is a Three.js game (not Phaser \u2014 use `/add-assets` for 2D games)\n- Read `src/core/Constants.js` for entity types, sizes, colors\n- Read entity files (`src/gameplay/*.js`, `src/entities/*.js`) \u2014 find `BoxGeometry`, `SphereGeometry`, etc.\n- Read `src/level/LevelBuilder.js` for environment primitives\n- List every entity using geometric shapes\n- Identify which entity is the **player character** (needs animated model)\n\n### Step 3: Plan\n\nSplit entities into two categories:\n\n**Animated characters** (player, enemies with AI) \u2014 generate with Meshy AI:\n\n| Entity | Meshy Prompt | Notes |\n|--------|-------------|-------|\n| Player | \"a heroic knight, low poly game character, full body, t-pose\" | Generate \u2192 rig \u2192 animate |\n| Enemy | \"a goblin warrior with a club, low poly game character\" | Generate \u2192 rig \u2192 animate |\n\nIf Meshy unavailable, fall back to `assets/3d-characters/`:\n- **Soldier** \u2014 realistic military (Idle, Walk, Run) \u2014 best default\n- **Xbot** \u2014 stylized mannequin (idle, walk, run + additive poses)\n- **RobotExpressive** \u2014 cartoon robot (Idle, Walking, Running, Dance, Jump + 8 more)\n- **Fox** \u2014 low-poly animal (Survey, Walk, Run) \u2014 scale 0.02\n\n**World objects** (buildings, props, scenery, collectibles) \u2014 generate with Meshy or search free libraries:\n\n| Entity | Meshy Prompt | Fallback Source |\n|--------|-------------|-----------------|\n| Tree | \"a low poly stylized tree, game asset\" | Poly Haven |\n| House | \"a medieval house, low poly game asset\" | Poly Haven |\n| Barrel | \"a wooden barrel, low poly game asset\" | Poly Haven |\n| Coin | \"a gold coin, game collectible item\" | Sketchfab |\n\n### Step 4: Generate / Download\n\n**With Meshy (preferred):**\n```bash\n# Generate characters\nMESHY_API_KEY=<key> node <plugin-root>/scripts/meshy-generate.mjs \\\n  --mode text-to-3d \\\n  --prompt \"a heroic knight, low poly game character, full body\" \\\n  --polycount 15000 --pbr \\\n  --output public/assets/models/ --slug player\n\n# Rig characters for animation\nMESHY_API_KEY=<key> node <plugin-root>/scripts/meshy-generate.mjs \\\n  --mode rig --task-id <refine-task-id> --height 1.7 \\\n  --output public/assets/models/ --slug player-rigged\n\n# Generate static props\nMESHY_API_KEY=<key> node <plugin-root>/scripts/meshy-generate.mjs \\\n  --mode text-to-3d \\\n  --prompt \"a wooden barrel, low poly game asset\" \\\n  --polycount 5000 \\\n  --output public/assets/models/ --slug barrel\n```\n\n**Without Meshy (fallback):**\n```bash\n# Characters \u2014 copy from library\ncp <plugin-root>/assets/3d-characters/models/Soldier.glb public/assets/models/\n\n# World objects \u2014 search and download\nnode <plugin-root>/scripts/find-3d-asset.mjs --query \"barrel\" --source polyhaven \\\n  --output public/assets/models/ --slug barrel\n```\n\n### Step 5: Integrate\n\n1. Create `src/level/AssetLoader.js` \u2014 **use `SkeletonUtils.clone()` for animated models** (import from `three/addons/utils/SkeletonUtils.js`). Regular `.clone()` breaks skeleton \u2192 T-pose.\n2. Add `CHARACTER` to Constants.js with `path`, `scale`, `facingOffset`, `clipMap`\n3. Add `ASSET_PATHS` and `MODEL_CONFIG` for static models\n4. Update `Player.js`:\n   - `THREE.Group` as position anchor\n   - `loadAnimatedModel()` + `AnimationMixer`\n   - `fadeToAction()` for idle/walk/run crossfade\n   - Camera-relative WASD via `applyAxisAngle(_up, cameraAzimuth)`\n   - Model facing: `atan2(v.x, v.z) + CHARACTER.facingOffset`\n   - `model.quaternion.rotateTowards(targetQuat, turnSpeed * delta)`\n5. Update `Game.js`:\n   - Add `OrbitControls` \u2014 third-person camera orbiting player\n   - Camera follows: move `orbitControls.target` + `camera.position` by player delta\n   - Pass `orbitControls.getAzimuthalAngle()` to Player for camera-relative movement\n6. Replace environment primitives with `loadModel()` calls + `.catch()` fallback\n7. Add `THREE.GridHelper` for visible movement reference\n8. Preload all models on startup with `preloadAll()` for instant loading\n\n### Step 6: Tune & Verify\n\n- Run `npm run dev` \u2014 walk around with WASD, orbit camera with mouse\n- Confirm character animates (Idle when stopped, Walk when moving, Run with Shift)\n- Adjust `MODEL_CONFIG` values (scale, rotationY, offsetY) per model\n- Run `npm run build` to confirm no errors\n- Generate `ATTRIBUTION.md` from `.meta.json` files\n\n## Example Usage\n\n### With Meshy AI\n```\n/add-3d-assets examples/space-explorer\n```\nResult: Generates custom knight model via Meshy \u2192 rigs and animates (Idle/Walk/Run) \u2192 replaces BoxGeometry player with animated GLB \u2192 adds OrbitControls camera \u2192 world props from free libraries.\n\n### Without Meshy (fallback)\n```\n/add-3d-assets examples/3d-platformer\n```\nResult: Copies Soldier.glb from character library \u2192 configures SkeletonUtils.clone() \u2192 fadeToAction animation crossfade \u2192 replaces all primitives with library/downloaded models.\n\n## Troubleshooting\n\n### Model stuck in T-pose (not animating)\n**Cause:** Using `.clone(true)` instead of `SkeletonUtils.clone()` breaks skeleton bindings on animated GLB models.\n**Fix:** Always use `SkeletonUtils.clone()` from `three/addons/utils/SkeletonUtils.js` for any model with animations. Regular `.clone()` copies the mesh but not the skeleton bindings.\n\n### Meshy AI generation fails or returns low quality\n**Cause:** Vague prompts or wrong generation mode selected.\n**Fix:** Use specific, descriptive prompts (e.g., \"low-poly medieval wooden treasure chest, game asset\" not \"chest\"). For characters, use image-to-3D mode with a reference image. Set art style to \"game-asset\" or \"low-poly\" for better game integration.\n\n### Rigging fails on generated model\n**Cause:** The model geometry is not suitable for auto-rigging (too complex, non-manifold, or not humanoid).\n**Fix:** Simplify the prompt to produce cleaner geometry. Ensure the model is a single connected mesh in a humanoid pose. Non-humanoid models (props, vehicles) should not be rigged \u2014 use them as static assets instead.\n\n### meshopt decoder error on load\n**Cause:** Some GLB files use meshopt compression which requires a decoder not loaded by default.\n**Fix:** Add the meshopt decoder before loading: `import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js'; loader.setMeshoptDecoder(MeshoptDecoder);`\n\n### Model facing wrong direction\n**Cause:** Different model sources use different forward directions. Mixamo models face -Z, some others face +Z.\n**Fix:** Store a `facingOffset` per character model. Apply it as `model.rotation.y = facingOffset + movementAngle`. Common values: Soldier/Xbot need `+Math.PI`, Robot/Fox need `+0`.\n\n## Next Step\n\nTell the user:\n\n> Your 3D game now has custom models! Characters were generated with Meshy AI (or sourced from the model library), rigged, and animated. World objects are loaded from GLB files.\n>\n> **Files created:**\n> - `src/level/AssetLoader.js` \u2014 model loader with SkeletonUtils\n> - `public/assets/models/` \u2014 generated and downloaded GLB models\n> - OrbitControls third-person camera\n>\n> **Controls:** WASD to move, Shift to run, mouse drag to orbit camera, scroll to zoom.\n> Run the game to see everything in action. Adjust `MODEL_CONFIG` in Constants.js to fine-tune scale and orientation.\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "add-3d-assets",
-    "description": "Replace primitive 3D shapes with real GLB models \u2014 animated characters, world props, buildings, and scenery for Three.js games. Use when the user says \"add 3D models\", \"replace the boxes with real models\", \"add GLB assets\", or \"make the 3D game look real\". For 2D pixel art, use add-assets instead. Do NOT use for 2D pixel art (use add-assets) or gameplay changes (use add-feature).",
-    "argument-hint": "[path-to-game]",
-    "license": "MIT",
-    "metadata": "",
-    "author": "OpusGameLabs",
-    "version": "1.3.0",
-    "tags": "[game, 3d, assets, glb, models, threejs]"
+  "author": "OpusGameLabs",
+  "version": "1.3.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "[game",
+    "3d",
+    "assets",
+    "glb",
+    "models",
+    "threejs]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000025963",
   "name": "minara",
   "slug": "minara-2",
   "description": "Minara Agent API offers crypto trading analysis, swap intent conversion, perpetual trading suggestions, and prediction market analysis. Supports API Key and x402 (pay-per-use USDC).",
   "content": "\n# Minara API\n\nCall the [Minara Agent API](https://api.minara.ai) for crypto trading assistance. Two auth options:\n\n| Method      | Base URL                 | Requires                                                         |\n| ----------- | ------------------------ | ---------------------------------------------------------------- |\n| **API Key** | `https://api.minara.ai`  | `MINARA_API_KEY` (Pro/Partner at [minara.ai](https://minara.ai)) |\n| **x402**    | `https://x402.minara.ai` | `EVM_PRIVATE_KEY` + USDC wallet (pay-per-use, no subscription)   |\n\nUse API Key when `MINARA_API_KEY` is set; otherwise use x402 when `EVM_PRIVATE_KEY` is available.\n\n## Endpoints\n\n### 1. Chat\n\n`POST https://api.minara.ai/v1/developer/chat`\n\nGeneral-purpose chat for trading analysis, market insights, and questions.\n\n| Param   | Type    | Required | Description                            |\n| ------- | ------- | -------- | -------------------------------------- |\n| mode    | string  | Yes      | `\"fast\"` or `\"expert\"`                 |\n| stream  | boolean | Yes      | `false` for JSON, `true` for SSE       |\n| message | object  | Yes      | `{ \"role\": \"user\", \"content\": \"...\" }` |\n| chatId  | string  | No       | Continue existing conversation         |\n\nResponse: `{ chatId, messageId, content, usage }`\n\n### 2. Intent to Swap Transaction\n\n`POST https://api.minara.ai/v1/developer/intent-to-swap-tx`\n\nConvert natural language swap intent to an executable transaction payload (OKX DEX compatible).\n\n| Param         | Type   | Required | Description                                                 |\n| ------------- | ------ | -------- | ----------------------------------------------------------- |\n| intent        | string | Yes      | e.g. `\"swap 0.1 ETH to USDC\"`                               |\n| walletAddress | string | Yes      | 0x... address                                               |\n| chain         | string | No       | `\"base\"`, `\"ethereum\"`, `\"bsc\"`, `\"arbitrum\"`, `\"optimism\"` |\n\nResponse: `{ transaction: { chain, inputTokenAddress, inputTokenSymbol, outputTokenAddress, outputTokenSymbol, amount, amountPercentage, slippagePercent } }`\n\n### 3. Perpetual Trading Suggestion\n\n`POST https://api.minara.ai/v1/developer/perp-trading-suggestion`\n\nGet perp trading suggestions: side, entry, stop loss, take profit, confidence.\n\n| Param     | Type   | Required | Description                                                          |\n| --------- | ------ | -------- | -------------------------------------------------------------------- |\n| symbol    | string | Yes      | e.g. `\"BTC\"`, `\"ETH\"`, `\"SOL\"`                                       |\n| style     | string | No       | `\"scalping\"`, `\"day-trading\"`, `\"swing-trading\"` (default: scalping) |\n| marginUSD | number | No       | Default 1000                                                         |\n| leverage  | number | No       | 1\u201340, default 10                                                     |\n| strategy  | string | No       | Default `\"max-profit\"`                                               |\n\nResponse: `{ entryPrice, side, stopLossPrice, takeProfitPrice, confidence, reasons, risks }`\n\n### 4. Prediction Market Analysis\n\n`POST https://api.minara.ai/v1/developer/prediction-market-ask`\n\nAnalyze prediction market events (e.g. Polymarket) and get probability estimates.\n\n| Param        | Type    | Required | Description                               |\n| ------------ | ------- | -------- | ----------------------------------------- |\n| link         | string  | Yes      | Event URL (e.g. Polymarket)               |\n| mode         | string  | Yes      | `\"fast\"` or `\"expert\"`                    |\n| only_result  | boolean | No       | `true` = probabilities only, no reasoning |\n| customPrompt | string  | No       | Custom analysis instructions              |\n\nResponse: `{ predictions: [{ outcome, yesProb, noProb }], reasoning }`\n\n## Usage\n\n### API Key (api.minara.ai)\n\nUse `fetch` or HTTP client:\n\n- URL: endpoint above\n- Method: `POST`\n- Headers: `Authorization: Bearer ${process.env.MINARA_API_KEY}`, `Content-Type: application/json`\n- Body: JSON object per endpoint spec\n\n### x402 (x402.minara.ai)\n\nPay-per-use with USDC. No subscription. See [Getting Started by x402](https://minara.ai/docs/ecosystem/agent-api/getting-started-by-x402).\n\n**Option A: x402 SDK (recommended)**\n\nNode.js example\u2014SDK handles payment challenges automatically:\n\n```typescript\nimport { wrapFetchWithPayment } from \"@x402/fetch\";\nimport { x402Client } from \"@x402/core/client\";\nimport { registerExactEvmScheme } from \"@x402/evm/exact/client\";\nimport { privateKeyToAccount } from \"viem/accounts\";\n\nconst signer = privateKeyToAccount(\n  process.env.EVM_PRIVATE_KEY as `0x${string}`\n);\nconst client = new x402Client();\nregisterExactEvmScheme(client, { signer });\nconst fetchWithPayment = wrapFetchWithPayment(fetch, client);\n\nconst res = await fetchWithPayment(\"https://x402.minara.ai/x402/chat\", {\n  method: \"POST\",\n  headers: { \"Content-Type\": \"application/json\" },\n  body: JSON.stringify({ userQuery: \"What is the current price of BTC?\" }),\n});\nconst data = await res.json();\n```\n\nDependencies: `@x402/fetch`, `@x402/evm`, `viem`. Solana: add `@x402/svm`.\n\n**x402 Chat endpoint** (differs from API Key):\n\n- `POST https://x402.minara.ai/x402/chat`\n- Body: `{ \"userQuery\": \"...\" }` (no mode/stream/message/chatId)\n- Response: `{ content }`\n\nChain-specific: `https://x402.minara.ai/x402/solana/chat`, `https://x402.minara.ai/x402/polygon/chat`\n\n**Option B: Manual 402 flow**\n\n1. Request \u2192 402 with payment instructions (amount, recipient, chain)\n2. Send USDC to recipient\n3. Retry with `x-payment-response` header containing payment proof\n\n## Config\n\n`~/.openclaw/openclaw.json`:\n\n```json\n{\n  \"skills\": {\n    \"entries\": {\n      \"minara\": {\n        \"enabled\": true,\n        \"apiKey\": \"YOUR_MINARA_API_KEY\",\n        \"env\": { \"EVM_PRIVATE_KEY\": \"0x...\" }\n      }\n    }\n  }\n}\n```\n\n- **API Key**: set `apiKey` or `MINARA_API_KEY` in env.\n- **x402**: set `env.EVM_PRIVATE_KEY` or `EVM_PRIVATE_KEY` in env. Wallet must hold USDC. Sandboxed: use `agents.defaults.sandbox.docker.env`.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "minara",
-    "description": "Minara Agent API offers crypto trading analysis, swap intent conversion, perpetual trading suggestions, and prediction market analysis. Supports API Key and x402 (pay-per-use USDC).",
-    "homepage": "https://minara.ai",
-    "metadata": "",
-    "\"openclaw\"": "",
-    "\"always\"": "true,",
-    "\"primaryEnv\"": "MINARA_API_KEY\",",
-    "\"emoji\"": "\ud83d\udc69\",",
-    "\"homepage\"": "https://minara.ai\","
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

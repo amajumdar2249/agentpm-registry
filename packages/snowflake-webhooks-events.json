@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033304",
   "name": "snowflake-webhooks-events",
   "slug": "snowflake-webhooks-events",
   "description": "Implement Snowflake event-driven patterns with alerts, notifications,",
   "content": "# Snowflake Webhooks & Events\n\n## Overview\n\nSnowflake uses alerts, email notifications, external functions, and notification integrations for event-driven patterns (not traditional webhooks).\n\n## Prerequisites\n\n- ACCOUNTADMIN or role with `CREATE ALERT` privilege\n- Email notification integration configured\n- For external functions: API Gateway (AWS/GCP/Azure) configured\n- For S3/GCS event notifications: Snowpipe configured\n\n## Instructions\n\n### Step 1: Snowflake Alerts (Built-in Event System)\n\n```sql\n-- Alert when daily revenue drops below threshold\nCREATE OR REPLACE ALERT revenue_drop_alert\n  WAREHOUSE = ANALYTICS_WH\n  SCHEDULE = '60 MINUTE'\n  IF (EXISTS (\n    SELECT 1\n    FROM daily_order_metrics\n    WHERE metric_date = CURRENT_DATE()\n      AND total_revenue < (\n        SELECT AVG(total_revenue) * 0.5\n        FROM daily_order_metrics\n        WHERE metric_date BETWEEN DATEADD(days, -30, CURRENT_DATE())\n          AND DATEADD(days, -1, CURRENT_DATE())\n      )\n  ))\n  THEN\n    CALL SYSTEM$SEND_EMAIL(\n      'revenue_notifications',\n      'oncall@company.com',\n      'Revenue Alert: Below 50% of 30-day average',\n      'Daily revenue has dropped significantly. Check dashboard.'\n    );\n\nALTER ALERT revenue_drop_alert RESUME;\n\n-- Alert when warehouse credits exceed daily budget\nCREATE OR REPLACE ALERT credit_usage_alert\n  WAREHOUSE = ANALYTICS_WH\n  SCHEDULE = '30 MINUTE'\n  IF (EXISTS (\n    SELECT 1\n    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY\n    WHERE start_time >= CURRENT_DATE()\n    GROUP BY ALL\n    HAVING SUM(credits_used) > 100  -- Daily budget: 100 credits\n  ))\n  THEN\n    CALL SYSTEM$SEND_EMAIL(\n      'ops_notifications',\n      'ops@company.com',\n      'Snowflake Credit Alert',\n      'Daily credit usage has exceeded 100 credits.'\n    );\n\n-- Monitor alert history\nSELECT *\nFROM TABLE(INFORMATION_SCHEMA.ALERT_HISTORY(\n  SCHEDULED_TIME_RANGE_START => DATEADD(hours, -24, CURRENT_TIMESTAMP())\n))\nORDER BY scheduled_time DESC;\n```\n\n### Step 2: Email Notification Integration\n\n```sql\n-- Set up email notification integration\nCREATE OR REPLACE NOTIFICATION INTEGRATION email_notifications\n  TYPE = EMAIL\n  ENABLED = TRUE\n  ALLOWED_RECIPIENTS = (\n    'oncall@company.com',\n    'ops@company.com',\n    'data-team@company.com'\n  );\n\n-- Send email from stored procedure\nCREATE OR REPLACE PROCEDURE send_data_quality_report()\n  RETURNS VARCHAR\n  LANGUAGE SQL\nAS\n$$\nBEGIN\n  LET row_count INTEGER;\n  SELECT COUNT(*) INTO :row_count\n  FROM orders WHERE order_date = CURRENT_DATE() AND amount IS NULL;\n\n  IF (row_count > 0) THEN\n    CALL SYSTEM$SEND_EMAIL(\n      'email_notifications',\n      'data-team@company.com',\n      'Data Quality Issue: NULL amounts detected',\n      row_count || ' orders have NULL amounts today.'\n    );\n    RETURN 'Alert sent for ' || row_count || ' records';\n  END IF;\n  RETURN 'No issues found';\nEND;\n$$;\n```\n\n### Step 3: External Functions (Call External APIs)\n\n```sql\n-- Create API integration for external function\nCREATE OR REPLACE API INTEGRATION my_api_integration\n  API_PROVIDER = aws_api_gateway\n  API_AWS_ROLE_ARN = 'arn:aws:iam::123456789:role/snowflake-api-role'\n  ENABLED = TRUE\n  API_ALLOWED_PREFIXES = ('https://api.execute-api.us-east-1.amazonaws.com/');\n\n-- Create external function that calls your API\nCREATE OR REPLACE EXTERNAL FUNCTION notify_slack(message VARCHAR)\n  RETURNS VARIANT\n  API_INTEGRATION = my_api_integration\n  AS 'https://api.execute-api.us-east-1.amazonaws.com/prod/slack-notify';\n\n-- Use in a task to notify on data changes\nCREATE OR REPLACE TASK notify_new_high_value_orders\n  WAREHOUSE = ANALYTICS_WH\n  SCHEDULE = '15 MINUTE'\n  WHEN SYSTEM$STREAM_HAS_DATA('orders_stream')\nAS\n  SELECT notify_slack(\n    'New high-value order: $' || amount || ' from customer ' || customer_id\n  )\n  FROM orders_stream\n  WHERE METADATA$ACTION = 'INSERT' AND amount >= 10000;\n```\n\n### Step 4: Cloud Event Notifications (S3/GCS/Azure)\n\n```sql\n-- S3 event notification for auto-ingest (Snowpipe)\n-- This triggers when new files land in S3\nCREATE OR REPLACE PIPE auto_ingest_pipe\n  AUTO_INGEST = TRUE\n  AS\n  COPY INTO raw_events\n    FROM @my_s3_stage/events/\n    FILE_FORMAT = my_json_format;\n\n-- Get the SQS queue ARN to configure S3 event notifications\nSHOW PIPES LIKE 'auto_ingest_pipe';\n-- Copy notification_channel value \u2192 S3 bucket event configuration\n\n-- GCS pub/sub notification\nCREATE OR REPLACE NOTIFICATION INTEGRATION gcs_notification\n  TYPE = QUEUE\n  NOTIFICATION_PROVIDER = GCP_PUBSUB\n  ENABLED = TRUE\n  GCP_PUBSUB_SUBSCRIPTION_NAME = 'projects/my-project/subscriptions/snowflake-sub';\n```\n\n### Step 5: Application-Side Event Processing\n\n```typescript\n// src/snowflake/event-processor.ts\n// Poll for changes using streams (app-side consumption)\n\ninterface OrderEvent {\n  ORDER_ID: number;\n  CUSTOMER_ID: number;\n  AMOUNT: number;\n  METADATA$ACTION: 'INSERT' | 'DELETE';\n}\n\nasync function processOrderEvents(conn: snowflake.Connection) {\n  // Check if stream has data\n  const hasData = await query<{ HAS_DATA: boolean }>(conn,\n    \"SELECT SYSTEM$STREAM_HAS_DATA('orders_stream') AS HAS_DATA\"\n  );\n  if (!hasData.rows[0]?.HAS_DATA) return;\n\n  // Consume stream within a transaction\n  await query(conn, 'BEGIN');\n  try {\n    const events = await query<OrderEvent>(conn,\n      'SELECT * FROM orders_stream'\n    );\n\n    for (const event of events.rows) {\n      if (event.METADATA$ACTION === 'INSERT' && event.AMOUNT >= 10000) {\n        await notifySlack(`High-value order: $${event.AMOUNT}`);\n      }\n    }\n\n    // Advance the stream offset by writing to target\n    await query(conn, `\n      INSERT INTO processed_orders\n      SELECT order_id, customer_id, amount, CURRENT_TIMESTAMP()\n      FROM orders_stream WHERE METADATA$ACTION = 'INSERT'\n    `);\n\n    await query(conn, 'COMMIT');\n  } catch (err) {\n    await query(conn, 'ROLLBACK');\n    throw err;\n  }\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Alert not firing | Alert suspended | `ALTER ALERT x RESUME` |\n| Email not delivered | Recipient not in allowlist | Add to `ALLOWED_RECIPIENTS` |\n| External function timeout | API too slow | Increase timeout, check API health |\n| Snowpipe not triggering | S3 event config missing | Configure SQS notification from `SHOW PIPES` |\n| Stream data loss | Stream stale | Recreate stream, increase retention |\n\n## Resources\n\n- [Snowflake Alerts](https://docs.snowflake.com/en/user-guide/alerts)\n- [External Functions](https://docs.snowflake.com/en/sql-reference/external-functions)\n- [Snowpipe Auto-Ingest](https://docs.snowflake.com/en/user-guide/data-load-snowpipe-intro)\n\n## Next Steps\n\nFor performance optimization, see `snowflake-performance-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "snowflake-webhooks-events",
-    "description": "Implement Snowflake event-driven patterns with alerts, notifications,",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

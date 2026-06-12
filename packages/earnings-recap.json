@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009638",
   "name": "earnings-recap",
   "slug": "earnings-recap",
   "description": ">",
   "content": "\n# Earnings Recap Skill\n\nGenerates a post-earnings analysis using Yahoo Finance data via [yfinance](https://github.com/ranaroussi/yfinance). Covers the actual vs estimated numbers, surprise magnitude, stock price reaction, and financial context \u2014 a complete picture of what happened.\n\n**Important**: Data is for research and educational purposes only. Not financial advice. yfinance is not affiliated with Yahoo, Inc.\n\n---\n\n## Step 1: Ensure yfinance Is Available\n\n**Current environment status:**\n\n```\n!`python3 -c \"import yfinance; print('yfinance ' + yfinance.__version__ + ' installed')\" 2>/dev/null || echo \"YFINANCE_NOT_INSTALLED\"`\n```\n\nIf `YFINANCE_NOT_INSTALLED`, install it:\n\n```python\nimport subprocess, sys\nsubprocess.check_call([sys.executable, \"-m\", \"pip\", \"install\", \"-q\", \"yfinance\"])\n```\n\nIf already installed, skip to the next step.\n\n---\n\n## Step 2: Identify the Ticker and Gather Data\n\nExtract the ticker from the user's request. Fetch all relevant post-earnings data in one script.\n\n```python\nimport yfinance as yf\nimport pandas as pd\nfrom datetime import datetime, timedelta\n\nticker = yf.Ticker(\"AAPL\")  # replace with actual ticker\n\n# --- Earnings result ---\nearnings_hist = ticker.earnings_history\n\n# --- Financial statements ---\nquarterly_income = ticker.quarterly_income_stmt\nquarterly_cashflow = ticker.quarterly_cashflow\nquarterly_balance = ticker.quarterly_balance_sheet\n\n# --- Price reaction ---\n# Get ~30 days of history to capture the reaction window\nhist = ticker.history(period=\"1mo\")\n\n# --- Context ---\ninfo = ticker.info\nnews = ticker.news\nrecommendations = ticker.recommendations\n```\n\n### What to extract\n\n| Data Source | Key Fields | Purpose |\n|---|---|---|\n| `earnings_history` | epsEstimate, epsActual, epsDifference, surprisePercent | Beat/miss result |\n| `quarterly_income_stmt` | TotalRevenue, GrossProfit, OperatingIncome, NetIncome, BasicEPS | Actual financials |\n| `history()` | Close prices around earnings date | Stock price reaction |\n| `info` | currentPrice, marketCap, forwardPE | Current context |\n| `news` | Recent headlines | Earnings-related news |\n\n---\n\n## Step 3: Determine the Most Recent Earnings\n\nThe most recent earnings result is the first row (most recent date) in `earnings_history`. Use its date to:\n\n1. **Identify the earnings date** for the price reaction analysis\n2. **Match to the corresponding quarter** in the financial statements\n3. **Calculate stock price reaction** \u2014 compare the close before earnings to the next trading day's close (or open, depending on whether earnings were before/after market)\n\n### Price reaction calculation\n\n```python\nimport numpy as np\n\n# Find the earnings date from earnings_history index\nearnings_date = earnings_hist.index[0]  # most recent\n\n# Get daily prices around the earnings date\nhist_extended = ticker.history(start=earnings_date - timedelta(days=5),\n                                end=earnings_date + timedelta(days=5))\n\n# The reaction is typically measured as:\n# - Close on the last trading day before earnings -> Close on the first trading day after\n# Be careful with before/after market reports\nif len(hist_extended) >= 2:\n    pre_price = hist_extended['Close'].iloc[0]\n    post_price = hist_extended['Close'].iloc[-1]\n    reaction_pct = ((post_price - pre_price) / pre_price) * 100\n```\n\n**Note**: The exact reaction window depends on when the company reported (before market open vs after close). The price data will reflect this \u2014 look for the biggest gap between consecutive closes near the earnings date.\n\n---\n\n## Step 4: Build the Earnings Recap\n\n### Section 1: Headline Result\n\nLead with the key numbers:\n- **EPS**: Actual vs. Estimate, beat/miss by how much, surprise %\n- **Revenue**: Actual vs. prior year (from quarterly_income_stmt TotalRevenue)\n- **Stock reaction**: % move on earnings day\n\nExample: \"AAPL beat Q3 EPS estimates by 3.7% ($1.40 actual vs $1.35 expected). Revenue grew 5.4% YoY to $94.3B. The stock rose +2.1% on the report.\"\n\n### Section 2: Earnings vs. Estimates Detail\n\n| Metric | Estimate | Actual | Surprise |\n|---|---|---|---|\n| EPS | $1.35 | $1.40 | +$0.05 (+3.7%) |\n\nIf the user asked about a specific quarter (not the most recent), look further back in `earnings_history`.\n\n### Section 3: Quarterly Financial Trends\n\nShow the last 4 quarters of key metrics from `quarterly_income_stmt`:\n\n| Quarter | Revenue | YoY Growth | Gross Margin | Operating Margin | EPS |\n|---|---|---|---|---|---|\n| Q3 2024 | $94.3B | +5.4% | 46.2% | 30.1% | $1.40 |\n| Q2 2024 | $85.8B | +4.9% | 46.0% | 29.8% | $1.33 |\n| Q1 2024 | $119.6B | +2.1% | 45.9% | 33.5% | $2.18 |\n| Q4 2023 | $89.5B | -0.3% | 45.2% | 29.2% | $1.26 |\n\nCalculate margins from the raw financials:\n- Gross Margin = GrossProfit / TotalRevenue\n- Operating Margin = OperatingIncome / TotalRevenue\n\n### Section 4: Stock Price Reaction\n\n- The % move on the earnings day/next session\n- How it compares to the stock's average earnings-day move (calculate the average absolute move from the last 4 earnings dates in `earnings_history`)\n- Where the stock is now relative to the earnings-day move (has it held, given back gains, extended further?)\n\n### Section 5: Context & What Changed\n\nBased on the data, note:\n- Whether margins expanded or compressed vs prior quarter\n- Any notable changes in revenue growth trajectory\n- How the beat/miss compares to the stock's historical pattern (from the full `earnings_history`)\n- Current analyst sentiment from `recommendations` if available\n\n---\n\n## Step 5: Respond to the User\n\nPresent the recap as a clean, structured summary:\n\n1. **Lead with the headline**: \"AAPL reported Q3 2024 earnings on [date]: Beat EPS by 3.7%, revenue +5.4% YoY.\"\n2. **Show the tables** for detail\n3. **Highlight what matters**: Was this a meaningful beat or a low-bar situation? Is the trend improving or deteriorating?\n4. **Keep it factual** \u2014 present the data, avoid making investment recommendations\n\n### Caveats to include\n- Yahoo Finance data may not include all details from the earnings call (guidance, segment breakdowns)\n- Revenue estimates are harder to compare precisely \u2014 yfinance provides YoY comparison from financial statements\n- Price reaction may be influenced by broader market moves on the same day\n- This is not financial advice\n\n---\n\n## Reference Files\n\n- `references/api_reference.md` \u2014 Detailed yfinance API reference for earnings history and financial statement methods\n\nRead the reference file when you need exact method signatures or to handle edge cases in the financial data.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "earnings-recap",
-    "description": ">",
-    "Triggers": "AAPL earnings recap\", \"how did TSLA earnings go\", \"MSFT earnings results\","
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

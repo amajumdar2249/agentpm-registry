@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000026477",
   "name": "validate",
   "slug": "validate-4",
   "description": "Produce PASS/WARN/FAIL verdicts.",
   "content": "\n# $validate \u2014 Canonical Validator Skill\n\n> **Role:** validator. Input = artifact (plan, spec, code, PR, fitness gate). Output = `verdict.v1` (PASS / WARN / FAIL with rationale + findings).\n\n> **Status (2026-05-08):** introduced ADDITIVE in Phase 1 (m6v5.D.1 / soc-78s2v). Existing validators (council, vibe, pre-mortem, red-team, pr-validate, validation, review, scenario) stay until Phase 2 shim conversion (m6v5.D.2). Fix-C smoke (`soc-wb2aa`) gates Phase 2.\n\n`$validate` is a driving adapter for the `validate_acceptance` port in the\n[Intent-to-Loop Hexagon](../../docs/architecture/intent-to-loop-hexagon.md).\nWhen the artifact contains a `hexagon:` block, preserve the bounded context,\ncontext packet, guard adapters, and done state in the verdict.\nWhen the artifact claims DONE/closed/green, apply the\n[Completion-Claim Kernel](../shared/validation-contract.md#completion-claim-kernel)\nbefore returning PASS.\n\n## Modes (\u22648 per Fix-F mode-flag budget)\n\n| Mode | Purpose | Replaces (post-Phase 2) |\n|---|---|---|\n| (default) | 2-judge multi-judge consensus on any artifact | `$council` default |\n| `--quick` | Inline single-agent structured review | `$council --quick` |\n| `--deep` | 4-judge thorough review | `$council --deep` |\n| `--mixed` | Cross-vendor (Claude + Codex), N\u00d72 judges | `$council --mixed` |\n| `--debate` | Adversarial 2-round refinement | `$council --debate`, `$red-team` |\n| `--mode=post-impl` | Code-readiness pipeline (complexity \u2192 bug-hunt \u2192 council) | `$vibe` |\n| `--mode=pre-impl [--target=X]` | Plan/spec validation; target \u2208 {scenario,fitness,ratchet,scope,skill,health} | `$pre-mortem`, `$scenario`, `$goals measure`, `$ratchet`, `$scope`, `$skill-auditor`, `ao doctor` |\n| `--mode=pr` | PR-shape verdict (diff review + acceptance check) | `$pr-validate`, `$review` |\n\n**Mode-budget assertion:** 8 modes. Adding a 9th requires demoting an existing one OR refusing the addition (per Fix-F \u00a7 continuous CI gate).\n\n## Quick Start\n\n```bash\n$validate path/to/plan.md                  # default 2-judge consensus\n$validate --quick path/to/plan.md          # inline single-agent\n$validate --deep path/to/spec.md           # 4-judge thorough\n$validate --mode=pre-impl path/to/plan.md  # pre-mortem mode\n$validate --mode=post-impl recent          # vibe mode (post-implement)\n$validate --mode=pr 123                    # PR review by PR number\n$validate --mode=pre-impl --target=fitness # fitness gate against GOALS.md\n```\n\nDefault uses runtime-native subagent spawning. Falls back to `--quick` (inline) when no multi-agent capability detected.\n\n## Execution\n\n### Step 1: Resolve mode + target\n\nParse `--mode` and `--target`. Default mode is multi-judge. Validate combinations:\n\n| Mode | Allowed `--target` |\n|---|---|\n| default, --quick, --deep, --mixed, --debate | n/a |\n| --mode=post-impl | n/a (pipeline scope is recent code changes) |\n| --mode=pre-impl | scenario, fitness, ratchet, scope, skill, health (default: pre-mortem on plan) |\n| --mode=pr | n/a (PR ID/path is positional) |\n\nReject invalid combinations (e.g., `--mode=pr --target=fitness`).\n\n### Step 2: Load artifact + context\n\n```bash\n# resolve artifact:\nARTIFACT=\"${1:-recent}\"  # path, PR ID, or \"recent\"\n\n# load FAIL patterns:\n# (folded into skill body; not a separate hook)\n```\n\nFor `--mode=pre-impl`, also load:\n- `.agents/planning-rules/*.md` (compiled planning rules)\n- `.agents/findings/registry.jsonl` (active findings)\n- `.agents/pre-mortem-checks/*.md` (compiled prevention)\n\nFor `--mode=post-impl`, run pre-checks:\n- complexity audit (radon for python, gocyclo for go)\n- bug-hunt sweep (skill-body convention; no `$bug-hunt` skill needed)\n\nFor `--mode=pr`, fetch the PR diff (`gh pr diff <id>` or path).\n\n### Step 3: Determine spawn backend\n\n1. `spawn_agent` available \u2192 Codex sub-agent\n2. `--mixed` requested and Codex CLI available \u2192 spawn native judges and pair\n   with Codex CLI judge runs\n3. No multi-agent backend available \u2192 fall back to `--quick` (inline\n   single-agent)\n\nLog selected backend in the verdict frontmatter.\n\n### Step 4: Run judges\n\n| Mode | Judges | Perspectives |\n|---|---|---|\n| default | 2 | independent (no labeled perspectives) |\n| --deep | 4 | missing-requirements, feasibility, scope, spec-completeness |\n| --mixed | 2N (default N=3) | same N perspectives across Claude + Codex |\n| --debate | 2+ rounds | adversarial; 2 rounds with critique-rebuttal |\n| --quick | 0 (inline self) | structured review |\n| --mode=post-impl | 2 + pipeline | complexity \u2192 bug-hunt \u2192 2-judge council |\n| --mode=pre-impl | 2-4 | per target preset |\n| --mode=pr | 2 | diff-review + acceptance-check |\n\nEach judge gets:\n- artifact path\n- relevant context (planning rules, findings)\n- council FAIL pattern check prompt (top 8)\n- temporal interrogation prompt (--deep + --target=plan)\n\n### Step 5: Mandatory checks (auto-trigger)\n\nFor `--mode=pre-impl --target=plan`:\n- temporal interrogation (auto for plans with 5+ files or 3+ deps)\n- error & rescue map\n- council FAIL pattern check (top 8)\n- test pyramid coverage check\n- input validation check (enum-like fields)\n\nFor `--mode=post-impl`:\n- L0/L1/L2 coverage check on changed files\n\nFor `--mode=pre-impl --target=fitness`:\n- read GOALS.md\n- evaluate each gate against current state\n- report PASS/WARN/FAIL per gate + aggregate\n\n### Step 6: Consolidate to verdict\n\nEach judge returns a per-judge result. Consolidate:\n- PASS only if all judges PASS (or majority for --deep)\n- WARN if any judge raises a warning the others don't dispute\n- FAIL if any judge raises a blocker the others don't override\n\n### Step 7: Write verdict\n\nOutput path: `.agents/council/YYYY-MM-DD-validate-<topic-slug>.md`\n\n```markdown\n---\nid: validate-YYYY-MM-DD-<slug>\ntype: verdict\ndate: YYYY-MM-DD\nmode: <mode>\ntarget: <target or n/a>\nartifact: <path>\nbackend: <codex-subagents | claude-teams | opencode | inline>\n---\n\n# Validate Verdict \u2014 <topic>\n\n## Council Verdict: PASS / WARN / FAIL\n\n| Failure mode | Risk | Severity | Addressed? |\n|---|---|---|---|\n| ... | ... | ... | ... |\n\n## Pseudocode Fixes (when WARN/FAIL)\n(copy-pastable into affected issues per pre-mortem 4.6 contract)\n\n## FAIL Pattern Check\n(top 8 patterns \u2014 status per pattern)\n\n## Verdict\nPASS \u2014 proceed\nWARN \u2014 review concerns, accept risk, or apply fixes\nFAIL \u2014 block; revise artifact and rerun\n```\n\nThe exact heading `## Council Verdict: PASS / WARN / FAIL` is mandatory \u2014 `ao rpi phased` (when present) parses with anchored regex.\n\n### Step 8: Persist findings (when applicable)\n\nFor `--mode=pre-impl` reusable findings: append to `.agents/findings/registry.jsonl` (atomic temp+rename).\n\n### Step 9: Report\n\n1. Verdict (PASS/WARN/FAIL).\n2. Key concerns (when not PASS).\n3. Output path.\n4. Recommended next action.\n\n## --target taxonomy (pre-impl)\n\n| `--target` | What gets graded | Replaces |\n|---|---|---|\n| (default) | Plan/spec for an upcoming `$implement` | `$pre-mortem` |\n| scenario | Holdout scenario gate | `$scenario` |\n| fitness | GOALS.md fitness gates | `$goals measure`, `ao goals measure` |\n| ratchet | Brownian Ratchet checkpoint | `$ratchet`, `ao ratchet status` |\n| scope | Frozen-dirs declaration | `$scope` |\n| skill | SKILL.md hygiene + audit | `$skill-auditor`, `$heal-skill` (audit half) |\n| health | Repo health probe | `ao doctor` |\n\nEach target has its own inline check rubric until Phase 2 extraction.\n\n## Constraints (one-role-per-skill)\n\n- **One role: validator.** Output is always a verdict. Never mutates code (delegates to `$implement` for fixes).\n- **No new modes** without dropping/merging an existing one (Fix-F mode-budget cap = 8).\n- **Verdict heading is regex-anchored** \u2014 do not alter the `## Council Verdict: ...` text format.\n\n## See Also\n\n- `skills/rpi/SKILL.md` \u2014 orchestrator that fires `$validate --mode=pre-impl` after `$plan`\n- `skills/curate/SKILL.md` \u2014 miner role (paired canonical skill)\n- `schemas/verdict.v1.schema.json` \u2014 output contract\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "validate",
-    "description": "Produce PASS/WARN/FAIL verdicts."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

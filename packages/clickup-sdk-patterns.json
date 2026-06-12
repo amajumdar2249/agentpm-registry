@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031611",
   "name": "clickup-sdk-patterns",
   "slug": "clickup-sdk-patterns",
   "description": "Production-ready ClickUp API v2 client patterns with typed wrappers,",
   "content": "# ClickUp SDK Patterns\n\n## Overview\n\nClickUp has no official SDK. Build a typed REST client wrapper around `https://api.clickup.com/api/v2/`. These patterns provide singleton clients, typed responses, error boundaries, and multi-tenant support.\n\n## Typed Client Wrapper\n\n```typescript\n// src/clickup/client.ts\nconst CLICKUP_BASE = 'https://api.clickup.com/api/v2';\n\ninterface ClickUpClientConfig {\n  token: string;\n  timeout?: number;\n  onRateLimit?: (waitMs: number) => void;\n}\n\nclass ClickUpClient {\n  private token: string;\n  private timeout: number;\n  private rateLimitRemaining = 100;\n  private rateLimitReset = 0;\n\n  constructor(config: ClickUpClientConfig) {\n    this.token = config.token;\n    this.timeout = config.timeout ?? 30000;\n  }\n\n  async request<T>(path: string, options: RequestInit = {}): Promise<T> {\n    const controller = new AbortController();\n    const timer = setTimeout(() => controller.abort(), this.timeout);\n\n    try {\n      const response = await fetch(`${CLICKUP_BASE}${path}`, {\n        ...options,\n        signal: controller.signal,\n        headers: {\n          'Authorization': this.token,\n          'Content-Type': 'application/json',\n          ...options.headers,\n        },\n      });\n\n      // Track rate limit state from response headers\n      this.rateLimitRemaining = parseInt(\n        response.headers.get('X-RateLimit-Remaining') ?? '100'\n      );\n      this.rateLimitReset = parseInt(\n        response.headers.get('X-RateLimit-Reset') ?? '0'\n      ) * 1000;\n\n      if (!response.ok) {\n        const body = await response.json().catch(() => ({}));\n        throw new ClickUpApiError(response.status, body.err, body.ECODE);\n      }\n\n      return response.json();\n    } finally {\n      clearTimeout(timer);\n    }\n  }\n\n  // Convenience methods\n  async getUser(): Promise<ClickUpUser> {\n    const data = await this.request<{ user: ClickUpUser }>('/user');\n    return data.user;\n  }\n\n  async getTeams(): Promise<ClickUpTeam[]> {\n    const data = await this.request<{ teams: ClickUpTeam[] }>('/team');\n    return data.teams;\n  }\n\n  async getSpaces(teamId: string): Promise<ClickUpSpace[]> {\n    const data = await this.request<{ spaces: ClickUpSpace[] }>(\n      `/team/${teamId}/space?archived=false`\n    );\n    return data.spaces;\n  }\n\n  async createTask(listId: string, task: CreateTaskInput): Promise<ClickUpTask> {\n    return this.request<ClickUpTask>(`/list/${listId}/task`, {\n      method: 'POST',\n      body: JSON.stringify(task),\n    });\n  }\n\n  async getTask(taskId: string): Promise<ClickUpTask> {\n    return this.request<ClickUpTask>(`/task/${taskId}`);\n  }\n\n  async updateTask(taskId: string, updates: Partial<CreateTaskInput>): Promise<ClickUpTask> {\n    return this.request<ClickUpTask>(`/task/${taskId}`, {\n      method: 'PUT',\n      body: JSON.stringify(updates),\n    });\n  }\n\n  isRateLimited(): boolean {\n    return this.rateLimitRemaining < 5 && Date.now() < this.rateLimitReset;\n  }\n}\n```\n\n## TypeScript Types\n\n```typescript\n// src/clickup/types.ts\ninterface ClickUpUser {\n  id: number;\n  username: string;\n  email: string;\n  color: string;\n  profilePicture: string | null;\n}\n\ninterface ClickUpTeam {\n  id: string;\n  name: string;\n  color: string;\n  members: Array<{ user: ClickUpUser; role: number }>;\n}\n\ninterface ClickUpSpace {\n  id: string;\n  name: string;\n  private: boolean;\n  statuses: Array<{ status: string; color: string; type: string }>;\n  features: Record<string, { enabled: boolean }>;\n}\n\ninterface ClickUpTask {\n  id: string;\n  custom_id: string | null;\n  name: string;\n  description: string;\n  status: { status: string; color: string; type: string };\n  priority: { id: string; priority: string; color: string } | null;\n  date_created: string;\n  date_updated: string;\n  due_date: string | null;\n  assignees: ClickUpUser[];\n  tags: Array<{ name: string }>;\n  url: string;\n  list: { id: string; name: string };\n  folder: { id: string; name: string };\n  space: { id: string };\n  custom_fields: ClickUpCustomFieldValue[];\n}\n\ninterface CreateTaskInput {\n  name: string;\n  description?: string;\n  markdown_description?: string;\n  assignees?: number[];\n  priority?: 1 | 2 | 3 | 4 | null;\n  status?: string;\n  due_date?: number;\n  due_date_time?: boolean;\n  parent?: string;\n  tags?: string[];\n  custom_fields?: Array<{ id: string; value: any }>;\n}\n\ninterface ClickUpCustomFieldValue {\n  id: string;\n  name: string;\n  type: string;\n  value: any;\n}\n\nclass ClickUpApiError extends Error {\n  constructor(\n    public readonly status: number,\n    public readonly err: string,\n    public readonly ecode?: string,\n  ) {\n    super(`ClickUp API ${status}: ${err}${ecode ? ` (${ecode})` : ''}`);\n  }\n\n  get isRateLimited(): boolean { return this.status === 429; }\n  get isAuthError(): boolean { return this.status === 401; }\n  get isNotFound(): boolean { return this.status === 404; }\n  get isRetryable(): boolean { return this.status === 429 || this.status >= 500; }\n}\n```\n\n## Singleton Pattern\n\n```typescript\n// src/clickup/index.ts\nlet defaultClient: ClickUpClient | null = null;\n\nexport function getClickUpClient(): ClickUpClient {\n  if (!defaultClient) {\n    const token = process.env.CLICKUP_API_TOKEN;\n    if (!token) throw new Error('CLICKUP_API_TOKEN not set');\n    defaultClient = new ClickUpClient({ token });\n  }\n  return defaultClient;\n}\n```\n\n## Multi-Tenant Factory\n\n```typescript\nconst tenantClients = new Map<string, ClickUpClient>();\n\nfunction getClientForTenant(tenantId: string, token: string): ClickUpClient {\n  if (!tenantClients.has(tenantId)) {\n    tenantClients.set(tenantId, new ClickUpClient({ token }));\n  }\n  return tenantClients.get(tenantId)!;\n}\n```\n\n## Zod Response Validation\n\n```typescript\nimport { z } from 'zod';\n\nconst TaskSchema = z.object({\n  id: z.string(),\n  name: z.string(),\n  status: z.object({ status: z.string(), color: z.string() }),\n  priority: z.object({ priority: z.string() }).nullable(),\n  url: z.string().url(),\n});\n\nasync function getValidatedTask(taskId: string) {\n  const raw = await getClickUpClient().getTask(taskId);\n  return TaskSchema.parse(raw);\n}\n```\n\n## Error Handling\n\n| Pattern | Use Case | Benefit |\n|---------|----------|---------|\n| Typed error class | All API calls | Type-safe error discrimination |\n| Singleton | Single-tenant apps | Shared rate limit tracking |\n| Factory | Multi-tenant SaaS | Per-tenant isolation |\n| Zod validation | Response parsing | Catches API contract changes |\n\n## Resources\n\n- [ClickUp API Reference](https://developer.clickup.com/)\n- [Zod Documentation](https://zod.dev/)\n\n## Next Steps\n\nApply patterns in `clickup-core-workflow-a` for task management.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clickup-sdk-patterns",
-    "description": "Production-ready ClickUp API v2 client patterns with typed wrappers,",
-    "Trigger": "clickup client wrapper\", \"clickup SDK patterns\", \"clickup best practices\",",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

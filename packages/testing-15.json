@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000026532",
   "name": "testing",
   "slug": "testing-15",
   "description": "Run and troubleshoot tests for DBHub, including unit tests, integration tests with Testcontainers, and database-specific tests. Use when asked to run tests, fix test failures, debug integration tests, troubleshoot Docker/database container issues, or add new tests. Also use when verifying code changes work correctly or when CI test failures need investigation.",
   "content": "\n# Testing Skill\n\nThis skill helps you run, write, and troubleshoot tests in the DBHub project.\n\n## Test Commands\n\n```bash\npnpm test              # Run all tests (unit + integration)\npnpm test:unit         # Unit tests only (no Docker needed)\npnpm test:watch        # Interactive watch mode\npnpm test:integration  # Integration tests only (requires Docker)\n```\n\nRun a specific test file:\n```bash\npnpm test src/connectors/__tests__/postgres.integration.test.ts\npnpm test src/utils/__tests__/allowed-keywords.test.ts\n```\n\nRun tests matching a name pattern:\n```bash\npnpm test -- --testNamePattern=\"PostgreSQL\"\n```\n\nVerbose output for debugging:\n```bash\npnpm test:integration --reporter=verbose\n```\n\n## Test Architecture\n\nVitest is configured with two projects in `vitest.config.ts`:\n- **unit**: All `*.test.ts` files excluding `*integration*` in the filename\n- **integration**: Only `*integration*.test.ts` files\n\nThis means the naming convention matters \u2014 integration tests MUST have `integration` in their filename to be correctly categorized.\n\n### Test File Locations\n\n**Unit tests** (~20 files, no Docker needed):\n- `src/utils/__tests__/` \u2014 Utility function tests (SQL parsing, DSN obfuscation, SSH config, allowed keywords, identifier quoting, parameter mapping, row limiting, safe URL, config watcher, AWS RDS signer)\n- `src/tools/__tests__/` \u2014 Tool handler tests (execute-sql, search-objects, custom-tool-handler)\n- `src/config/__tests__/` \u2014 Configuration tests (env parsing, TOML loading)\n- `src/connectors/__tests__/` \u2014 Connector unit tests (dsn-parser, manager)\n- `src/requests/__tests__/` \u2014 Request store tests\n\n**Integration tests** (~11 files, Docker required):\n- `src/connectors/__tests__/postgres.integration.test.ts`\n- `src/connectors/__tests__/mysql.integration.test.ts`\n- `src/connectors/__tests__/mariadb.integration.test.ts`\n- `src/connectors/__tests__/sqlserver.integration.test.ts`\n- `src/connectors/__tests__/sqlite.integration.test.ts`\n- `src/connectors/__tests__/postgres-ssh.integration.test.ts`\n- `src/connectors/__tests__/multi-sqlite-sources.integration.test.ts`\n- `src/__tests__/json-rpc-integration.test.ts`\n- `src/api/__tests__/sources.integration.test.ts`\n- `src/api/__tests__/requests.integration.test.ts`\n- `src/config/__tests__/ssh-config-integration.test.ts`\n\n### IntegrationTestBase\n\nDatabase connector integration tests extend `IntegrationTestBase<TContainer>` from `src/connectors/__tests__/shared/integration-test-base.ts`. This abstract class provides:\n\n- **Lifecycle**: Container start in `beforeAll` (120s timeout) \u2192 connect \u2192 setup test data \u2192 run tests \u2192 cleanup in `afterAll`\n- **Shared test suites**: `createConnectionTests()`, `createSchemaTests()`, `createTableTests()`, `createSQLExecutionTests()`, `createStoredProcedureTests()`, `createCommentTests()`, `createErrorHandlingTests()`\n- **Standard test data**: `users` table (id, name, email, age) + `orders` table (id, user_id, amount) + `test_schema.products`\n\nTo add a new database connector test, extend this class and implement:\n- `createContainer()` \u2014 Start the Testcontainers instance\n- `createConnector()` \u2014 Create the database connector\n- `setupTestData(connector)` \u2014 Populate test tables\n\n### Test Fixtures\n\nLocated in `src/__fixtures__/`:\n- `helpers.ts` \u2014 Utilities: `fixtureTomlPath()`, `loadFixtureConfig()`, `setupManagerWithFixture()`\n- `toml/multi-sqlite.toml` \u2014 Three in-memory SQLite databases (database_a, database_b, database_c)\n- `toml/readonly-maxrows.toml` \u2014 Sources with readonly/max_rows tool configurations\n\nUsage:\n```typescript\nimport { setupManagerWithFixture, FIXTURES } from '../../__fixtures__/helpers.js';\nconst manager = await setupManagerWithFixture(FIXTURES.MULTI_SQLITE);\n// ... test ...\nawait manager.disconnect();\n```\n\n### Mocking Patterns\n\nUnit tests use vitest mocking:\n```typescript\nvi.mock('../../connectors/manager.js');  // Mock ConnectorManager\nvi.mocked(ConnectorManager.getCurrentConnector).mockReturnValue(mockConnector);\n```\n\nSSH tunnel tests mock `SSHTunnel.prototype.establish` to avoid real SSH connections while testing config passing.\n\n## Integration Testing\n\nIntegration tests use [Testcontainers](https://testcontainers.com/) to run real database instances in Docker.\n\n### Prerequisites\n\nBefore running integration tests:\n1. Docker is installed and running: `docker ps`\n2. Sufficient Docker memory (4GB+ recommended, especially for SQL Server)\n3. Network access to pull Docker images\n\n### Database Images\n\n| Database | Image | Notes |\n|----------|-------|-------|\n| PostgreSQL | `postgres:15-alpine` | Fast startup |\n| MySQL | `@testcontainers/mysql` | Supports IAM auth testing |\n| MariaDB | `@testcontainers/mariadb` | Supports IAM auth testing |\n| SQL Server | `@testcontainers/mssqlserver` | Slow startup (3-5 min), needs 4GB+ RAM |\n| SQLite | No container needed | In-memory or file-based |\n\n## Troubleshooting\n\n### Container Startup Failures\n```bash\ndocker ps                    # Verify Docker is running\ndocker system df             # Check disk space\ndocker pull postgres:15-alpine  # Manually pull images\n```\n\n### SQL Server Timeouts\nSQL Server containers are the slowest to start (3-5 minutes). Run them separately and ensure Docker has 4GB+ memory:\n```bash\npnpm test src/connectors/__tests__/sqlserver.integration.test.ts\n```\n\n### Test Isolation Issues\nEach integration test manages its own container lifecycle. If containers leak, clean up:\n```bash\ndocker ps -a | grep testcontainers  # Find leaked containers\ndocker container prune               # Clean up stopped containers\n```\n\n### CI Failures\nThe CI workflow (`.github/workflows/run-tests.yml`) runs unit and integration tests as separate parallel jobs on PR events. Unit tests don't need Docker; integration tests verify Docker availability first. Check the specific job that failed.\n\n## Adding New Tests\n\n**Unit test**: Create `src/{module}/__tests__/{name}.test.ts` \u2014 will auto-run with `pnpm test:unit`.\n\n**Integration test**: Create `src/{module}/__tests__/{name}.integration.test.ts` \u2014 the `integration` in the filename is what routes it to `pnpm test:integration`.\n\n**New connector test**: Extend `IntegrationTestBase`, implement the three abstract methods, and call the shared test suite methods.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "testing",
-    "description": "Run and troubleshoot tests for DBHub, including unit tests, integration tests with Testcontainers, and database-specific tests. Use when asked to run tests, fix test failures, debug integration tests, troubleshoot Docker/database container issues, or add new tests. Also use when verifying code changes work correctly or when CI test failures need investigation."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

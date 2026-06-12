@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031137",
   "name": "abridge-upgrade-migration",
   "slug": "abridge-upgrade-migration",
   "description": "Plan and execute Abridge integration upgrades and EHR migration procedures.",
   "content": "# Abridge Upgrade & Migration\n\n## Overview\n\nProcedures for upgrading Abridge API integrations and migrating between EHR systems. Healthcare migrations are high-risk \u2014 clinical documentation cannot have gaps.\n\n## Common Migration Scenarios\n\n| Scenario | Complexity | Downtime | Risk |\n|----------|-----------|----------|------|\n| API version bump (v1 \u2192 v2) | Medium | Zero (dual-version) | Low |\n| EHR migration (Epic \u2192 Athena) | High | Planned window | High |\n| New specialty onboarding | Low | Zero | Low |\n| Note template changes | Medium | Zero | Medium |\n| Multi-site rollout | High | Per-site windows | Medium |\n\n## Instructions\n\n### Step 1: API Version Migration\n\n```typescript\n// src/migration/api-version-adapter.ts\n// Dual-version adapter for zero-downtime API upgrades\n\ninterface ApiVersionConfig {\n  v1BaseUrl: string;  // Current production\n  v2BaseUrl: string;  // New version (canary)\n  canaryPercent: number;  // Percentage of traffic to v2\n}\n\nclass AbridgeVersionAdapter {\n  constructor(private config: ApiVersionConfig) {}\n\n  getBaseUrl(): string {\n    // Gradual canary rollout\n    const useV2 = Math.random() * 100 < this.config.canaryPercent;\n    return useV2 ? this.config.v2BaseUrl : this.config.v1BaseUrl;\n  }\n\n  // Map v1 response to v2 format (or vice versa)\n  normalizeNoteResponse(response: any, version: 'v1' | 'v2'): any {\n    if (version === 'v1') {\n      return {\n        ...response,\n        // v2 adds quality_metrics \u2014 provide defaults for v1\n        quality_metrics: response.quality_metrics || {\n          confidence_score: response.confidence || 0,\n          completeness_score: 0,\n          coding_accuracy: 0,\n        },\n      };\n    }\n    return response;\n  }\n}\n```\n\n### Step 2: EHR Migration Procedure\n\n```typescript\n// src/migration/ehr-migration.ts\ninterface EhrMigrationPlan {\n  sourceEhr: 'epic' | 'athena' | 'cerner' | 'eclinicalworks';\n  targetEhr: 'epic' | 'athena' | 'cerner' | 'eclinicalworks';\n  migrationDate: Date;\n  providerCount: number;\n  steps: MigrationStep[];\n}\n\ninterface MigrationStep {\n  order: number;\n  name: string;\n  description: string;\n  rollbackable: boolean;\n  estimatedMinutes: number;\n}\n\nfunction generateMigrationPlan(source: string, target: string): EhrMigrationPlan {\n  return {\n    sourceEhr: source as any,\n    targetEhr: target as any,\n    migrationDate: new Date(),\n    providerCount: 0, // Set per org\n    steps: [\n      { order: 1, name: 'Freeze new enrollments', description: 'Stop new provider enrollments on source EHR', rollbackable: true, estimatedMinutes: 5 },\n      { order: 2, name: 'Export note templates', description: 'Export all custom note templates and SmartPhrases', rollbackable: true, estimatedMinutes: 30 },\n      { order: 3, name: 'Configure target EHR', description: 'Set up FHIR endpoints and OAuth for target EHR', rollbackable: true, estimatedMinutes: 60 },\n      { order: 4, name: 'Parallel run', description: 'Run both EHRs for 1 week \u2014 compare note output', rollbackable: true, estimatedMinutes: 10080 },\n      { order: 5, name: 'Provider re-enrollment', description: 'Re-enroll providers on target EHR', rollbackable: true, estimatedMinutes: 120 },\n      { order: 6, name: 'Cutover', description: 'Switch primary EHR integration to target', rollbackable: true, estimatedMinutes: 15 },\n      { order: 7, name: 'Decommission source', description: 'Disable source EHR integration after 30-day soak', rollbackable: false, estimatedMinutes: 30 },\n    ],\n  };\n}\n```\n\n### Step 3: Note Template Migration\n\n```typescript\n// src/migration/template-migration.ts\ninterface NoteTemplate {\n  id: string;\n  name: string;\n  specialty: string;\n  sections: string[];\n  smartPhrases: Record<string, string>;  // Epic-specific\n}\n\nasync function migrateTemplates(\n  sourceApi: any,\n  targetApi: any,\n): Promise<{ migrated: number; failed: string[] }> {\n  const { data: templates } = await sourceApi.get('/note-templates');\n  const failed: string[] = [];\n  let migrated = 0;\n\n  for (const template of templates) {\n    try {\n      // Remove EHR-specific fields\n      const { smartPhrases, ...portable } = template;\n\n      await targetApi.post('/note-templates', {\n        ...portable,\n        // Map SmartPhrases to target EHR equivalent if applicable\n      });\n      migrated++;\n    } catch (err) {\n      failed.push(template.id);\n    }\n  }\n\n  return { migrated, failed };\n}\n```\n\n## Rollback Procedures\n\n```bash\n#!/bin/bash\n# scripts/abridge-migration-rollback.sh\n\necho \"=== Migration Rollback ===\"\necho \"Step 1: Revert FHIR endpoint to source EHR\"\necho \"Step 2: Re-enable source EHR Abridge module\"\necho \"Step 3: Notify providers of rollback\"\necho \"Step 4: Verify note generation on source EHR\"\necho \"=== Rollback Complete ===\"\n```\n\n## Output\n\n- Dual-version API adapter for zero-downtime upgrades\n- EHR migration plan with parallel run validation\n- Note template migration with rollback\n- Provider re-enrollment procedure\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Template incompatible | EHR-specific fields | Strip EHR-specific data before migration |\n| Provider enrollment fails | Credentials not migrated | Re-issue provider credentials on target |\n| Note format mismatch | Different FHIR profiles | Map FHIR profiles between EHR systems |\n\n## Resources\n\n- [Abridge Platform](https://www.abridge.com/product)\n- [HL7 FHIR Migration Guide](https://hl7.org/fhir/R4/comparison.html)\n\n## Next Steps\n\nFor CI/CD pipeline setup, see `abridge-ci-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "abridge-upgrade-migration",
-    "description": "Plan and execute Abridge integration upgrades and EHR migration procedures.",
-    "Trigger": "abridge upgrade\", \"abridge migration\", \"abridge version update\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

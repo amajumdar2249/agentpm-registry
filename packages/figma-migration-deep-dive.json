@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031920",
   "name": "figma-migration-deep-dive",
   "slug": "figma-migration-deep-dive",
   "description": "Migrate design systems between Figma files, or from other tools to Figma",
   "content": "# Figma Migration Deep Dive\n\n## Overview\n\nAutomate migration of design data between Figma files, from other tools to Figma, or from Figma styles to the Variables API. Covers inventory, extraction, transformation, and validation.\n\n## Prerequisites\n\n- Source and destination Figma file keys\n- `FIGMA_PAT` with `file_content:read` and `file_variables:write` (Enterprise) scopes\n- Understanding of source file structure\n\n## Instructions\n\n### Step 1: Inventory Source File\n\n```typescript\nconst PAT = process.env.FIGMA_PAT!;\n\nasync function inventoryFile(fileKey: string) {\n  const res = await fetch(\n    `https://api.figma.com/v1/files/${fileKey}`,\n    { headers: { 'X-Figma-Token': PAT } }\n  );\n  const file = await res.json();\n\n  const inventory = {\n    name: file.name,\n    pages: file.document.children.map((p: any) => p.name),\n    componentCount: Object.keys(file.components).length,\n    styleCount: Object.keys(file.styles).length,\n    styles: {\n      fills: Object.values(file.styles).filter((s: any) => s.style_type === 'FILL').length,\n      text: Object.values(file.styles).filter((s: any) => s.style_type === 'TEXT').length,\n      effects: Object.values(file.styles).filter((s: any) => s.style_type === 'EFFECT').length,\n      grids: Object.values(file.styles).filter((s: any) => s.style_type === 'GRID').length,\n    },\n  };\n\n  // Count total nodes\n  let nodeCount = 0;\n  function countNodes(node: any) {\n    nodeCount++;\n    if (node.children) node.children.forEach(countNodes);\n  }\n  countNodes(file.document);\n  (inventory as any).totalNodes = nodeCount;\n\n  return inventory;\n}\n\n// Usage\nconst inv = await inventoryFile(process.env.FIGMA_FILE_KEY!);\nconsole.log(`File: ${inv.name}`);\nconsole.log(`Pages: ${inv.pages.join(', ')}`);\nconsole.log(`Components: ${inv.componentCount}, Styles: ${inv.styleCount}`);\nconsole.log(`Total nodes: ${(inv as any).totalNodes}`);\n```\n\n### Step 2: Extract Styles from Source\n\n```typescript\nasync function extractAllStyles(fileKey: string) {\n  const file = await fetch(\n    `https://api.figma.com/v1/files/${fileKey}`,\n    { headers: { 'X-Figma-Token': PAT } }\n  ).then(r => r.json());\n\n  const styleNodeIds = Object.keys(file.styles);\n  const nodesRes = await fetch(\n    `https://api.figma.com/v1/files/${fileKey}/nodes?ids=${styleNodeIds.join(',')}`,\n    { headers: { 'X-Figma-Token': PAT } }\n  ).then(r => r.json());\n\n  const extracted = [];\n  for (const [nodeId, styleMeta] of Object.entries(file.styles) as any[]) {\n    const node = nodesRes.nodes[nodeId]?.document;\n    if (!node) continue;\n\n    extracted.push({\n      name: styleMeta.name,\n      type: styleMeta.style_type,\n      nodeId,\n      data: {\n        fills: node.fills,\n        strokes: node.strokes,\n        effects: node.effects,\n        style: node.style,       // typography\n        characters: node.characters,\n      },\n    });\n  }\n\n  return extracted;\n}\n```\n\n### Step 3: Transform and Map to Target\n\n```typescript\n// Map extracted styles to design tokens JSON\ninterface MigrationToken {\n  name: string;\n  category: 'color' | 'typography' | 'effect';\n  source: { file: string; nodeId: string };\n  value: any;\n}\n\nfunction transformStyles(styles: any[], sourceFileKey: string): MigrationToken[] {\n  return styles.map(style => {\n    switch (style.type) {\n      case 'FILL':\n        const fill = style.data.fills?.[0];\n        return {\n          name: style.name,\n          category: 'color' as const,\n          source: { file: sourceFileKey, nodeId: style.nodeId },\n          value: fill?.color\n            ? {\n                r: Math.round(fill.color.r * 255),\n                g: Math.round(fill.color.g * 255),\n                b: Math.round(fill.color.b * 255),\n                a: fill.color.a ?? 1,\n              }\n            : null,\n        };\n      case 'TEXT':\n        return {\n          name: style.name,\n          category: 'typography' as const,\n          source: { file: sourceFileKey, nodeId: style.nodeId },\n          value: style.data.style\n            ? {\n                fontFamily: style.data.style.fontFamily,\n                fontSize: style.data.style.fontSize,\n                fontWeight: style.data.style.fontWeight,\n                lineHeight: style.data.style.lineHeightPx,\n              }\n            : null,\n        };\n      default:\n        return {\n          name: style.name,\n          category: 'effect' as const,\n          source: { file: sourceFileKey, nodeId: style.nodeId },\n          value: style.data.effects,\n        };\n    }\n  }).filter(t => t.value !== null);\n}\n```\n\n### Step 4: Write to Target (Variables API)\n\n```typescript\n// Enterprise only: create variables in the target file\nasync function migrateToVariables(\n  targetFileKey: string,\n  tokens: MigrationToken[]\n) {\n  const colorTokens = tokens.filter(t => t.category === 'color');\n\n  // Create variable collection and variables\n  const payload = {\n    variableCollections: [{\n      action: 'CREATE' as const,\n      id: 'temp_collection_1',\n      name: 'Migrated Colors',\n    }],\n    variables: colorTokens.map((token, i) => ({\n      action: 'CREATE' as const,\n      id: `temp_var_${i}`,\n      name: token.name.replace(/\\//g, '/'), // preserve Figma group paths\n      variableCollectionId: 'temp_collection_1',\n      resolvedType: 'COLOR' as const,\n      codeSyntax: { WEB: `--${token.name.toLowerCase().replace(/[\\s/]+/g, '-')}` },\n    })),\n    variableModeValues: colorTokens.map((token, i) => ({\n      variableId: `temp_var_${i}`,\n      modeId: '', // Will use default mode\n      value: {\n        r: token.value.r / 255,\n        g: token.value.g / 255,\n        b: token.value.b / 255,\n        a: token.value.a,\n      },\n    })),\n  };\n\n  const res = await fetch(\n    `https://api.figma.com/v1/files/${targetFileKey}/variables`,\n    {\n      method: 'POST',\n      headers: {\n        'X-Figma-Token': PAT,\n        'Content-Type': 'application/json',\n      },\n      body: JSON.stringify(payload),\n    }\n  );\n\n  if (!res.ok) throw new Error(`Variable creation failed: ${res.status} ${await res.text()}`);\n  return res.json();\n}\n```\n\n### Step 5: Validation\n\n```typescript\nasync function validateMigration(\n  sourceFileKey: string,\n  targetFileKey: string\n): Promise<{ passed: boolean; issues: string[] }> {\n  const sourceStyles = await extractAllStyles(sourceFileKey);\n  const targetVars = await fetch(\n    `https://api.figma.com/v1/files/${targetFileKey}/variables/local`,\n    { headers: { 'X-Figma-Token': PAT } }\n  ).then(r => r.json());\n\n  const issues: string[] = [];\n  const targetNames = new Set(\n    Object.values(targetVars.meta.variables).map((v: any) => v.name)\n  );\n\n  for (const style of sourceStyles) {\n    if (style.type === 'FILL' && !targetNames.has(style.name)) {\n      issues.push(`Missing in target: ${style.name}`);\n    }\n  }\n\n  return { passed: issues.length === 0, issues };\n}\n```\n\n## Output\n\n- Source file inventoried (components, styles, nodes)\n- Styles extracted and transformed to tokens\n- Tokens written to target file via Variables API\n- Migration validated with comparison report\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| 403 on Variables POST | Not Enterprise | Use JSON export instead of Variables API |\n| Duplicate variable names | Name collision in target | Add prefix/suffix to migrated names |\n| Missing node data | Node deleted between fetch and read | Re-fetch with error handling |\n| Large file timeout | File >100MB | Use `/nodes` endpoint for specific pages |\n\n## Resources\n\n- [Figma Variables API](https://developers.figma.com/docs/rest-api/variables-endpoints/)\n- [Figma File Endpoints](https://developers.figma.com/docs/rest-api/file-endpoints/)\n- [Design Tokens Format](https://design-tokens.github.io/community-group/format/)\n\n## Next Steps\n\nFor advanced troubleshooting, see `figma-advanced-troubleshooting`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "figma-migration-deep-dive",
-    "description": "Migrate design systems between Figma files, or from other tools to Figma",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(node:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

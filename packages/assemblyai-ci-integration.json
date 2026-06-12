@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031343",
   "name": "assemblyai-ci-integration",
   "slug": "assemblyai-ci-integration",
   "description": "Configure AssemblyAI CI/CD integration with GitHub Actions and testing.",
   "content": "# AssemblyAI CI Integration\n\n## Overview\n\nSet up CI/CD pipelines for AssemblyAI transcription projects with unit tests (mocked), integration tests (live API), and cost-controlled test strategies.\n\n## Prerequisites\n\n- GitHub repository with Actions enabled\n- AssemblyAI API key for testing\n- npm/pnpm project configured\n\n## Instructions\n\n### Step 1: GitHub Actions Workflow\n\n```yaml\n# .github/workflows/assemblyai-tests.yml\nname: AssemblyAI Tests\n\non:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n\njobs:\n  unit-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n      - run: npm test -- --coverage\n        # Unit tests use mocked AssemblyAI client \u2014 no API key needed\n\n  integration-tests:\n    runs-on: ubuntu-latest\n    # Only run on main branch to limit API costs\n    if: github.ref == 'refs/heads/main'\n    env:\n      ASSEMBLYAI_API_KEY: ${{ secrets.ASSEMBLYAI_API_KEY }}\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n      - run: npm run test:integration\n        timeout-minutes: 5\n```\n\n### Step 2: Configure Secrets\n\n```bash\n# Store API key as GitHub secret\ngh secret set ASSEMBLYAI_API_KEY --body \"your-test-api-key\"\n\n# Use a separate test key with lower quota to control costs\n# Get one from https://www.assemblyai.com/app/account\n```\n\n### Step 3: Unit Tests (Mocked \u2014 Free, Fast)\n\n```typescript\n// tests/unit/transcription.test.ts\nimport { describe, it, expect, vi, beforeEach } from 'vitest';\nimport { AssemblyAI } from 'assemblyai';\n\nvi.mock('assemblyai', () => ({\n  AssemblyAI: vi.fn().mockImplementation(() => ({\n    transcripts: {\n      transcribe: vi.fn().mockResolvedValue({\n        id: 'mock-transcript-id',\n        status: 'completed',\n        text: 'Hello world, this is a test transcription.',\n        audio_duration: 5.2,\n        words: [\n          { text: 'Hello', start: 0, end: 300, confidence: 0.99 },\n          { text: 'world', start: 310, end: 600, confidence: 0.98 },\n        ],\n        utterances: [\n          { speaker: 'A', text: 'Hello world, this is a test transcription.', start: 0, end: 5200 },\n        ],\n      }),\n      get: vi.fn(),\n      list: vi.fn().mockResolvedValue({\n        transcripts: [{ id: 'mock-1', status: 'completed' }],\n      }),\n      delete: vi.fn().mockResolvedValue({}),\n    },\n    lemur: {\n      task: vi.fn().mockResolvedValue({\n        request_id: 'mock-lemur-id',\n        response: 'This is a greeting recording.',\n      }),\n      summary: vi.fn().mockResolvedValue({\n        response: 'The audio contains a greeting.',\n      }),\n    },\n  })),\n}));\n\ndescribe('TranscriptionService', () => {\n  it('should transcribe audio and return text', async () => {\n    const client = new AssemblyAI({ apiKey: 'test-key' });\n    const result = await client.transcripts.transcribe({\n      audio: 'https://example.com/test.wav',\n    });\n\n    expect(result.status).toBe('completed');\n    expect(result.text).toContain('Hello world');\n    expect(result.words).toHaveLength(2);\n  });\n\n  it('should handle speaker diarization', async () => {\n    const client = new AssemblyAI({ apiKey: 'test-key' });\n    const result = await client.transcripts.transcribe({\n      audio: 'https://example.com/test.wav',\n      speaker_labels: true,\n    });\n\n    expect(result.utterances).toBeDefined();\n    expect(result.utterances![0].speaker).toBe('A');\n  });\n\n  it('should run LeMUR task', async () => {\n    const client = new AssemblyAI({ apiKey: 'test-key' });\n    const { response } = await client.lemur.task({\n      transcript_ids: ['mock-transcript-id'],\n      prompt: 'Summarize.',\n    });\n\n    expect(response).toBeTruthy();\n  });\n});\n```\n\n### Step 4: Integration Tests (Live API \u2014 Controlled)\n\n```typescript\n// tests/integration/assemblyai.test.ts\nimport { describe, it, expect } from 'vitest';\nimport { AssemblyAI } from 'assemblyai';\n\n// Use a short, free sample audio to minimize costs\nconst TEST_AUDIO = 'https://storage.googleapis.com/aai-web-samples/5_common_sports_702.wav';\n\nconst skipIfNoKey = !process.env.ASSEMBLYAI_API_KEY;\n\ndescribe.skipIf(skipIfNoKey)('AssemblyAI Integration', () => {\n  const client = new AssemblyAI({\n    apiKey: process.env.ASSEMBLYAI_API_KEY!,\n  });\n\n  it('should transcribe a short audio file', async () => {\n    const transcript = await client.transcripts.transcribe({\n      audio: TEST_AUDIO,\n    });\n\n    expect(transcript.status).toBe('completed');\n    expect(transcript.text).toBeTruthy();\n    expect(transcript.audio_duration).toBeGreaterThan(0);\n    expect(transcript.words?.length).toBeGreaterThan(0);\n  }, 60_000); // 60s timeout for transcription\n\n  it('should list recent transcripts', async () => {\n    const page = await client.transcripts.list({ limit: 5 });\n    expect(page.transcripts).toBeDefined();\n    expect(Array.isArray(page.transcripts)).toBe(true);\n  });\n\n  it('should run LeMUR on a transcript', async () => {\n    const transcript = await client.transcripts.transcribe({\n      audio: TEST_AUDIO,\n    });\n\n    const { response } = await client.lemur.task({\n      transcript_ids: [transcript.id],\n      prompt: 'What is this about? One sentence.',\n    });\n\n    expect(response).toBeTruthy();\n    expect(response.length).toBeGreaterThan(10);\n  }, 90_000);\n});\n```\n\n### Step 5: Cost-Controlled Testing Strategy\n\n```yaml\n# Only run integration tests on main (not on every PR)\n# Use short sample audio (~30s = ~$0.002 per test run)\n# Cache transcript IDs across tests when possible\n\n# In package.json:\n# \"test\": \"vitest --exclude='**/integration/**'\"\n# \"test:integration\": \"vitest --include='**/integration/**'\"\n```\n\n## Output\n\n- Unit test pipeline (mocked, runs on every PR)\n- Integration test pipeline (live API, runs on main only)\n- GitHub Secrets configured for API key\n- Cost-controlled test strategy\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Secret not found | Missing GitHub secret | `gh secret set ASSEMBLYAI_API_KEY` |\n| Integration test timeout | Slow transcription | Increase timeout to 60s+, use short audio |\n| Flaky tests | Network latency | Add retry logic, use `vitest.retries(2)` |\n| High test costs | Long audio files | Use 30-second sample audio |\n\n## Resources\n\n- [GitHub Actions Documentation](https://docs.github.com/en/actions)\n- [Vitest Documentation](https://vitest.dev/)\n- [AssemblyAI Node SDK](https://github.com/AssemblyAI/assemblyai-node-sdk)\n\n## Next Steps\n\nFor deployment patterns, see `assemblyai-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "assemblyai-ci-integration",
-    "description": "Configure AssemblyAI CI/CD integration with GitHub Actions and testing.",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

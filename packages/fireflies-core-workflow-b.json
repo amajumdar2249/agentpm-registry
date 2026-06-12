@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031984",
   "name": "fireflies-core-workflow-b",
   "slug": "fireflies-core-workflow-b",
   "description": "Search across Fireflies.ai transcripts, use AskFred AI, and build meeting",
   "content": "# Fireflies.ai Core Workflow B -- Search, AskFred & Analytics\n\n## Overview\n\nSecondary workflow: search across transcripts with keyword and date filters, use AskFred AI for natural language Q&A over meetings, and aggregate meeting analytics for reporting.\n\n## Prerequisites\n\n- Completed `fireflies-install-auth` setup\n- Familiarity with `fireflies-core-workflow-a`\n- AI credits for AskFred queries (check Fireflies dashboard)\n\n## Instructions\n\n### Step 1: Search Transcripts by Keyword\n\n```typescript\nconst SEARCH_TRANSCRIPTS = `\n  query SearchMeetings(\n    $keyword: String,\n    $fromDate: DateTime,\n    $toDate: DateTime,\n    $participants: [String],\n    $limit: Int\n  ) {\n    transcripts(\n      keyword: $keyword\n      fromDate: $fromDate\n      toDate: $toDate\n      participants: $participants\n      limit: $limit\n    ) {\n      id title date duration\n      organizer_email\n      participants\n      summary { overview action_items keywords }\n    }\n  }\n`;\n\n// Search for \"quarterly review\" in the last 30 days\nconst results = await firefliesQuery(SEARCH_TRANSCRIPTS, {\n  keyword: \"quarterly review\",\n  fromDate: new Date(Date.now() - 30 * 86400000).toISOString(),\n  limit: 20,\n});\n\nconsole.log(`Found ${results.transcripts.length} matching meetings`);\nfor (const t of results.transcripts) {\n  console.log(`  ${t.title} (${t.date}) - ${t.duration}min`);\n}\n```\n\n### Step 2: AskFred -- AI Q&A Over a Single Meeting\n\n```typescript\n// Create a new AskFred thread tied to a transcript\nconst CREATE_THREAD = `\n  mutation CreateThread($input: CreateAskFredThreadInput!) {\n    createAskFredThread(input: $input) {\n      id\n      title\n      messages {\n        id\n        answer\n        suggested_queries\n      }\n    }\n  }\n`;\n\nconst thread = await firefliesQuery(CREATE_THREAD, {\n  input: {\n    query: \"What were the key decisions made in this meeting?\",\n    transcript_id: \"your-transcript-id\",\n  },\n});\n\nconsole.log(\"Fred says:\", thread.createAskFredThread.messages[0].answer);\nconsole.log(\"Suggested follow-ups:\", thread.createAskFredThread.messages[0].suggested_queries);\n```\n\n### Step 3: AskFred -- Continue a Conversation\n\n```typescript\nconst CONTINUE_THREAD = `\n  mutation ContinueThread($thread_id: String!, $query: String!) {\n    continueAskFredThread(thread_id: $thread_id, query: $query) {\n      id\n      answer\n      suggested_queries\n    }\n  }\n`;\n\nconst followUp = await firefliesQuery(CONTINUE_THREAD, {\n  thread_id: thread.createAskFredThread.id,\n  query: \"Who is responsible for the action items?\",\n});\n\nconsole.log(\"Follow-up:\", followUp.continueAskFredThread.answer);\n```\n\n### Step 4: AskFred -- Cross-Meeting Analysis\n\n```typescript\n// Query across multiple meetings (no transcript_id = searches all)\nconst crossMeeting = await firefliesQuery(CREATE_THREAD, {\n  input: {\n    query: \"What topics came up repeatedly across our sprint planning meetings?\",\n    // filters can narrow scope without tying to a single transcript\n  },\n});\n```\n\n### Step 5: Meeting Analytics Aggregation\n\n```typescript\nasync function meetingAnalytics(days: number = 30) {\n  const since = new Date(Date.now() - days * 86400000).toISOString();\n\n  const data = await firefliesQuery(`\n    query Analytics($fromDate: DateTime) {\n      transcripts(fromDate: $fromDate, limit: 100) {\n        id title date duration\n        organizer_email participants\n        summary { action_items keywords }\n        analytics {\n          speakers { name duration word_count questions }\n          sentiments { positive_pct negative_pct }\n        }\n      }\n    }\n  `, { fromDate: since });\n\n  const meetings = data.transcripts;\n  const totalMinutes = meetings.reduce((s: number, m: any) => s + (m.duration || 0), 0);\n  const totalActions = meetings.reduce(\n    (s: number, m: any) => s + (m.summary?.action_items?.length || 0), 0\n  );\n\n  // Top keywords across all meetings\n  const keywordCounts: Record<string, number> = {};\n  for (const m of meetings) {\n    for (const kw of m.summary?.keywords || []) {\n      keywordCounts[kw] = (keywordCounts[kw] || 0) + 1;\n    }\n  }\n  const topKeywords = Object.entries(keywordCounts)\n    .sort((a, b) => b[1] - a[1])\n    .slice(0, 10);\n\n  return {\n    period: `${days} days`,\n    totalMeetings: meetings.length,\n    totalHours: (totalMinutes / 60).toFixed(1),\n    totalActionItems: totalActions,\n    avgDuration: Math.round(totalMinutes / meetings.length),\n    topKeywords,\n  };\n}\n```\n\n### Step 6: List and Manage AskFred Threads\n\n```typescript\n// List all threads\nconst threads = await firefliesQuery(`{\n  askfred_threads {\n    id title transcript_id created_at\n  }\n}`);\n\n// Delete a thread (cleanup)\nawait firefliesQuery(`\n  mutation DeleteThread($id: String!) {\n    deleteAskFredThread(thread_id: $id)\n  }\n`, { id: \"thread-id-to-delete\" });\n```\n\n## AskFred Credits\n\nAskFred API calls consume AI credits. If you receive `require_ai_credits`, visit the Upgrade section in your Fireflies dashboard to add credits. Budget accordingly for production use.\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `require_ai_credits` | No AI credits remaining | Purchase credits in Fireflies dashboard |\n| Empty search results | No matching transcripts | Broaden keyword or date range |\n| Thread not found | Invalid thread ID | List threads first to get valid IDs |\n| Rate limit 429 | Too many requests | Implement backoff per `fireflies-rate-limits` |\n\n## Output\n\n- Keyword search results across transcript history\n- AskFred AI-powered Q&A threads with suggested follow-ups\n- Cross-meeting analytics report with keyword trends\n\n## Resources\n\n- [AskFred API Overview](https://docs.fireflies.ai/askfred/overview)\n- [Transcripts Query](https://docs.fireflies.ai/graphql-api/query/transcript)\n\n## Next Steps\n\nFor common errors, see `fireflies-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "fireflies-core-workflow-b",
-    "description": "Search across Fireflies.ai transcripts, use AskFred AI, and build meeting",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

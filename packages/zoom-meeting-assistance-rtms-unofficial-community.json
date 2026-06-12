@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000006363",
   "name": "zoom-meeting-assistance-rtms-unofficial-community",
   "slug": "zoom-meeting-assistance-rtms-unofficial-community",
   "description": "Zoom RTMS Meeting Assistant \u2014 start on-demand to capture meeting audio, video, transcript, screenshare, and chat via Zoom Real-Time Media Streams. Handles meeting.rtms_started and meeting.rtms_stopped webhook events. Provides AI-powered dialog suggestions, sentiment analysis, and live summaries with WhatsApp notifications. Use when a Zoom RTMS webhook fires or the user asks to record/analyze a meeting.",
   "content": "\n# Zoom RTMS Meeting Assistant\n\nHeadless capture service for Zoom meetings using Real-Time Media Streams (RTMS). Receives webhook events, connects to RTMS WebSockets, records all media, and runs AI analysis via OpenClaw.\n\n## Webhook Events Handled\n\nThis skill processes two Zoom webhook events:\n\n- **`meeting.rtms_started`** \u2014 Zoom sends this when RTMS is activated for a meeting. Contains `server_urls`, `rtms_stream_id`, and `meeting_uuid` needed to connect to the RTMS WebSocket.\n- **`meeting.rtms_stopped`** \u2014 Zoom sends this when RTMS ends (meeting ended or RTMS disabled). Triggers cleanup: closes WebSocket connections, generates screenshare PDF, sends summary notification.\n\n## Webhook Dependency\n\nThis skill needs a public webhook endpoint to receive these events from Zoom.\n\n**Preferred:** Use the **ngrok-unofficial-webhook-skill** (`skills/ngrok-unofficial-webhook-skill`). It auto-discovers this skill via `webhookEvents` in `skill.json`, notifies the user, and offers to route events here.\n\nOther webhook solutions (e.g. custom servers, cloud functions) will work but require additional integration to forward payloads to this service.\n\n## Prerequisites\n\n```bash\ncd skills/zoom-meeting-assistance-rtms-unofficial-community\nnpm install\n```\n\nRequires `ffmpeg` for post-meeting media conversion.\n\n## Environment Variables\n\nSet these in the skill's `.env` file:\n\n**Required:**\n- `ZOOM_SECRET_TOKEN` \u2014 Zoom webhook secret token\n- `ZOOM_CLIENT_ID` \u2014 Zoom app Client ID\n- `ZOOM_CLIENT_SECRET` \u2014 Zoom app Client Secret\n\n**Optional:**\n- `PORT` \u2014 Server port (default: `3000`)\n- `AI_PROCESSING_INTERVAL_MS` \u2014 AI analysis frequency in ms (default: `30000`)\n- `AI_FUNCTION_STAGGER_MS` \u2014 Delay between AI calls in ms (default: `5000`)\n- `AUDIO_DATA_OPT` \u2014 `1` = mixed stream, `2` = multi-stream (default: `2`)\n- `OPENCLAW_NOTIFY_CHANNEL` \u2014 Notification channel (default: `whatsapp`)\n- `OPENCLAW_NOTIFY_TARGET` \u2014 Phone number / target for notifications\n\n## Starting the Service\n\n```bash\ncd skills/zoom-meeting-assistance-rtms-unofficial-community\nnode index.js\n```\n\nThis starts an Express server listening for Zoom webhook events on `PORT`.\n\n**\u26a0\ufe0f Important:** Before forwarding webhooks to this service, always check if it's running:\n\n```bash\n# Check if service is listening on port 3000\nlsof -i :3000\n```\n\nIf nothing is returned, start the service first before forwarding any webhook events.\n\n**Typical flow:**\n1. Start the server as a background process\n2. Zoom sends `meeting.rtms_started` webhook \u2192 service connects to RTMS WebSocket\n3. Media streams in real-time: audio, video, transcript, screenshare, chat\n4. AI processing runs periodically (dialog suggestions, sentiment, summary)\n5. `meeting.rtms_stopped` \u2192 service closes connections, generates screenshare PDF\n\n## Recorded Data\n\nAll recordings are stored organized by date:\n```\nskills/zoom-meeting-assistance-rtms-unofficial-community/recordings/YYYY/MM/DD/{streamId}/\n```\n\nEach stream folder contains:\n\n| File | Content | Searchable |\n|------|---------|-----------|\n| `metadata.json` | Meeting metadata (UUID, stream ID, operator, start time) | \u2705 |\n| `transcript.txt` | Plain text transcript with timestamps and speaker names | \u2705 Best for searching \u2014 grep-friendly, one line per utterance |\n| `transcript.vtt` | VTT format transcript with timing cues | \u2705 |\n| `transcript.srt` | SRT format transcript | \u2705 |\n| `events.log` | Participant join/leave, active speaker changes (JSON lines) | \u2705 |\n| `chat.txt` | Chat messages with timestamps | \u2705 |\n| `ai_summary.md` | AI-generated meeting summary (markdown) | \u2705 Key document \u2014 read this first for meeting overview |\n| `ai_dialog.json` | AI dialog suggestions | \u2705 |\n| `ai_sentiment.json` | Sentiment analysis per participant | \u2705 |\n| `mixedaudio.raw` | Mixed audio stream (raw PCM) | \u274c Binary |\n| `activespeakervideo.h264` | Active speaker video (raw H.264) | \u274c Binary |\n| `processed/screenshare.pdf` | Deduplicated screenshare frames as PDF | \u274c Binary |\n\nAll summaries are also copied to a central folder for easy access:\n```\nskills/zoom-meeting-assistance-rtms-unofficial-community/summaries/summary_YYYY-MM-DDTHH-MM-SS_{streamId}.md\n```\n\n## Searching & Querying Past Meetings\n\nTo find and review past meeting data:\n\n```bash\n# List all recorded meetings by date\nls -R recordings/\n\n# List meetings for a specific date\nls recordings/2026/01/28/\n\n# Search across all transcripts for a keyword\ngrep -rl \"keyword\" recordings/*/*/*/*/transcript.txt\n\n# Search for what a specific person said\ngrep \"Chun Siong Tan\" recordings/*/*/*/*/transcript.txt\n\n# Read a meeting summary\ncat recordings/YYYY/MM/DD/<streamId>/ai_summary.md\n\n# Search summaries for a topic\ngrep -rl \"topic\" recordings/*/*/*/*/ai_summary.md\n\n# Check who attended a meeting\ncat recordings/YYYY/MM/DD/<streamId>/events.log\n\n# Get sentiment for a meeting\ncat recordings/YYYY/MM/DD/<streamId>/ai_sentiment.json\n```\n\nThe `.txt`, `.md`, `.json`, and `.log` files are all text-based and searchable. Start with `ai_summary.md` for a quick overview, then drill into `transcript.txt` for specific quotes or details.\n\n## API Endpoints\n\n```bash\n# Toggle WhatsApp notifications on/off\ncurl -X POST http://localhost:3000/api/notify-toggle -H \"Content-Type: application/json\" -d '{\"enabled\": false}'\n\n# Check notification status\ncurl http://localhost:3000/api/notify-toggle\n```\n\n## Post-Meeting Processing\n\nWhen `meeting.rtms_stopped` fires, the service automatically:\n1. Generates PDF from screenshare images\n2. Converts `mixedaudio.raw` \u2192 `mixedaudio.wav`\n3. Converts `activespeakervideo.h264` \u2192 `activespeakervideo.mp4`\n4. Muxes mixed audio + active speaker video into `final_output.mp4`\n\nManual conversion scripts are available but note that auto-conversion runs on meeting end, so manual re-runs are rarely needed.\n\n## Reading Meeting Data\n\nAfter or during a meeting, read files from `recordings/YYYY/MM/DD/{streamId}/`:\n\n```bash\n# List recorded meetings by date\nls -R recordings/\n\n# Read transcript\ncat recordings/YYYY/MM/DD/<streamId>/transcript.txt\n\n# Read AI summary\ncat recordings/YYYY/MM/DD/<streamId>/ai_summary.md\n\n# Read sentiment analysis\ncat recordings/YYYY/MM/DD/<streamId>/ai_sentiment.json\n```\n\n## Prompt Customization\n\nWant different summary styles or analysis? Customize the AI prompts to fit your needs!\n\nEdit these files to change AI behavior:\n\n| File | Purpose | Example Customizations |\n|------|---------|----------------------|\n| `summary_prompt.md` | Meeting summary generation | Bullet points vs prose, focus areas, length |\n| `query_prompt.md` | Query response formatting | Response style, detail level |\n| `query_prompt_current_meeting.md` | Real-time meeting analysis | What to highlight during meetings |\n| `query_prompt_dialog_suggestions.md` | Dialog suggestion style | Formal vs casual, suggestion count |\n| `query_prompt_sentiment_analysis.md` | Sentiment scoring logic | Custom sentiment categories, thresholds |\n\n**Tip:** Back up the originals before editing, so you can revert if needed.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "zoom-meeting-assistance-rtms-unofficial-community",
-    "description": "Zoom RTMS Meeting Assistant \u2014 start on-demand to capture meeting audio, video, transcript, screenshare, and chat via Zoom Real-Time Media Streams. Handles meeting.rtms_started and meeting.rtms_stopped webhook events. Provides AI-powered dialog suggestions, sentiment analysis, and live summaries with WhatsApp notifications. Use when a Zoom RTMS webhook fires or the user asks to record/analyze a meeting."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

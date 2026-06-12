@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032585",
   "name": "maintainx-debug-bundle",
   "slug": "maintainx-debug-bundle",
   "description": "Comprehensive debugging toolkit for MaintainX integrations.",
   "content": "# MaintainX Debug Bundle\n\n## Current State\n\n!`node --version 2>/dev/null || echo 'N/A'`\n!`python3 --version 2>/dev/null || echo 'N/A'`\n!`echo \"API key set: $([ -n \"$MAINTAINX_API_KEY\" ] && echo 'yes' || echo 'no')\"`\n\n## Overview\n\nComplete debugging toolkit for diagnosing and resolving MaintainX integration issues with diagnostic scripts, request logging, and health checks.\n\n## Prerequisites\n\n- MaintainX API access configured\n- Node.js 18+ or curl\n- `MAINTAINX_API_KEY` environment variable set\n\n## Instructions\n\n### Step 1: Environment Diagnostic Script\n\n```bash\n#!/bin/bash\necho \"=== MaintainX Debug Report ===\"\necho \"Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ)\"\necho \"Node.js: $(node --version 2>/dev/null || echo 'not installed')\"\necho \"npm: $(npm --version 2>/dev/null || echo 'not installed')\"\necho \"API key set: $([ -n \"$MAINTAINX_API_KEY\" ] && echo 'yes (length: '${#MAINTAINX_API_KEY}')' || echo 'NO')\"\necho \"\"\n\necho \"=== API Connectivity ===\"\nHTTP_CODE=$(curl -s -o /tmp/mx-debug.json -w \"%{http_code}\" \\\n  \"https://api.getmaintainx.com/v1/users?limit=1\" \\\n  -H \"Authorization: Bearer $MAINTAINX_API_KEY\")\necho \"Auth status: $HTTP_CODE\"\n\nif [ \"$HTTP_CODE\" = \"200\" ]; then\n  echo \"Response: $(cat /tmp/mx-debug.json | jq -c '{users: (.users | length)}')\"\nelse\n  echo \"Error: $(cat /tmp/mx-debug.json | jq -r '.message // .error // \"unknown\"')\"\nfi\n\necho \"\"\necho \"=== DNS Resolution ===\"\nnslookup api.getmaintainx.com 2>/dev/null | grep -A1 \"Name:\"\n\necho \"\"\necho \"=== Response Timing ===\"\ncurl -s -o /dev/null -w \"DNS: %{time_namelookup}s\\nConnect: %{time_connect}s\\nTTFB: %{time_starttransfer}s\\nTotal: %{time_total}s\\n\" \\\n  \"https://api.getmaintainx.com/v1/users?limit=1\" \\\n  -H \"Authorization: Bearer $MAINTAINX_API_KEY\"\n```\n\n### Step 2: Request/Response Logger\n\n```typescript\n// src/debug/request-logger.ts\nimport axios, { AxiosInstance, AxiosError } from 'axios';\n\nexport function createDebugClient(): AxiosInstance {\n  const client = axios.create({\n    baseURL: 'https://api.getmaintainx.com/v1',\n    headers: {\n      Authorization: `Bearer ${process.env.MAINTAINX_API_KEY}`,\n      'Content-Type': 'application/json',\n    },\n  });\n\n  // Request interceptor\n  client.interceptors.request.use((config) => {\n    const startTime = Date.now();\n    (config as any).__startTime = startTime;\n    console.log(`[REQ] ${config.method?.toUpperCase()} ${config.url}`);\n    if (config.data) console.log('  Body:', JSON.stringify(config.data).slice(0, 200));\n    if (config.params) console.log('  Params:', config.params);\n    return config;\n  });\n\n  // Response interceptor\n  client.interceptors.response.use(\n    (response) => {\n      const duration = Date.now() - (response.config as any).__startTime;\n      console.log(`[RES] ${response.status} (${duration}ms)`);\n      console.log('  Data keys:', Object.keys(response.data));\n      return response;\n    },\n    (error: AxiosError) => {\n      const duration = Date.now() - (error.config as any)?.__startTime;\n      console.error(`[ERR] ${error.response?.status || 'NETWORK'} (${duration}ms)`);\n      console.error('  Message:', (error.response?.data as any)?.message || error.message);\n      console.error('  Headers:', JSON.stringify(error.response?.headers || {}));\n      throw error;\n    },\n  );\n\n  return client;\n}\n```\n\n### Step 3: API Health Check\n\n```typescript\n// src/debug/health-check.ts\ninterface HealthResult {\n  endpoint: string;\n  status: 'ok' | 'error';\n  statusCode?: number;\n  latencyMs: number;\n  error?: string;\n}\n\nasync function healthCheck(apiKey: string): Promise<HealthResult[]> {\n  const endpoints = [\n    { path: '/users?limit=1', name: 'Users' },\n    { path: '/workorders?limit=1', name: 'Work Orders' },\n    { path: '/assets?limit=1', name: 'Assets' },\n    { path: '/locations?limit=1', name: 'Locations' },\n    { path: '/teams?limit=1', name: 'Teams' },\n  ];\n\n  const results: HealthResult[] = [];\n\n  for (const ep of endpoints) {\n    const start = Date.now();\n    try {\n      const res = await fetch(`https://api.getmaintainx.com/v1${ep.path}`, {\n        headers: { Authorization: `Bearer ${apiKey}` },\n      });\n      results.push({\n        endpoint: ep.name,\n        status: res.ok ? 'ok' : 'error',\n        statusCode: res.status,\n        latencyMs: Date.now() - start,\n      });\n    } catch (err: any) {\n      results.push({\n        endpoint: ep.name,\n        status: 'error',\n        latencyMs: Date.now() - start,\n        error: err.message,\n      });\n    }\n  }\n\n  // Print report\n  console.log('\\n=== MaintainX Health Check ===');\n  for (const r of results) {\n    const icon = r.status === 'ok' ? 'PASS' : 'FAIL';\n    console.log(`  [${icon}] ${r.endpoint}: ${r.statusCode || 'N/A'} (${r.latencyMs}ms)`);\n    if (r.error) console.log(`        Error: ${r.error}`);\n  }\n\n  return results;\n}\n\n// Run: npx tsx src/debug/health-check.ts\nhealthCheck(process.env.MAINTAINX_API_KEY!);\n```\n\n### Step 4: Data Validation Checker\n\n```typescript\n// src/debug/validate-data.ts\nasync function validateWorkOrders(client: any) {\n  const { workOrders } = await client.getWorkOrders({ limit: 50 });\n  const issues: string[] = [];\n\n  for (const wo of workOrders) {\n    if (!wo.title) issues.push(`WO #${wo.id}: missing title`);\n    if (wo.status === 'COMPLETED' && !wo.completedAt) {\n      issues.push(`WO #${wo.id}: COMPLETED but no completedAt timestamp`);\n    }\n    if (wo.dueDate && new Date(wo.dueDate) < new Date() && wo.status === 'OPEN') {\n      issues.push(`WO #${wo.id}: overdue (due ${wo.dueDate})`);\n    }\n    if (wo.assignees?.length === 0 && wo.priority === 'HIGH') {\n      issues.push(`WO #${wo.id}: HIGH priority but no assignees`);\n    }\n  }\n\n  console.log(`\\n=== Data Validation (${workOrders.length} work orders) ===`);\n  if (issues.length === 0) {\n    console.log('  All checks passed');\n  } else {\n    for (const issue of issues) {\n      console.log(`  WARNING: ${issue}`);\n    }\n  }\n  return issues;\n}\n```\n\n### Step 5: Generate Support Bundle\n\n```typescript\n// src/debug/support-bundle.ts\nimport { writeFileSync } from 'fs';\n\nasync function generateSupportBundle(client: any) {\n  const bundle: Record<string, any> = {\n    generated: new Date().toISOString(),\n    environment: {\n      node: process.version,\n      platform: process.platform,\n      apiKeyPrefix: process.env.MAINTAINX_API_KEY?.slice(0, 8) + '...',\n    },\n    health: await healthCheck(process.env.MAINTAINX_API_KEY!),\n    sampleData: {\n      workOrderCount: (await client.getWorkOrders({ limit: 1 })).workOrders.length,\n      assetCount: (await client.getAssets({ limit: 1 })).assets.length,\n    },\n  };\n\n  const filename = `maintainx-debug-${Date.now()}.json`;\n  writeFileSync(filename, JSON.stringify(bundle, null, 2));\n  console.log(`Support bundle saved to ${filename}`);\n  return filename;\n}\n```\n\n## Output\n\n- Environment diagnostic report (Node.js version, API key status, connectivity)\n- Request/response logging with timing for every API call\n- Health check results for all major MaintainX endpoints\n- Data validation warnings (overdue WOs, missing assignees, etc.)\n- Support bundle JSON file for sharing with MaintainX support\n\n## Error Handling\n\n| Issue | Diagnostic Step | Solution |\n|-------|----------------|----------|\n| 401 on all endpoints | Run Step 1 diagnostic script | Regenerate API key |\n| High latency (> 5s) | Check Step 1 response timing | Verify network, check MaintainX status |\n| Intermittent 500s | Enable Step 2 request logger | Report to MaintainX with request IDs |\n| Missing data | Run Step 4 data validator | Fix data quality issues, re-sync |\n\n## Resources\n\n- [MaintainX API Reference](https://developer.maintainx.com/reference)\n- [MaintainX Status Page](https://status.getmaintainx.com)\n- [MaintainX Help Center](https://help.getmaintainx.com)\n\n## Next Steps\n\nFor rate limit handling, see `maintainx-rate-limits`.\n\n## Examples\n\n**One-liner diagnostic**:\n\n```bash\ncurl -w \"\\nHTTP: %{http_code} | Time: %{time_total}s\\n\" \\\n  \"https://api.getmaintainx.com/v1/users?limit=1\" \\\n  -H \"Authorization: Bearer $MAINTAINX_API_KEY\" | jq .\n```\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "maintainx-debug-bundle",
-    "description": "Comprehensive debugging toolkit for MaintainX integrations.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(curl:*), Bash(node:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

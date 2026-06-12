@@ -1,15 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000017191",
   "name": "error-handling",
   "slug": "error-handling-3",
   "description": "Implement robust error handling in Node.js with custom error classes, async patterns, Express middleware, and production monitoring",
   "content": "\n# Node.js Error Handling Skill\n\nMaster error handling patterns for building resilient Node.js applications that fail gracefully and provide meaningful feedback.\n\n## Quick Start\n\nError handling in 4 layers:\n1. **Custom Error Classes** - Typed, informative errors\n2. **Try/Catch Patterns** - Sync and async handling\n3. **Express Middleware** - Centralized API errors\n4. **Process Handlers** - Uncaught exceptions\n\n## Core Concepts\n\n### Custom Error Classes\n```javascript\n// Base application error\nclass AppError extends Error {\n  constructor(message, statusCode, code) {\n    super(message);\n    this.statusCode = statusCode;\n    this.code = code;\n    this.isOperational = true;\n    Error.captureStackTrace(this, this.constructor);\n  }\n}\n\n// Specific error types\nclass ValidationError extends AppError {\n  constructor(message, details = []) {\n    super(message, 400, 'VALIDATION_ERROR');\n    this.details = details;\n  }\n}\n\nclass NotFoundError extends AppError {\n  constructor(resource = 'Resource') {\n    super(`${resource} not found`, 404, 'NOT_FOUND');\n  }\n}\n\nclass UnauthorizedError extends AppError {\n  constructor(message = 'Authentication required') {\n    super(message, 401, 'UNAUTHORIZED');\n  }\n}\n\nclass ForbiddenError extends AppError {\n  constructor(message = 'Access denied') {\n    super(message, 403, 'FORBIDDEN');\n  }\n}\n```\n\n### Async Error Handling\n```javascript\n// Async wrapper for Express routes\nconst asyncHandler = (fn) => (req, res, next) => {\n  Promise.resolve(fn(req, res, next)).catch(next);\n};\n\n// Usage\nrouter.get('/users/:id', asyncHandler(async (req, res) => {\n  const user = await User.findById(req.params.id);\n  if (!user) throw new NotFoundError('User');\n  res.json(user);\n}));\n```\n\n### Express Error Middleware\n```javascript\nconst errorHandler = (err, req, res, next) => {\n  // Log error\n  logger.error({\n    message: err.message,\n    stack: err.stack,\n    code: err.code,\n    url: req.originalUrl\n  });\n\n  // Handle operational errors\n  if (err.isOperational) {\n    return res.status(err.statusCode).json({\n      success: false,\n      error: {\n        message: err.message,\n        code: err.code,\n        ...(err.details && { details: err.details })\n      }\n    });\n  }\n\n  // Production: hide internal errors\n  if (process.env.NODE_ENV === 'production') {\n    return res.status(500).json({\n      success: false,\n      error: { message: 'Internal server error', code: 'INTERNAL_ERROR' }\n    });\n  }\n\n  // Development: show stack\n  res.status(500).json({\n    success: false,\n    error: { message: err.message, stack: err.stack }\n  });\n};\n```\n\n## Learning Path\n\n### Beginner (1-2 weeks)\n- \u2705 Understand Error types\n- \u2705 Try/catch for sync code\n- \u2705 Promise .catch() handling\n- \u2705 Basic Express error middleware\n\n### Intermediate (3-4 weeks)\n- \u2705 Custom error classes\n- \u2705 Async error wrapper\n- \u2705 Centralized error handling\n- \u2705 Error logging with Winston\n\n### Advanced (5-6 weeks)\n- \u2705 Production error monitoring\n- \u2705 Graceful shutdown\n- \u2705 Circuit breaker patterns\n- \u2705 Error recovery strategies\n\n## Process-Level Error Handling\n```javascript\n// Uncaught exceptions\nprocess.on('uncaughtException', (error) => {\n  console.error('Uncaught Exception:', error);\n  logger.fatal({ error }, 'Uncaught exception');\n  process.exit(1);\n});\n\n// Unhandled promise rejections\nprocess.on('unhandledRejection', (reason, promise) => {\n  console.error('Unhandled Rejection:', reason);\n  logger.error({ reason }, 'Unhandled rejection');\n});\n\n// Graceful shutdown\nprocess.on('SIGTERM', async () => {\n  console.log('SIGTERM received. Graceful shutdown...');\n  server.close(() => console.log('HTTP server closed'));\n  await mongoose.connection.close();\n  process.exit(0);\n});\n```\n\n## Retry with Exponential Backoff\n```javascript\nasync function retryOperation(fn, options = {}) {\n  const { maxRetries = 3, delay = 1000, backoff = 2 } = options;\n  let lastError;\n\n  for (let attempt = 1; attempt <= maxRetries; attempt++) {\n    try {\n      return await fn();\n    } catch (error) {\n      lastError = error;\n      if (attempt === maxRetries) throw error;\n\n      const waitTime = delay * Math.pow(backoff, attempt - 1);\n      await new Promise(resolve => setTimeout(resolve, waitTime));\n    }\n  }\n  throw lastError;\n}\n```\n\n## Error Response Format\n```javascript\n// Success\n{ \"success\": true, \"data\": { ... } }\n\n// Error\n{\n  \"success\": false,\n  \"error\": {\n    \"message\": \"User not found\",\n    \"code\": \"NOT_FOUND\",\n    \"details\": [],\n    \"timestamp\": \"2024-01-15T10:30:00.000Z\"\n  }\n}\n```\n\n## Unit Test Template\n```javascript\ndescribe('Error Handling', () => {\n  describe('ValidationError', () => {\n    it('should create error with correct properties', () => {\n      const error = new ValidationError('Invalid input', [\n        { field: 'email', message: 'Required' }\n      ]);\n\n      expect(error.statusCode).toBe(400);\n      expect(error.code).toBe('VALIDATION_ERROR');\n      expect(error.isOperational).toBe(true);\n    });\n  });\n\n  describe('asyncHandler', () => {\n    it('should catch async errors', async () => {\n      const mockNext = jest.fn();\n      const handler = asyncHandler(async () => {\n        throw new Error('Test error');\n      });\n\n      await handler({}, {}, mockNext);\n      expect(mockNext).toHaveBeenCalledWith(expect.any(Error));\n    });\n  });\n});\n```\n\n## Troubleshooting\n\n| Problem | Cause | Solution |\n|---------|-------|----------|\n| Unhandled rejection warnings | Missing .catch() | Add process handler + local catches |\n| Error swallowed silently | Empty catch block | Log or rethrow errors |\n| Stack trace missing | Error.captureStackTrace not called | Use AppError base class |\n| Memory leak from errors | Storing error references | Use WeakMap or clean up |\n\n## When to Use\n\nUse proper error handling when:\n- Building production Node.js applications\n- Creating REST APIs with Express\n- Handling database operations\n- Processing external API calls\n- Implementing retry logic\n\n## Related Skills\n\n- Express REST API (API error responses)\n- Async Programming (promise rejections)\n- Testing & Debugging (error testing)\n\n## Resources\n\n- [Node.js Error Handling](https://nodejs.org/en/docs/guides/error-handling/)\n- [Express Error Handling](https://expressjs.com/en/guide/error-handling.html)\n- [Sentry for Node.js](https://docs.sentry.io/platforms/node/)\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "error-handling",
-    "description": "Implement robust error handling in Node.js with custom error classes, async patterns, Express middleware, and production monitoring",
-    "version": "2.1.0",
-    "sasmp_version": "1.3.0",
-    "bonded_agent": "06-testing-debugging",
-    "bond_type": "PRIMARY_BOND"
+  "author": "agentpm",
+  "version": "2.1.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

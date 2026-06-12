@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000010340",
   "name": "blockbench-use",
   "slug": "blockbench-use",
   "description": "MANDATORY prerequisite \u2014 invoke BEFORE any mcp__blockbench__* tool call that creates, modifies, or exports Blockbench content. Orchestrates the other blockbench-* skills (modeling, texturing, animation, PBR, Hytale, MCP overview). Trigger on: 3D model/texture/animation creation or edits in Blockbench; calls to mcp__blockbench__* tools; phrases like 'build a Minecraft model', 'paint a texture', 'animate this rig', 'export the model'. Dispatches to the right sub-skill(s), enforces pre-flight checks (project open, format, outline), wraps risky work in checkpoints, and ensures exports close the loop.",
   "content": "\n# Blockbench Use\n\nOrchestrator for Blockbench MCP work. Load this **before** touching the 3D scene so the right sub-skills load and the right pre-flight checks run.\n\n## Rule\n\nAny request that will call an `mcp__blockbench__*` tool to create or modify content **must** go through this skill first.\n\nSteps, in order:\n\n1. **Classify the request** \u2192 pick one or more sub-skills (table below).\n2. **Pre-flight** \u2192 confirm a project is open and the format is correct (see \"Pre-flight checks\").\n3. **Load the sub-skill(s)** via the Skill tool.\n4. **Checkpoint before risk** \u2192 call `save_checkpoint` for multi-step edits that might need rollback.\n5. **Execute** the sub-skill's workflow.\n6. **Close the loop** \u2192 screenshot, validate (Hytale), or export if the user asked for a deliverable.\n\n## Skill routing table\n\nPick by primary intent. When the task spans domains, load **all** relevant skills before starting.\n\n| User intent | Primary skill | Also load when\u2026 |\n|---|---|---|\n| Build cubes, meshes, groups, hierarchy | `blockbench-modeling` | needs texture \u2192 `blockbench-texturing` |\n| Paint, fill, draw, brush, layers, UV | `blockbench-texturing` | channel-aware (normal/MER) \u2192 `blockbench-pbr-materials` |\n| Keyframes, bone rigs, walk/idle/attack | `blockbench-animation` | bones need geometry first \u2192 `blockbench-modeling` |\n| `.texture_set.json`, normal/height/MER | `blockbench-pbr-materials` | textures not yet drawn \u2192 `blockbench-texturing` |\n| `.blockymodel`, `.blockyanim`, attachments, quads, stretch, shading modes | `blockbench-hytale` | modeling/animation parts \u2192 those skills |\n| \"What tools are available?\" / unclear scope | `blockbench-mcp-overview` | \u2014 |\n| Write a Blockbench JS plugin (not use MCP) | `blockbench-plugins` (from `blockbench-development/`) | \u2014 |\n\n**Skip this skill** for pure research questions (API docs, \"how does Blockbench work?\"). Go straight to `blockbench-mcp-overview`.\n\n## Pre-flight checks\n\nRun before any mutation. One round of `list_outline` + `list_textures` is usually enough.\n\n1. **Is a project open?** If no project, call `create_project` first (format from the routing table below).\n2. **Is the format correct for the task?**\n   - Cube modeling (Minecraft) \u2192 `bedrock_block`, `java_block`, `bedrock`\n   - Mesh/freeform \u2192 `free`, `modded_entity`, `optifine_entity`\n   - Hytale character \u2192 `hytale_character` (64px)\n   - Hytale prop \u2192 `hytale_prop` (32px)\n   - Generic \u2192 `generic` or `free`\n3. **What's already there?** Use `list_outline` (structure) + `list_textures` (materials). Prefer `find_elements_by_criteria` / `filter_by_material` over dumping the whole outline for large projects.\n4. **Hytale project?** Run `hytale_validate_model` at the end; never silently exceed 255 nodes.\n\n## Multi-skill workflow compositions\n\n### \"Create a Minecraft character with a walk cycle\"\n\n```\nblockbench-modeling    \u2192 bones + cubes\nblockbench-texturing   \u2192 skin texture\nblockbench-animation   \u2192 walk cycle keyframes\n# finally:\ncapture_screenshot     \u2192 preview\nexport_model: codec_id=\"project\"  \u2192 save .bbmodel\n```\n\n### \"Make a Bedrock RTX block\"\n\n```\nblockbench-modeling        \u2192 single cube\nblockbench-texturing       \u2192 color map\nblockbench-pbr-materials   \u2192 normal + MER + texture_set.json\n# finally:\nhytale_validate_model      \u2192 (skip \u2014 not Hytale)\ncapture_screenshot\n```\n\n### \"Build a Hytale character with attachments\"\n\n```\nblockbench-hytale          \u2192 read first: format, node limits, pieces\nblockbench-modeling        \u2192 geometry in character format\nblockbench-animation       \u2192 optional keyframes (60 FPS)\n# separately per attachment collection:\nblockbench-hytale          \u2192 hytale_set_attachment_piece on bones\n# finally:\nhytale_validate_model      \u2192 node count, stretch, shading\nexport_model: codec_id=\"blockymodel\"\n```\n\n### \"Retexture an existing model\"\n\n```\n# Pre-flight: find everything that uses the old texture\nfilter_by_material: texture=\"old_skin\"\n# Load:\nblockbench-texturing       \u2192 paint/create replacement\n# Swap references:\napply_texture per match (from filter_by_material results)\n```\n\n## Safety & efficiency rules (apply in every session)\n\n1. **Checkpoint before risk.** For any workflow of 3+ mutations, call `save_checkpoint: name=\"<descriptive>\"` first. If the result is wrong, `undo: steps=N` back.\n2. **Filter, don't dump.** Prefer `find_elements_by_criteria`, `filter_by_material`, or `select_all_of_type` over `list_outline` when you know the shape of what you want. Large outlines blow context.\n3. **Respect the format.** Don't call Hytale tools on a non-Hytale project \u2014 they will error. Check `Format.id` via `risky_eval` or `hytale_get_format_info` if unsure.\n4. **Screenshot after meaningful changes.** `capture_screenshot` confirms the model looks right. Do it at milestones, not every edit.\n5. **Export only when the user asks for a deliverable.** Use `list_export_formats` first to pick the right codec, then `export_model` with a `path` (or content-only if the user just wants to see it).\n6. **Never call `trigger_action: action=\"undo\"` or `\"redo\"`.** Use the dedicated `undo` / `redo` tools \u2014 they return which actions were traversed.\n7. **Name everything.** Descriptive names make `find_elements_by_criteria` and filtering work later.\n\n## When to load `blockbench-mcp-overview`\n\nLoad it instead of a specialized skill when:\n\n- The user's intent is ambiguous (\"help me with this model\")\n- The tool call count will be small (<5) and spans multiple domains\n- The user is asking about capabilities, not executing\n\nOtherwise prefer the specialized skills \u2014 they have concrete examples and return shapes.\n\n## What this skill does NOT cover\n\n- **Blockbench plugin development** (writing `.js` plugins) \u2192 `blockbench-plugins`\n- **MCP server development** (adding tools to this repo) \u2192 not in this skill set\n- **General 3D theory / THREE.js / rendering internals** \u2192 out of scope\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "blockbench-use",
-    "description": "MANDATORY prerequisite \u2014 invoke BEFORE any mcp__blockbench__* tool call that creates, modifies, or exports Blockbench content. Orchestrates the other blockbench-* skills (modeling, texturing, animation, PBR, Hytale, MCP overview). Trigger on: 3D model/texture/animation creation or edits in Blockbench; calls to mcp__blockbench__* tools; phrases like 'build a Minecraft model', 'paint a texture', 'animate this rig', 'export the model'. Dispatches to the right sub-skill(s), enforces pre-flight checks (project open, format, outline), wraps risky work in checkpoints, and ensures exports close the loop."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

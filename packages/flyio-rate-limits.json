@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032041",
   "name": "flyio-rate-limits",
   "slug": "flyio-rate-limits",
   "description": "Handle Fly.io Machines API rate limits with backoff, concurrency control,",
   "content": "# Fly.io Rate Limits\n\n## Overview\n\nThe Fly.io Machines API rate-limits per organization, with write operations (create, delete, update) throttled much more aggressively than reads. Deploying fleets of edge machines across multiple regions can easily trigger 429s, especially during rolling deployments or auto-scaling events. The API returns a `Retry-After` header on rate-limited responses, and organizations running 50+ machines should implement client-side token bucket limiting to avoid cascading failures during high-churn operations.\n\n## Rate Limit Reference\n\n| Endpoint | Limit | Window | Scope |\n|----------|-------|--------|-------|\n| Machine create/delete | 10 req | 1 minute | Per org |\n| Machine start/stop | 30 req | 1 minute | Per org |\n| Machine list/get | 120 req | 1 minute | Per org |\n| App create/delete | 5 req | 1 minute | Per org |\n| Volume operations | 15 req | 1 minute | Per org |\n\n## Rate Limiter Implementation\n\n```typescript\nclass FlyRateLimiter {\n  private tokens: number;\n  private lastRefill: number;\n  private readonly max: number;\n  private readonly refillRate: number;\n  private queue: Array<{ resolve: () => void }> = [];\n\n  constructor(maxPerMinute: number) {\n    this.max = maxPerMinute;\n    this.tokens = maxPerMinute;\n    this.lastRefill = Date.now();\n    this.refillRate = maxPerMinute / 60_000;\n  }\n\n  async acquire(): Promise<void> {\n    this.refill();\n    if (this.tokens >= 1) { this.tokens -= 1; return; }\n    return new Promise(resolve => this.queue.push({ resolve }));\n  }\n\n  private refill() {\n    const now = Date.now();\n    this.tokens = Math.min(this.max, this.tokens + (now - this.lastRefill) * this.refillRate);\n    this.lastRefill = now;\n    while (this.tokens >= 1 && this.queue.length) {\n      this.tokens -= 1;\n      this.queue.shift()!.resolve();\n    }\n  }\n}\n\nconst writeLimiter = new FlyRateLimiter(8);  // leave headroom under 10/min\nconst readLimiter = new FlyRateLimiter(100);\n```\n\n## Retry Strategy\n\n```typescript\nasync function flyRetry<T>(fn: () => Promise<Response>, maxRetries = 4): Promise<T> {\n  for (let attempt = 0; attempt <= maxRetries; attempt++) {\n    const res = await fn();\n    if (res.ok) return res.json();\n    if (res.status === 429) {\n      const retryAfter = parseInt(res.headers.get(\"Retry-After\") || \"10\", 10);\n      const delay = retryAfter * 1000 + Math.random() * 2000;\n      await new Promise(r => setTimeout(r, delay));\n      continue;\n    }\n    if (res.status >= 500 && attempt < maxRetries) {\n      await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 1000));\n      continue;\n    }\n    throw new Error(`Fly API ${res.status}: ${await res.text()}`);\n  }\n  throw new Error(\"Max retries exceeded\");\n}\n```\n\n## Batch Processing\n\n```typescript\nasync function rollingDeployMachines(appId: string, configs: any[], batchSize = 3) {\n  const results: any[] = [];\n  for (let i = 0; i < configs.length; i += batchSize) {\n    const batch = configs.slice(i, i + batchSize);\n    const batchResults = await Promise.all(\n      batch.map(async cfg => {\n        await writeLimiter.acquire();\n        return flyRetry(() =>\n          fetch(`https://api.machines.dev/v1/apps/${appId}/machines`, {\n            method: \"POST\", headers, body: JSON.stringify(cfg),\n          })\n        );\n      })\n    );\n    results.push(...batchResults);\n    if (i + batchSize < configs.length) await new Promise(r => setTimeout(r, 10_000));\n  }\n  return results;\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Fix |\n|-------|-------|-----|\n| 429 on machine create | Exceeded 10 writes/min org limit | Use Retry-After header, batch deploys |\n| 429 on fleet list | Monitoring polling too fast | Cache responses, poll every 30s max |\n| Timeout on volume attach | Volume in another region | Verify region match before attach |\n| 503 during region outage | Specific edge region down | Fail over to secondary region |\n| 409 on machine update | Concurrent config change | Re-fetch machine state, retry with latest version |\n\n## Resources\n\n- [Fly.io Machines API](https://fly.io/docs/machines/api/)\n\n## Next Steps\n\nSee `flyio-performance-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "flyio-rate-limits",
-    "description": "Handle Fly.io Machines API rate limits with backoff, concurrency control,",
-    "Trigger": "fly.io rate limit\", \"fly.io 429\", \"fly.io throttling\", \"machines API limit\".",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

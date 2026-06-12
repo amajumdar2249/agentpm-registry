@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032701",
   "name": "notion-core-workflow-b",
   "slug": "notion-core-workflow-b",
   "description": "Work with Notion blocks, rich text, comments, and page content.",
   "content": "# Notion Core Workflow B \u2014 Blocks, Content & Comments\n\n## Overview\n\nSecondary workflow for content operations: reading block trees, appending content, building rich text with annotations, and managing comments.\n\n## Prerequisites\n\n- Completed `notion-install-auth` setup\n- A Notion page shared with your integration\n- Familiarity with `notion-core-workflow-a` (databases/pages)\n\n## Instructions\n\n### Step 1: Retrieve Block Children\n\n```typescript\nimport { Client } from '@notionhq/client';\n\nconst notion = new Client({ auth: process.env.NOTION_TOKEN });\n\nasync function getPageContent(pageId: string) {\n  const blocks = [];\n  let cursor: string | undefined;\n\n  do {\n    const response = await notion.blocks.children.list({\n      block_id: pageId,\n      start_cursor: cursor,\n      page_size: 100,\n    });\n    blocks.push(...response.results);\n    cursor = response.has_more ? response.next_cursor ?? undefined : undefined;\n  } while (cursor);\n\n  return blocks;\n}\n```\n\n### Step 2: Read Blocks Recursively (Nested Content)\n\n```typescript\nasync function getBlockTree(blockId: string, depth = 0): Promise<any[]> {\n  const blocks = await getPageContent(blockId);\n  const tree = [];\n\n  for (const block of blocks) {\n    const node: any = { ...block, children: [] };\n    // Recursively fetch children if block has them\n    if ('has_children' in block && block.has_children) {\n      node.children = await getBlockTree(block.id, depth + 1);\n    }\n    tree.push(node);\n  }\n\n  return tree;\n}\n\n// Extract plain text from a block tree\nfunction blockToText(block: any): string {\n  const type = block.type;\n  if (block[type]?.rich_text) {\n    return block[type].rich_text.map((t: any) => t.plain_text).join('');\n  }\n  return '';\n}\n```\n\n### Step 3: Append Content Blocks\n\n```typescript\nasync function appendContent(pageId: string) {\n  await notion.blocks.children.append({\n    block_id: pageId,\n    children: [\n      // Heading\n      {\n        heading_1: {\n          rich_text: [{ text: { content: 'Section Title' } }],\n        },\n      },\n      // Paragraph with formatting\n      {\n        paragraph: {\n          rich_text: [\n            { text: { content: 'Regular text, ' } },\n            { text: { content: 'bold' }, annotations: { bold: true } },\n            { text: { content: ', ' } },\n            { text: { content: 'italic' }, annotations: { italic: true } },\n            { text: { content: ', ' } },\n            { text: { content: 'code' }, annotations: { code: true } },\n            { text: { content: ', and ' } },\n            {\n              text: { content: 'a link', link: { url: 'https://notion.so' } },\n              annotations: { underline: true },\n            },\n          ],\n        },\n      },\n      // Bulleted list items\n      {\n        bulleted_list_item: {\n          rich_text: [{ text: { content: 'First bullet point' } }],\n        },\n      },\n      {\n        bulleted_list_item: {\n          rich_text: [{ text: { content: 'Second bullet point' } }],\n        },\n      },\n      // Numbered list\n      {\n        numbered_list_item: {\n          rich_text: [{ text: { content: 'Step one' } }],\n        },\n      },\n      // To-do items\n      {\n        to_do: {\n          rich_text: [{ text: { content: 'Task to complete' } }],\n          checked: false,\n        },\n      },\n      {\n        to_do: {\n          rich_text: [{ text: { content: 'Already done' } }],\n          checked: true,\n        },\n      },\n      // Code block\n      {\n        code: {\n          rich_text: [{ text: { content: 'console.log(\"Hello Notion!\");' } }],\n          language: 'typescript',\n        },\n      },\n      // Callout\n      {\n        callout: {\n          rich_text: [{ text: { content: 'Important note here' } }],\n          icon: { emoji: '\ud83d\udca1' },\n        },\n      },\n      // Quote\n      {\n        quote: {\n          rich_text: [{ text: { content: 'A meaningful quote' } }],\n        },\n      },\n      // Divider\n      { divider: {} },\n      // Toggle block (with children added separately)\n      {\n        toggle: {\n          rich_text: [{ text: { content: 'Click to expand' } }],\n        },\n      },\n    ],\n  });\n}\n```\n\n### Step 4: Rich Text Annotations Reference\n\n```typescript\n// All annotation options\ninterface Annotations {\n  bold: boolean;\n  italic: boolean;\n  strikethrough: boolean;\n  underline: boolean;\n  code: boolean;\n  color: 'default' | 'gray' | 'brown' | 'orange' | 'yellow' |\n         'green' | 'blue' | 'purple' | 'pink' | 'red' |\n         'gray_background' | 'brown_background' | 'orange_background' |\n         'yellow_background' | 'green_background' | 'blue_background' |\n         'purple_background' | 'pink_background' | 'red_background';\n}\n\n// Rich text types: text, mention, equation\nconst richTextExamples = [\n  // Plain text\n  { text: { content: 'Hello' } },\n\n  // Text with link\n  { text: { content: 'Click here', link: { url: 'https://notion.so' } } },\n\n  // Mention a user\n  { mention: { user: { id: 'user-uuid' } } },\n\n  // Mention a page\n  { mention: { page: { id: 'page-uuid' } } },\n\n  // Mention a date\n  { mention: { date: { start: '2026-04-01' } } },\n\n  // Inline equation (LaTeX)\n  { equation: { expression: 'E = mc^2' } },\n];\n```\n\n### Step 5: Update and Delete Blocks\n\n```typescript\n// Update a block's content\nasync function updateBlock(blockId: string) {\n  await notion.blocks.update({\n    block_id: blockId,\n    paragraph: {\n      rich_text: [{ text: { content: 'Updated content' } }],\n    },\n  });\n}\n\n// Delete (archive) a block\nasync function deleteBlock(blockId: string) {\n  await notion.blocks.delete({ block_id: blockId });\n}\n```\n\n### Step 6: Work with Comments\n\n```typescript\n// Add a comment to a page\nasync function addComment(pageId: string, text: string) {\n  await notion.comments.create({\n    parent: { page_id: pageId },\n    rich_text: [{ text: { content: text } }],\n  });\n}\n\n// Add a comment to a specific block (discussion thread)\nasync function addBlockComment(discussionId: string, text: string) {\n  await notion.comments.create({\n    discussion_id: discussionId,\n    rich_text: [{ text: { content: text } }],\n  });\n}\n\n// List comments on a block or page\nasync function listComments(blockId: string) {\n  const response = await notion.comments.list({ block_id: blockId });\n  for (const comment of response.results) {\n    const text = comment.rich_text.map(t => t.plain_text).join('');\n    console.log(`${comment.created_by.id}: ${text}`);\n  }\n}\n```\n\n## Output\n\n- Page content blocks retrieved (flat or recursive tree)\n- Rich content appended with formatting, lists, code, callouts\n- Blocks updated and deleted\n- Comments created and listed\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `validation_error` on append | Invalid block type structure | Check block type object shape |\n| `object_not_found` | Block deleted or page not shared | Verify block ID and permissions |\n| `rate_limited` (429) | Rapid block operations | Add delays between batch operations |\n| Empty `rich_text` array | Block has no text content | Check block type before accessing |\n\n## Examples\n\n### Build a Report Page\n\n```typescript\nasync function buildReport(pageId: string, data: { title: string; items: string[] }) {\n  const blocks: any[] = [\n    { heading_1: { rich_text: [{ text: { content: data.title } }] } },\n    { paragraph: { rich_text: [{ text: { content: `Generated ${new Date().toISOString()}` } }] } },\n    { divider: {} },\n  ];\n\n  for (const item of data.items) {\n    blocks.push({\n      bulleted_list_item: { rich_text: [{ text: { content: item } }] },\n    });\n  }\n\n  await notion.blocks.children.append({ block_id: pageId, children: blocks });\n}\n```\n\n## Resources\n\n- [Block Object Reference](https://developers.notion.com/reference/block)\n- [Rich Text Reference](https://developers.notion.com/reference/rich-text)\n- [Append Block Children](https://developers.notion.com/reference/patch-block-children)\n- [Working with Page Content](https://developers.notion.com/docs/working-with-page-content)\n- [Working with Comments](https://developers.notion.com/docs/working-with-comments)\n\n## Next Steps\n\nFor common errors, see `notion-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "notion-core-workflow-b",
-    "description": "Work with Notion blocks, rich text, comments, and page content.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

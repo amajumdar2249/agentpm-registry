@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031313",
   "name": "appfolio-rate-limits",
   "slug": "appfolio-rate-limits",
   "description": "Handle AppFolio API rate limits with throttling and backoff.",
   "content": "# AppFolio Rate Limits\n\n## Overview\n\nAppFolio's Stack API enforces per-partner rate limits to protect shared property management infrastructure. High-volume operations like bulk tenant imports, rent-roll syncs, and work-order batch updates can quickly exhaust quotas. Property managers running nightly portfolio syncs across hundreds of units must throttle carefully, especially during month-end when lease renewals and payment processing spike concurrently.\n\n## Rate Limit Reference\n\n| Endpoint | Limit | Window | Scope |\n|----------|-------|--------|-------|\n| Properties list/get | 120 req | 1 minute | Per partner key |\n| Tenant create/update | 30 req | 1 minute | Per partner key |\n| Work orders | 60 req | 1 minute | Per partner key |\n| Bulk data export | 5 req | 1 hour | Per partner key |\n| Webhooks registration | 10 req | 1 minute | Per partner key |\n\n## Rate Limiter Implementation\n\n```typescript\nclass AppFolioRateLimiter {\n  private tokens: number;\n  private lastRefill: number;\n  private readonly maxTokens: number;\n  private readonly refillRate: number; // tokens per ms\n  private queue: Array<{ resolve: () => void }> = [];\n\n  constructor(maxPerMinute: number) {\n    this.maxTokens = maxPerMinute;\n    this.tokens = maxPerMinute;\n    this.lastRefill = Date.now();\n    this.refillRate = maxPerMinute / 60_000;\n  }\n\n  async acquire(): Promise<void> {\n    this.refill();\n    if (this.tokens >= 1) { this.tokens -= 1; return; }\n    return new Promise(resolve => this.queue.push({ resolve }));\n  }\n\n  private refill() {\n    const now = Date.now();\n    this.tokens = Math.min(this.maxTokens, this.tokens + (now - this.lastRefill) * this.refillRate);\n    this.lastRefill = now;\n    while (this.tokens >= 1 && this.queue.length) {\n      this.tokens -= 1;\n      this.queue.shift()!.resolve();\n    }\n  }\n}\n\nconst limiter = new AppFolioRateLimiter(100);\n```\n\n## Retry Strategy\n\n```typescript\nasync function appfolioRetry<T>(fn: () => Promise<Response>, maxRetries = 4): Promise<T> {\n  for (let attempt = 0; attempt <= maxRetries; attempt++) {\n    await limiter.acquire();\n    const res = await fn();\n    if (res.ok) return res.json();\n    if (res.status === 429) {\n      const retryAfter = parseInt(res.headers.get(\"Retry-After\") || \"10\", 10);\n      const delay = retryAfter * 1000 + Math.random() * 2000;\n      await new Promise(r => setTimeout(r, delay));\n      continue;\n    }\n    if (res.status >= 500 && attempt < maxRetries) {\n      await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 1000));\n      continue;\n    }\n    throw new Error(`AppFolio API ${res.status}: ${await res.text()}`);\n  }\n  throw new Error(\"Max retries exceeded\");\n}\n```\n\n## Batch Processing\n\n```typescript\nasync function batchSyncTenants(tenants: any[], batchSize = 25) {\n  const results: any[] = [];\n  for (let i = 0; i < tenants.length; i += batchSize) {\n    const batch = tenants.slice(i, i + batchSize);\n    const batchResults = await Promise.all(\n      batch.map(t => appfolioRetry(() =>\n        fetch(`${BASE}/api/v1/tenants`, {\n          method: \"POST\", headers, body: JSON.stringify(t),\n        })\n      ))\n    );\n    results.push(...batchResults);\n    if (i + batchSize < tenants.length) await new Promise(r => setTimeout(r, 2000));\n  }\n  return results;\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Fix |\n|-------|-------|-----|\n| 429 Too Many Requests | Exceeded partner rate limit | Backoff using Retry-After header |\n| 403 on bulk export | Hourly export cap reached | Queue exports with 15-min spacing |\n| Timeout on property list | Large portfolio (500+ units) | Paginate with `per_page=50` |\n| 409 Conflict on tenant update | Concurrent write to same tenant | Retry with fresh ETag |\n| 503 during maintenance | Scheduled nightly window (2-4 AM PT) | Skip requests, retry after window |\n\n## Resources\n\n- [AppFolio Stack API](https://www.appfolio.com/stack/partners/api)\n\n## Next Steps\n\nSee `appfolio-performance-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "appfolio-rate-limits",
-    "description": "Handle AppFolio API rate limits with throttling and backoff.",
-    "Trigger": "appfolio rate limit\".",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

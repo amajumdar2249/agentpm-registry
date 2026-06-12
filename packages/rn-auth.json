@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000001620",
   "name": "rn-auth",
   "slug": "rn-auth",
   "description": "React Native authentication patterns for Expo apps. Use when implementing login flows, Google/Apple sign-in, token management, session handling, or debugging auth issues in Expo/React Native.",
   "content": "\n# React Native Authentication (Expo)\n\n## Core Patterns\n\n### Expo AuthSession for OAuth\n\nUse `expo-auth-session` with `expo-web-browser` for OAuth flows:\n\n```typescript\nimport * as AuthSession from 'expo-auth-session';\nimport * as WebBrowser from 'expo-web-browser';\nimport * as Google from 'expo-auth-session/providers/google';\n\n// Critical: Call this at module level for proper redirect handling\nWebBrowser.maybeCompleteAuthSession();\n\n// Inside component\nconst [request, response, promptAsync] = Google.useAuthRequest({\n  iosClientId: 'YOUR_IOS_CLIENT_ID.apps.googleusercontent.com',\n  webClientId: 'YOUR_WEB_CLIENT_ID.apps.googleusercontent.com', // For backend verification\n  scopes: ['profile', 'email'],\n});\n```\n\n### Common Pitfalls\n\n1. **Missing `maybeCompleteAuthSession()`** - Auth redirects fail silently without this at module level\n2. **Wrong client ID** - iOS needs the iOS client ID, but backend verification needs the web client ID\n3. **Scheme mismatch** - `app.json` scheme must match Google Cloud Console redirect URI\n4. **Expo Go vs standalone** - Different redirect URIs; use `AuthSession.makeRedirectUri()` to handle both\n\n### Token Storage\n\nUse `expo-secure-store` for tokens (not AsyncStorage):\n\n```typescript\nimport * as SecureStore from 'expo-secure-store';\n\nconst TOKEN_KEY = 'auth_token';\nconst REFRESH_KEY = 'refresh_token';\n\nexport const tokenStorage = {\n  async save(token: string, refresh?: string) {\n    await SecureStore.setItemAsync(TOKEN_KEY, token);\n    if (refresh) {\n      await SecureStore.setItemAsync(REFRESH_KEY, refresh);\n    }\n  },\n  \n  async get() {\n    return SecureStore.getItemAsync(TOKEN_KEY);\n  },\n  \n  async getRefresh() {\n    return SecureStore.getItemAsync(REFRESH_KEY);\n  },\n  \n  async clear() {\n    await SecureStore.deleteItemAsync(TOKEN_KEY);\n    await SecureStore.deleteItemAsync(REFRESH_KEY);\n  },\n};\n```\n\n### Auth Context Pattern\n\n```typescript\nimport { createContext, useContext, useEffect, useState, ReactNode } from 'react';\n\ntype AuthState = {\n  token: string | null;\n  user: User | null;\n  isLoading: boolean;\n  signIn: (token: string, user: User) => Promise<void>;\n  signOut: () => Promise<void>;\n};\n\nconst AuthContext = createContext<AuthState | null>(null);\n\nexport function AuthProvider({ children }: { children: ReactNode }) {\n  const [token, setToken] = useState<string | null>(null);\n  const [user, setUser] = useState<User | null>(null);\n  const [isLoading, setIsLoading] = useState(true);\n\n  useEffect(() => {\n    // Restore session on mount\n    async function restore() {\n      try {\n        const savedToken = await tokenStorage.get();\n        if (savedToken) {\n          // Validate token with backend before trusting it\n          const userData = await validateToken(savedToken);\n          setToken(savedToken);\n          setUser(userData);\n        }\n      } catch {\n        await tokenStorage.clear();\n      } finally {\n        setIsLoading(false);\n      }\n    }\n    restore();\n  }, []);\n\n  const signIn = async (newToken: string, userData: User) => {\n    await tokenStorage.save(newToken);\n    setToken(newToken);\n    setUser(userData);\n  };\n\n  const signOut = async () => {\n    await tokenStorage.clear();\n    setToken(null);\n    setUser(null);\n  };\n\n  return (\n    <AuthContext.Provider value={{ token, user, isLoading, signIn, signOut }}>\n      {children}\n    </AuthContext.Provider>\n  );\n}\n\nexport const useAuth = () => {\n  const ctx = useContext(AuthContext);\n  if (!ctx) throw new Error('useAuth must be inside AuthProvider');\n  return ctx;\n};\n```\n\n### Protected Routes with Expo Router\n\n```typescript\n// app/_layout.tsx\nimport { Slot, useRouter, useSegments } from 'expo-router';\nimport { useAuth } from '@/contexts/auth';\nimport { useEffect } from 'react';\n\nexport default function RootLayout() {\n  const { token, isLoading } = useAuth();\n  const segments = useSegments();\n  const router = useRouter();\n\n  useEffect(() => {\n    if (isLoading) return;\n\n    const inAuthGroup = segments[0] === '(auth)';\n\n    if (!token && !inAuthGroup) {\n      router.replace('/(auth)/login');\n    } else if (token && inAuthGroup) {\n      router.replace('/(app)/home');\n    }\n  }, [token, isLoading, segments]);\n\n  if (isLoading) {\n    return <LoadingScreen />;\n  }\n\n  return <Slot />;\n}\n```\n\n## Backend Integration\n\n### Sending Auth Headers\n\n```typescript\n// api/client.ts\nimport { tokenStorage } from '@/utils/tokenStorage';\n\nconst API_BASE = process.env.EXPO_PUBLIC_API_URL;\n\nasync function authFetch(path: string, options: RequestInit = {}) {\n  const token = await tokenStorage.get();\n  \n  const response = await fetch(`${API_BASE}${path}`, {\n    ...options,\n    headers: {\n      'Content-Type': 'application/json',\n      ...(token && { Authorization: `Bearer ${token}` }),\n      ...options.headers,\n    },\n  });\n\n  if (response.status === 401) {\n    // Token expired - try refresh or force logout\n    const refreshed = await attemptTokenRefresh();\n    if (!refreshed) {\n      await tokenStorage.clear();\n      // Trigger auth state update (emit event or use callback)\n    }\n  }\n\n  return response;\n}\n```\n\n### Google Token Verification (FastAPI backend)\n\n```python\n# For reference: backend should verify Google tokens like this\nfrom google.oauth2 import id_token\nfrom google.auth.transport import requests\n\ndef verify_google_token(token: str, client_id: str) -> dict:\n    \"\"\"Verify Google ID token and return user info.\"\"\"\n    idinfo = id_token.verify_oauth2_token(\n        token, \n        requests.Request(), \n        client_id  # Use WEB client ID here, not iOS\n    )\n    return {\n        \"google_id\": idinfo[\"sub\"],\n        \"email\": idinfo[\"email\"],\n        \"name\": idinfo.get(\"name\"),\n    }\n```\n\n## Debugging Auth Issues\n\n### Check redirect URI configuration\n\n```typescript\n// Log the redirect URI being used\nconsole.log('Redirect URI:', AuthSession.makeRedirectUri());\n```\n\nCompare this with what's configured in:\n- Google Cloud Console > Credentials > OAuth 2.0 Client IDs\n- `app.json` scheme field\n\n### Common error patterns\n\n| Error | Likely Cause |\n|-------|--------------|\n| \"redirect_uri_mismatch\" | Redirect URI in console doesn't match app |\n| Auth popup opens but nothing happens | Missing `maybeCompleteAuthSession()` |\n| Works in Expo Go, fails in build | Using Expo Go redirect URI in standalone config |\n| Token validation fails on backend | Using iOS client ID instead of web client ID for verification |\n\n### Test auth flow\n\n1. Clear all tokens: `await tokenStorage.clear()`\n2. Force kill app\n3. Reopen and verify redirect to login\n4. Complete sign-in flow\n5. Force kill and reopen - should stay logged in\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "rn-auth",
-    "description": "React Native authentication patterns for Expo apps. Use when implementing login flows, Google/Apple sign-in, token management, session handling, or debugging auth issues in Expo/React Native."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

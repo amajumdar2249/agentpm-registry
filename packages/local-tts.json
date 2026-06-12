@@ -1,19 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000030838",
   "name": "local-tts",
   "slug": "local-tts",
   "description": "Generate speech locally from text using VoxCPM2 (2B params, Apache-2.0).",
   "content": "# Local TTS \u2014 Offline Text-to-Speech\n\nGenerate speech from text using VoxCPM2 locally. 30 languages, voice design, voice cloning. Runs on Apple Silicon via Metal. Apache-2.0, zero cost.\n\n## Overview\n\nThis skill wraps VoxCPM2 (OpenBMB, Apache-2.0) for local text-to-speech. It supports three modes:\n\n1. **Default voice** \u2014 just feed text, get natural speech in 30 languages (auto-detected)\n2. **Voice Design** \u2014 describe the voice in a parenthetical prefix, get matching speech\n3. **Voice Cloning** \u2014 provide a 3-10s reference clip, the output mimics the voice\n\nAll processing happens on-device. No API keys. No network calls after the initial model download. Output is 48 kHz WAV ready for any use (Telegram voice messages, podcasts, video narration).\n\n## Prerequisites\n\n- Python 3.10+ (3.12 recommended)\n- macOS with Apple Silicon preferred (M1/M2/M3/M4). Linux with CUDA also works.\n- ~10 GB disk space for model weights (downloaded once on first use)\n- ~16 GB RAM recommended\n\nThe skill expects a Python venv at `~/.local-tts/venv` with the `voxcpm` package installed. If missing, create it:\n\n```bash\nmkdir -p ~/.local-tts\npython3.12 -m venv ~/.local-tts/venv\n~/.local-tts/venv/bin/pip install --upgrade pip voxcpm\n```\n\nFirst generation downloads ~10 GB of model weights to `~/.cache/huggingface/`. Subsequent runs load the cache in ~30s.\n\n## Instructions\n\n### Step 1 \u2014 Verify the environment\n\n```bash\nls ~/.local-tts/venv/bin/python && echo \"venv OK\" || echo \"Run setup first\"\n```\n\nIf the venv is missing, guide the user through the setup commands above.\n\n### Step 2 \u2014 Generate the speech\n\nUse the `generate.py` script bundled in this plugin. The entry point:\n\n```bash\nVENV=~/.local-tts/venv\nSCRIPT=${CLAUDE_PLUGIN_ROOT}/scripts/generate.py\nOUT=/tmp/tts_$(date +%s).wav\n```\n\n**Default voice (auto-detected language)**:\n\n```bash\n\"$VENV/bin/python\" \"$SCRIPT\" --text \"Your text here.\" --out \"$OUT\"\n```\n\n**Voice Design** \u2014 describe the voice in parentheses at the start. The parenthetical is stripped from the spoken audio.\n\n```bash\n\"$VENV/bin/python\" \"$SCRIPT\" \\\n  --text \"(warm female voice, mid-30s, American accent)Welcome back.\" \\\n  --out \"$OUT\"\n```\n\nDescription examples that work:\n\n- `(young woman, gentle and sweet voice)`\n- `(older man, deep resonant voice, slow pace)`\n- `(cheerful, energetic, fast-talking)`\n- `(voix f\u00e9minine chaleureuse, ton pos\u00e9)` \u2014 descriptions in any supported language\n\n**Voice Cloning** \u2014 provide a reference clip (3-10s). Clones timbre, accent, emotional tone.\n\n```bash\n\"$VENV/bin/python\" \"$SCRIPT\" \\\n  --text \"This is the cloned voice speaking.\" \\\n  --ref /path/to/reference.wav \\\n  --out \"$OUT\"\n```\n\n**Ultimate Cloning** \u2014 reference + prompt for maximum fidelity (reproduces micro-level vocal nuances):\n\n```bash\n\"$VENV/bin/python\" \"$SCRIPT\" \\\n  --text \"Highest fidelity clone.\" \\\n  --ref /path/to/ref.wav \\\n  --prompt-wav /path/to/ref.wav \\\n  --out \"$OUT\"\n```\n\n**Long text via stdin** (for articles, scripts):\n\n```bash\ncat /path/to/article.txt | \"$VENV/bin/python\" \"$SCRIPT\" --stdin --out \"$OUT\"\n```\n\n### Step 3 \u2014 Verify and hand off\n\n```bash\nfile \"$OUT\"   # Should show: \"RIFF ... WAVE audio, Microsoft PCM, 16 bit, mono 48000 Hz\"\nls -lh \"$OUT\" # Check size is reasonable\n```\n\nThe script prints `OK <duration>s <rtf>x <path>` on success.\n\n## Output\n\n- **Format**: 48 kHz mono WAV, 16-bit PCM\n- **Location**: whatever `--out` path specified (typically `/tmp/tts_*.wav`)\n- **Size**: roughly 100 KB per second of audio\n- **Usage**: ready to attach to Telegram, embed in video, use as voiceover\n\n## Script options\n\n| Flag | Purpose |\n|------|---------|\n| `--text STR` | Text to synthesize |\n| `--stdin` | Read text from stdin (for long input) |\n| `--out PATH` | Output WAV path (required) |\n| `--ref PATH` | Reference audio for cloning |\n| `--prompt-wav PATH` | Prompt wav for ultimate cloning |\n| `--cfg FLOAT` | Classifier-free guidance (default 2.0) |\n| `--steps INT` | Diffusion steps (default 10) |\n| `--model ID` | Model id (default `openbmb/VoxCPM2`) |\n| `--quiet` | Suppress loading messages |\n\n## Supported languages (30)\n\nArabic, Burmese, Chinese (+ dialects), Danish, Dutch, English, Finnish, French, German, Greek, Hebrew, Hindi, Indonesian, Italian, Japanese, Khmer, Korean, Lao, Malay, Norwegian, Polish, Portuguese, Russian, Spanish, Swahili, Swedish, Tagalog, Thai, Turkish, Vietnamese.\n\nNo language tag needed \u2014 VoxCPM auto-detects from the text.\n\n## Error Handling\n\n- **`ModuleNotFoundError: voxcpm`** \u2014 venv missing. Run the setup commands from Prerequisites.\n- **`No such file: VoxCPM2 weights`** \u2014 HuggingFace cache missing. First run will download (needs network, ~10 GB).\n- **Slow first call (~5 min)** \u2014 normal. Model download + initial load. Subsequent runs ~30s.\n- **French pronunciation edge cases** \u2014 add an IPA-ish hint or rephrase. Most names and proper nouns work out of the box.\n\n## Performance\n\nOn Apple M4 with MPS + bfloat16:\n\n- First load: ~340s (downloads weights)\n- Subsequent loads: ~30s\n- Generation: ~2.3\u00d7 realtime (10s audio \u2248 23s compute)\n\nNot suitable for real-time streaming. Good for batch generation, voiceovers, podcasts, voice messages.\n\n## Examples\n\n**Example 1: Voice message for Telegram**\n\n```bash\n\"$VENV/bin/python\" \"$SCRIPT\" \\\n  --text \"Hey, quick voice note about our meeting tomorrow.\" \\\n  --out /tmp/voice_msg.wav\n```\n\n**Example 2: Clone a voice from an MP3**\n\n```bash\n\"$VENV/bin/python\" \"$SCRIPT\" \\\n  --text \"Bonjour, c'est une voix clon\u00e9e localement.\" \\\n  --ref ~/my_voice_sample.mp3 \\\n  --out /tmp/cloned.wav\n```\n\n**Example 3: Designed voice for narration**\n\n```bash\n\"$VENV/bin/python\" \"$SCRIPT\" \\\n  --text \"(deep narrator voice, dramatic, slow pace)In a world where AI runs locally...\" \\\n  --out /tmp/narration.wav\n```\n\n## Resources\n\n- VoxCPM2 source: https://github.com/OpenBMB/VoxCPM\n- Model card: https://huggingface.co/openbmb/VoxCPM2\n- Script source (same as bundled): https://github.com/vdk888/local-tts/blob/main/scripts/generate.py\n- License: Apache-2.0\n",
+  "author": "Bubble Invest <contact@bubbleinvest.com>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "local-tts",
-    "description": "Generate speech locally from text using VoxCPM2 (2B params, Apache-2.0).",
-    "a voice, or wants to generate audio from text. Trigger phrases": "say this\",",
-    "allowed-tools": "Read, Bash(python3:*), Bash(file:*), Bash(ls:*)",
-    "version": "1.0.0",
-    "author": "Bubble Invest <contact@bubbleinvest.com>",
-    "license": "Apache-2.0",
-    "tags": "",
-    "user-invocable": "true",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "Apache-2.0",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

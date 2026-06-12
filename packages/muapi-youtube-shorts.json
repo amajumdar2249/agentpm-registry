@@ -1,14 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000018428",
   "name": "muapi-youtube-shorts",
   "slug": "muapi-youtube-shorts",
   "description": "Auto-generate viral 9:16 YouTube Shorts (or TikTok / Reels clips) from a long-form video. Thin platform-aware wrapper around the AI Clipping skill \u2014 picks sensible defaults for short-form social platforms (9:16, 30\u201360s sweet spot) and delegates the actual highlight extraction + crop to muapi.ai's `/ai-clipping` endpoint.",
   "content": "\n# YouTube Shorts Generator\n\n**Long video \u2192 ranked vertical short clips, tuned for short-form social.**\n\nThis skill is a platform-aware preset over the [AI Clipping](../../edit/ai-clipping/) primitive. It picks the right aspect ratio and clip count for the target platform and delegates highlight extraction, dedupe, and face-tracked auto-crop to muapi.ai's managed `/ai-clipping` endpoint.\n\nReference implementation: https://github.com/SamurAIGPT/AI-Youtube-Shorts-Generator\nUnderlying API: https://muapi.ai/playground/ai-clipping\n\n---\n\n## When to Use This vs. AI Clipping\n\n| Use this skill when\u2026 | Use [AI Clipping](../../edit/ai-clipping/) directly when\u2026 |\n|:---|:---|\n| Target is YouTube Shorts / TikTok / Reels | You want full control over aspect / count |\n| You want platform-tuned defaults | You want raw timestamps (`--coords-only`) |\n| You'd rather pass `--platform tiktok` than think about ratios | You're integrating into a custom renderer |\n\n---\n\n## Agent Execution Protocol\n\n### Step 1 \u2014 Collect Inputs\n\n| Input | Default | Notes |\n|:---|:---|:---|\n| `--source` | \u2014 | YouTube URL, hosted mp4 URL, or local file |\n| `--platform` | `shorts` | `shorts` \\| `tiktok` \\| `reels` \\| `feed` (sets ratio + count defaults) |\n| `--num-clips` | platform default | Override clip count |\n| `--aspect-ratio` | platform default | Override aspect ratio |\n\nIf the user gave only a URL, run with platform defaults \u2014 don't block.\n\n---\n\n### Step 2 \u2014 Verify Prerequisites\n\n- `muapi-cli` installed and authed (`muapi auth configure`)\n- `MUAPI_API_KEY` available\n\nThat's it. Transcription, highlight ranking, dedupe, and cropping all run server-side \u2014 no `ffmpeg`, no Python, no Whisper, no LLM keys needed locally.\n\n---\n\n### Step 3 \u2014 Run the Pipeline\n\n```bash\nbash library/social/youtube-shorts/scripts/run-youtube-shorts.sh \\\n  --source \"<YOUTUBE_URL>\" \\\n  --platform shorts \\\n  --num-clips 5 \\\n  --view\n```\n\nThe script:\n1. Resolves the source (uploads local files to muapi CDN if needed).\n2. Picks platform defaults if `--aspect-ratio` / `--num-clips` aren't passed.\n3. Calls `muapi edit clipping` (the `/ai-clipping` endpoint) with the chosen params.\n4. Polls until done, prints a ranked summary, optionally downloads / opens clips.\n\n---\n\n## What Happens Server-Side\n\nThe `/ai-clipping` endpoint runs the full pipeline:\n\n- **Transcribes** the audio.\n- **Ranks highlights** through a virality framework \u2014 hook moments, emotional peaks, opinion bombs, revelation moments, conflict, quotable lines, story peaks, practical value.\n- **Dedupes** overlapping candidates by score.\n- **Top-N selects** and **face-tracks** vertical crops.\n\nEach clip ships with score (0\u2013100), opening hook line, and a one-sentence \"why it works\" reason.\n\n---\n\n## Platform Defaults\n\n| Platform | Flag | Aspect | Default clips | Notes |\n|:---|:---|:---|:---|:---|\n| YouTube Shorts | `--platform shorts` | `9:16` | 3 | Hook in first 1s |\n| TikTok | `--platform tiktok` | `9:16` | 5 | Higher energy, longer ok |\n| Instagram Reels | `--platform reels` | `9:16` | 3 | Hook in first 1s |\n| Instagram Feed | `--platform feed` | `1:1` | 3 | Static-feel works well |\n\nOverride any default with `--aspect-ratio` / `--num-clips`.\n\n---\n\n## Quick Invocation Patterns\n\n**Single video, defaults:**\n```bash\nbash run-youtube-shorts.sh --source \"https://youtube.com/watch?v=VIDEO_ID\"\n```\n\n**TikTok preset \u2014 5 clips, view in player:**\n```bash\nbash run-youtube-shorts.sh --source \"<URL>\" --platform tiktok --view\n```\n\n**Square Instagram feed clips:**\n```bash\nbash run-youtube-shorts.sh --source \"<URL>\" --platform feed --num-clips 3\n```\n\n**Batch \u2014 `urls.txt` with one URL per line:**\n```bash\nxargs -a urls.txt -I{} bash run-youtube-shorts.sh --source \"{}\"\n```\n\n**Async submit (returns request_id, poll later):**\n```bash\nREQUEST_ID=$(bash run-youtube-shorts.sh --source \"<URL>\" --async --output-json - | jq -r '.request_id')\nmuapi predict wait \"$REQUEST_ID\" --download ./outputs\n```\n\n---\n\n## Output Schema\n\n```json\n{\n  \"source_video_url\": \"...\",\n  \"shorts\": [\n    {\n      \"title\": \"The one mistake that cost me $50K\",\n      \"start_time\": 124.3,\n      \"end_time\": 187.6,\n      \"score\": 92,\n      \"hook_sentence\": \"Nobody talks about this, but it killed my first startup...\",\n      \"virality_reason\": \"Opens with a number + regret, peaks on a contrarian lesson\",\n      \"clip_url\": \"https://.../short_1.mp4\"\n    }\n  ]\n}\n```\n\nWhen reporting back, surface for each clip: rank, score, time range, title, hook, and clip URL.\n\n---\n\n## Common Mistakes to Avoid\n\n1. **Wrong aspect ratio for the platform** \u2014 Shorts / TikTok / Reels are `9:16`. The platform preset handles this; only override if you know why.\n2. **Padding to hit `--num-clips`** \u2014 if the API returns fewer survivors, return what you have. Don't ship low-score filler.\n3. **Re-running on a 404'd clip URL** \u2014 re-fetch the same `request_id` with `muapi predict wait <id>` rather than re-clipping.\n\n---\n\n## Failure Modes\n\n- **API key missing or rejected** \u2014 surface the error; don't fabricate a key.\n- **Job timed out** \u2014 bump `--poll-timeout` and retry.\n- **Source URL not reachable** \u2014 upload the file via `muapi upload file` and pass the returned URL.\n- **Fewer clips returned than requested** \u2014 source had fewer rankable highlights. Return what came back with a note.\n\n---\n\n## Done Criteria\n\nThe skill is done when:\n1. `result.shorts` has up to `num_clips` entries, each with a working `clip_url`.\n2. The user has been shown the ranked list (score, time range, title, hook, URL).\n3. If `--output-json` was set, the file exists and parses.\n",
-  "version": "1.0.0",
-  "metadata": {
-    "slug": "muapi-youtube-shorts",
-    "name": "muapi-youtube-shorts",
-    "version": "2.0.0",
-    "description": "Auto-generate viral 9:16 YouTube Shorts (or TikTok / Reels clips) from a long-form video. Thin platform-aware wrapper around the AI Clipping skill \u2014 picks sensible defaults for short-form social platforms (9:16, 30\u201360s sweet spot) and delegates the actual highlight extraction + crop to muapi.ai's `/ai-clipping` endpoint.",
-    "acceptLicenseTerms": "true"
+  "author": "agentpm",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

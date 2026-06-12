@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032502",
   "name": "linear-deploy-integration",
   "slug": "linear-deploy-integration",
   "description": "Deploy Linear-integrated applications and track deployments.",
   "content": "# Linear Deploy Integration\n\n## Overview\n\nDeploy Linear-integrated applications with automatic deployment tracking. Linear's GitHub integration links PRs to issues using magic words (`Fixes`, `Closes`, `Resolves`) and auto-detects Vercel preview links. This skill adds custom deployment comments, state transitions, and rollback tracking.\n\n## Prerequisites\n\n- Working Linear integration with API key or OAuth\n- Deployment platform (Vercel, Railway, Cloud Run, etc.)\n- GitHub integration enabled in Linear (Settings > Integrations > GitHub)\n\n## Instructions\n\n### Step 1: Deployment Workflow with Linear Tracking\n\n```yaml\n# .github/workflows/deploy.yml\nname: Deploy and Track\n\non:\n  push:\n    branches: [main]\n\njobs:\n  deploy:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0 # Full history for commit scanning\n\n      - name: Deploy\n        id: deploy\n        run: |\n          # Replace with your deploy command\n          DEPLOY_URL=$(npx vercel deploy --prod --token=${{ secrets.VERCEL_TOKEN }} 2>&1 | tail -1)\n          echo \"url=$DEPLOY_URL\" >> $GITHUB_OUTPUT\n\n      - name: Track deployment in Linear\n        if: success()\n        env:\n          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}\n        run: |\n          npx tsx scripts/track-deployment.ts \\\n            --env production \\\n            --url \"${{ steps.deploy.outputs.url }}\" \\\n            --sha \"${{ github.sha }}\" \\\n            --before \"${{ github.event.before }}\"\n\n      - name: Create failure issue\n        if: failure()\n        env:\n          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}\n        run: |\n          curl -s -X POST https://api.linear.app/graphql \\\n            -H \"Authorization: $LINEAR_API_KEY\" \\\n            -H \"Content-Type: application/json\" \\\n            -d '{\n              \"query\": \"mutation($i: IssueCreateInput!) { issueCreate(input: $i) { success } }\",\n              \"variables\": { \"i\": { \"teamId\": \"${{ vars.LINEAR_TEAM_ID }}\", \"title\": \"[Deploy] Failed: ${{ github.sha }}\", \"priority\": 1 } }\n            }'\n```\n\n### Step 2: Deployment Tracking Script\n\n```typescript\n// scripts/track-deployment.ts\nimport { LinearClient } from \"@linear/sdk\";\nimport { execSync } from \"child_process\";\nimport { parseArgs } from \"util\";\n\nconst { values } = parseArgs({\n  options: {\n    env: { type: \"string\" },\n    url: { type: \"string\" },\n    sha: { type: \"string\" },\n    before: { type: \"string\" },\n  },\n});\n\nasync function trackDeployment() {\n  const client = new LinearClient({ apiKey: process.env.LINEAR_API_KEY! });\n\n  // Extract Linear issue IDs from commit messages since last deploy\n  const log = execSync(\n    `git log --oneline ${values.before}..${values.sha} 2>/dev/null || echo \"\"`\n  ).toString();\n\n  const issueIds = [...new Set(log.match(/[A-Z]+-\\d+/g) ?? [])];\n  console.log(`Found ${issueIds.length} Linear issues in commits: ${issueIds.join(\", \")}`);\n\n  for (const identifier of issueIds) {\n    const results = await client.issueSearch(identifier);\n    const issue = results.nodes.find(i => i.identifier === identifier);\n    if (!issue) continue;\n\n    // Add deployment comment\n    await client.createComment({\n      issueId: issue.id,\n      body: `Deployed to **${values.env}**: [${values.url}](${values.url})\\n\\nCommit: \\`${values.sha?.substring(0, 7)}\\``,\n    });\n\n    // Auto-transition based on environment\n    const team = await issue.team;\n    const states = await team!.states();\n\n    if (values.env === \"staging\") {\n      const reviewState = states.nodes.find(s =>\n        s.name.toLowerCase().includes(\"review\")\n      );\n      if (reviewState) await issue.update({ stateId: reviewState.id });\n    } else if (values.env === \"production\") {\n      const doneState = states.nodes.find(s => s.type === \"completed\");\n      if (doneState) await issue.update({ stateId: doneState.id });\n    }\n\n    console.log(`Updated ${identifier} \u2014 deployed to ${values.env}`);\n  }\n}\n\ntrackDeployment().catch(console.error);\n```\n\n### Step 3: Rollback Tracking\n\n```typescript\nasync function trackRollback(\n  client: LinearClient,\n  issueIdentifier: string,\n  reason: string\n) {\n  const results = await client.issueSearch(issueIdentifier);\n  const issue = results.nodes[0];\n  if (!issue) return;\n\n  // Add rollback comment\n  await client.createComment({\n    issueId: issue.id,\n    body: `**Rolled back from production**\\n\\nReason: ${reason}\\n\\nIssue moved back to In Progress.`,\n  });\n\n  // Move back to In Progress with elevated priority\n  const team = await issue.team;\n  const states = await team!.states();\n  const inProgress = states.nodes.find(s =>\n    s.name.toLowerCase() === \"in progress\"\n  );\n  if (inProgress) {\n    await issue.update({ stateId: inProgress.id, priority: 1 });\n  }\n}\n```\n\n### Step 4: PR Template for Deployment Tracking\n\n```markdown\n<!-- .github/PULL_REQUEST_TEMPLATE.md -->\n## Linear Issues\n<!-- Linear auto-links when you use magic words -->\nFixes ENG-XXX\n\n## Deployment Notes\n- [ ] Requires database migration\n- [ ] Requires environment variable changes\n- [ ] Requires Linear webhook reconfiguration\n- [ ] Requires secret rotation\n```\n\n### Step 5: Deployment Dashboard Query\n\n```typescript\n// Query recently deployed issues\nasync function getDeploymentSummary(client: LinearClient, days = 14) {\n  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();\n\n  const completed = await client.issues({\n    filter: {\n      state: { type: { eq: \"completed\" } },\n      completedAt: { gte: since },\n    },\n    first: 100,\n    orderBy: \"completedAt\",\n  });\n\n  console.log(`${completed.nodes.length} issues completed in last ${days} days:`);\n  for (const issue of completed.nodes) {\n    const assignee = await issue.assignee;\n    console.log(`  ${issue.identifier}: ${issue.title} (${assignee?.name ?? \"unassigned\"})`);\n  }\n\n  return completed.nodes;\n}\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `LINEAR_API_KEY` not set | Missing CI secret | Add to GitHub repo Settings > Secrets |\n| Issue not found | Wrong workspace or deleted | Verify team key matches workspace |\n| Preview links not appearing | GitHub integration off | Enable in Linear Settings > Integrations > GitHub |\n| Deploy comment missing | Issue ID not in commits | Follow branch naming: `feature/ENG-123-desc` |\n\n## Examples\n\n### Multi-Environment Matrix\n\n```yaml\nstrategy:\n  matrix:\n    include:\n      - env: staging\n        trigger: pull_request\n      - env: production\n        trigger: push\n```\n\n## Resources\n\n- [Linear GitHub Integration](https://linear.app/docs/github)\n- [Vercel Deploy Hooks](https://vercel.com/docs/deploy-hooks)\n- [Linear API Authentication](https://linear.app/developers/graphql)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "linear-deploy-integration",
-    "description": "Deploy Linear-integrated applications and track deployments.",
-    "Trigger": "deploy linear integration\", \"linear deployment\",",
-    "allowed-tools": "Read, Write, Edit, Bash(vercel:*), Bash(gcloud:*), Bash(aws:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

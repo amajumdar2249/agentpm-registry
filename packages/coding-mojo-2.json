@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000039976",
   "name": "coding-mojo",
   "slug": "coding-mojo-2",
   "description": "Develop and run Mojo code in Claude.ai containers. Handles installation, compilation, and execution. Use when writing Mojo code, benchmarking Mojo vs Python, or when user mentions Mojo, Modular, or MAX. Routes to Modular's official skills (mojo-syntax, mojo-python-interop, mojo-gpu-fundamentals) for language-specific correction layers.",
   "content": "\n# Mojo Development in Claude.ai Containers\n\nMojo is a systems programming language from Modular that combines Python-like syntax with C-level performance. This skill handles container setup and execution. For **language syntax and semantics**, defer to Modular's official skills at `github.com/modular/skills` \u2014 they are authoritative correction layers for pretrained knowledge.\n\n## Installation\n\nInstall once per session (~20s via uv, ~500MB). Skip if already installed.\n\n```bash\nif mojo --version 2>/dev/null; then\n  echo \"Mojo already installed\"\nelse\n  # Compiler binary without ML extras (~350MB saved)\n  uv pip install --system --break-system-packages modular --no-deps 2>&1 | tail -5\n  # Entry points + base deps (numpy, pyyaml, rich)\n  uv pip install --system --break-system-packages mojo max 2>&1 | tail -5\n  mojo --version\nfi\n```\n\nVerify:\n```bash\necho 'def main(): print(\"Mojo ready\")' > /tmp/_verify.mojo && mojo /tmp/_verify.mojo\n```\n\n## Running Mojo Code\n\n**Quick tests** (write to temp file):\n```bash\ncat > /tmp/test.mojo << 'EOF'\ndef main():\n    print(\"hello\")\nEOF\nmojo /tmp/test.mojo\n```\n\n**File execution** (JIT compile + run, ~1.4s overhead):\n```bash\ncat > /home/claude/example.mojo << 'EOF'\ndef main():\n    print(\"Hello from Mojo\")\nEOF\nmojo /home/claude/example.mojo\n```\n\n**Build binary** (for benchmarking \u2014 ~6s cold compile, but binary runs at native speed):\n```bash\nmojo build /home/claude/example.mojo -o /home/claude/example\n/home/claude/example\n```\n\nUse `mojo build` for benchmarks \u2014 `mojo` (JIT) includes ~1.4s compilation overhead per run. There is no `mojo -e` flag; always write to a file.\n\n## Critical Syntax Corrections (v26.2)\n\nPretrained models generate outdated Mojo. These corrections are current as of Mojo 26.2:\n\n| Wrong (pretrained) | Correct (26.2) | Notes |\n|---|---|---|\n| `fn main():` | `def main():` | `fn` is deprecated; `def` is the only function keyword |\n| `let x = 5` | `var x = 5` | `let` removed; `var` for all bindings |\n| `inout self` | `mut self` / `out self` | `mut` for mutation, `out` for `__init__` |\n| `@parameter for` | `comptime for` | Compile-time loops |\n| `List[Int](1, 2, 3)` | `[1, 2, 3]` | Collection literals |\n| `from math import sqrt` | `from std.math import sqrt` | `std.` prefix required for **all** stdlib modules |\n| `from time import X` | `from std.time import X` | Includes `perf_counter_ns`, `sleep`, etc. |\n| `__str__` / `Stringable` | `write_to` / `Writable` | String conversion protocol |\n| `String(self.x)` for int\u2192str | `String(self.x)` | This one is actually correct, but `str()` is not |\n| `list.append(item)` | `list.append(item^)` | Non-copyable types require `^` transfer operator |\n| `var x: Int = perf_counter_ns()` | `var x: UInt = perf_counter_ns()` | Time functions return `UInt`, not `Int` |\n| Implicit copy of `List[T]` | `.copy()` or `^` transfer | `List` is not implicitly copyable; use explicit copy or move |\n\n## Companion Skills (Modular Official)\n\nThese skills from `github.com/modular/skills` provide deep syntax correction layers. If they are installed in the user's skill set, read them before writing Mojo code:\n\n- **mojo-syntax** \u2014 Comprehensive syntax corrections, type system, ownership model. **Always use when writing any Mojo code.**\n- **mojo-python-interop** \u2014 Calling Python from Mojo, type conversion, extension modules. Use when mixing Mojo and Python.\n- **mojo-gpu-fundamentals** \u2014 GPU programming (no CUDA syntax \u2014 Mojo has its own model). Reference only in Claude.ai containers (no GPU available).\n- **new-modular-project** \u2014 Project scaffolding with Pixi or uv. Use when starting a new Mojo/MAX project locally.\n\nIf companion skills are not installed, the correction table above covers the most common pretrained errors. For deeper work, fetch the skill content directly:\n```bash\ncurl -sL -H \"Authorization: token $GH_TOKEN\" \\\n  -H \"Accept: application/vnd.github.v3.raw\" \\\n  \"https://api.github.com/repos/modular/skills/contents/mojo-syntax/SKILL.md?ref=main\"\n```\n\n## Container Constraints\n\n- **No GPU**: Claude.ai containers are CPU-only. GPU skills are reference material for generating code the user will run locally.\n- **Session-ephemeral**: Mojo installation doesn't persist across conversations. Reinstall each session.\n- **Build artifacts**: Store in `/home/claude/`. Copy final outputs to `/mnt/user-data/outputs/`.\n- **Timeout**: Long compilations or benchmarks may hit the ~200s bash timeout. Break work into smaller units.\n\n## Benchmarking Pattern\n\nCompare Mojo vs Python on the same algorithm:\n\n```bash\n# Python baseline\npython3 -c \"\nimport time\ndef fib(n):\n    a, b = 0, 1\n    for _ in range(n):\n        a, b = b, a + b\n    return a\n# Warmup + timed runs\nfib(90)\ntimes = []\nfor _ in range(100):\n    start = time.perf_counter()\n    fib(90)\n    times.append((time.perf_counter() - start) * 1e6)\nimport statistics\nprint(f'Python: median={statistics.median(times):.1f} \u00b5s, min={min(times):.1f} \u00b5s')\n\"\n\n# Mojo version\ncat > /home/claude/fib.mojo << 'EOF'\nfrom std.time import perf_counter_ns\n\ndef fib(n: Int) -> Int:\n    var a = 0\n    var b = 1\n    for _ in range(n):\n        var tmp = a\n        a = b\n        b = tmp + b\n    return a\n\ndef main():\n    # Warmup\n    _ = fib(90)\n    \n    # Timed runs\n    var total_ns: UInt = 0\n    var min_ns: UInt = 999999999\n    for _ in range(100):\n        var start = perf_counter_ns()\n        _ = fib(90)\n        var elapsed = perf_counter_ns() - start\n        total_ns += elapsed\n        if elapsed < min_ns:\n            min_ns = elapsed\n    print(\"Mojo: mean =\", total_ns // 100, \"ns, min =\", min_ns, \"ns\")\nEOF\nmojo build /home/claude/fib.mojo -o /home/claude/fib\n/home/claude/fib\n```\n\nExpected: Mojo is ~50x faster than CPython on tight numeric loops. SIMD and parallelism widen the gap further but require mojo-syntax and mojo-gpu-fundamentals skills for correct usage.\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "coding-mojo",
-    "description": "Develop and run Mojo code in Claude.ai containers. Handles installation, compilation, and execution. Use when writing Mojo code, benchmarking Mojo vs Python, or when user mentions Mojo, Modular, or MAX. Routes to Modular's official skills (mojo-syntax, mojo-python-interop, mojo-gpu-fundamentals) for language-specific correction layers.",
-    "metadata": "",
-    "version": "0.2.1"
+  "author": "agentpm",
+  "version": "0.2.1",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

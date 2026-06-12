@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031270",
   "name": "apify-prod-checklist",
   "slug": "apify-prod-checklist",
   "description": "Production readiness checklist for Apify Actor deployments.",
   "content": "# Apify Production Checklist\n\n## Overview\n\nComplete checklist for deploying Actors to the Apify platform and integrating them into production applications. Covers Actor configuration, scheduling, monitoring, alerting, and rollback.\n\n## Prerequisites\n\n- Actor tested locally with `apify run`\n- `apify login` configured with production token\n- Familiarity with `apify-core-workflow-a` and `apify-deploy-integration`\n\n## Pre-Deployment Checklist\n\n### Actor Configuration\n\n- [ ] `.actor/actor.json` has correct `name`, `title`, `description`\n- [ ] `INPUT_SCHEMA.json` validates all required inputs\n- [ ] `Dockerfile` uses pinned base image version (`apify/actor-node:20`, not `latest`)\n- [ ] `package-lock.json` committed (deterministic installs)\n- [ ] Memory set appropriately (start at 1024MB, tune after profiling)\n- [ ] Timeout set with buffer (2x expected runtime)\n\n### Code Quality\n\n- [ ] `Actor.main()` wraps entry point (handles init/exit/errors)\n- [ ] `failedRequestHandler` logs failures without crashing Actor\n- [ ] Input validation at Actor start (`if (!input?.startUrls) throw ...`)\n- [ ] No hardcoded URLs, credentials, or magic numbers\n- [ ] Proxy configured for target sites that block datacenter IPs\n- [ ] `maxRequestsPerCrawl` set to prevent runaway costs\n\n### Data Output\n\n- [ ] Dataset schema documented (consistent field names)\n- [ ] `SUMMARY` key-value store record saved with run stats\n- [ ] Large payloads chunked (9MB dataset push limit)\n- [ ] PII sanitized before storage\n\n## Instructions\n\n### Step 1: Deploy Actor\n\n```bash\n# Build and push to Apify platform\napify push\n\n# Verify the build succeeded\napify builds ls\n\n# Test on platform with production-like input\napify actors call username/my-actor \\\n  --input='{\"startUrls\":[{\"url\":\"https://target.com\"}],\"maxItems\":10}'\n```\n\n### Step 2: Configure Scheduling\n\n```typescript\nimport { ApifyClient } from 'apify-client';\n\nconst client = new ApifyClient({ token: process.env.APIFY_TOKEN });\n\n// Create a scheduled task (cron)\nconst schedule = await client.schedules().create({\n  name: 'daily-product-scrape',\n  cronExpression: '0 6 * * *',  // Daily at 6 AM UTC\n  isEnabled: true,\n  actions: [{\n    type: 'RUN_ACTOR',\n    actorId: 'username/my-actor',\n    runInput: {\n      body: JSON.stringify({\n        startUrls: [{ url: 'https://target.com/products' }],\n        maxItems: 5000,\n      }),\n      contentType: 'application/json',\n    },\n    runOptions: {\n      memory: 2048,\n      timeout: 3600,\n      build: 'latest',\n    },\n  }],\n});\n\nconsole.log(`Schedule created: ${schedule.id}`);\n```\n\nOr configure in Apify Console: Actors > Your Actor > Schedules.\n\n### Step 3: Set Up Webhooks for Monitoring\n\n```typescript\n// Create webhook for run completion alerts\nconst webhook = await client.webhooks().create({\n  eventTypes: ['ACTOR.RUN.SUCCEEDED', 'ACTOR.RUN.FAILED', 'ACTOR.RUN.TIMED_OUT'],\n  condition: { actorId: 'ACTOR_ID' },\n  requestUrl: 'https://your-server.com/api/apify-webhook',\n  payloadTemplate: JSON.stringify({\n    eventType: '{{eventType}}',\n    actorId: '{{actorId}}',\n    runId: '{{actorRunId}}',\n    status: '{{resource.status}}',\n    datasetId: '{{resource.defaultDatasetId}}',\n    startedAt: '{{resource.startedAt}}',\n    finishedAt: '{{resource.finishedAt}}',\n  }),\n});\n```\n\n### Step 4: Monitor Runs\n\n```typescript\n// Check recent runs for failures\nasync function checkActorHealth(actorId: string, lookbackHours = 24) {\n  const { items: runs } = await client.actor(actorId).runs().list({\n    limit: 50,\n    desc: true,\n  });\n\n  const cutoff = new Date(Date.now() - lookbackHours * 3600_000);\n  const recentRuns = runs.filter(r => new Date(r.startedAt) > cutoff);\n\n  const stats = {\n    total: recentRuns.length,\n    succeeded: recentRuns.filter(r => r.status === 'SUCCEEDED').length,\n    failed: recentRuns.filter(r => r.status === 'FAILED').length,\n    timedOut: recentRuns.filter(r => r.status === 'TIMED-OUT').length,\n    totalCostUsd: recentRuns.reduce((sum, r) => sum + (r.usageTotalUsd ?? 0), 0),\n  };\n\n  const successRate = stats.total > 0\n    ? ((stats.succeeded / stats.total) * 100).toFixed(1)\n    : 'N/A';\n\n  console.log(`Actor: ${actorId}`);\n  console.log(`Last ${lookbackHours}h: ${stats.total} runs, ${successRate}% success`);\n  console.log(`Failed: ${stats.failed}, Timed out: ${stats.timedOut}`);\n  console.log(`Total cost: $${stats.totalCostUsd.toFixed(4)}`);\n\n  if (stats.failed > 0) {\n    console.warn('ALERT: Failed runs detected!');\n  }\n\n  return stats;\n}\n```\n\n### Step 5: Implement Rollback\n\n```bash\n# List available builds\napify builds ls\n\n# Roll back to a previous build\ncurl -X POST \\\n  -H \"Authorization: Bearer $APIFY_TOKEN\" \\\n  \"https://api.apify.com/v2/acts/ACTOR_ID?build=BUILD_NUMBER\"\n\n# Or redeploy from a git tag\ngit checkout v1.2.3\napify push\n```\n\n### Step 6: Cost Guard\n\n```typescript\n// Set up a cost guard that aborts runs exceeding budget\nasync function runWithCostGuard(\n  actorId: string,\n  input: Record<string, unknown>,\n  maxCostUsd: number,\n) {\n  const run = await client.actor(actorId).start(input);\n\n  // Poll every 30 seconds\n  const pollInterval = setInterval(async () => {\n    const status = await client.run(run.id).get();\n    const cost = status.usageTotalUsd ?? 0;\n\n    if (cost > maxCostUsd) {\n      console.error(`Cost guard: $${cost.toFixed(4)} exceeds $${maxCostUsd}. Aborting.`);\n      await client.run(run.id).abort();\n      clearInterval(pollInterval);\n    }\n  }, 30_000);\n\n  const finished = await client.run(run.id).waitForFinish();\n  clearInterval(pollInterval);\n  return finished;\n}\n```\n\n## Production Alert Conditions\n\n| Alert | Condition | Severity |\n|-------|-----------|----------|\n| Run failed | `status === 'FAILED'` | P1 |\n| Run timed out | `status === 'TIMED-OUT'` | P2 |\n| Low yield | Dataset items < expected threshold | P2 |\n| High cost | `usageTotalUsd > budget` | P2 |\n| Consecutive failures | 3+ failures in a row | P1 |\n| No runs in window | Schedule didn't trigger | P1 |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Build fails on platform | Local deps differ | Commit `package-lock.json` |\n| Schedule not firing | Cron syntax error | Validate at crontab.guru |\n| Webhook not received | URL not reachable | Use ngrok for testing; check HTTPS |\n| Memory exceeded | Workload too large | Increase memory or reduce concurrency |\n| Unexpected cost spike | No `maxRequestsPerCrawl` | Always set an upper bound |\n\n## Resources\n\n- [Actor Deployment Guide](https://docs.apify.com/platform/actors/development/deployment)\n- [Schedules Documentation](https://docs.apify.com/platform/schedules)\n- [Webhook Event Types](https://docs.apify.com/platform/integrations/webhooks/events)\n- [Usage & Billing](https://docs.apify.com/platform/actors/running/usage-and-resources)\n\n## Next Steps\n\nFor version upgrades, see `apify-upgrade-migration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "apify-prod-checklist",
-    "description": "Production readiness checklist for Apify Actor deployments.",
-    "Trigger": "apify production\", \"deploy actor to prod\",",
-    "allowed-tools": "Read, Bash(apify:*), Bash(curl:*), Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000035154",
   "name": "ingest-inbox-item",
   "slug": "ingest-inbox-item-2",
   "description": "Ingests a single file from the substacker inbox/ into corpus/seeds/ as a normalized markdown seed with full frontmatter. Orchestrates format normalization, topic tagging, intuition-density scoring, dedupe, changelog, ledger update, and inbox-file move to .processed/. Use when the user drops raw material into inbox/ and runs /ingest, at session start, or whenever a single inbox file needs to become an indexed seed. Trigger keywords: ingest, inbox, new note, new transcript, new highlight, index this, add to corpus.",
   "content": "\n# Ingest Inbox Item\n\n## Table of Contents\n\n- [Workflow](#workflow)\n- [Frontmatter schema](#frontmatter-schema)\n- [Worked example](#worked-example)\n- [Guardrails](#guardrails)\n- [Related skills](#related-skills)\n\n**Related skills:** Uses `normalize-format`, `tag-by-topic`, `score-intuition-density`, `dedupe-against-corpus`, `update-topic-ledger`. Called by the Librarian agent for each file in `inbox/`.\n\n## Workflow\n\nCopy this checklist and track progress per file:\n\n```\nIngest one inbox file:\n- [ ] Step 0: Compute sha256 of file body; check .librarian-state.json for duplicate fingerprint\n- [ ] Step 1: Invoke normalize-format \u2192 body + partial frontmatter\n- [ ] Step 2: Invoke tag-by-topic \u2192 topics + pending_tags\n- [ ] Step 3: Invoke score-intuition-density \u2192 score + signals\n- [ ] Step 4: Invoke dedupe-against-corpus \u2192 CREATE | LINK | SKIPPED\n- [ ] Step 5: If LINK, backlink matched seeds' related_seeds field\n- [ ] Step 6: Write seed file with full frontmatter; status=seed; manual_edits=false\n- [ ] Step 7: Append one line to corpus/seeds/.changelog.md\n- [ ] Step 8: Invoke update-topic-ledger for each topic tag\n- [ ] Step 9: mv inbox file \u2192 inbox/.processed/\n- [ ] Step 10: Update .librarian-state.json with the fingerprint\n```\n\n**Step 0**: Hash the body (not frontmatter). If the fingerprint is in `.librarian-state.json`, exit with `SKIPPED (already ingested: <seed-id>)`. Idempotency is a feature.\n\n**Step 1**: `normalize-format` handles all supported formats (plain markdown, `.jsonl` Claude Code sessions, `.json` Claude.ai exports, Readwise exports, transcripts with speaker labels, link captures). Returns one or more `{body, partial_frontmatter}` pairs \u2014 multi-chunk outputs possible for long transcripts.\n\n**Step 2**: `tag-by-topic` proposes 1\u20134 tags from the controlled vocabulary. If none match, it logs to `topic-ledger.md#pending-tags` and still assigns the closest existing tag.\n\n**Step 3**: `score-intuition-density` computes 0\u201310 from 8 explicit signals. Auditable.\n\n**Step 4**: `dedupe-against-corpus` returns one of `SKIPPED` (exact fingerprint match \u2014 exit), `LINK` (near-match \u2014 proceed but write `related_seeds`), or `CREATE` (no match).\n\n**Step 6**: Write the seed file. Location: `corpus/seeds/{id}.md` where `id = YYYY-MM-DD-slugified-title`. If a seed with that `id` already exists, append `-v2` rather than overwrite.\n\n**Step 7**: Changelog format: `YYYY-MM-DDThh:mm | ADDED | {seed-id} | from {original_path} | density={N} | topics={comma-list}`\n\n## Frontmatter schema\n\n```yaml\n---\nid: 2026-04-23-dropout-as-ensemble-thinned-networks\ntitle: \"Dropout as ensemble over thinned networks\"\ncreated: 2026-04-21T09:14:00-07:00\nsource:\n  type: inbox-note\n  original_path: inbox/2026-04-21-dropout-as-ensemble.md\n  ingested_at: 2026-04-23T14:32:01-07:00\n  fingerprint: sha256:7c1d...\ntopics: [regularization, ensembling, dropout]\nintuition_density:\n  score: 8\n  signals: [analogy_present, concrete_worked_example, counterfactual_offered, reframe_against_default, biology_to_ai]\nstatus: seed\nprovenance:\n  author: kushal\n  confidence: owned\nlinks:\n  related_seeds: [2026-03-11-l2-as-gaussian-prior]\n  parent_source: null\nsection_affinity: [agent-workshop]\nword_count: 87\nmanual_edits: false\n---\n\n[body: preserved verbatim from normalize-format output]\n```\n\n## Worked example\n\n**Input**: `inbox/2026-04-21-dropout-as-ensemble.md` (87 words, plain markdown, user's own note).\n\n**Run**:\n- Step 0: fingerprint new \u2192 proceed.\n- Step 1: normalize-format \u2192 body unchanged (plain markdown); title from first line or filename.\n- Step 2: tag-by-topic \u2192 `[regularization, ensembling, dropout]`; `dropout` new \u2192 logged to pending-tags.\n- Step 3: score \u2192 8; signals fired: analogy_present, concrete_worked_example, counterfactual_offered, reframe_against_default, biology_to_ai.\n- Step 4: dedupe \u2192 near-match `2026-03-11-l2-as-gaussian-prior` at Jaccard 0.32 (below 0.5 threshold) \u2192 CREATE (not LINK).\n- Step 6: Write `corpus/seeds/2026-04-21-dropout-as-ensemble-thinned-networks.md` with full frontmatter.\n- Step 7: Changelog: `2026-04-23T14:32 | ADDED | 2026-04-21-dropout-as-ensemble-thinned-networks | from inbox/2026-04-21-dropout-as-ensemble.md | density=8 | topics=regularization,ensembling,dropout`\n- Step 8: Ledger: `regularization` seeds 3\u21924, temperature\u2192hot; `ensembling` 1\u21922; `dropout` new row added.\n- Step 9: `mv inbox/2026-04-21-dropout-as-ensemble.md inbox/.processed/`\n- Step 10: Append fingerprint to state.\n\n**Output**: one seed file, one changelog line, three ledger updates, one moved file.\n\n## Guardrails\n\n1. If `normalize-format` fails, the inbox file stays put (not moved) and the changelog records `ERROR | <file> | <reason>`. No partial ingests.\n2. If topic-tagger proposes a tag not in the controlled vocabulary that cannot map to one, log to pending-tags \u2014 never silently invent.\n3. If a seed with the candidate `id` exists, append `-v2`; never overwrite.\n4. Never ingest files under `inbox/.processed/` or `inbox/.trash/`.\n5. Run single-threaded. Parallel ingests corrupt the ledger and changelog.\n6. If `dedupe-against-corpus` returns `SKIPPED`, move the inbox file to `.processed/` with a renamed suffix `-duplicate-of-{matched-seed-id}` and exit \u2014 don't re-write the matched seed.\n\n## Quick reference\n\n- **Idempotent**: yes (fingerprint check in step 0).\n- **Writes**: one seed file + one changelog line + ledger updates + one moved inbox file + state update.\n- **Failure mode**: format error halts the pipeline for that one file; other files continue.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "ingest-inbox-item",
-    "description": "Ingests a single file from the substacker inbox/ into corpus/seeds/ as a normalized markdown seed with full frontmatter. Orchestrates format normalization, topic tagging, intuition-density scoring, dedupe, changelog, ledger update, and inbox-file move to .processed/. Use when the user drops raw material into inbox/ and runs /ingest, at session start, or whenever a single inbox file needs to become an indexed seed. Trigger keywords: ingest, inbox, new note, new transcript, new highlight, index this, add to corpus."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

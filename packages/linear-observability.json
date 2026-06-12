@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032510",
   "name": "linear-observability",
   "slug": "linear-observability",
   "description": "Implement monitoring, logging, and alerting for Linear integrations.",
   "content": "# Linear Observability\n\n## Overview\n\nProduction monitoring for Linear integrations using Prometheus metrics, structured logging with pino, health checks, and alerting rules. Track API latency, error rates, rate limit headroom, and webhook throughput.\n\n## Prerequisites\n\n- Linear integration deployed\n- Prometheus or Datadog for metrics\n- Structured logging (pino, winston)\n- Alerting system (PagerDuty, OpsGenie, Slack)\n\n## Instructions\n\n### Step 1: Define Metrics\n\n```typescript\n// src/metrics/linear-metrics.ts\nimport { Counter, Histogram, Gauge, register } from \"prom-client\";\n\nexport const metrics = {\n  // API request tracking\n  apiRequests: new Counter({\n    name: \"linear_api_requests_total\",\n    help: \"Total Linear API requests\",\n    labelNames: [\"operation\", \"status\"],\n  }),\n\n  // Request duration\n  apiLatency: new Histogram({\n    name: \"linear_api_request_duration_seconds\",\n    help: \"Linear API request duration\",\n    labelNames: [\"operation\"],\n    buckets: [0.1, 0.25, 0.5, 1, 2, 5, 10],\n  }),\n\n  // Rate limit headroom\n  rateLimitRemaining: new Gauge({\n    name: \"linear_rate_limit_remaining\",\n    help: \"Remaining rate limit budget\",\n    labelNames: [\"type\"], // \"requests\" or \"complexity\"\n  }),\n\n  // Webhook tracking\n  webhooksReceived: new Counter({\n    name: \"linear_webhooks_received_total\",\n    help: \"Total webhooks received\",\n    labelNames: [\"type\", \"action\"],\n  }),\n\n  webhookProcessingDuration: new Histogram({\n    name: \"linear_webhook_processing_seconds\",\n    help: \"Webhook processing duration\",\n    labelNames: [\"type\"],\n    buckets: [0.01, 0.05, 0.1, 0.5, 1, 5],\n  }),\n\n  // Cache effectiveness\n  cacheHits: new Counter({\n    name: \"linear_cache_hits_total\",\n    help: \"Cache hit count\",\n    labelNames: [\"key\"],\n  }),\n  cacheMisses: new Counter({\n    name: \"linear_cache_misses_total\",\n    help: \"Cache miss count\",\n    labelNames: [\"key\"],\n  }),\n};\n\n// Expose metrics endpoint\napp.get(\"/metrics\", async (req, res) => {\n  res.set(\"Content-Type\", register.contentType);\n  res.end(await register.metrics());\n});\n```\n\n### Step 2: Instrumented Client Wrapper\n\n```typescript\nimport { LinearClient } from \"@linear/sdk\";\n\nfunction instrumentedCall<T>(\n  operation: string,\n  fn: () => Promise<T>\n): Promise<T> {\n  const timer = metrics.apiLatency.startTimer({ operation });\n\n  return fn()\n    .then((result) => {\n      metrics.apiRequests.inc({ operation, status: \"success\" });\n      timer();\n      return result;\n    })\n    .catch((error: any) => {\n      const status = error.status === 429 ? \"rate_limited\" : \"error\";\n      metrics.apiRequests.inc({ operation, status });\n      timer();\n      throw error;\n    });\n}\n\n// Usage\nconst client = new LinearClient({ apiKey: process.env.LINEAR_API_KEY! });\n\nconst teams = await instrumentedCall(\"teams\", () => client.teams());\nconst issues = await instrumentedCall(\"issues\", () =>\n  client.issues({ first: 50 })\n);\n```\n\n### Step 3: Structured Logging\n\n```typescript\nimport pino from \"pino\";\n\nconst logger = pino({\n  level: process.env.LOG_LEVEL ?? \"info\",\n  formatters: {\n    level: (label) => ({ level: label }),\n  },\n});\n\nconst linearLog = logger.child({ component: \"linear\" });\n\n// Log API calls\nfunction logApiCall(operation: string, durationMs: number, success: boolean, meta?: any) {\n  linearLog.info({\n    event: \"api_call\",\n    operation,\n    durationMs,\n    success,\n    ...meta,\n  });\n}\n\n// Log webhook events\nfunction logWebhook(type: string, action: string, deliveryId: string, meta?: any) {\n  linearLog.info({\n    event: \"webhook\",\n    type,\n    action,\n    deliveryId,\n    ...meta,\n  });\n}\n\n// Log errors with context\nfunction logError(operation: string, error: any) {\n  linearLog.error({\n    event: \"error\",\n    operation,\n    errorMessage: error.message,\n    errorStatus: error.status,\n    errorType: error.type,\n    // Never log API keys or tokens\n  });\n}\n```\n\n### Step 4: Health Check Endpoint\n\n```typescript\ninterface HealthCheck {\n  status: \"healthy\" | \"degraded\" | \"unhealthy\";\n  checks: Record<string, {\n    status: string;\n    latencyMs?: number;\n    error?: string;\n  }>;\n  timestamp: string;\n}\n\nasync function checkLinearHealth(client: LinearClient): Promise<HealthCheck> {\n  const checks: HealthCheck[\"checks\"] = {};\n\n  // Check API connectivity\n  const apiStart = Date.now();\n  try {\n    const viewer = await client.viewer;\n    checks.linear_api = {\n      status: \"healthy\",\n      latencyMs: Date.now() - apiStart,\n    };\n  } catch (error: any) {\n    checks.linear_api = {\n      status: \"unhealthy\",\n      latencyMs: Date.now() - apiStart,\n      error: error.message,\n    };\n  }\n\n  // Check rate limit headroom\n  try {\n    const resp = await fetch(\"https://api.linear.app/graphql\", {\n      method: \"POST\",\n      headers: {\n        Authorization: process.env.LINEAR_API_KEY!,\n        \"Content-Type\": \"application/json\",\n      },\n      body: JSON.stringify({ query: \"{ viewer { id } }\" }),\n    });\n    const remaining = parseInt(resp.headers.get(\"x-ratelimit-requests-remaining\") ?? \"5000\");\n    metrics.rateLimitRemaining.set({ type: \"requests\" }, remaining);\n\n    checks.rate_limit = {\n      status: remaining > 100 ? \"healthy\" : \"degraded\",\n      latencyMs: remaining,\n    };\n  } catch {\n    checks.rate_limit = { status: \"unknown\" };\n  }\n\n  const overall = Object.values(checks).some(c => c.status === \"unhealthy\")\n    ? \"unhealthy\"\n    : Object.values(checks).some(c => c.status === \"degraded\")\n    ? \"degraded\"\n    : \"healthy\";\n\n  return { status: overall, checks, timestamp: new Date().toISOString() };\n}\n\napp.get(\"/health/linear\", async (req, res) => {\n  const health = await checkLinearHealth(client);\n  res.status(health.status === \"unhealthy\" ? 503 : 200).json(health);\n});\n```\n\n### Step 5: Alerting Rules (Prometheus)\n\n```yaml\n# prometheus/linear-alerts.yml\ngroups:\n  - name: linear\n    rules:\n      - alert: LinearHighErrorRate\n        expr: |\n          rate(linear_api_requests_total{status=\"error\"}[5m])\n          / rate(linear_api_requests_total[5m]) > 0.05\n        for: 5m\n        labels:\n          severity: warning\n        annotations:\n          summary: \"Linear API error rate > 5%\"\n\n      - alert: LinearRateLimitLow\n        expr: linear_rate_limit_remaining{type=\"requests\"} < 100\n        for: 2m\n        labels:\n          severity: critical\n        annotations:\n          summary: \"Linear rate limit remaining < 100 requests\"\n\n      - alert: LinearHighLatency\n        expr: |\n          histogram_quantile(0.95, rate(linear_api_request_duration_seconds_bucket[5m])) > 2\n        for: 5m\n        labels:\n          severity: warning\n        annotations:\n          summary: \"Linear API p95 latency > 2 seconds\"\n\n      - alert: LinearWebhookProcessingSlow\n        expr: |\n          histogram_quantile(0.95, rate(linear_webhook_processing_seconds_bucket[5m])) > 5\n        for: 5m\n        labels:\n          severity: warning\n        annotations:\n          summary: \"Webhook processing p95 > 5 seconds\"\n```\n\n### Step 6: Webhook Instrumentation\n\n```typescript\n// Instrument webhook handler\napp.post(\"/webhooks/linear\", express.raw({ type: \"*/*\" }), async (req, res) => {\n  const start = Date.now();\n  // ... signature verification ...\n\n  const event = JSON.parse(req.body.toString());\n  const delivery = req.headers[\"linear-delivery\"] as string;\n\n  metrics.webhooksReceived.inc({ type: event.type, action: event.action });\n  logWebhook(event.type, event.action, delivery);\n\n  res.json({ ok: true });\n\n  try {\n    await processEvent(event);\n    metrics.webhookProcessingDuration.observe(\n      { type: event.type },\n      (Date.now() - start) / 1000\n    );\n  } catch (error: any) {\n    logError(\"webhook_processing\", error);\n  }\n});\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Metrics not collecting | Missing instrumentation | Wrap all client calls with `instrumentedCall()` |\n| Alerts not firing | Thresholds too high | Adjust based on actual traffic patterns |\n| Health check timeout | Linear API slow | Add 10s timeout to health check |\n| Log volume too high | Debug level in production | Set `LOG_LEVEL=info` in prod |\n\n## Examples\n\n### Quick Health Check\n\n```bash\ncurl -s http://localhost:3000/health/linear | jq .\n# { \"status\": \"healthy\", \"checks\": { \"linear_api\": { \"status\": \"healthy\", \"latencyMs\": 150 } } }\n```\n\n## Resources\n\n- [Prometheus Client](https://github.com/siimon/prom-client)\n- [Pino Logger](https://getpino.io/)\n- [Grafana Dashboards](https://grafana.com/docs/grafana/latest/dashboards/)\n- [Linear API Status](https://status.linear.app)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "linear-observability",
-    "description": "Implement monitoring, logging, and alerting for Linear integrations.",
-    "Trigger": "linear monitoring\", \"linear observability\",",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

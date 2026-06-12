@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031434",
   "name": "canva-observability",
   "slug": "canva-observability",
   "description": "Set up observability for Canva Connect API integrations with metrics,",
   "content": "# Canva Observability\n\n## Overview\n\nInstrument Canva Connect API calls with metrics, traces, and structured logging. Track latency, error rates, rate limit headroom, and export job completion times.\n\n## Key Metrics\n\n| Metric | Type | Labels | Description |\n|--------|------|--------|-------------|\n| `canva_api_requests_total` | Counter | `method`, `endpoint`, `status` | Total API calls |\n| `canva_api_duration_seconds` | Histogram | `method`, `endpoint` | Request latency |\n| `canva_api_errors_total` | Counter | `endpoint`, `error_code` | Error count |\n| `canva_export_duration_seconds` | Histogram | `format` | Export completion time |\n| `canva_token_refresh_total` | Counter | `status` | Token refresh attempts |\n| `canva_rate_limit_remaining` | Gauge | `endpoint` | Rate limit headroom |\n\n## Prometheus Instrumentation\n\n```typescript\nimport { Registry, Counter, Histogram, Gauge } from 'prom-client';\n\nconst registry = new Registry();\n\nconst requestCounter = new Counter({\n  name: 'canva_api_requests_total',\n  help: 'Total Canva Connect API requests',\n  labelNames: ['method', 'endpoint', 'status'],\n  registers: [registry],\n});\n\nconst requestDuration = new Histogram({\n  name: 'canva_api_duration_seconds',\n  help: 'Canva API request duration',\n  labelNames: ['method', 'endpoint'],\n  buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10],\n  registers: [registry],\n});\n\nconst rateLimitGauge = new Gauge({\n  name: 'canva_rate_limit_remaining',\n  help: 'Remaining rate limit for endpoint',\n  labelNames: ['endpoint'],\n  registers: [registry],\n});\n\nconst exportDuration = new Histogram({\n  name: 'canva_export_duration_seconds',\n  help: 'Time from export request to completion',\n  labelNames: ['format'],\n  buckets: [1, 2, 5, 10, 20, 30, 60],\n  registers: [registry],\n});\n```\n\n## Instrumented Client Wrapper\n\n```typescript\nasync function instrumentedCanvaRequest<T>(\n  method: string,\n  endpoint: string,\n  fn: () => Promise<Response>\n): Promise<T> {\n  const timer = requestDuration.startTimer({ method, endpoint });\n\n  try {\n    const res = await fn();\n\n    // Track rate limit headroom\n    const remaining = res.headers.get('X-RateLimit-Remaining');\n    if (remaining) {\n      rateLimitGauge.set({ endpoint }, parseInt(remaining));\n    }\n\n    const status = res.ok ? 'success' : `error_${res.status}`;\n    requestCounter.inc({ method, endpoint, status });\n\n    if (!res.ok) {\n      const body = await res.text();\n      throw new CanvaAPIError(res.status, body, endpoint);\n    }\n\n    return res.json();\n  } catch (error) {\n    requestCounter.inc({ method, endpoint, status: 'exception' });\n    throw error;\n  } finally {\n    timer();\n  }\n}\n```\n\n## OpenTelemetry Tracing\n\n```typescript\nimport { trace, SpanStatusCode } from '@opentelemetry/api';\n\nconst tracer = trace.getTracer('canva-connect-api');\n\nasync function tracedCanvaCall<T>(\n  operationName: string,\n  fn: () => Promise<T>\n): Promise<T> {\n  return tracer.startActiveSpan(`canva.${operationName}`, async (span) => {\n    span.setAttribute('canva.base_url', 'api.canva.com/rest/v1');\n\n    try {\n      const result = await fn();\n      span.setStatus({ code: SpanStatusCode.OK });\n      return result;\n    } catch (error: any) {\n      span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });\n      span.setAttribute('canva.error_code', error.status || 'unknown');\n      span.recordException(error);\n      throw error;\n    } finally {\n      span.end();\n    }\n  });\n}\n```\n\n## Structured Logging\n\n```typescript\nimport pino from 'pino';\n\nconst logger = pino({ name: 'canva', level: process.env.LOG_LEVEL || 'info' });\n\nfunction logCanvaRequest(data: {\n  method: string;\n  endpoint: string;\n  status: number;\n  durationMs: number;\n  rateLimitRemaining?: number;\n}) {\n  // NEVER log access tokens or refresh tokens\n  logger.info({\n    service: 'canva-connect-api',\n    ...data,\n  });\n}\n```\n\n## Alert Rules\n\n```yaml\n# prometheus/canva-alerts.yml\ngroups:\n  - name: canva_connect_api\n    rules:\n      - alert: CanvaHighErrorRate\n        expr: |\n          rate(canva_api_errors_total[5m]) /\n          rate(canva_api_requests_total[5m]) > 0.05\n        for: 5m\n        labels:\n          severity: warning\n        annotations:\n          summary: \"Canva API error rate > 5%\"\n\n      - alert: CanvaHighLatency\n        expr: |\n          histogram_quantile(0.95,\n            rate(canva_api_duration_seconds_bucket[5m])\n          ) > 3\n        for: 5m\n        labels:\n          severity: warning\n        annotations:\n          summary: \"Canva API P95 latency > 3s\"\n\n      - alert: CanvaRateLimitLow\n        expr: canva_rate_limit_remaining < 5\n        for: 1m\n        labels:\n          severity: warning\n        annotations:\n          summary: \"Canva rate limit nearly exhausted\"\n\n      - alert: CanvaTokenRefreshFailing\n        expr: increase(canva_token_refresh_total{status=\"error\"}[15m]) > 0\n        labels:\n          severity: critical\n        annotations:\n          summary: \"Canva token refresh failing \u2014 users may lose access\"\n\n      - alert: CanvaExportSlow\n        expr: |\n          histogram_quantile(0.95,\n            rate(canva_export_duration_seconds_bucket[15m])\n          ) > 30\n        for: 10m\n        labels:\n          severity: warning\n        annotations:\n          summary: \"Canva exports taking > 30s at P95\"\n```\n\n## Grafana Dashboard Queries\n\n```\n# Request rate by endpoint\nrate(canva_api_requests_total[5m])\n\n# P95 latency\nhistogram_quantile(0.95, rate(canva_api_duration_seconds_bucket[5m]))\n\n# Error rate percentage\n100 * rate(canva_api_requests_total{status=~\"error.*\"}[5m]) / rate(canva_api_requests_total[5m])\n\n# Rate limit headroom\ncanva_rate_limit_remaining\n\n# Export completion time P50/P95\nhistogram_quantile(0.5, rate(canva_export_duration_seconds_bucket[5m]))\nhistogram_quantile(0.95, rate(canva_export_duration_seconds_bucket[5m]))\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Missing metrics | No instrumentation | Wrap all API calls |\n| High cardinality | Too many label values | Use endpoint patterns, not full paths |\n| Alert storms | Thresholds too sensitive | Tune for-duration and threshold |\n| Token in logs | Missing redaction | Never log Authorization headers |\n\n## Resources\n\n- [Canva API Reference](https://www.canva.dev/docs/connect/api-reference/)\n- [Prometheus](https://prometheus.io/docs/practices/naming/)\n- [OpenTelemetry](https://opentelemetry.io/docs/)\n\n## Next Steps\n\nFor incident response, see `canva-incident-runbook`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "canva-observability",
-    "description": "Set up observability for Canva Connect API integrations with metrics,",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

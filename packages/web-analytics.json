@@ -1,19 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000030852",
   "name": "web-analytics",
   "slug": "web-analytics",
   "description": "Push-based web analytics intelligence for your entire site portfolio.",
   "content": "# Web Analytics Intelligence\n\nOrchestrates a team of specialist agents to deliver business-grade analytics insights\nacross your entire site portfolio. Not a dashboard replacement \u2014 a push-based analytics\nteam that surfaces what matters.\n\n## Overview\n\nThis skill routes analytics requests to the right combination of specialist agents based\non the requested tier, compiles their outputs into a cohesive narrative, and delivers\nvia console, email, or Slack.\n\n**Architecture:** Orchestrator (this skill) \u2192 Data Collector \u2192 Specialist Agents (parallel) \u2192 Reporter\n\n## Prerequisites\n\n- Umami credentials in `~/.env` (UMAMI_PASSWORD for the admin user)\n- Sites configured in `${CLAUDE_SKILL_DIR}/references/site-registry.md`\n- For email delivery: `/email` skill working\n- For Slack delivery: `/slack` skill working\n\n## Data Access\n\nThe skill uses **direct Umami REST API calls** (more reliable than MCP):\n\n```bash\n# Get auth token\nTOKEN=$(curl -s \"https://analytics.intentsolutions.io/api/auth/login\" \\\n  -X POST -H \"Content-Type: application/json\" \\\n  -d '{\"username\":\"admin\",\"password\":\"'\"$UMAMI_PASSWORD\"'\"}' | \\\n  python3 -c \"import sys,json; print(json.load(sys.stdin).get('token',''))\")\n\n# Get stats (uses epoch ms, compare=prev for prior period)\ncurl -s \"https://analytics.intentsolutions.io/api/websites/{SITE_ID}/stats?startAt={START_MS}&endAt={END_MS}&compare=prev\" \\\n  -H \"Authorization: Bearer $TOKEN\"\n\n# Get active visitors\ncurl -s \"https://analytics.intentsolutions.io/api/websites/{SITE_ID}/active\" \\\n  -H \"Authorization: Bearer $TOKEN\"\n\n# Get daily pageviews\ncurl -s \"https://analytics.intentsolutions.io/api/websites/{SITE_ID}/pageviews?startAt={START_MS}&endAt={END_MS}&unit=day&timezone=America%2FNew_York\" \\\n  -H \"Authorization: Bearer $TOKEN\"\n```\n\n## Instructions\n\n### Step 1: Parse Request\n\nExtract from `$ARGUMENTS` or conversation context:\n\n| Parameter | Default | Options |\n|-----------|---------|---------|\n| Tier | mini | `mini`, `medium`, `full` |\n| Site | all | Site name from registry, or `all` |\n| Period | 7d | `today`, `yesterday`, `7d`, `30d`, `mtd`, `qtd` |\n| Delivery | console | `--email`, `--slack`, `--all` |\n| Compare | auto | Previous equivalent period |\n\nExamples:\n\n- `/analytics` \u2192 mini tier, all sites, 7d, console\n- `/analytics medium --site=tonsofskills` \u2192 medium tier, one site, 7d, console\n- `/analytics full --period=30d --email` \u2192 full tier, all sites, 30d, email delivery\n- `how's my traffic today?` \u2192 mini tier, all sites, today, console\n\n### Step 2: Load Configuration\n\nRead these reference files for context:\n\n1. `${CLAUDE_SKILL_DIR}/references/site-registry.md` \u2014 site config, baselines, thresholds\n2. `${CLAUDE_SKILL_DIR}/references/mcp-tool-reference.md` \u2014 MCP tool signatures\n3. `${CLAUDE_SKILL_DIR}/references/reporting-tiers.md` \u2014 output format specs (medium/full tiers)\n4. `${CLAUDE_SKILL_DIR}/references/interpretation-guide.md` \u2014 advisory voice standards\n\n### Step 3: Route by Tier\n\n#### Mini Tier (inline \u2014 no subagents)\n\nFor mini tier, handle data collection inline to minimize latency:\n\n1. Source `~/.env` to get UMAMI_PASSWORD, then get auth token via curl\n2. Calculate time range as epoch milliseconds (use `date -d \"2026-04-30\" +%s` then append `000`)\n3. For each site (or specified site):\n   - Call `/api/websites/{ID}/stats?startAt=...&endAt=...&compare=prev` for aggregate metrics\n   - Call `/api/websites/{ID}/active` for real-time visitor count\n4. Compute deltas using the `comparison` block returned by `get_stats`\n5. Format as mini pulse:\n\n```\n## Analytics Pulse \u2014 {date}\n\n**Portfolio:** {total_visitors} visitors across {n} sites ({+/-n%} vs prior {period})\n\n| Site | Visitors | Pageviews | Bounce | Trend |\n|------|----------|-----------|--------|-------|\n| {site} | {n} | {n} | {n%} | {\u2191\u2193\u2192 n%} |\n\n**Top Signal:** {most notable change across all sites}\n**Active Now:** {n} visitors\n```\n\nKeep it under 15 lines. No analysis, just the numbers and one signal.\n\n#### Medium Tier (4 agents)\n\nLaunch these agents using the Agent tool with subagent_type:\n\n**Phase A \u2014 Data Collection:**\n\n1. Spawn `data-collector` agent with instructions:\n   - Sites: {sites from request}\n   - Period: {calculated time range}\n   - Data needed: stats, referrers, top pages, time series\n   - Provide the full content of `${CLAUDE_SKILL_DIR}/references/mcp-tool-reference.md`\n   - Provide the full content of `${CLAUDE_SKILL_DIR}/references/site-registry.md`\n\n**Phase B \u2014 Parallel Analysis (after data returns):**\n2. Spawn `traffic-intelligence` agent with data-collector output\n3. Spawn `content-seo` agent with data-collector output (if available)\n4. Spawn `anomaly-detector` agent with data-collector output (if available)\n\n**Phase C \u2014 Compilation:**\n5. Spawn `reporting-narrative` agent with all specialist outputs\n\n- Tier: medium\n- Delivery format: {console/email/slack}\n\n#### Full Tier (all agents)\n\n**Phase A \u2014 Data Collection:**\n\n1. Spawn `data-collector` agent \u2014 request ALL data types including events, tech, geo\n\n**Phase B \u2014 Parallel Analysis:**\n2. Spawn ALL specialist agents in parallel:\n\n- `traffic-intelligence` \u2014 channel/source analysis\n- `content-seo` \u2014 page performance\n- `anomaly-detector` \u2014 spike/drop detection\n- `conversion-funnel` \u2014 event/goal analysis\n- `audience-segmentation` \u2014 cohort/geo analysis\n\n**Phase C \u2014 Verification:**\n3. Spawn `verification-agent` with all specialist outputs \u2014 adversarial quality check\n\n**Phase D \u2014 Compilation:**\n4. Spawn `reporting-narrative` agent with all outputs + verification notes\n\n- Tier: full\n- Delivery format: {console/email/slack}\n\n### Step 4: Deliver\n\n**Console (default):** Display the narrative report directly.\n\n**Email (`--email`):** Invoke the `/email` skill with:\n\n- To: jeremy@intentsolutions.io\n- Subject: \"Analytics {Tier} \u2014 {date} \u2014 {headline}\"\n- Body: Report content (formatted for email)\n\n**Slack (`--slack`):** Invoke the `/slack` skill with:\n\n- Channel: #operation-hired\n- Message: Report content (formatted for Slack, respect 3000-char limit)\n\n**All (`--all`):** Console + email + Slack.\n\n### Step 5: Memory Update (Full Tier Only)\n\nFor full-tier reports, spawn the `memory-agent` to:\n\n- Record this period's baselines for future comparison\n- Note any new referral sources or traffic patterns\n- Update seasonal adjustment data if applicable\n\n## Agent Roster\n\n| Agent | File | Tier | Purpose |\n|-------|------|------|---------|\n| data-collector | `${CLAUDE_SKILL_DIR}/agents/data-collector.md` | All | MCP data fetching |\n| traffic-intelligence | `${CLAUDE_SKILL_DIR}/agents/traffic-intelligence.md` | Medium+ | Source attribution |\n| content-seo | `${CLAUDE_SKILL_DIR}/agents/content-seo.md` | Medium+ | Page performance |\n| anomaly-detector | `${CLAUDE_SKILL_DIR}/agents/anomaly-detector.md` | Medium+ | Spike/drop detection |\n| conversion-funnel | `${CLAUDE_SKILL_DIR}/agents/conversion-funnel.md` | Full | Event/goal analysis |\n| audience-segmentation | `${CLAUDE_SKILL_DIR}/agents/audience-segmentation.md` | Full | Cohort analysis |\n| verification-agent | `${CLAUDE_SKILL_DIR}/agents/verification-agent.md` | Full | Output quality check |\n| reporting-narrative | `${CLAUDE_SKILL_DIR}/agents/reporting-narrative.md` | Medium+ | Narrative compilation |\n| memory-agent | `${CLAUDE_SKILL_DIR}/agents/memory-agent.md` | Full | Rolling context |\n\n## Troubleshooting\n\n| Issue | Resolution |\n|-------|-----------|\n| \"Umami MCP not connected\" | Run `/mcp` to check server status. Ensure `umami-analytics` is in settings.json |\n| Empty data for a site | Verify site ID in site-registry.md matches Umami. Run `mcp__umami__get_websites` to list. If all sites show zero, the tracker `<script>` likely isn't installed on the site (see site-registry per-site repo paths). |\n| Slow response (>5min) | Switch to lower tier. Mini tier bypasses all subagents. |\n| Email/Slack delivery fails | Test `/email` and `/slack` independently first |\n| Stale baselines | Run `/analytics full` to trigger memory-agent baseline update |\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "web-analytics",
-    "description": "Push-based web analytics intelligence for your entire site portfolio.",
-    "delivers actionable insights. Three tiers": "mini (30s pulse), medium (2min brief),",
-    "allowed-tools": "Read,Glob,Grep,Bash(date:*),Bash(node:*),Bash(curl:*),Bash(python3:*),Bash(source:*),Task,AskUserQuestion",
-    "version": "1.1.0",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "license": "MIT",
-    "tags": "",
-    "argument-hint": "[mini|medium|full] [--site=name] [--period=7d] [--email] [--slack]",
-    "compatibility": "Designed for Claude Code"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "1.1.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

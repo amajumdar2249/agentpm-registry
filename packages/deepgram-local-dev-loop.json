@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031777",
   "name": "deepgram-local-dev-loop",
   "slug": "deepgram-local-dev-loop",
   "description": "Configure Deepgram local development workflow with testing and mocks.",
   "content": "# Deepgram Local Dev Loop\n\n## Overview\n\nSet up a fast local development workflow for Deepgram: test fixtures with sample audio, mock responses for offline unit tests, Vitest integration tests against the real API, and a watch-mode transcription dev server.\n\n## Prerequisites\n\n- `@deepgram/sdk` installed, `DEEPGRAM_API_KEY` configured\n- `npm install -D vitest tsx dotenv` for testing and dev server\n- Optional: `curl` for downloading test fixtures\n\n## Instructions\n\n### Step 1: Project Structure\n\n```bash\nmkdir -p src tests/mocks fixtures\ntouch src/transcribe.ts tests/transcribe.test.ts tests/mocks/deepgram-responses.ts\n```\n\n### Step 2: Download Test Fixtures\n\n```bash\n# Deepgram provides free sample audio files\ncurl -o fixtures/nasa-podcast.wav \\\n  https://static.deepgram.com/examples/nasa-podcast.wav\n\ncurl -o fixtures/bueller.wav \\\n  https://static.deepgram.com/examples/Bueller-Life-moves-702702706.wav\n```\n\n### Step 3: Environment Config\n\n```bash\n# .env.development\nDEEPGRAM_API_KEY=your-dev-key\nDEEPGRAM_MODEL=nova-3\n\n# .env.test (use a separate test key with low limits)\nDEEPGRAM_API_KEY=your-test-key\nDEEPGRAM_MODEL=base\n```\n\n```json\n{\n  \"scripts\": {\n    \"dev\": \"tsx watch src/transcribe.ts\",\n    \"test\": \"vitest\",\n    \"test:watch\": \"vitest --watch\",\n    \"test:integration\": \"vitest run tests/integration/\"\n  }\n}\n```\n\n### Step 4: Mock Deepgram Responses\n\n```typescript\n// tests/mocks/deepgram-responses.ts\nexport const mockPrerecordedResult = {\n  metadata: {\n    request_id: 'mock-request-id-001',\n    created: '2026-01-01T00:00:00.000Z',\n    duration: 12.5,\n    channels: 1,\n    models: ['nova-3'],\n    model_info: { 'nova-3': { name: 'nova-3', version: '2026-01-01' } },\n  },\n  results: {\n    channels: [{\n      alternatives: [{\n        transcript: 'Life moves pretty fast. If you don\\'t stop and look around once in a while, you could miss it.',\n        confidence: 0.98,\n        words: [\n          { word: 'life', start: 0.08, end: 0.32, confidence: 0.99, punctuated_word: 'Life' },\n          { word: 'moves', start: 0.32, end: 0.56, confidence: 0.98, punctuated_word: 'moves' },\n          { word: 'pretty', start: 0.56, end: 0.88, confidence: 0.97, punctuated_word: 'pretty' },\n          { word: 'fast', start: 0.88, end: 1.12, confidence: 0.99, punctuated_word: 'fast.' },\n        ],\n      }],\n    }],\n    utterances: [{\n      speaker: 0,\n      transcript: 'Life moves pretty fast. If you don\\'t stop and look around once in a while, you could miss it.',\n      start: 0.08,\n      end: 5.44,\n      confidence: 0.98,\n    }],\n  },\n};\n\nexport const mockLiveTranscript = {\n  type: 'Results',\n  channel_index: [0, 1],\n  duration: 1.5,\n  start: 0.0,\n  is_final: true,\n  speech_final: true,\n  channel: {\n    alternatives: [{\n      transcript: 'Hello, how are you today?',\n      confidence: 0.95,\n      words: [\n        { word: 'hello', start: 0.0, end: 0.3, confidence: 0.98, punctuated_word: 'Hello,' },\n        { word: 'how', start: 0.35, end: 0.5, confidence: 0.96, punctuated_word: 'how' },\n      ],\n    }],\n  },\n};\n\nexport const mockTtsResponse = {\n  content_type: 'audio/wav',\n  request_id: 'mock-tts-001',\n  model_name: 'aura-2-thalia-en',\n  characters: { count: 42, limit: 100000 },\n};\n```\n\n### Step 5: Unit Tests with Mocks\n\n```typescript\n// tests/transcribe.test.ts\nimport { describe, it, expect, vi, beforeEach } from 'vitest';\nimport { mockPrerecordedResult } from './mocks/deepgram-responses';\n\n// Mock the SDK\nvi.mock('@deepgram/sdk', () => ({\n  createClient: () => ({\n    listen: {\n      prerecorded: {\n        transcribeUrl: vi.fn().mockResolvedValue({\n          result: mockPrerecordedResult,\n          error: null,\n        }),\n        transcribeFile: vi.fn().mockResolvedValue({\n          result: mockPrerecordedResult,\n          error: null,\n        }),\n      },\n    },\n    speak: {\n      request: vi.fn().mockResolvedValue({\n        getStream: () => Promise.resolve(null),\n      }),\n    },\n  }),\n}));\n\ndescribe('DeepgramTranscriber', () => {\n  it('transcribes URL and returns transcript text', async () => {\n    const { createClient } = await import('@deepgram/sdk');\n    const client = createClient('mock-key');\n\n    const { result } = await client.listen.prerecorded.transcribeUrl(\n      { url: 'https://example.com/audio.wav' },\n      { model: 'nova-3', smart_format: true }\n    );\n\n    expect(result.results.channels[0].alternatives[0].transcript).toContain('Life moves');\n    expect(result.metadata.duration).toBe(12.5);\n    expect(result.metadata.request_id).toBe('mock-request-id-001');\n  });\n\n  it('returns word-level timing data', async () => {\n    const { createClient } = await import('@deepgram/sdk');\n    const client = createClient('mock-key');\n\n    const { result } = await client.listen.prerecorded.transcribeUrl(\n      { url: 'https://example.com/audio.wav' },\n      { model: 'nova-3' }\n    );\n\n    const words = result.results.channels[0].alternatives[0].words;\n    expect(words[0].word).toBe('life');\n    expect(words[0].start).toBe(0.08);\n    expect(words[0].confidence).toBeGreaterThan(0.9);\n  });\n});\n```\n\n### Step 6: Integration Tests (Real API)\n\n```typescript\n// tests/integration/deepgram.test.ts\nimport { describe, it, expect } from 'vitest';\nimport { createClient } from '@deepgram/sdk';\n\ndescribe('Deepgram Integration', () => {\n  const client = createClient(process.env.DEEPGRAM_API_KEY!);\n\n  it('transcribes sample audio URL', async () => {\n    const { result, error } = await client.listen.prerecorded.transcribeUrl(\n      { url: 'https://static.deepgram.com/examples/Bueller-Life-moves-702702706.wav' },\n      { model: 'nova-3', smart_format: true }\n    );\n\n    expect(error).toBeNull();\n    expect(result.results.channels[0].alternatives[0].transcript).toBeTruthy();\n    expect(result.results.channels[0].alternatives[0].confidence).toBeGreaterThan(0.8);\n  }, 30000);\n\n  it('verifies API key with project listing', async () => {\n    const { result, error } = await client.manage.getProjects();\n    expect(error).toBeNull();\n    expect(result.projects.length).toBeGreaterThan(0);\n  });\n});\n```\n\n## Output\n\n- Project structure with src, tests, fixtures directories\n- Mock response objects matching real Deepgram API shape\n- Unit tests with mocked SDK (no API calls)\n- Integration tests against real API with timeout\n- Watch mode for rapid iteration\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Fixture 404 | Deepgram moved sample URL | Check latest URLs at developers.deepgram.com |\n| `DEEPGRAM_API_KEY` undefined in test | `.env.test` not loaded | Configure Vitest `env` or use `dotenv/config` |\n| Integration test timeout | Network or API slow | Increase timeout to 30000ms |\n| Mock shape mismatch | API response changed | Update mocks from real response capture |\n\n## Resources\n\n- [Vitest Documentation](https://vitest.dev/)\n- [Deepgram Sample Audio](https://static.deepgram.com/examples/)\n- [SDK Testing Guide](https://developers.deepgram.com/docs/testing)\n\n## Next Steps\n\nProceed to `deepgram-sdk-patterns` for production-ready code patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "deepgram-local-dev-loop",
-    "description": "Configure Deepgram local development workflow with testing and mocks.",
-    "Trigger": "deepgram local dev\", \"deepgram development setup\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(pip:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

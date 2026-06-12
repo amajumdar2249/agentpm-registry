@@ -1,15 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000010859",
   "name": "content-publish",
   "slug": "content-publish",
   "description": "Publish content to joelclaw.com via the Convex-first pipeline. Covers the full lifecycle: draft \u2192 review \u2192 publish \u2192 revalidate \u2192 verify. Handles secret leasing, tag conventions, content types (article, tutorial, note, essay), and verification gates. Use when: 'write article about X', 'publish article <slug>', 'draft a tutorial', 'publish this', 'push to convex', or any content publishing task.",
   "content": "\n# Content Publish\n\nPublish content to joelclaw.com through the Convex-first pipeline. Every article, tutorial, note, and essay flows through this skill.\n\n## Content Types\n\n| Type | `fields.type` | When to use |\n|------|--------------|-------------|\n| article | `article` | Standard blog post, opinion, narrative |\n| tutorial | `tutorial` | Implementable spec \u2014 agent or human can build from it |\n| note | `note` | Short observation, link commentary, video note |\n| essay | `essay` | Long-form, thesis-driven |\n\n**Tags must include the content type.** A tutorial gets `tags: [..., \"tutorial\"]`. An essay gets `tags: [..., \"essay\"]`. This enables filtered views and search facets.\n\n## Lifecycle\n\n### 1. Draft\n\nUpsert to Convex with `draft: true`:\n\n```bash\nnpx convex run contentResources:upsert '<JSON>'\n```\n\nRequired fields:\n```json\n{\n  \"resourceId\": \"article:<slug>\",\n  \"type\": \"article\",\n  \"fields\": {\n    \"title\": \"The Title\",\n    \"slug\": \"the-slug\",\n    \"description\": \"One-liner for cards and meta\",\n    \"date\": \"2026-03-02T10:14:00.000Z\",\n    \"tags\": [\"topic1\", \"topic2\", \"tutorial\"],\n    \"draft\": true,\n    \"content\": \"Full MDX body (frontmatter stripped)\"\n  }\n}\n```\n\n**Slug rules**: lowercase, hyphenated, no special chars. Derived from title. Check for collisions first:\n```bash\nnpx convex run contentResources:getByResourceId '{\"resourceId\": \"article:<slug>\"}'\n```\n\n**Date**: Full ISO datetime, not bare date. Determines sort order.\n\n**Content**: Strip any frontmatter from MDX before setting `fields.content`. The frontmatter fields are stored as separate Convex fields, not inline.\n\n### 2. Content preparation\n\nFor large content, prepare the JSON payload with Node to handle escaping:\n\n```bash\ncd ~/Code/joelhooks/joelclaw/apps/web\n\nnode -e \"\nconst fs = require('fs');\nconst content = fs.readFileSync('<path-to-mdx>', 'utf-8')\n  .replace(/^---[\\\\\\\\s\\\\\\\\S]*?---\\\\\\\\n/, '').trim();\nconst args = {\n  resourceId: 'article:<slug>',\n  type: 'article',\n  fields: {\n    title: '<title>',\n    slug: '<slug>',\n    description: '<description>',\n    date: '<ISO datetime>',\n    tags: [<tags>],\n    draft: true,\n    content: content,\n  },\n};\nfs.writeFileSync('/tmp/convex-args.json', JSON.stringify(args));\n\"\n\nnpx convex run contentResources:upsert \\\"\\$(cat /tmp/convex-args.json)\\\"\n```\n\n**Always run `npx convex` from `apps/web/`** \u2014 that's where the Convex config and generated API types live.\n\n### 3. Review\n\nDrafts are visible in dev only (`NODE_ENV === \"development\"`). Preview at `localhost:3000/<slug>`.\n\nDrafts return 404 in production \u2014 this is correct. Do not publish without review confirmation from Joel unless the content was explicitly pre-approved.\n\n### 4. Publish\n\nUpdate the document with `draft: false` and set `updated` timestamp:\n\n```bash\n# Re-run the upsert with draft: false\n# Add fields.updated = current ISO datetime\n```\n\n### 5. Revalidate\n\nLease the revalidation secret and hit the API:\n\n```bash\n# Lease secret (TTL auto-managed)\nSECRET=$(joelclaw secrets lease revalidation_secret)\n\ncurl -s -X POST \"https://joelclaw.com/api/revalidate\" \\\n  -H \"Content-Type: application/json\" \\\n  -d \"{\n    \\\"secret\\\": \\\"$SECRET\\\",\n    \\\"tags\\\": [\\\"post:<slug>\\\", \\\"article:<slug>\\\", \\\"articles\\\"],\n    \\\"paths\\\": [\\\"/\\\", \\\"/<slug>\\\", \\\"/<slug>.md\\\", \\\"/<slug>/md\\\", \\\"/feed.xml\\\", \\\"/sitemap.md\\\"]\n  }\"\n```\n\nExpected response: `{\"revalidated\": true, ...}`\n\n**Tag convention**:\n- `post:<slug>` \u2014 individual post cache\n- `article:<slug>` \u2014 content resource cache\n- `articles` \u2014 list page cache\n- Always include all three tags + the markdown/feed/sitemap paths\n\n### 6. Verify\n\n```bash\n# Must return 200\ncurl -s -o /dev/null -w \"%{http_code}\" \"https://joelclaw.com/<slug>\"\n\n# Markdown twin must return 200 and current content\ncurl -s -o /dev/null -w \"%{http_code}\" \"https://joelclaw.com/<slug>.md\"\n\n# Must appear on homepage\ncurl -s \"https://joelclaw.com\" | grep -c \"<slug>\"\n\n# Feed should include it\ncurl -s \"https://joelclaw.com/feed.xml\" | grep -c \"<slug>\"\n```\n\nAll four checks must pass. If the slug page returns 404 after revalidation, the Convex document is likely still `draft: true` or content is missing.\n\n## Updating existing content\n\nSame upsert flow. Set `fields.updated` to bump sort position. Always revalidate after update.\n\n## Gotchas\n\n- **Convex CLI must run from `apps/web/`** \u2014 it needs the project config\n- **Content must have frontmatter stripped** \u2014 Convex fields ARE the metadata; don't duplicate in content body\n- **ISO datetimes, not bare dates** \u2014 `2026-03-02T10:14:00.000Z` not `2026-03-02`\n- **Secret is ephemeral** \u2014 lease from `agent-secrets`, never hardcode or cache\n- **Large content needs JSON escaping** \u2014 use Node script to build payload, not manual string interpolation\n- **Tags must include content type** \u2014 tutorials get `\"tutorial\"` tag, essays get `\"essay\"` tag\n- **The filesystem `content/` directory is gitignored seed material** \u2014 Convex is the source of truth at runtime\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "content-publish",
-    "displayName": "Content Publish",
-    "description": "Publish content to joelclaw.com via the Convex-first pipeline. Covers the full lifecycle: draft \u2192 review \u2192 publish \u2192 revalidate \u2192 verify. Handles secret leasing, tag conventions, content types (article, tutorial, note, essay), and verification gates. Use when: 'write article about X', 'publish article <slug>', 'draft a tutorial', 'publish this', 'push to convex', or any content publishing task.",
-    "version": "0.1.0",
-    "author": "joel",
-    "tags": ""
+  "author": "joel",
+  "version": "0.1.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

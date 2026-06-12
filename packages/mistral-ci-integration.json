@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032645",
   "name": "mistral-ci-integration",
   "slug": "mistral-ci-integration",
   "description": "Configure Mistral AI CI/CD integration with GitHub Actions and prompt",
   "content": "# Mistral CI Integration\n\n## Overview\n\nIntegrate Mistral AI validation into CI/CD pipelines: prompt regression tests, model response quality checks, cost estimation in PR comments, and deployment gates for prompt changes. Uses GitHub Actions with `MISTRAL_API_KEY` stored as a repository secret.\n\n## Prerequisites\n\n- `MISTRAL_API_KEY` stored as GitHub repository secret\n- GitHub Actions configured\n- Test framework (Vitest recommended)\n\n## Instructions\n\n### Step 1: GitHub Actions Workflow\n\n```yaml\n# .github/workflows/mistral-tests.yml\nname: Mistral AI Tests\n\non:\n  pull_request:\n    paths:\n      - 'src/prompts/**'\n      - 'src/ai/**'\n      - 'tests/ai/**'\n\njobs:\n  prompt-tests:\n    runs-on: ubuntu-latest\n    timeout-minutes: 10\n    steps:\n      - uses: actions/checkout@v4\n\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n\n      - run: npm ci\n\n      - name: Run prompt regression tests\n        env:\n          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}\n        run: npx vitest run tests/ai/ --reporter=verbose\n\n      - name: Cost estimation\n        env:\n          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}\n        run: npx tsx scripts/estimate-costs.ts >> $GITHUB_STEP_SUMMARY\n```\n\n### Step 2: Prompt Regression Tests\n\n```typescript\n// tests/ai/mistral-prompts.test.ts\nimport { describe, it, expect } from 'vitest';\nimport { Mistral } from '@mistralai/mistralai';\n\nconst apiKey = process.env.MISTRAL_API_KEY;\n\ndescribe.skipIf(!apiKey)('Mistral Prompt Regression', () => {\n  const client = new Mistral({ apiKey: apiKey! });\n\n  it('summarization produces 2-3 sentences', async () => {\n    const result = await client.chat.complete({\n      model: 'mistral-small-latest',\n      messages: [\n        { role: 'system', content: 'Summarize in 2-3 sentences.' },\n        { role: 'user', content: 'TypeScript is a typed superset of JavaScript that compiles to plain JavaScript. It adds optional static typing and class-based OOP.' },\n      ],\n      maxTokens: 150,\n      temperature: 0, // Deterministic for regression\n    });\n\n    const content = result.choices?.[0]?.message?.content ?? '';\n    expect(content.length).toBeGreaterThan(20);\n    expect(content.split(/[.!?]+/).filter(Boolean).length).toBeGreaterThanOrEqual(2);\n  }, 15_000);\n\n  it('classification returns valid category', async () => {\n    const result = await client.chat.complete({\n      model: 'mistral-small-latest',\n      messages: [\n        { role: 'system', content: 'Classify as: bug, feature, question. Reply with one word only.' },\n        { role: 'user', content: 'The login page crashes on mobile devices' },\n      ],\n      maxTokens: 10,\n      temperature: 0,\n    });\n\n    const category = result.choices?.[0]?.message?.content?.trim().toLowerCase();\n    expect(['bug', 'feature', 'question']).toContain(category);\n  }, 15_000);\n\n  it('JSON mode returns valid JSON', async () => {\n    const result = await client.chat.complete({\n      model: 'mistral-small-latest',\n      messages: [{ role: 'user', content: 'Return {\"status\": \"ok\"} as JSON' }],\n      responseFormat: { type: 'json_object' },\n      maxTokens: 50,\n      temperature: 0,\n    });\n\n    const content = result.choices?.[0]?.message?.content ?? '';\n    expect(() => JSON.parse(content)).not.toThrow();\n  }, 15_000);\n\n  it('respects maxTokens limit', async () => {\n    const result = await client.chat.complete({\n      model: 'mistral-small-latest',\n      messages: [{ role: 'user', content: 'Write a long essay about AI' }],\n      maxTokens: 50,\n    });\n\n    expect(result.usage?.completionTokens).toBeLessThanOrEqual(50);\n  }, 15_000);\n});\n```\n\n### Step 3: Cost Estimation Script\n\n```typescript\n// scripts/estimate-costs.ts\nimport { readdirSync, readFileSync } from 'fs';\nimport { join } from 'path';\n\nconst PRICING: Record<string, { input: number; output: number }> = {\n  'mistral-small-latest': { input: 0.1, output: 0.3 },\n  'mistral-large-latest': { input: 0.5, output: 1.5 },\n  'codestral-latest':     { input: 0.3, output: 0.9 },\n  'mistral-embed':        { input: 0.1, output: 0 },\n};\n\nconsole.log('## Prompt Cost Estimates\\n');\nconsole.log('| File | Est. Tokens | Cost/call (small) | Cost/call (large) |');\nconsole.log('|------|-------------|-------------------|-------------------|');\n\nconst promptDir = join(process.cwd(), 'src/prompts');\nif (readdirSync(promptDir, { withFileTypes: true })) {\n  for (const file of readdirSync(promptDir)) {\n    const content = readFileSync(join(promptDir, file), 'utf-8');\n    const tokens = Math.ceil(content.length / 4);\n    const smallCost = (tokens / 1e6) * PRICING['mistral-small-latest'].input;\n    const largeCost = (tokens / 1e6) * PRICING['mistral-large-latest'].input;\n\n    console.log(`| ${file} | ~${tokens} | $${smallCost.toFixed(6)} | $${largeCost.toFixed(6)} |`);\n  }\n}\n```\n\n### Step 4: Model Validation Gate\n\n```yaml\n# .github/workflows/model-gate.yml\nname: AI Model Gate\n\non:\n  pull_request:\n    paths: ['src/ai/**', 'src/prompts/**']\n\njobs:\n  validate:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with: { node-version: '20', cache: 'npm' }\n      - run: npm ci\n\n      - name: Validate model references\n        run: |\n          echo \"## Model References\" >> $GITHUB_STEP_SUMMARY\n          grep -rn \"mistral-\\|codestral-\\|pixtral-\" src/ --include=\"*.ts\" | \\\n            grep -oP \"(mistral|codestral|pixtral)-[\\w-]+\" | sort -u | while read model; do\n            echo \"- \\`$model\\`\" >> $GITHUB_STEP_SUMMARY\n          done\n\n      - name: Check for deprecated models\n        run: |\n          DEPRECATED=\"open-mistral-7b open-mixtral-8x7b mistral-tiny mistral-medium\"\n          for model in $DEPRECATED; do\n            if grep -rq \"$model\" src/ --include=\"*.ts\"; then\n              echo \"::warning::Deprecated model found: $model\"\n            fi\n          done\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Tests fail in CI | Missing API key secret | Add `MISTRAL_API_KEY` to repo Settings > Secrets |\n| Flaky prompt tests | Non-deterministic output | Set `temperature: 0` for regression tests |\n| High CI costs | Running on every push | Only trigger on prompt/AI file changes via `paths:` |\n| Test timeout | Slow API response | Set generous timeout (15s) per test |\n\n## Examples\n\n### Minimal Smoke Test\n\n```yaml\n- name: Mistral smoke test\n  env:\n    MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}\n  run: |\n    curl -sf -X POST https://api.mistral.ai/v1/chat/completions \\\n      -H \"Authorization: Bearer $MISTRAL_API_KEY\" \\\n      -H \"Content-Type: application/json\" \\\n      -d '{\"model\":\"mistral-small-latest\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":5}' \\\n      | jq '.choices[0].message.content'\n```\n\n## Resources\n\n- [Mistral API Reference](https://docs.mistral.ai/api/)\n- [GitHub Actions Secrets](https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions)\n\n## Output\n\n- GitHub Actions workflow for prompt testing\n- Regression test suite with deterministic assertions\n- Cost estimation in PR summaries\n- Model validation gate catching deprecated references\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "mistral-ci-integration",
-    "description": "Configure Mistral AI CI/CD integration with GitHub Actions and prompt",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

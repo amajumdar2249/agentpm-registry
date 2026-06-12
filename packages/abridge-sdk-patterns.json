@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031135",
   "name": "abridge-sdk-patterns",
   "slug": "abridge-sdk-patterns",
   "description": "Apply production-ready patterns for Abridge clinical AI integration.",
   "content": "# Abridge SDK Patterns\n\n## Overview\n\nProduction-ready patterns for Abridge clinical AI integration. Since Abridge operates via partner APIs (not a public SDK), these patterns wrap the REST API with type-safe clients, HIPAA-compliant logging, and healthcare-specific error handling.\n\n## Prerequisites\n\n- Completed `abridge-install-auth` setup\n- TypeScript project with strict mode enabled\n- Understanding of HIPAA audit logging requirements\n\n## Instructions\n\n### Step 1: Type-Safe API Client Singleton\n\n```typescript\n// src/abridge/client.ts\nimport axios, { AxiosInstance, AxiosError } from 'axios';\n\ninterface AbridgeConfig {\n  baseUrl: string;\n  clientSecret: string;\n  orgId: string;\n  timeoutMs?: number;\n  maxRetries?: number;\n}\n\nclass AbridgeApiClient {\n  private static instance: AbridgeApiClient | null = null;\n  private api: AxiosInstance;\n  private config: AbridgeConfig;\n\n  private constructor(config: AbridgeConfig) {\n    this.config = config;\n    this.api = axios.create({\n      baseURL: config.baseUrl,\n      timeout: config.timeoutMs || 30000,\n      headers: {\n        'Authorization': `Bearer ${config.clientSecret}`,\n        'X-Org-Id': config.orgId,\n        'Content-Type': 'application/json',\n        'X-Request-Source': 'partner-integration',\n      },\n    });\n\n    // Request/response interceptors for audit logging\n    this.api.interceptors.request.use((req) => {\n      req.headers['X-Correlation-Id'] = crypto.randomUUID();\n      this.auditLog('request', req.method!, req.url!, req.headers['X-Correlation-Id']);\n      return req;\n    });\n\n    this.api.interceptors.response.use(\n      (res) => { this.auditLog('response', res.config.method!, res.config.url!, res.status); return res; },\n      (err) => { this.auditLog('error', err.config?.method, err.config?.url, err.response?.status); throw err; }\n    );\n  }\n\n  static getInstance(): AbridgeApiClient {\n    if (!AbridgeApiClient.instance) {\n      AbridgeApiClient.instance = new AbridgeApiClient({\n        baseUrl: process.env.ABRIDGE_BASE_URL!,\n        clientSecret: process.env.ABRIDGE_CLIENT_SECRET!,\n        orgId: process.env.ABRIDGE_ORG_ID!,\n      });\n    }\n    return AbridgeApiClient.instance;\n  }\n\n  // HIPAA-compliant audit log \u2014 never log PHI\n  private auditLog(type: string, method: string, url: string, detail: any): void {\n    const entry = {\n      timestamp: new Date().toISOString(),\n      type,\n      method: method?.toUpperCase(),\n      endpoint: url?.replace(/\\/sessions\\/[^/]+/, '/sessions/{id}'), // Redact IDs\n      detail: typeof detail === 'number' ? `status:${detail}` : `id:${detail}`,\n    };\n    console.log(JSON.stringify(entry));\n  }\n\n  get http(): AxiosInstance { return this.api; }\n}\n\nexport { AbridgeApiClient };\n```\n\n### Step 2: HIPAA-Safe Error Handler\n\n```typescript\n// src/abridge/errors.ts\nclass AbridgeApiError extends Error {\n  constructor(\n    message: string,\n    public readonly statusCode: number,\n    public readonly errorCode: string,\n    public readonly correlationId: string,\n    public readonly retryable: boolean,\n  ) {\n    super(message);\n    this.name = 'AbridgeApiError';\n  }\n\n  // Sanitized error \u2014 safe for logging (no PHI)\n  toSafeLog(): Record<string, unknown> {\n    return {\n      name: this.name,\n      statusCode: this.statusCode,\n      errorCode: this.errorCode,\n      correlationId: this.correlationId,\n      retryable: this.retryable,\n      // Never include message in logs \u2014 may contain PHI\n    };\n  }\n}\n\nfunction parseAbridgeError(err: AxiosError): AbridgeApiError {\n  const data = err.response?.data as any;\n  const status = err.response?.status || 500;\n\n  const retryableCodes = [429, 502, 503, 504];\n\n  return new AbridgeApiError(\n    data?.message || err.message,\n    status,\n    data?.error_code || 'UNKNOWN',\n    err.config?.headers?.['X-Correlation-Id'] as string || 'none',\n    retryableCodes.includes(status),\n  );\n}\n\nexport { AbridgeApiError, parseAbridgeError };\n```\n\n### Step 3: Retry with Exponential Backoff\n\n```typescript\n// src/abridge/retry.ts\nimport { AbridgeApiError, parseAbridgeError } from './errors';\n\nasync function withRetry<T>(\n  operation: () => Promise<T>,\n  options: { maxRetries?: number; baseDelayMs?: number; maxDelayMs?: number } = {}\n): Promise<T> {\n  const { maxRetries = 3, baseDelayMs = 1000, maxDelayMs = 30000 } = options;\n\n  for (let attempt = 1; attempt <= maxRetries; attempt++) {\n    try {\n      return await operation();\n    } catch (err) {\n      const apiErr = err instanceof AbridgeApiError ? err : parseAbridgeError(err as any);\n\n      if (!apiErr.retryable || attempt === maxRetries) throw apiErr;\n\n      // Respect Retry-After header if present\n      const retryAfter = (err as any).response?.headers?.['retry-after'];\n      const delay = retryAfter\n        ? parseInt(retryAfter) * 1000\n        : Math.min(baseDelayMs * Math.pow(2, attempt - 1), maxDelayMs);\n\n      console.log(`Retry ${attempt}/${maxRetries} after ${delay}ms (${apiErr.errorCode})`);\n      await new Promise(r => setTimeout(r, delay));\n    }\n  }\n  throw new Error('Unreachable');\n}\n\nexport { withRetry };\n```\n\n### Step 4: Session Manager Pattern\n\n```typescript\n// src/abridge/session-manager.ts\nimport { AbridgeApiClient } from './client';\nimport { withRetry } from './retry';\n\ninterface SessionState {\n  sessionId: string;\n  status: 'initialized' | 'recording' | 'processing' | 'completed' | 'error';\n  createdAt: Date;\n  segmentCount: number;\n}\n\nclass EncounterSessionManager {\n  private sessions = new Map<string, SessionState>();\n  private api = AbridgeApiClient.getInstance().http;\n\n  async create(patientId: string, providerId: string, specialty: string): Promise<SessionState> {\n    const { data } = await withRetry(() =>\n      this.api.post('/encounters/sessions', {\n        patient_id: patientId,\n        provider_id: providerId,\n        specialty,\n        encounter_type: 'outpatient',\n      })\n    );\n\n    const state: SessionState = {\n      sessionId: data.session_id,\n      status: 'initialized',\n      createdAt: new Date(),\n      segmentCount: 0,\n    };\n    this.sessions.set(data.session_id, state);\n    return state;\n  }\n\n  async addTranscript(sessionId: string, speaker: string, text: string): Promise<void> {\n    await this.api.post(`/encounters/sessions/${sessionId}/transcript`, { speaker, text });\n    const state = this.sessions.get(sessionId)!;\n    state.segmentCount++;\n    state.status = 'recording';\n  }\n\n  async finalize(sessionId: string): Promise<any> {\n    await this.api.post(`/encounters/sessions/${sessionId}/finalize`);\n    this.sessions.get(sessionId)!.status = 'processing';\n\n    for (let i = 0; i < 60; i++) {\n      const { data } = await this.api.get(`/encounters/sessions/${sessionId}/note`);\n      if (data.status === 'completed') {\n        this.sessions.get(sessionId)!.status = 'completed';\n        return data.note;\n      }\n      await new Promise(r => setTimeout(r, 1000));\n    }\n    throw new Error('Note generation timed out');\n  }\n}\n\nexport { EncounterSessionManager };\n```\n\n## Output\n\n- Type-safe singleton client with audit logging\n- HIPAA-safe error handling (no PHI in logs)\n- Exponential backoff with Retry-After support\n- Session lifecycle manager with state tracking\n\n## Error Handling\n\n| Pattern | Use Case | Benefit |\n|---------|----------|---------|\n| Singleton client | All API calls | Single source of config, consistent headers |\n| Safe error logging | HIPAA compliance | Prevents PHI leakage in error logs |\n| Retry with backoff | Transient failures | Handles 429/5xx gracefully |\n| Session manager | Encounter lifecycle | Tracks state, prevents orphaned sessions |\n\n## Resources\n\n- [HIPAA Security Rule](https://www.hhs.gov/hipaa/for-professionals/security/index.html)\n- [Abridge Platform](https://www.abridge.com/product)\n\n## Next Steps\n\nApply these patterns in `abridge-core-workflow-a` for real encounter processing.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "abridge-sdk-patterns",
-    "description": "Apply production-ready patterns for Abridge clinical AI integration.",
-    "Trigger": "abridge SDK patterns\", \"abridge best practices\", \"abridge code patterns\".",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

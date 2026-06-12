@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031803",
   "name": "documenso-multi-env-setup",
   "slug": "documenso-multi-env-setup",
   "description": "Configure Documenso across multiple environments (dev, staging, production).",
   "content": "# Documenso Multi-Environment Setup\n\n## Overview\n\nConfigure Documenso across development, staging, and production with environment isolation, secret management, and promotion workflows. Documenso cloud offers a staging environment at `stg-app.documenso.com`; self-hosted users run separate instances.\n\n## Prerequisites\n\n- Documenso accounts or instances for each environment\n- Secret management solution (Vault, AWS Secrets Manager, or `.env` files)\n- Completed `documenso-install-auth` setup\n\n## Environment Architecture\n\n```\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2502  Development                                                 \u2502\n\u2502  API: stg-app.documenso.com (or localhost:3000 self-hosted) \u2502\n\u2502  Key: DOCUMENSO_API_KEY=api_dev_xxx                         \u2502\n\u2502  Webhooks: ngrok tunnel                                      \u2502\n\u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524\n\u2502  Staging                                                     \u2502\n\u2502  API: stg-app.documenso.com                                 \u2502\n\u2502  Key: DOCUMENSO_API_KEY=api_stg_xxx                         \u2502\n\u2502  Webhooks: staging.yourapp.com/webhooks/documenso           \u2502\n\u251c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524\n\u2502  Production                                                  \u2502\n\u2502  API: app.documenso.com (or sign.yourcompany.com)           \u2502\n\u2502  Key: DOCUMENSO_API_KEY=api_prod_xxx                        \u2502\n\u2502  Webhooks: api.yourapp.com/webhooks/documenso               \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n```\n\n## Instructions\n\n### Step 1: Environment Configuration Files\n\n```bash\n# .env.development\nDOCUMENSO_API_KEY=api_dev_xxxxxxxxxxxx\nDOCUMENSO_BASE_URL=https://stg-app.documenso.com/api/v2\nDOCUMENSO_WEBHOOK_SECRET=whsec_dev_xxxxxxxxxxxx\nLOG_LEVEL=debug\nNODE_ENV=development\n\n# .env.staging\nDOCUMENSO_API_KEY=api_stg_xxxxxxxxxxxx\nDOCUMENSO_BASE_URL=https://stg-app.documenso.com/api/v2\nDOCUMENSO_WEBHOOK_SECRET=whsec_stg_xxxxxxxxxxxx\nLOG_LEVEL=info\nNODE_ENV=staging\n\n# .env.production\nDOCUMENSO_API_KEY=api_prod_xxxxxxxxxxxx\nDOCUMENSO_BASE_URL=https://app.documenso.com/api/v2\nDOCUMENSO_WEBHOOK_SECRET=whsec_prod_xxxxxxxxxxxx\nLOG_LEVEL=warn\nNODE_ENV=production\n```\n\n### Step 2: Environment-Aware Client Factory\n\n```typescript\n// src/documenso/factory.ts\nimport { Documenso } from \"@documenso/sdk-typescript\";\n\ninterface EnvConfig {\n  apiKey: string;\n  baseUrl: string;\n  webhookSecret: string;\n}\n\nfunction getConfig(): EnvConfig {\n  const apiKey = process.env.DOCUMENSO_API_KEY;\n  if (!apiKey) throw new Error(\"DOCUMENSO_API_KEY required\");\n\n  return {\n    apiKey,\n    baseUrl: process.env.DOCUMENSO_BASE_URL ?? \"https://app.documenso.com/api/v2\",\n    webhookSecret: process.env.DOCUMENSO_WEBHOOK_SECRET ?? \"\",\n  };\n}\n\nlet client: Documenso | null = null;\n\nexport function getClient(): Documenso {\n  if (!client) {\n    const config = getConfig();\n    client = new Documenso({\n      apiKey: config.apiKey,\n      serverURL: config.baseUrl,\n    });\n  }\n  return client;\n}\n\nexport function getWebhookSecret(): string {\n  return getConfig().webhookSecret;\n}\n\n// Reset for testing\nexport function resetClient(): void {\n  client = null;\n}\n```\n\n### Step 3: Environment Guards\n\n```typescript\n// src/guards.ts\nfunction requireProduction() {\n  if (process.env.NODE_ENV !== \"production\") {\n    throw new Error(\"This operation requires production environment\");\n  }\n}\n\nfunction blockProduction(operation: string) {\n  if (process.env.NODE_ENV === \"production\") {\n    throw new Error(`${operation} is blocked in production`);\n  }\n}\n\n// Usage\nasync function deleteAllDrafts(client: Documenso) {\n  blockProduction(\"deleteAllDrafts\"); // Safety guard\n  // ... only runs in dev/staging\n}\n\nasync function sendBulkContracts(client: Documenso) {\n  requireProduction(); // Only send real contracts in prod\n  // ...\n}\n```\n\n### Step 4: Mock Client for Development\n\n```typescript\n// src/documenso/mock.ts\nimport { vi } from \"vitest\";\n\nexport function createMockClient() {\n  let docCounter = 0;\n  return {\n    documents: {\n      createV0: vi.fn().mockImplementation(async ({ title }) => ({\n        documentId: ++docCounter,\n        title,\n        status: \"DRAFT\",\n      })),\n      setFileV0: vi.fn().mockResolvedValue(undefined),\n      findV0: vi.fn().mockResolvedValue({ documents: [] }),\n      getV0: vi.fn().mockResolvedValue({ status: \"DRAFT\", recipients: [] }),\n      sendV0: vi.fn().mockResolvedValue(undefined),\n      deleteV0: vi.fn().mockResolvedValue(undefined),\n    },\n    documentsRecipients: {\n      createV0: vi.fn().mockResolvedValue({ recipientId: 100 }),\n    },\n    documentsFields: {\n      createV0: vi.fn().mockResolvedValue({ fieldId: 200 }),\n    },\n  };\n}\n```\n\n### Step 5: Template Promotion Between Environments\n\n```typescript\n// scripts/promote-template.ts\n// Templates can't be copied via API \u2014 recreate them per environment\n// Keep template configuration in code for consistency\n\ninterface TemplateConfig {\n  title: string;\n  recipients: Array<{ role: string; placeholder: string }>;\n  fields: Array<{\n    recipientIndex: number;\n    type: string;\n    pageNumber: number;\n    pageX: number;\n    pageY: number;\n    pageWidth: number;\n    pageHeight: number;\n  }>;\n}\n\n// Template definitions versioned in git\nconst SERVICE_AGREEMENT: TemplateConfig = {\n  title: \"Service Agreement Template v2\",\n  recipients: [\n    { role: \"SIGNER\", placeholder: \"Client\" },\n    { role: \"APPROVER\", placeholder: \"Legal\" },\n  ],\n  fields: [\n    { recipientIndex: 0, type: \"SIGNATURE\", pageNumber: 3, pageX: 10, pageY: 80, pageWidth: 30, pageHeight: 5 },\n    { recipientIndex: 0, type: \"DATE\", pageNumber: 3, pageX: 60, pageY: 80, pageWidth: 20, pageHeight: 3 },\n    { recipientIndex: 1, type: \"SIGNATURE\", pageNumber: 3, pageX: 10, pageY: 90, pageWidth: 30, pageHeight: 5 },\n  ],\n};\n\n// Apply to any environment by running: ENV=staging tsx scripts/promote-template.ts\n```\n\n## Environment Checklist\n\n| Check | Dev | Staging | Production |\n|-------|-----|---------|------------|\n| Separate API key | Yes | Yes | Yes |\n| Debug logging | On | On | Off |\n| Webhook endpoint | ngrok | staging URL | production URL |\n| Secret manager | .env file | .env file | Vault/AWS SM |\n| Mock mode available | Yes | No | No |\n| Cleanup scripts enabled | Yes | Yes | No |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Wrong environment data | Missing `NODE_ENV` | Set explicitly in each environment |\n| Key mismatch | Using dev key in prod | Verify env var names per environment |\n| Webhook not received | Wrong URL configured | Update webhook URL in each Documenso environment |\n| Mock not working | Wrong client injected | Check factory returns mock in test env |\n\n## Resources\n\n- [12-Factor App Config](https://12factor.net/config)\n- [Documenso Staging](https://stg-app.documenso.com)\n- [Secret Management Best Practices](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html)\n\n## Next Steps\n\nFor monitoring setup, see `documenso-observability`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "documenso-multi-env-setup",
-    "description": "Configure Documenso across multiple environments (dev, staging, production).",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

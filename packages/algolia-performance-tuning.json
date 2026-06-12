@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031203",
   "name": "algolia-performance-tuning",
   "slug": "algolia-performance-tuning",
   "description": "Optimize Algolia search performance: record size, searchable attributes,",
   "content": "# Algolia Performance Tuning\n\n## Overview\n\nAlgolia's edge infrastructure typically delivers search in < 50ms globally. When performance degrades, the causes are usually: oversized records, too many searchable attributes, unoptimized faceting, or missing client-side caching. This skill covers server-side and client-side optimizations.\n\n## Performance Baselines\n\n| Metric | Good | Warning | Action Needed |\n|--------|------|---------|---------------|\n| Search latency (P50) | < 20ms | 20-100ms | > 100ms |\n| Search latency (P95) | < 50ms | 50-200ms | > 200ms |\n| Indexing time per 1K records | < 2s | 2-10s | > 10s |\n| Record size (avg) | < 5KB | 5-50KB | > 50KB |\n\n## Instructions\n\n### Step 1: Optimize Record Size\n\n```typescript\nimport { algoliasearch } from 'algoliasearch';\n\nconst client = algoliasearch(process.env.ALGOLIA_APP_ID!, process.env.ALGOLIA_ADMIN_KEY!);\n\n// BAD: Full record with unnecessary data\nconst badRecord = {\n  objectID: '1',\n  name: 'Running Shoes',\n  full_html_description: '<div>...5000 chars of HTML...</div>',  // Too big\n  internal_notes: 'Supplier ref: ABC-123',                       // Not searchable\n  all_reviews: [/* 200 reviews */],                                // Huge array\n};\n\n// GOOD: Lean record for search\nconst goodRecord = {\n  objectID: '1',\n  name: 'Running Shoes',\n  description: 'Lightweight running shoes with cushioned sole',  // Plain text, truncated\n  category: 'shoes',\n  brand: 'Nike',\n  price: 129.99,\n  rating: 4.5,\n  review_count: 200,          // Count, not full reviews\n  in_stock: true,\n  image_url: '/images/1.jpg', // URL, not base64\n};\n```\n\n### Step 2: Optimize Searchable Attributes\n\n```typescript\nawait client.setSettings({\n  indexName: 'products',\n  indexSettings: {\n    // Order matters: first attribute = highest priority in ranking\n    // Fewer searchable attributes = faster search\n    searchableAttributes: [\n      'name',                    // Highest priority\n      'brand',\n      'category',\n      'unordered(description)',  // unordered = position in attribute doesn't affect ranking\n    ],\n    // DON'T make IDs, URLs, or numeric fields searchable\n\n    // unretrievableAttributes: fields searchable but never returned in hits\n    // Use for fields users should match against but not see\n    unretrievableAttributes: ['internal_tags'],\n\n    // attributesToRetrieve: limit what comes back (smaller response = faster)\n    attributesToRetrieve: ['name', 'brand', 'price', 'image_url', 'category'],\n  },\n});\n```\n\n### Step 3: Optimize Faceting\n\n```typescript\nawait client.setSettings({\n  indexName: 'products',\n  indexSettings: {\n    attributesForFaceting: [\n      'category',              // Regular facet: counts computed\n      'brand',                 // Regular facet\n      'filterOnly(price)',     // filterOnly: no counts = faster\n      'filterOnly(in_stock)',  // Use for boolean/numeric filters\n      'filterOnly(created_at)',\n    ],\n    // filterOnly() saves CPU \u2014 use it when you don't need facet counts\n    // searchable(brand) lets users search within facet values\n  },\n});\n```\n\n### Step 4: Client-Side Response Caching\n\n```typescript\nimport { LRUCache } from 'lru-cache';\n\nconst searchCache = new LRUCache<string, any>({\n  max: 500,           // Max cached queries\n  ttl: 60 * 1000,     // 1 minute TTL\n});\n\nasync function cachedSearch(query: string, filters?: string) {\n  const cacheKey = `${query}|${filters || ''}`;\n  const cached = searchCache.get(cacheKey);\n  if (cached) return cached;\n\n  const result = await client.searchSingleIndex({\n    indexName: 'products',\n    searchParams: { query, filters, hitsPerPage: 20 },\n  });\n\n  searchCache.set(cacheKey, result);\n  return result;\n}\n```\n\n### Step 5: Query-Time Optimization Parameters\n\n```typescript\nconst { hits } = await client.searchSingleIndex({\n  indexName: 'products',\n  searchParams: {\n    query: 'laptop',\n\n    // Reduce response size\n    attributesToRetrieve: ['name', 'price', 'image_url'],  // Only what UI needs\n    attributesToHighlight: ['name'],                         // Fewer = faster\n    attributesToSnippet: [],                                 // Skip snippets if not used\n    responseFields: ['hits', 'nbHits', 'page', 'nbPages'],  // Skip unnecessary metadata\n\n    // Limit processing\n    hitsPerPage: 20,              // Don't over-fetch\n    maxValuesPerFacet: 10,        // Limit facet values returned\n\n    // Disable features you don't use\n    // typoTolerance: false,      // Uncomment if exact matching is fine\n    // removeStopWords: false,    // Keep stop words in query\n  },\n});\n```\n\n### Step 6: Replica Strategy for Sort Orders\n\n```typescript\n// Standard replicas share data but have their own ranking\n// Virtual replicas share data AND ranking config (less storage cost)\nawait client.setSettings({\n  indexName: 'products',\n  indexSettings: {\n    replicas: [\n      'virtual(products_price_asc)',   // Virtual: cheaper, limited customization\n      'virtual(products_price_desc)',\n      'products_newest',               // Standard: full ranking control\n    ],\n  },\n});\n\n// Virtual replica can only override: customRanking and ranking\n// Standard replica can override all settings\n```\n\n## Performance Monitoring\n\n```typescript\nasync function measureSearchLatency(query: string, iterations = 10) {\n  const latencies: number[] = [];\n\n  for (let i = 0; i < iterations; i++) {\n    const start = performance.now();\n    await client.searchSingleIndex({\n      indexName: 'products',\n      searchParams: { query, hitsPerPage: 20 },\n    });\n    latencies.push(performance.now() - start);\n  }\n\n  latencies.sort((a, b) => a - b);\n  console.log({\n    p50: latencies[Math.floor(iterations * 0.5)].toFixed(1),\n    p95: latencies[Math.floor(iterations * 0.95)].toFixed(1),\n    p99: latencies[Math.floor(iterations * 0.99)].toFixed(1),\n    avg: (latencies.reduce((a, b) => a + b) / iterations).toFixed(1),\n  });\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| P95 > 200ms | Oversized records | Trim records, use `unretrievableAttributes` |\n| Facet queries slow | Too many facet values | Use `filterOnly()` or `maxValuesPerFacet` |\n| Indexing slow | Large batch + complex settings | Reduce batch size, simplify `searchableAttributes` |\n| Cache stampede | TTL expired, burst traffic | Use stale-while-revalidate pattern |\n\n## Resources\n\n- [Performance Best Practices](https://www.algolia.com/doc/guides/managing-results/optimize-search-results/)\n- [Record Size Tips](https://support.algolia.com/hc/en-us/articles/4406981897617)\n- [Virtual Replicas](https://www.algolia.com/doc/guides/managing-results/refine-results/sorting/how-to/sort-an-index-by-date/)\n\n## Next Steps\n\nFor cost optimization, see `algolia-cost-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "algolia-performance-tuning",
-    "description": "Optimize Algolia search performance: record size, searchable attributes,",
-    "Trigger": "algolia performance\", \"optimize algolia\", \"algolia latency\",",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

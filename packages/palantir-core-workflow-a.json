@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032851",
   "name": "palantir-core-workflow-a",
   "slug": "palantir-core-workflow-a",
   "description": "Build Palantir Foundry data pipelines using Python transforms.",
   "content": "# Palantir Core Workflow A \u2014 Data Pipelines with Transforms\n\n## Overview\n\nBuild Foundry data pipelines using the `transforms-python` library. Covers the `@transform` and `@transform_df` decorators, input/output dataset wiring, incremental transforms, and `@configure` for Spark tuning. This is the primary workflow for all data processing in Foundry.\n\n## Prerequisites\n\n- Completed `palantir-install-auth` setup\n- A Foundry Code Repository (Python Transforms type)\n- Understanding of PySpark DataFrames (Foundry runs Spark under the hood)\n\n## Instructions\n\n### Step 1: Project Structure\n\n```\nmy-transforms-repo/\n\u251c\u2500\u2500 src/\n\u2502   \u2514\u2500\u2500 myproject/\n\u2502       \u251c\u2500\u2500 __init__.py\n\u2502       \u251c\u2500\u2500 pipeline.py          # Main transforms\n\u2502       \u251c\u2500\u2500 utils.py             # Shared logic\n\u2502       \u2514\u2500\u2500 datasets.py          # Dataset path constants\n\u251c\u2500\u2500 build.gradle                 # Foundry build config\n\u251c\u2500\u2500 conda_recipe/meta.yaml       # Dependency declarations\n\u2514\u2500\u2500 settings.gradle\n```\n\n### Step 2: Basic Transform with @transform_df\n\n```python\n# src/myproject/pipeline.py\nfrom transforms.api import transform_df, Input, Output\n\n@transform_df(\n    Output(\"/Company/datasets/cleaned_orders\"),\n    orders=Input(\"/Company/datasets/raw_orders\"),\n)\ndef clean_orders(orders):\n    \"\"\"Clean raw orders: drop nulls, normalize dates, filter test data.\"\"\"\n    from pyspark.sql import functions as F\n\n    return (\n        orders\n        .filter(F.col(\"order_id\").isNotNull())\n        .filter(~F.col(\"email\").like(\"%@test.com\"))\n        .withColumn(\"order_date\", F.to_date(\"order_date_str\", \"yyyy-MM-dd\"))\n        .withColumn(\"total_cents\", (F.col(\"total\") * 100).cast(\"long\"))\n        .drop(\"order_date_str\", \"total\")\n    )\n```\n\n### Step 3: Multi-Input Join Transform\n\n```python\n@transform_df(\n    Output(\"/Company/datasets/order_enriched\"),\n    orders=Input(\"/Company/datasets/cleaned_orders\"),\n    customers=Input(\"/Company/datasets/customers\"),\n)\ndef enrich_orders(orders, customers):\n    \"\"\"Join orders with customer data for analytics.\"\"\"\n    from pyspark.sql import functions as F\n\n    return (\n        orders\n        .join(customers, orders.customer_id == customers.id, \"left\")\n        .select(\n            orders.order_id,\n            orders.order_date,\n            orders.total_cents,\n            customers.name.alias(\"customer_name\"),\n            customers.segment,\n            customers.region,\n        )\n        .withColumn(\"processed_at\", F.current_timestamp())\n    )\n```\n\n### Step 4: Low-Level @transform for File I/O\n\n```python\nfrom transforms.api import transform, Input, Output\n\n@transform(\n    output=Output(\"/Company/datasets/report_summary\"),\n    orders=Input(\"/Company/datasets/order_enriched\"),\n)\ndef generate_summary(orders, output):\n    \"\"\"Write aggregated summary using low-level FileSystem API.\"\"\"\n    df = orders.dataframe()\n\n    summary = (\n        df.groupBy(\"region\", \"segment\")\n        .agg(\n            {\"total_cents\": \"sum\", \"order_id\": \"count\"}\n        )\n        .withColumnRenamed(\"sum(total_cents)\", \"revenue_cents\")\n        .withColumnRenamed(\"count(order_id)\", \"order_count\")\n    )\n\n    output.write_dataframe(summary)\n```\n\n### Step 5: Incremental Transforms\n\n```python\nfrom transforms.api import transform_df, Input, Output, incremental\n\n@incremental()\n@transform_df(\n    Output(\"/Company/datasets/daily_events\"),\n    events=Input(\"/Company/datasets/raw_events\"),\n)\ndef process_events_incrementally(events):\n    \"\"\"Only process new rows since last build \u2014 much faster for append-only data.\"\"\"\n    from pyspark.sql import functions as F\n\n    return events.withColumn(\"ingested_at\", F.current_timestamp())\n```\n\n### Step 6: Configure Spark Resources\n\n```python\nfrom transforms.api import transform_df, Input, Output, configure\n\n@configure(profile=[\"DRIVER_MEMORY_LARGE\"])  # 16GB driver\n@transform_df(\n    Output(\"/Company/datasets/heavy_aggregation\"),\n    data=Input(\"/Company/datasets/large_dataset\"),\n)\ndef heavy_compute(data):\n    \"\"\"Resource-intensive transform needing extra Spark memory.\"\"\"\n    from pyspark.sql import functions as F\n\n    return (\n        data\n        .groupBy(\"category\")\n        .agg(F.approx_count_distinct(\"user_id\").alias(\"unique_users\"))\n    )\n```\n\n## Output\n\n- Dataset-to-dataset transforms wired with `@transform_df`\n- Multi-input joins connecting datasets across projects\n- Incremental processing for append-only sources\n- Spark resource tuning with `@configure`\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `DatasetNotFound` | Wrong path string | Check dataset path in Foundry UI (right-click > Copy path) |\n| `AnalysisException: cannot resolve` | Column name mismatch | Print `df.columns` to debug; Foundry columns are case-sensitive |\n| `OutOfMemoryError` | Insufficient Spark memory | Add `@configure(profile=[\"DRIVER_MEMORY_LARGE\"])` |\n| `Transform is not incremental-compatible` | Using non-append operations | Only use `filter/select/withColumn` in incremental transforms |\n| Build hangs | Circular dependency | Check that no two transforms reference each other's output |\n\n## Examples\n\n### Polars Transform (Lightweight)\n\n```python\nfrom transforms.api import transform_polars, Input, Output\n\n@transform_polars(\n    Output(\"/Company/datasets/fast_summary\"),\n    data=Input(\"/Company/datasets/small_table\"),\n)\ndef fast_polars(data):\n    \"\"\"Use Polars for small datasets \u2014 faster than Spark, no JVM overhead.\"\"\"\n    import polars as pl\n    return data.group_by(\"category\").agg(pl.col(\"amount\").sum())\n```\n\n## Resources\n\n- [Python Transforms Guide](https://www.palantir.com/docs/foundry/transforms-python/transforms)\n- [Transforms API Reference](https://www.palantir.com/docs/foundry/transforms-python/transforms-python-api)\n- [@configure Reference](https://www.palantir.com/docs/foundry/api-reference/transforms-python-library/api-configure)\n- [Incremental Transforms](https://www.palantir.com/docs/foundry/transforms-python/transforms-pipelines)\n\n## Next Steps\n\n- Query Ontology objects and actions: `palantir-core-workflow-b`\n- Optimize pipeline performance: `palantir-performance-tuning`\n- Deploy across environments: `palantir-multi-env-setup`\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "palantir-core-workflow-a",
-    "description": "Build Palantir Foundry data pipelines using Python transforms.",
-    "allowed-tools": "Read, Write, Edit, Bash(pip:*), Grep",
-    "version": "2.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

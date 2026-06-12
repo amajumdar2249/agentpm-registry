@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031989",
   "name": "fireflies-enterprise-rbac",
   "slug": "fireflies-enterprise-rbac",
   "description": "Configure Fireflies.ai workspace roles, channels, privacy controls,",
   "content": "# Fireflies.ai Enterprise RBAC\n\n## Overview\n\nManage workspace access control in Fireflies.ai using roles, channels, privacy levels, and the sharing API. Fireflies uses per-seat licensing with workspace roles and channel-based transcript organization.\n\n## Prerequisites\n\n- Fireflies Business or Enterprise plan\n- Workspace admin privileges (or API key from admin account)\n- Understanding of your team structure\n\n## Workspace Roles\n\n| Role | Capabilities |\n|------|-------------|\n| Admin | Full workspace control, manage members, access all transcripts |\n| Member | Record meetings, view own + shared transcripts |\n| Guest | View shared transcripts only (may not consume a seat) |\n\n## Instructions\n\n### Step 1: List Workspace Members\n\n```bash\nset -euo pipefail\ncurl -s -X POST https://api.fireflies.ai/graphql \\\n  -H \"Authorization: Bearer $FIREFLIES_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"query\": \"{ users { name email user_id is_admin num_transcripts } }\"}' \\\n  | jq '.data.users[] | {name, email, admin: .is_admin, transcripts: .num_transcripts}'\n```\n\n### Step 2: Set User Roles via API\n\n```typescript\n// Promote or change a user's role\nasync function setUserRole(userId: string, role: string) {\n  return firefliesQuery(`\n    mutation($userId: String!, $role: String!) {\n      setUserRole(user_id: $userId, role: $role)\n    }\n  `, { userId, role });\n}\n\n// Usage: setUserRole(\"user-id-123\", \"admin\")\n```\n\n### Step 3: Organize Transcripts with Channels\n\n```typescript\n// List all channels\nconst channels = await firefliesQuery(`{\n  channels {\n    id\n    title\n    is_private\n    created_by\n    members { user_id email name }\n  }\n}`);\n\n// Move transcripts to a channel\nasync function assignToChannel(transcriptIds: string[], channelId: string) {\n  return firefliesQuery(`\n    mutation($ids: [String!]!, $channelId: String!) {\n      updateMeetingChannel(transcript_ids: $ids, channel_id: $channelId)\n    }\n  `, { ids: transcriptIds, channelId });\n}\n```\n\nOrganize by department:\n\n- **Sales** channel: All client/prospect calls\n- **Engineering** channel: Sprint reviews, architecture discussions\n- **Leadership** channel (private): Board meetings, strategy sessions\n\n### Step 4: Control Transcript Privacy\n\n```typescript\n// Privacy levels (most restrictive to least)\ntype PrivacyLevel =\n  | \"owner\"                    // Only meeting organizer\n  | \"participants\"             // Only meeting participants\n  | \"teammatesandparticipants\" // Workspace members + participants\n  | \"teammates\"               // All workspace members\n  | \"link\";                    // Anyone with the link\n\nasync function setTranscriptPrivacy(transcriptId: string, privacy: PrivacyLevel) {\n  return firefliesQuery(`\n    mutation($id: String!, $privacy: String!) {\n      updateMeetingPrivacy(transcript_id: $id, privacy_level: $privacy)\n    }\n  `, { id: transcriptId, privacy });\n}\n\n// Default new transcripts to participants-only\nawait setTranscriptPrivacy(\"transcript-id\", \"participants\");\n```\n\n### Step 5: Share Meetings with External Users\n\n```typescript\n// Share a transcript with up to 100 email recipients\nasync function shareMeeting(transcriptId: string, emails: string[], expiryDays = 30) {\n  return firefliesQuery(`\n    mutation($id: String!, $emails: [String!]!, $expiry: Int) {\n      shareMeeting(transcript_id: $id, emails: $emails, expiry_days: $expiry)\n    }\n  `, { id: transcriptId, emails, expiry: expiryDays });\n}\n\n// Revoke access\nasync function revokeAccess(transcriptId: string, email: string) {\n  return firefliesQuery(`\n    mutation($id: String!, $email: String!) {\n      revokeSharedMeetingAccess(transcript_id: $id, email: $email)\n    }\n  `, { id: transcriptId, email });\n}\n\n// Rate limit: 10 share operations per hour, up to 50 emails each\n```\n\n### Step 6: User Groups for Bulk Access\n\n```typescript\n// List user groups\nconst groups = await firefliesQuery(`\n  query($mine: Boolean) {\n    user_groups(mine: $mine) {\n      id name\n      members { user_id email name }\n      created_at\n    }\n  }\n`, { mine: false });\n\n// Use groups to manage channel membership in bulk\n```\n\n### Step 7: Audit Transcript Access\n\n```typescript\nasync function auditTranscriptAccess(transcriptId: string) {\n  const { transcript } = await firefliesQuery(`\n    query($id: String!) {\n      transcript(id: $id) {\n        id title\n        privacy\n        organizer_email\n        shared_with\n        channels { id }\n        workspace_users\n      }\n    }\n  `, { id: transcriptId });\n\n  console.log(`Transcript: ${transcript.title}`);\n  console.log(`Privacy: ${transcript.privacy}`);\n  console.log(`Owner: ${transcript.organizer_email}`);\n  console.log(`Shared with: ${transcript.shared_with?.join(\", \") || \"none\"}`);\n  console.log(`Channels: ${transcript.channels?.map((c: any) => c.id).join(\", \") || \"none\"}`);\n  console.log(`Workspace users: ${transcript.workspace_users?.join(\", \") || \"none\"}`);\n\n  return transcript;\n}\n```\n\n## Recommended Enterprise Configuration\n\n```yaml\nprivacy_defaults:\n  internal_meetings: \"teammatesandparticipants\"\n  external_meetings: \"participants\"\n  leadership_meetings: \"owner\"\n\nchannel_structure:\n  - name: \"Sales\"\n    private: false\n    auto_assign: \"meetings with external participants\"\n  - name: \"Engineering\"\n    private: false\n    auto_assign: \"meetings with 'sprint' or 'standup' in title\"\n  - name: \"Leadership\"\n    private: true\n    members: \"C-suite + VPs only\"\n\nsharing_policy:\n  max_expiry_days: 30\n  require_approval: true  # For external sharing\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Cannot set role | Not workspace admin | Use admin API key |\n| Channel not found | Invalid channel ID | List channels first |\n| Share rate limited | 10/hour limit | Queue share operations |\n| Privacy update fails | Transcript not owned | Only organizer can change privacy |\n\n## Output\n\n- Workspace members audited with roles and utilization\n- Channels created for department-based transcript organization\n- Privacy levels configured per meeting type\n- Sharing controls with expiry and revocation\n\n## Resources\n\n- [Fireflies API Docs](https://docs.fireflies.ai/)\n- [User Query](https://docs.fireflies.ai/graphql-api/query/user)\n\n## Next Steps\n\nFor migration strategies, see `fireflies-migration-deep-dive`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "fireflies-enterprise-rbac",
-    "description": "Configure Fireflies.ai workspace roles, channels, privacy controls,",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

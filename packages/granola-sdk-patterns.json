@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032180",
   "name": "granola-sdk-patterns",
   "slug": "granola-sdk-patterns",
   "description": "Zapier automation patterns and Enterprise API integration for Granola.",
   "content": "# Granola SDK Patterns\n\n## Overview\n\nGranola does not have a traditional SDK. Integration is achieved through three channels: Zapier (8,000+ app connections), the Enterprise API (REST, workspace-level read access), and native integrations (Slack, Notion, HubSpot, Attio, Affinity). This skill covers automation patterns for all three.\n\n## Prerequisites\n\n- Granola Business plan ($14/user/month) for Zapier + native CRM\n- Enterprise plan ($35+/user/month) for API access\n- Zapier account for automation workflows\n\n## Instructions\n\n### Step 1 \u2014 Understand Zapier Triggers\n\nGranola provides two Zapier triggers:\n\n| Trigger | Fires When | Use Case |\n|---------|-----------|----------|\n| **Note Added to Granola Folder** | A note is placed in a specific folder | Auto-route by meeting type |\n| **Note Shared to Zapier** | You manually share a note to Zapier | Selective sharing for important meetings |\n\n**Webhook payload data available:**\n\n- `title` \u2014 meeting title from calendar\n- `creator_name` / `creator_email` \u2014 note creator\n- `attendees[]` \u2014 array of `{name, email}` objects\n- `calendar_event_title` \u2014 original calendar event name\n- `calendar_event_datetime` \u2014 meeting date/time\n- `note_content` \u2014 the enhanced note content (Markdown)\n\n### Step 2 \u2014 Build Common Zap Patterns\n\n**Pattern 1: Meeting Notes to Notion (auto-archive)**\n\n```yaml\nTrigger: Note Added to Granola Folder (\"All Meetings\")\nAction: Notion \u2014 Create Database Item\n  Database: Meeting Archive\n  Title: \"{{title}}\"\n  Date: \"{{calendar_event_datetime}}\"\n  Content: \"{{note_content}}\"\n  Attendees: \"{{attendees}}\"\n```\n\n**Pattern 2: Action Items to Asana/Linear**\n\n```yaml\nTrigger: Note Shared to Zapier\nFilter: note_content contains \"Action Items\"\nCode Step (JavaScript):\n  const lines = inputData.note_content.split('\\n');\n  const actions = lines\n    .filter(l => l.match(/^- \\[ \\]/))\n    .map(l => l.replace('- [ ] ', ''));\n  output = actions.map(a => ({task: a}));\nAction: Linear \u2014 Create Issue (for each action)\n  Title: \"{{task}}\"\n  Team: Engineering\n  Label: \"meeting-action\"\n```\n\n**Pattern 3: Sales Call Summary to Slack + HubSpot**\n\n```yaml\nTrigger: Note Added to Granola Folder (\"Sales Calls\")\nPath A \u2014 Slack:\n  Action: Post Message to #sales-updates\n  Message: |\n    *New Sales Call:* {{title}}\n    *Attendees:* {{attendees}}\n\n    {{note_content}}\n\n    [View full notes in Granola]\n\nPath B \u2014 HubSpot (via Zapier if not using native):\n  Action: Find Contact by Email ({{attendees[0].email}})\n  Action: Create Engagement Note\n    Body: \"{{note_content}}\"\n```\n\n**Pattern 4: Meeting Follow-Up Email**\n\n```yaml\nTrigger: Note Shared to Zapier\nAction: ChatGPT \u2014 Generate Follow-Up Email\n  Prompt: \"Write a professional follow-up email based on: {{note_content}}\"\nAction: Gmail \u2014 Create Draft\n  To: \"{{attendees}}\"\n  Subject: \"Follow-up: {{title}}\"\n  Body: \"{{chatgpt_response}}\"\nAction: Slack \u2014 Notify\n  Message: \"Follow-up draft ready for: {{title}}\"\n```\n\n### Step 3 \u2014 Use the Enterprise API\n\nAvailable on Enterprise plan. API keys generated at Settings > API Keys (up to 5 per workspace).\n\n```bash\n# List all accessible notes (paginated)\ncurl -s \"https://api.granola.ai/v0/notes\" \\\n  -H \"Authorization: Bearer $GRANOLA_API_KEY\" \\\n  -H \"Content-Type: application/json\" | jq '.notes[:3]'\n\n# Get a specific note with transcript\ncurl -s \"https://api.granola.ai/v0/notes/{note_id}\" \\\n  -H \"Authorization: Bearer $GRANOLA_API_KEY\" | jq '{title, summary, action_items}'\n```\n\n**API characteristics:**\n\n- Bearer token authentication\n- Read-only access to publicly shared notes within your workspace\n- Rate limited per workspace (429 response when exceeded)\n- Pagination for list endpoints\n\n**Reverse-engineered endpoints (unofficial, for reference):**\n\n```\nPOST https://api.granola.ai/v2/get-documents    # List documents (paginated)\nPOST https://api.granola.ai/v1/get-document-transcript  # Get transcript\nPOST https://api.granola.ai/v1/get-workspaces    # List workspaces\nPOST https://api.granola.ai/v1/get-documents-batch  # Bulk fetch by IDs\n```\n\nAuthentication uses WorkOS with refresh token rotation via `POST https://api.workos.com/user_management/authenticate`.\n\n### Step 4 \u2014 Multi-Step Automation Chains\n\n```yaml\nName: Complete Meeting Follow-Up Pipeline\n\nStep 1 \u2014 Trigger:\n  Granola: Note Added to Folder (\"Client Meetings\")\n\nStep 2 \u2014 Filter:\n  Only continue if attendees contain external email domains\n\nStep 3 \u2014 Action:\n  ChatGPT: Generate structured summary and follow-up email\n\nStep 4 \u2014 Action:\n  Gmail: Create draft follow-up email to external attendees\n\nStep 5 \u2014 Action:\n  Notion: Create page in Client Meeting Log database\n\nStep 6 \u2014 Action:\n  Linear: Create issues from action items with \"client\" label\n\nStep 7 \u2014 Action:\n  Slack: Post summary to #client-updates channel\n\nStep 8 \u2014 Action:\n  HubSpot: Log meeting note on matched Contact/Deal\n```\n\n### Step 5 \u2014 Folder-Based Routing\n\nOrganize Granola folders to drive different Zap behaviors:\n\n| Folder | Zapier Trigger | Actions |\n|--------|---------------|---------|\n| `Sales Calls` | Auto | Slack #sales + HubSpot + follow-up email |\n| `Engineering` | Auto | Linear tasks + Notion wiki |\n| `All Hands` | Auto | Slack #general + Google Drive archive |\n| `Interviews` | Manual share | Greenhouse scorecard + hiring panel Slack |\n| `1-on-1s` | None | Private, no automation |\n\n## Output\n\n- Zapier workflows configured for automated note processing\n- API access established for custom integrations\n- Multi-step automation chains routing by meeting type\n- Folder-based routing strategy implemented\n\n## Error Handling\n\n| Error | Cause | Fix |\n|-------|-------|-----|\n| Zapier trigger not firing | Folder trigger misconfigured | Verify the exact folder name in Zapier matches Granola |\n| Missing note content | Note still processing | Add a 2-minute delay step at the start of the Zap |\n| API 429 Too Many Requests | Rate limit exceeded | Add delays between requests, implement backoff |\n| API 401 Unauthorized | Invalid or expired API key | Regenerate key at Settings > API Keys |\n| Attendee data empty | Calendar event has no attendee list | Add attendees to the calendar event |\n\n## Resources\n\n- [Zapier Granola App](https://zapier.com/apps/granola/integrations)\n- [Automate Granola (4 Ways)](https://zapier.com/blog/automate-granola/)\n- [Granola Enterprise API](https://docs.granola.ai/introduction)\n- [Enterprise API Docs](https://docs.granola.ai/help-center/sharing/integrations/enterprise-api)\n\n## Next Steps\n\nProceed to `granola-common-errors` for troubleshooting.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "granola-sdk-patterns",
-    "description": "Zapier automation patterns and Enterprise API integration for Granola.",
-    "Trigger": "granola zapier\", \"granola automation\", \"granola API\", \"granola SDK\".",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

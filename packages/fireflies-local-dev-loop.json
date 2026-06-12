@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031993",
   "name": "fireflies-local-dev-loop",
   "slug": "fireflies-local-dev-loop",
   "description": "Configure local development workflow for Fireflies.ai GraphQL integrations.",
   "content": "# Fireflies.ai Local Dev Loop\n\n## Overview\n\nSet up a fast local development workflow for Fireflies.ai integrations: project structure, mock data for offline development, test helpers, and API response recording for replay.\n\n## Prerequisites\n\n- Completed `fireflies-install-auth` setup\n- Node.js 18+ with npm/pnpm\n- Vitest for testing\n\n## Instructions\n\n### Step 1: Project Structure\n\n```\nmy-fireflies-app/\n  src/\n    lib/\n      fireflies-client.ts    # GraphQL client (see fireflies-sdk-patterns)\n      transcript-service.ts  # Business logic layer\n    types/\n      fireflies.ts           # TypeScript interfaces\n  tests/\n    fixtures/\n      transcript.json        # Recorded API responses\n    fireflies-client.test.ts\n    transcript-service.test.ts\n  .env.local                 # FIREFLIES_API_KEY (git-ignored)\n  .env.example               # Template without secrets\n```\n\n### Step 2: Record Real API Responses as Fixtures\n\n```typescript\n// scripts/record-fixtures.ts\nimport { FirefliesClient } from \"../src/lib/fireflies-client\";\nimport { writeFileSync, mkdirSync } from \"fs\";\n\nasync function recordFixtures() {\n  const client = new FirefliesClient();\n  mkdirSync(\"tests/fixtures\", { recursive: true });\n\n  // Record user\n  const user = await client.query(`{ user { name email user_id is_admin } }`);\n  writeFileSync(\"tests/fixtures/user.json\", JSON.stringify(user, null, 2));\n\n  // Record transcript list\n  const list = await client.query(`{\n    transcripts(limit: 3) {\n      id title date duration organizer_email\n      summary { overview action_items keywords }\n    }\n  }`);\n  writeFileSync(\"tests/fixtures/transcripts.json\", JSON.stringify(list, null, 2));\n\n  // Record single transcript with sentences\n  const id = list.transcripts[0]?.id;\n  if (id) {\n    const full = await client.query(`\n      query($id: String!) {\n        transcript(id: $id) {\n          id title date duration\n          speakers { id name }\n          sentences { speaker_name text start_time end_time }\n          summary { overview action_items keywords }\n          analytics {\n            sentiments { positive_pct negative_pct neutral_pct }\n            speakers { name duration word_count }\n          }\n        }\n      }\n    `, { id });\n    writeFileSync(\"tests/fixtures/transcript-full.json\", JSON.stringify(full, null, 2));\n  }\n\n  console.log(\"Fixtures recorded in tests/fixtures/\");\n}\n\nrecordFixtures().catch(console.error);\n```\n\n### Step 3: Mock Client for Tests\n\n```typescript\n// tests/helpers/mock-fireflies.ts\nimport { readFileSync } from \"fs\";\n\nexport function createMockClient() {\n  const fixtures: Record<string, any> = {};\n\n  return {\n    loadFixture(name: string) {\n      fixtures[name] = JSON.parse(\n        readFileSync(`tests/fixtures/${name}.json`, \"utf-8\")\n      );\n    },\n\n    async query(gql: string, variables?: Record<string, any>) {\n      // Match query to fixture by operation\n      if (gql.includes(\"transcripts(\")) return fixtures[\"transcripts\"];\n      if (gql.includes(\"transcript(id:\")) return fixtures[\"transcript-full\"];\n      if (gql.includes(\"user {\")) return fixtures[\"user\"];\n      throw new Error(`No fixture for query: ${gql.slice(0, 50)}`);\n    },\n  };\n}\n```\n\n### Step 4: Write Tests\n\n```typescript\n// tests/transcript-service.test.ts\nimport { describe, it, expect, vi, beforeEach } from \"vitest\";\nimport { createMockClient } from \"./helpers/mock-fireflies\";\n\ndescribe(\"Transcript Service\", () => {\n  let mockClient: ReturnType<typeof createMockClient>;\n\n  beforeEach(() => {\n    mockClient = createMockClient();\n    mockClient.loadFixture(\"transcripts\");\n    mockClient.loadFixture(\"transcript-full\");\n  });\n\n  it(\"should list recent transcripts\", async () => {\n    const data = await mockClient.query(\"{ transcripts(limit: 3) { id title } }\");\n    expect(data.transcripts).toBeDefined();\n    expect(data.transcripts.length).toBeGreaterThan(0);\n  });\n\n  it(\"should fetch full transcript with sentences\", async () => {\n    const data = await mockClient.query(\n      `query($id: String!) { transcript(id: $id) { sentences { text } } }`,\n      { id: \"test-id\" }\n    );\n    expect(data.transcript.sentences).toBeDefined();\n  });\n\n  it(\"should handle API errors gracefully\", async () => {\n    const errorClient = {\n      query: vi.fn().mockRejectedValue(new Error(\"Fireflies: auth_failed\")),\n    };\n    await expect(errorClient.query(\"{ user { email } }\"))\n      .rejects.toThrow(\"auth_failed\");\n  });\n});\n```\n\n### Step 5: Development Scripts\n\n```json\n{\n  \"scripts\": {\n    \"dev\": \"tsx watch src/index.ts\",\n    \"test\": \"vitest\",\n    \"test:watch\": \"vitest --watch\",\n    \"record-fixtures\": \"tsx scripts/record-fixtures.ts\",\n    \"typecheck\": \"tsc --noEmit\"\n  }\n}\n```\n\n### Step 6: Environment Setup\n\n```bash\nset -euo pipefail\n# Create .env from template\ncp .env.example .env.local\n\n# .env.example\necho 'FIREFLIES_API_KEY=your-key-here' > .env.example\n\n# .gitignore additions\necho '.env.local' >> .gitignore\necho 'tests/fixtures/*.json' >> .gitignore\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Fixture not found | Fixtures not recorded | Run `npm run record-fixtures` |\n| Auth error in tests | Using real API key in CI | Use mock client, not real API |\n| Type mismatch | API schema changed | Re-record fixtures, update types |\n| Rate limit during recording | Too many fixture requests | Record once, commit fixtures |\n\n## Output\n\n- Project structure with typed client and service layers\n- Recorded API fixtures for offline testing\n- Mock client for unit tests\n- Dev scripts with hot reload and watch mode\n\n## Resources\n\n- [Vitest Documentation](https://vitest.dev/)\n- [Fireflies API Docs](https://docs.fireflies.ai/)\n\n## Next Steps\n\nSee `fireflies-sdk-patterns` for production-ready client patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "fireflies-local-dev-loop",
-    "description": "Configure local development workflow for Fireflies.ai GraphQL integrations.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(pnpm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

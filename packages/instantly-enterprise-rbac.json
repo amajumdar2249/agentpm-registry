@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032296",
   "name": "instantly-enterprise-rbac",
   "slug": "instantly-enterprise-rbac",
   "description": "Configure Instantly.ai workspace access control, team management, and",
   "content": "# Instantly Enterprise RBAC\n\n## Overview\n\nManage workspace access control in Instantly API v2. Covers workspace member management, API key governance with scoped permissions, workspace group management (for agencies), custom tag-based resource isolation, and audit logging. Instantly uses workspace-level isolation \u2014 each workspace is a separate tenant with its own data and API keys.\n\n## Prerequisites\n\n- Instantly Hypergrowth plan or higher\n- Workspace admin access\n- API key with `all:all` scope (for admin operations)\n\n## Instructions\n\n### Step 1: Workspace Member Management\n\n```typescript\nimport { InstantlyClient } from \"./src/instantly/client\";\nconst client = new InstantlyClient();\n\n// List workspace members\nasync function listMembers() {\n  const members = await client.request<Array<{\n    id: string;\n    email: string;\n    role: string;\n    timestamp_created: string;\n  }>>(\"/workspace-members\");\n\n  console.log(\"Workspace Members:\");\n  for (const m of members) {\n    console.log(`  ${m.email} \u2014 role: ${m.role} (joined: ${m.timestamp_created})`);\n  }\n  return members;\n}\n\n// Invite new member\nasync function inviteMember(email: string) {\n  const member = await client.request<{ id: string; email: string }>(\"/workspace-members\", {\n    method: \"POST\",\n    body: JSON.stringify({ email }),\n  });\n  console.log(`Invited: ${member.email} (${member.id})`);\n  return member;\n}\n\n// Update member role\nasync function updateMemberRole(memberId: string, role: string) {\n  await client.request(`/workspace-members/${memberId}`, {\n    method: \"PATCH\",\n    body: JSON.stringify({ role }),\n  });\n}\n\n// Remove member\nasync function removeMember(memberId: string) {\n  await client.request(`/workspace-members/${memberId}`, { method: \"DELETE\" });\n  console.log(`Removed member: ${memberId}`);\n}\n```\n\n### Step 2: API Key Governance\n\n```typescript\n// Create scoped API keys for different team roles\nasync function createScopedKeys() {\n  // Analytics-only key for the marketing team\n  const analyticsKey = await client.request<{ id: string; key: string; name: string }>(\n    \"/api-keys\",\n    {\n      method: \"POST\",\n      body: JSON.stringify({\n        name: \"Marketing \u2014 Analytics Read Only\",\n        scopes: [\"campaigns:read\", \"accounts:read\"],\n      }),\n    }\n  );\n  console.log(`Analytics key: ${analyticsKey.name} (${analyticsKey.id})`);\n\n  // Campaign management key for SDR team\n  const sdrKey = await client.request<{ id: string; key: string; name: string }>(\n    \"/api-keys\",\n    {\n      method: \"POST\",\n      body: JSON.stringify({\n        name: \"SDR \u2014 Campaign Management\",\n        scopes: [\"campaigns:all\", \"leads:all\"],\n      }),\n    }\n  );\n  console.log(`SDR key: ${sdrKey.name} (${sdrKey.id})`);\n\n  // Webhook-only key for integration service\n  const webhookKey = await client.request<{ id: string; key: string; name: string }>(\n    \"/api-keys\",\n    {\n      method: \"POST\",\n      body: JSON.stringify({\n        name: \"Integration Service \u2014 Webhook Handler\",\n        scopes: [\"leads:read\"],\n      }),\n    }\n  );\n  console.log(`Webhook key: ${webhookKey.name} (${webhookKey.id})`);\n}\n\n// List all API keys\nasync function auditApiKeys() {\n  const keys = await client.request<Array<{\n    id: string; name: string; scopes: string[]; timestamp_created: string;\n  }>>(\"/api-keys\");\n\n  console.log(\"API Keys:\");\n  for (const key of keys) {\n    console.log(`  ${key.name} (${key.id})`);\n    console.log(`    Scopes: ${key.scopes.join(\", \")}`);\n    console.log(`    Created: ${key.timestamp_created}`);\n  }\n\n  // Flag overprivileged keys\n  const overprivileged = keys.filter((k) =>\n    k.scopes.includes(\"all:all\") || k.scopes.includes(\"all:update\")\n  );\n  if (overprivileged.length > 0) {\n    console.log(`\\nWARNING: ${overprivileged.length} key(s) with all:all scope:`);\n    overprivileged.forEach((k) => console.log(`  ${k.name} \u2014 consider reducing scope`));\n  }\n}\n\n// Revoke a key\nasync function revokeApiKey(keyId: string) {\n  await client.request(`/api-keys/${keyId}`, { method: \"DELETE\" });\n  console.log(`Revoked API key: ${keyId}`);\n}\n```\n\n### Step 3: Workspace Group Management (Agency Pattern)\n\n```typescript\n// For agencies managing multiple client workspaces\nasync function manageWorkspaceGroups() {\n  // List workspace group members\n  const groupMembers = await client.request<Array<{\n    id: string; email: string;\n  }>>(\"/workspace-group-members\");\n\n  console.log(\"Workspace Group Members:\");\n  for (const m of groupMembers) {\n    console.log(`  ${m.email} (${m.id})`);\n  }\n\n  // Add member to workspace group\n  await client.request(\"/workspace-group-members\", {\n    method: \"POST\",\n    body: JSON.stringify({ email: \"team@agency.com\" }),\n  });\n\n  // Get admin users\n  const admins = await client.request<Array<{\n    id: string; email: string;\n  }>>(\"/workspace-group-members/admin\");\n  console.log(\"Admins:\", admins.map((a) => a.email).join(\", \"));\n}\n```\n\n### Step 4: Custom Tags for Resource Isolation\n\n```typescript\n// Use custom tags to organize campaigns and accounts by team/client\nasync function setupTeamTags() {\n  // Create tags for each team\n  const teams = [\"SDR-West\", \"SDR-East\", \"Marketing\", \"Enterprise\"];\n\n  for (const team of teams) {\n    const tag = await client.request<{ id: string; label: string }>(\"/custom-tags\", {\n      method: \"POST\",\n      body: JSON.stringify({\n        label: team,\n        description: `Resources owned by ${team} team`,\n      }),\n    });\n    console.log(`Created tag: ${tag.label} (${tag.id})`);\n  }\n}\n\n// Assign tag to campaign or account\nasync function tagResource(tagId: string, resourceId: string) {\n  await client.request(\"/custom-tags/toggle-resource\", {\n    method: \"POST\",\n    body: JSON.stringify({\n      tag_id: tagId,\n      resource_id: resourceId,\n    }),\n  });\n}\n\n// Filter campaigns by tag\nasync function getCampaignsByTeam(tagId: string) {\n  return client.request<Campaign[]>(`/campaigns?tag_ids=${tagId}&limit=100`);\n}\n\n// Filter accounts by tag\nasync function getAccountsByTeam(tagId: string) {\n  return client.request<Account[]>(`/accounts?tag_ids=${tagId}&limit=100`);\n}\n```\n\n### Step 5: Audit Logging\n\n```typescript\n// Review workspace audit logs\nasync function reviewAuditLogs() {\n  const logs = await client.request<Array<{\n    id: string;\n    action: string;\n    resource: string;\n    user: string;\n    timestamp_created: string;\n  }>>(\"/audit-logs?limit=50\");\n\n  console.log(\"Recent Audit Events:\");\n  for (const log of logs) {\n    console.log(`  ${log.timestamp_created} | ${log.user} | ${log.action} | ${log.resource}`);\n  }\n\n  return logs;\n}\n\n// Workspace ownership transfer\nasync function changeWorkspaceOwner(newOwnerUserId: string) {\n  await client.request(\"/workspaces/current/change-owner\", {\n    method: \"POST\",\n    body: JSON.stringify({ new_owner_id: newOwnerUserId }),\n  });\n  console.log(\"Workspace ownership transferred\");\n}\n```\n\n## Access Control Matrix\n\n| Role | Campaigns | Leads | Accounts | Webhooks | API Keys | Members |\n|------|-----------|-------|----------|----------|----------|---------|\n| Admin | Full | Full | Full | Full | Full | Full |\n| Manager | Create/Edit | Create/Edit | View | Create | View | View |\n| SDR | Launch/Pause | Import | View | - | - | - |\n| Viewer | View only | View only | View only | - | - | - |\n\n## Key API Endpoints\n\n| Method | Path | Purpose |\n|--------|------|---------|\n| `POST` | `/workspace-members` | Invite member |\n| `GET` | `/workspace-members` | List members |\n| `PATCH` | `/workspace-members/{id}` | Update role |\n| `DELETE` | `/workspace-members/{id}` | Remove member |\n| `POST` | `/api-keys` | Create scoped key |\n| `GET` | `/api-keys` | List keys |\n| `DELETE` | `/api-keys/{id}` | Revoke key |\n| `POST` | `/custom-tags` | Create tag |\n| `POST` | `/custom-tags/toggle-resource` | Tag a resource |\n| `GET` | `/audit-logs` | View audit trail |\n| `POST` | `/workspaces/current/change-owner` | Transfer ownership |\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `403` on member operations | Not workspace admin | Use admin API key |\n| Can't revoke own key | Self-revocation blocked | Use another key or dashboard |\n| Tags not filtering | Wrong tag_id format | Ensure UUID format |\n| Audit logs empty | Feature not available on plan | Upgrade to higher tier |\n\n## Resources\n\n- [Instantly API Key Management](https://developer.instantly.ai/api/v2/apikey)\n- [Workspace Members API](https://developer.instantly.ai/)\n- [Custom Tags API](https://developer.instantly.ai/api/v2/schemas)\n\n## Next Steps\n\nFor migration strategies, see `instantly-migration-deep-dive`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "instantly-enterprise-rbac",
-    "description": "Configure Instantly.ai workspace access control, team management, and",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

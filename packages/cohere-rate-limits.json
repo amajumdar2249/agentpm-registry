@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031657",
   "name": "cohere-rate-limits",
   "slug": "cohere-rate-limits",
   "description": "Implement Cohere rate limiting, backoff, and request queuing patterns.",
   "content": "# Cohere Rate Limits\n\n## Overview\n\nHandle Cohere rate limits with exponential backoff, request queuing, and proactive throttling. Real rate limits from Cohere's documentation.\n\n## Prerequisites\n\n- `cohere-ai` SDK installed\n- Understanding of async/await patterns\n\n## Actual Cohere Rate Limits\n\n| Key Type | Endpoint | Rate Limit | Monthly Limit |\n|----------|----------|-----------|---------------|\n| **Trial** | Chat | 20 calls/min | 1,000 total |\n| **Trial** | Embed | 5 calls/min | 1,000 total |\n| **Trial** | Rerank | 5 calls/min | 1,000 total |\n| **Trial** | Classify | 5 calls/min | 1,000 total |\n| **Production** | All endpoints | 1,000 calls/min | Unlimited |\n\nTrial keys are free. Production keys require billing at [dashboard.cohere.com](https://dashboard.cohere.com).\n\n## Instructions\n\n### Step 1: Exponential Backoff with Jitter\n\n```typescript\nimport { CohereError, CohereTimeoutError } from 'cohere-ai';\n\ninterface RetryConfig {\n  maxRetries: number;\n  baseDelayMs: number;\n  maxDelayMs: number;\n}\n\nconst DEFAULT_RETRY: RetryConfig = {\n  maxRetries: 5,\n  baseDelayMs: 1000,\n  maxDelayMs: 60_000,\n};\n\nasync function withBackoff<T>(\n  operation: () => Promise<T>,\n  config = DEFAULT_RETRY\n): Promise<T> {\n  for (let attempt = 0; attempt <= config.maxRetries; attempt++) {\n    try {\n      return await operation();\n    } catch (err) {\n      if (attempt === config.maxRetries) throw err;\n\n      // Only retry on rate limits (429) and server errors (5xx)\n      let shouldRetry = false;\n      let retryAfterMs: number | undefined;\n\n      if (err instanceof CohereError) {\n        if (err.statusCode === 429) {\n          shouldRetry = true;\n          // Cohere returns Retry-After header (seconds)\n          // SDK may expose this via err.headers\n        } else if (err.statusCode && err.statusCode >= 500) {\n          shouldRetry = true;\n        }\n      } else if (err instanceof CohereTimeoutError) {\n        shouldRetry = true;\n      }\n\n      if (!shouldRetry) throw err;\n\n      // Exponential delay with jitter\n      const exponential = config.baseDelayMs * Math.pow(2, attempt);\n      const jitter = Math.random() * config.baseDelayMs;\n      const delay = Math.min(exponential + jitter, config.maxDelayMs);\n\n      console.warn(`Cohere retry ${attempt + 1}/${config.maxRetries} in ${delay.toFixed(0)}ms`);\n      await new Promise(r => setTimeout(r, retryAfterMs ?? delay));\n    }\n  }\n  throw new Error('Unreachable');\n}\n```\n\n### Step 2: Request Queue (Concurrency-Limited)\n\n```typescript\nimport PQueue from 'p-queue';\n\n// Match rate limits: trial=20/min for chat, production=1000/min\nfunction createCohereQueue(callsPerMinute: number) {\n  return new PQueue({\n    concurrency: 5,\n    interval: 60_000,\n    intervalCap: callsPerMinute,\n  });\n}\n\n// Trial key queue\nconst trialChatQueue = createCohereQueue(20);\nconst trialEmbedQueue = createCohereQueue(5);\n\n// Production key queue\nconst prodQueue = createCohereQueue(1000);\n\n// Usage\nasync function queuedChat(params: any) {\n  return trialChatQueue.add(() =>\n    withBackoff(() => cohere.chat(params))\n  );\n}\n```\n\n### Step 3: Proactive Rate Tracking\n\n```typescript\nclass RateLimitTracker {\n  private windows: Map<string, number[]> = new Map();\n\n  constructor(private limitsPerMinute: Record<string, number>) {}\n\n  canProceed(endpoint: string): boolean {\n    const limit = this.limitsPerMinute[endpoint] ?? 1000;\n    const now = Date.now();\n    const window = this.windows.get(endpoint) ?? [];\n\n    // Remove entries older than 1 minute\n    const active = window.filter(t => now - t < 60_000);\n    this.windows.set(endpoint, active);\n\n    return active.length < limit;\n  }\n\n  record(endpoint: string): void {\n    const window = this.windows.get(endpoint) ?? [];\n    window.push(Date.now());\n    this.windows.set(endpoint, window);\n  }\n\n  waitTime(endpoint: string): number {\n    const limit = this.limitsPerMinute[endpoint] ?? 1000;\n    const window = this.windows.get(endpoint) ?? [];\n    const now = Date.now();\n    const active = window.filter(t => now - t < 60_000);\n\n    if (active.length < limit) return 0;\n    return 60_000 - (now - active[0]); // Wait until oldest entry expires\n  }\n}\n\n// Trial key tracker\nconst tracker = new RateLimitTracker({\n  chat: 20,\n  embed: 5,\n  rerank: 5,\n  classify: 5,\n});\n\n// Use before each call\nasync function trackedEmbed(params: any) {\n  const wait = tracker.waitTime('embed');\n  if (wait > 0) {\n    console.log(`Throttling embed: waiting ${wait}ms`);\n    await new Promise(r => setTimeout(r, wait));\n  }\n  tracker.record('embed');\n  return withBackoff(() => cohere.embed(params));\n}\n```\n\n### Step 4: Batch-Aware Embedding\n\n```typescript\n// Embed supports up to 96 texts per call \u2014 maximize batch size to reduce calls\nasync function efficientEmbed(\n  texts: string[],\n  inputType: 'search_document' | 'search_query' = 'search_document'\n): Promise<number[][]> {\n  const BATCH_SIZE = 96; // Cohere max per request\n  const allVectors: number[][] = [];\n\n  for (let i = 0; i < texts.length; i += BATCH_SIZE) {\n    const batch = texts.slice(i, i + BATCH_SIZE);\n\n    const response = await trackedEmbed({\n      model: 'embed-v4.0',\n      texts: batch,\n      inputType,\n      embeddingTypes: ['float'],\n    });\n\n    allVectors.push(...response.embeddings.float);\n  }\n\n  return allVectors;\n}\n\n// 960 texts = 10 API calls (not 960)\nconst vectors = await efficientEmbed(largeTextArray);\n```\n\n## Cost-Aware Rate Limiting\n\nFor production keys, rate limits are per-minute but costs are per-token:\n\n```typescript\nclass TokenBudget {\n  private tokensUsed = 0;\n  private readonly resetInterval: NodeJS.Timer;\n\n  constructor(\n    private maxTokensPerMinute: number,\n    private alertCallback?: (used: number) => void\n  ) {\n    // Reset every minute\n    this.resetInterval = setInterval(() => { this.tokensUsed = 0; }, 60_000);\n  }\n\n  canAfford(estimatedTokens: number): boolean {\n    return this.tokensUsed + estimatedTokens <= this.maxTokensPerMinute;\n  }\n\n  record(actualTokens: number): void {\n    this.tokensUsed += actualTokens;\n    if (this.tokensUsed > this.maxTokensPerMinute * 0.8) {\n      this.alertCallback?.(this.tokensUsed);\n    }\n  }\n\n  dispose(): void {\n    clearInterval(this.resetInterval);\n  }\n}\n```\n\n## Output\n\n- Automatic retry with exponential backoff + jitter\n- Concurrency-limited request queue matching Cohere rate limits\n- Proactive throttling before hitting limits\n- Batch-optimized embedding to minimize API calls\n\n## Error Handling\n\n| Scenario | Detection | Action |\n|----------|-----------|--------|\n| 429 from trial key | `CohereError.statusCode === 429` | Wait 60s, retry |\n| 429 from prod key | Same | Backoff, check concurrency |\n| Monthly limit hit (trial) | 429 with limit message | Upgrade to production key |\n| Burst of requests | Queue depth > threshold | Add backpressure |\n\n## Resources\n\n- [Cohere Rate Limits](https://docs.cohere.com/docs/rate-limits)\n- [Cohere API Keys](https://dashboard.cohere.com/api-keys)\n- [p-queue](https://github.com/sindresorhus/p-queue)\n\n## Next Steps\n\nFor security configuration, see `cohere-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "cohere-rate-limits",
-    "description": "Implement Cohere rate limiting, backoff, and request queuing patterns.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

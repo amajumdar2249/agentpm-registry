@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032194",
   "name": "groq-incident-runbook",
   "slug": "groq-incident-runbook",
   "description": "Execute Groq incident response: triage, mitigation, fallback, and postmortem.",
   "content": "# Groq Incident Runbook\n\n## Overview\n\nRapid incident response procedures for Groq API failures. Groq is a third-party inference provider -- when it goes down, your mitigation options are: wait, fall back to a different model, or fall back to a different provider.\n\n## Severity Levels\n\n| Level | Definition | Response Time | Examples |\n|-------|------------|---------------|----------|\n| P1 | Complete API failure | < 15 min | Groq API returns 5xx on all models |\n| P2 | Degraded performance | < 1 hour | High latency, partial 429s, one model down |\n| P3 | Minor impact | < 4 hours | Intermittent errors, non-critical feature affected |\n| P4 | No user impact | Next business day | Monitoring gap, cost anomaly |\n\n## Quick Triage (Run First)\n\n```bash\nset -euo pipefail\necho \"=== 1. Groq API Status ===\"\ncurl -sf https://status.groq.com > /dev/null && echo \"status.groq.com: REACHABLE\" || echo \"status.groq.com: UNREACHABLE\"\n\necho \"\"\necho \"=== 2. API Authentication ===\"\nHTTP_CODE=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n  https://api.groq.com/openai/v1/models \\\n  -H \"Authorization: Bearer $GROQ_API_KEY\")\necho \"GET /models: HTTP $HTTP_CODE\"\n\necho \"\"\necho \"=== 3. Model Availability ===\"\nfor model in \"llama-3.1-8b-instant\" \"llama-3.3-70b-versatile\"; do\n  CODE=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n    https://api.groq.com/openai/v1/chat/completions \\\n    -H \"Authorization: Bearer $GROQ_API_KEY\" \\\n    -H \"Content-Type: application/json\" \\\n    -d \"{\\\"model\\\":\\\"$model\\\",\\\"messages\\\":[{\\\"role\\\":\\\"user\\\",\\\"content\\\":\\\"ping\\\"}],\\\"max_tokens\\\":1}\")\n  echo \"$model: HTTP $CODE\"\ndone\n\necho \"\"\necho \"=== 4. Rate Limit Status ===\"\ncurl -si https://api.groq.com/openai/v1/chat/completions \\\n  -H \"Authorization: Bearer $GROQ_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"model\":\"llama-3.1-8b-instant\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":1}' \\\n  2>/dev/null | grep -iE \"^(x-ratelimit|retry-after)\" || echo \"No rate limit headers\"\n```\n\n## Decision Tree\n\n```\nIs the Groq API responding?\n\u251c\u2500 NO (timeout/connection refused):\n\u2502   \u251c\u2500 Check status.groq.com\n\u2502   \u2502   \u251c\u2500 Incident reported \u2192 Wait, enable fallback provider\n\u2502   \u2502   \u2514\u2500 No incident \u2192 Network issue on our side (check DNS, firewall, proxy)\n\u2502   \u2514\u2500 Check if api.groq.com resolves: dig api.groq.com\n\u2502\n\u251c\u2500 YES, but 401/403:\n\u2502   \u251c\u2500 API key revoked or expired \u2192 Rotate key\n\u2502   \u2514\u2500 Key not set in environment \u2192 Check secret manager\n\u2502\n\u251c\u2500 YES, but 429:\n\u2502   \u251c\u2500 retry-after header present \u2192 Wait that many seconds\n\u2502   \u251c\u2500 All models 429 \u2192 Org-level limit hit; reduce traffic or upgrade plan\n\u2502   \u2514\u2500 One model 429 \u2192 Route to a different model\n\u2502\n\u251c\u2500 YES, but 500/503:\n\u2502   \u251c\u2500 One model \u2192 Groq capacity issue on that model; use fallback model\n\u2502   \u2514\u2500 All models \u2192 Groq-wide outage; enable fallback provider\n\u2502\n\u2514\u2500 YES, but slow (latency > 2s):\n    \u251c\u2500 Large prompts \u2192 Reduce input size\n    \u251c\u2500 70B model \u2192 Switch to 8B for speed\n    \u2514\u2500 queue_time high \u2192 Groq queue congestion; try different model\n```\n\n## Immediate Mitigations\n\n### Enable Fallback to Different Model\n\n```typescript\n// If primary model is failing, route to fallback\nasync function mitigateModelFailure(messages: any[]) {\n  const models = [\n    \"llama-3.3-70b-versatile\",  // Primary\n    \"llama-3.3-70b-specdec\",    // Same quality, different infra\n    \"llama-3.1-8b-instant\",     // Fastest, most available\n  ];\n\n  for (const model of models) {\n    try {\n      return await groq.chat.completions.create({\n        model,\n        messages,\n        max_tokens: 1024,\n        timeout: 10_000,\n      });\n    } catch (err: any) {\n      console.warn(`Model ${model} failed: ${err.status} ${err.message}`);\n      continue;\n    }\n  }\n\n  throw new Error(\"All Groq models unavailable\");\n}\n```\n\n### 429 Rate Limit \u2014 Immediate Actions\n\n```bash\nset -euo pipefail\n# Check exact limit info\ncurl -si https://api.groq.com/openai/v1/chat/completions \\\n  -H \"Authorization: Bearer $GROQ_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"model\":\"llama-3.1-8b-instant\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":1}' \\\n  2>/dev/null | grep -i \"x-ratelimit\\|retry-after\"\n\n# Options:\n# 1. Wait for retry-after seconds\n# 2. Switch to a different model (each model has separate limits)\n# 3. Reduce request volume (disable non-critical features)\n# 4. If persistent, upgrade Groq plan at console.groq.com\n```\n\n### 401 Auth Failure \u2014 Key Rotation\n\n```bash\nset -euo pipefail\n# 1. Verify current key\necho \"Current key prefix: ${GROQ_API_KEY:0:8}\"\n\n# 2. Create new key at console.groq.com/keys\n# 3. Test new key\ncurl -s -o /dev/null -w \"%{http_code}\" \\\n  https://api.groq.com/openai/v1/models \\\n  -H \"Authorization: Bearer $NEW_GROQ_KEY\"\n\n# 4. Deploy new key to production\n# 5. Delete old key in console\n```\n\n## Communication Templates\n\n### Internal Alert (Slack/PagerDuty)\n\n```\nP[1-4] INCIDENT: Groq API [Error Type]\nStatus: INVESTIGATING | MITIGATING | RESOLVED\nImpact: [What users see]\nCurrent action: [What we're doing]\nFallback: [Enabled/Disabled]\nNext update in: [Time]\nCommander: @[name]\n```\n\n### Status Page (External)\n\n```\nAI Feature Performance Issue\n\nWe're experiencing [degraded performance / intermittent errors] with our AI features.\n[Feature X] may respond slower than usual.\nWe've activated backup systems and are monitoring the situation.\n\nLast updated: [timestamp]\n```\n\n## Post-Incident\n\n### Evidence Collection\n\n```bash\nset -euo pipefail\nINCIDENT_DIR=\"groq-incident-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$INCIDENT_DIR\"\n\n# API diagnostics\ncurl -s https://api.groq.com/openai/v1/models \\\n  -H \"Authorization: Bearer $GROQ_API_KEY\" > \"$INCIDENT_DIR/models.json\"\n\n# Application logs (redacted)\nkubectl logs -l app=your-app --since=1h 2>/dev/null | \\\n  grep -i \"groq\\|429\\|error\\|timeout\" | \\\n  sed 's/gsk_[a-zA-Z0-9]*/gsk_REDACTED/g' | \\\n  tail -100 > \"$INCIDENT_DIR/app-logs.txt\"\n\ntar -czf \"$INCIDENT_DIR.tar.gz\" \"$INCIDENT_DIR\"\necho \"Evidence bundle: $INCIDENT_DIR.tar.gz\"\n```\n\n### Postmortem Template\n\n```markdown\n## Incident: Groq [Error Type] \u2014 [Date]\n**Duration:** X hours Y minutes\n**Severity:** P[1-4]\n**Impact:** [N users affected, feature X degraded]\n\n### Timeline\n- HH:MM \u2014 First alert fired\n- HH:MM \u2014 On-call acknowledged, began triage\n- HH:MM \u2014 Root cause identified: [cause]\n- HH:MM \u2014 Mitigation applied: [what]\n- HH:MM \u2014 Resolved, monitoring\n\n### Root Cause\n[Was it Groq-side or our side? Rate limit hit? Model deprecated? Key expired?]\n\n### What Went Well\n- [Fallback activated automatically]\n\n### What Could Improve\n- [Alert fired too late / fallback didn't work / no runbook]\n\n### Action Items\n- [ ] [Action] \u2014 Owner \u2014 Due date\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Can't reach status.groq.com | Network issue | Use mobile or different network |\n| All models failing | Groq-wide outage | Enable fallback provider (OpenAI, etc.) |\n| Key rotation fails | No admin access | Escalate to team lead with console access |\n| Fallback provider also down | Multi-provider outage | Degrade gracefully, show cached content |\n\n## Resources\n\n- [Groq Status Page](https://status.groq.com)\n- [Groq Error Codes](https://console.groq.com/docs/errors)\n- [Groq Rate Limits](https://console.groq.com/docs/rate-limits)\n\n## Next Steps\n\nFor data handling compliance, see `groq-data-handling`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "groq-incident-runbook",
-    "description": "Execute Groq incident response: triage, mitigation, fallback, and postmortem.",
-    "allowed-tools": "Read, Grep, Bash(kubectl:*), Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

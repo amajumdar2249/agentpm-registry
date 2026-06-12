@@ -1,19 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009493",
   "name": "bio-workflows-cnv-pipeline",
   "slug": "bio-workflows-cnv-pipeline",
   "description": "End-to-end copy number variant detection workflow from BAM files. Covers CNVkit analysis for exome/targeted sequencing with visualization and annotation. Use when detecting copy number alterations from sequencing data.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: CNVkit 0.9+, GATK 4.5+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# CNV Pipeline\n\n**\"Detect copy number variants from my sequencing data\"** \u2192 Orchestrate CNVkit coverage analysis, segmentation, calling, visualization, and annotation for exome or targeted sequencing panels.\n\nComplete workflow for detecting copy number variants from exome or targeted sequencing data.\n\n## Workflow Overview\n\n```\nBAM files (tumor/normal or germline)\n    |\n    v\n[1. Target Preparation] --> Create/access target BED\n    |\n    v\n[2. Coverage Calculation] --> Read depth per target\n    |\n    v\n[3. Reference Creation] --> Pool of normals\n    |\n    v\n[4. CNV Calling] --------> Log2 ratios, segmentation\n    |\n    v\n[5. Visualization] ------> Scatter plots, heatmaps\n    |\n    v\n[6. Annotation] ---------> Gene-level CNVs\n    |\n    v\nCNV calls with gene annotations\n```\n\n## Primary Path: CNVkit\n\n### Step 1: Prepare Target Regions\n\n```bash\n# If using exome capture kit BED\ncnvkit.py target capture_targets.bed \\\n    --annotate refFlat.txt \\\n    --split \\\n    -o targets.bed\n\n# Access regions (off-target for WGS-like sensitivity)\ncnvkit.py access genome.fa \\\n    -o access.bed\n\ncnvkit.py antitarget targets.bed \\\n    --access access.bed \\\n    -o antitargets.bed\n```\n\n### Step 2: Calculate Coverage\n\n```bash\n# For each sample\nfor bam in *.bam; do\n    sample=$(basename $bam .bam)\n\n    # Target coverage\n    cnvkit.py coverage $bam targets.bed \\\n        -o coverage/${sample}.targetcoverage.cnn\n\n    # Antitarget coverage\n    cnvkit.py coverage $bam antitargets.bed \\\n        -o coverage/${sample}.antitargetcoverage.cnn\ndone\n```\n\n### Step 3: Create Reference (Pool of Normals)\n\n```bash\n# From normal samples\ncnvkit.py reference \\\n    coverage/normal*.targetcoverage.cnn \\\n    coverage/normal*.antitargetcoverage.cnn \\\n    --fasta genome.fa \\\n    -o reference.cnn\n\n# Or flat reference (no normals available)\ncnvkit.py reference \\\n    --fasta genome.fa \\\n    --targets targets.bed \\\n    --antitargets antitargets.bed \\\n    -o flat_reference.cnn\n```\n\n### Step 4: Call CNVs\n\n```bash\nfor bam in tumor*.bam; do\n    sample=$(basename $bam .bam)\n\n    # Fix and segment\n    cnvkit.py fix \\\n        coverage/${sample}.targetcoverage.cnn \\\n        coverage/${sample}.antitargetcoverage.cnn \\\n        reference.cnn \\\n        -o cnv/${sample}.cnr\n\n    # Segment\n    cnvkit.py segment cnv/${sample}.cnr \\\n        -o cnv/${sample}.cns\n\n    # Call integer copy numbers\n    cnvkit.py call cnv/${sample}.cns \\\n        -o cnv/${sample}.call.cns\ndone\n```\n\n### Step 5: Visualization\n\n```bash\n# Scatter plot for single sample\ncnvkit.py scatter cnv/tumor1.cnr \\\n    -s cnv/tumor1.cns \\\n    -o plots/tumor1_scatter.pdf\n\n# Chromosome-specific\ncnvkit.py scatter cnv/tumor1.cnr \\\n    -s cnv/tumor1.cns \\\n    -c chr17 \\\n    -o plots/tumor1_chr17.pdf\n\n# Diagram (chromosome ideogram)\ncnvkit.py diagram cnv/tumor1.cnr \\\n    -s cnv/tumor1.cns \\\n    -o plots/tumor1_diagram.pdf\n\n# Heatmap for multiple samples\ncnvkit.py heatmap cnv/*.cns \\\n    -o plots/cohort_heatmap.pdf\n```\n\n### Step 6: Export and Annotation\n\n```bash\n# Export to various formats\ncnvkit.py export seg cnv/*.cns -o cnv/cohort.seg\ncnvkit.py export vcf cnv/tumor1.call.cns -o cnv/tumor1.vcf\n\n# Gene-level summary\ncnvkit.py genemetrics cnv/tumor1.cnr \\\n    -s cnv/tumor1.cns \\\n    --threshold 0.2 \\\n    -o cnv/tumor1_genes.tsv\n\n# Filter for significant CNVs\nawk '$6 < -0.4 || $6 > 0.3' cnv/tumor1_genes.tsv > cnv/tumor1_significant_genes.tsv\n```\n\n## Batch Processing Script\n\n```bash\n#!/bin/bash\nset -e\n\nTARGETS=\"targets.bed\"\nREFERENCE=\"reference.cnn\"\nOUTDIR=\"cnv_results\"\n\nmkdir -p ${OUTDIR}/{coverage,cnv,plots}\n\n# Process all tumor samples\nfor bam in tumor*.bam; do\n    sample=$(basename $bam .bam)\n    echo \"Processing ${sample}...\"\n\n    # Coverage\n    cnvkit.py coverage $bam ${TARGETS} \\\n        -o ${OUTDIR}/coverage/${sample}.targetcoverage.cnn\n\n    # Fix\n    cnvkit.py fix \\\n        ${OUTDIR}/coverage/${sample}.targetcoverage.cnn \\\n        ${OUTDIR}/coverage/${sample}.antitargetcoverage.cnn \\\n        ${REFERENCE} \\\n        -o ${OUTDIR}/cnv/${sample}.cnr\n\n    # Segment\n    cnvkit.py segment ${OUTDIR}/cnv/${sample}.cnr \\\n        -o ${OUTDIR}/cnv/${sample}.cns\n\n    # Call\n    cnvkit.py call ${OUTDIR}/cnv/${sample}.cns \\\n        -o ${OUTDIR}/cnv/${sample}.call.cns\n\n    # Plot\n    cnvkit.py scatter ${OUTDIR}/cnv/${sample}.cnr \\\n        -s ${OUTDIR}/cnv/${sample}.cns \\\n        -o ${OUTDIR}/plots/${sample}.pdf\ndone\n\n# Cohort heatmap\ncnvkit.py heatmap ${OUTDIR}/cnv/*.cns -o ${OUTDIR}/plots/heatmap.pdf\n```\n\n## Germline CNV Calling\n\n```bash\n# For germline analysis (no tumor-normal)\ncnvkit.py batch sample*.bam \\\n    --normal normal*.bam \\\n    --targets targets.bed \\\n    --fasta genome.fa \\\n    --output-reference reference.cnn \\\n    --output-dir cnv_output \\\n    --scatter --diagram\n\n# Or use flat reference\ncnvkit.py batch sample.bam \\\n    --method hybrid \\\n    --targets targets.bed \\\n    --fasta genome.fa \\\n    --output-dir cnv_output\n```\n\n## Parameter Recommendations\n\n| Step | Parameter | Value |\n|------|-----------|-------|\n| target | --split | Yes (for WES) |\n| segment | --method | cbs (default) |\n| call | --ploidy | 2 (adjust if known) |\n| call | --purity | Estimate if tumor |\n| genemetrics | --threshold | 0.2 |\n\n## Troubleshooting\n\n| Issue | Likely Cause | Solution |\n|-------|--------------|----------|\n| Noisy signal | Low coverage | Increase sequencing depth |\n| No CNVs | Flat reference, normal sample | Check reference creation |\n| Many small CNVs | Over-segmentation | Increase segment min size |\n| Batch effects | Different capture kits | Match samples to correct reference |\n\n## Complete Pipeline Script\n\n```bash\n#!/bin/bash\nset -e\n\nGENOME=\"genome.fa\"\nTARGETS=\"capture_targets.bed\"\nREFFLAT=\"refFlat.txt\"\nNORMAL_BAMS=\"normal*.bam\"\nTUMOR_BAMS=\"tumor*.bam\"\nOUTDIR=\"cnv_results\"\n\nmkdir -p ${OUTDIR}/{coverage,cnv,plots,annotation}\n\n# Step 1: Prepare targets\ncnvkit.py target ${TARGETS} --annotate ${REFFLAT} --split -o ${OUTDIR}/targets.bed\ncnvkit.py access ${GENOME} -o ${OUTDIR}/access.bed\ncnvkit.py antitarget ${OUTDIR}/targets.bed --access ${OUTDIR}/access.bed -o ${OUTDIR}/antitargets.bed\n\n# Step 2: Coverage (normals)\nfor bam in ${NORMAL_BAMS}; do\n    sample=$(basename $bam .bam)\n    cnvkit.py coverage $bam ${OUTDIR}/targets.bed -o ${OUTDIR}/coverage/${sample}.targetcoverage.cnn\n    cnvkit.py coverage $bam ${OUTDIR}/antitargets.bed -o ${OUTDIR}/coverage/${sample}.antitargetcoverage.cnn\ndone\n\n# Step 3: Reference\ncnvkit.py reference ${OUTDIR}/coverage/normal*.cnn --fasta ${GENOME} -o ${OUTDIR}/reference.cnn\n\n# Step 4-5: Process tumors\nfor bam in ${TUMOR_BAMS}; do\n    sample=$(basename $bam .bam)\n    cnvkit.py coverage $bam ${OUTDIR}/targets.bed -o ${OUTDIR}/coverage/${sample}.targetcoverage.cnn\n    cnvkit.py coverage $bam ${OUTDIR}/antitargets.bed -o ${OUTDIR}/coverage/${sample}.antitargetcoverage.cnn\n    cnvkit.py fix ${OUTDIR}/coverage/${sample}.targetcoverage.cnn \\\n        ${OUTDIR}/coverage/${sample}.antitargetcoverage.cnn \\\n        ${OUTDIR}/reference.cnn -o ${OUTDIR}/cnv/${sample}.cnr\n    cnvkit.py segment ${OUTDIR}/cnv/${sample}.cnr -o ${OUTDIR}/cnv/${sample}.cns\n    cnvkit.py call ${OUTDIR}/cnv/${sample}.cns -o ${OUTDIR}/cnv/${sample}.call.cns\n    cnvkit.py scatter ${OUTDIR}/cnv/${sample}.cnr -s ${OUTDIR}/cnv/${sample}.cns -o ${OUTDIR}/plots/${sample}.pdf\n    cnvkit.py genemetrics ${OUTDIR}/cnv/${sample}.cnr -s ${OUTDIR}/cnv/${sample}.cns -o ${OUTDIR}/annotation/${sample}_genes.tsv\ndone\n\necho \"Pipeline complete. Results in ${OUTDIR}/\"\n```\n\n## Related Skills\n\n- copy-number/cnvkit-analysis - CNVkit details\n- copy-number/cnv-visualization - Plotting options\n- copy-number/cnv-annotation - Gene annotations\n- copy-number/gatk-cnv - GATK alternative\n- copy-number/copy-ratio-segmentation - Segmentation algorithm and depth-bias correction\n- copy-number/allele-specific-copy-number - Tumor purity, ploidy, and integer allele-specific CN\n- copy-number/recurrent-cnv - Cohort-level recurrent and driver CNV with GISTIC2\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-workflows-cnv-pipeline",
-    "description": "End-to-end copy number variant detection workflow from BAM files. Covers CNVkit analysis for exome/targeted sequencing with visualization and annotation. Use when detecting copy number alterations from sequencing data.",
-    "tool_type": "mixed",
-    "primary_tool": "CNVkit",
-    "workflow": "true",
-    "depends_on": "",
-    "qc_checkpoints": "",
-    "- after_coverage": "Uniform coverage across targets",
-    "- after_calling": "Reasonable CNV count, expected ploidy",
-    "- after_annotation": "Known CNVs detected if present"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

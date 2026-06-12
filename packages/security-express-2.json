@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000030313",
   "name": "security-express",
   "slug": "security-express-2",
   "description": "|-",
   "content": "\n<overview>\n\nSecurity audit patterns for Express.js applications covering essential security middleware, CORS configuration, auth patterns, and common vulnerabilities.\n\n</overview>\n\n<rules>\n\n## Essential Security Middleware\n\n### Helmet.js (Security Headers)\n```javascript\n// \u274c Missing security headers\nconst app = express();\n\n// \u2713 Use Helmet\nconst helmet = require('helmet');\napp.use(helmet());\n```\n\n**Check if Helmet is installed and used.** It sets:\n- Content-Security-Policy\n- X-Content-Type-Options: nosniff\n- X-Frame-Options: DENY\n- Strict-Transport-Security\n- And more...\n\n### Disable X-Powered-By\n```javascript\n// \u274c Default (header reveals framework)\nconst app = express();\n\n// \u2713 Disable fingerprinting\napp.disable('x-powered-by');\n// or: app.set('x-powered-by', false);\n```\n\n### CORS Configuration\n```javascript\n// \u274c CRITICAL: Allow all origins\napp.use(cors());\napp.use(cors({ origin: '*' }));\n\n// \u274c HIGH: Reflect origin with credentials\napp.use(cors({ \n  origin: true,  // Reflects any origin!\n  credentials: true \n}));\n\n// \u2713 Explicit allowlist\napp.use(cors({\n  origin: ['https://app.example.com', 'https://admin.example.com'],\n  credentials: true,\n}));\n\n// \u2713 Function for dynamic validation\napp.use(cors({\n  origin: (origin, callback) => {\n    const allowed = ['https://app.example.com'];\n    if (!origin || allowed.includes(origin)) {\n      callback(null, true);\n    } else {\n      callback(new Error('Not allowed by CORS'));\n    }\n  },\n  credentials: true,\n}));\n```\n\n## Body Parser Limits\n\n```javascript\n// \u274c No limit (DoS risk)\napp.use(express.json());\n\n// \u2713 Set reasonable limits\napp.use(express.json({ limit: '100kb' }));\napp.use(express.urlencoded({ extended: true, limit: '100kb' }));\n```\n\n</rules>\n\n<vulnerabilities>\n\n## Auth Middleware Patterns\n\n### Missing Auth on Routes\n```javascript\n// \u274c No auth on admin routes\napp.get('/api/admin/users', async (req, res) => {\n  res.json(await User.find());\n});\n\n// \u2713 Auth middleware applied\napp.get('/api/admin/users', requireAuth, requireAdmin, async (req, res) => {\n  res.json(await User.find());\n});\n```\n\n### Middleware Order Matters\n```javascript\n// \u274c Wrong order - static files before auth\napp.use(express.static('uploads')); // Exposed!\napp.use(requireAuth);\n\n// \u2713 Auth before protected static files\napp.use('/public', express.static('public')); // Intentionally public\napp.use(requireAuth);\napp.use('/uploads', express.static('uploads')); // Now protected\n```\n\n### Router-Level Auth Gaps\n```javascript\n// Check: Is auth applied to all routes in admin router?\nconst adminRouter = express.Router();\nadminRouter.use(requireAuth); // Applied to all routes below\nadminRouter.get('/users', getUsers);\nadminRouter.delete('/users/:id', deleteUser);\n\n// \u274c Watch for routes defined BEFORE the middleware\nconst apiRouter = express.Router();\napiRouter.get('/health', getHealth); // No auth (intentional?)\napiRouter.use(requireAuth);\napiRouter.get('/users', getUsers); // Has auth\n```\n\n## Common Vulnerabilities\n\n### SQL/NoSQL Injection\n```javascript\n// \u274c String interpolation\nconst user = await db.query(`SELECT * FROM users WHERE id = ${req.params.id}`);\n\n// \u2713 Parameterized query\nconst user = await db.query('SELECT * FROM users WHERE id = $1', [req.params.id]);\n\n// \u274c MongoDB injection\nconst user = await User.findOne({ email: req.body.email }); // If email is { $gt: \"\" }\n\n// \u2713 Validate input type\nif (typeof req.body.email !== 'string') return res.status(400).json({ error: 'Invalid email' });\n```\n\n### Path Traversal\n```javascript\n// \u274c User-controlled path\napp.get('/files/:filename', (req, res) => {\n  res.sendFile(`./uploads/${req.params.filename}`); // ../../etc/passwd\n});\n\n// \u2713 Validate and normalize\nconst path = require('path');\napp.get('/files/:filename', (req, res) => {\n  const filename = path.basename(req.params.filename);\n  const filepath = path.join(__dirname, 'uploads', filename);\n  if (!filepath.startsWith(path.join(__dirname, 'uploads'))) {\n    return res.status(400).json({ error: 'Invalid path' });\n  }\n  res.sendFile(filepath);\n});\n```\n\n### Error Handling\n```javascript\n// \u274c Stack traces in production\napp.use((err, req, res, next) => {\n  res.status(500).json({ error: err.stack }); // Leaks internals\n});\n\n// \u2713 Safe error handler\napp.use((err, req, res, next) => {\n  console.error(err); // Log for debugging\n  res.status(500).json({ error: 'Internal server error' });\n});\n```\n\n### Session Security\n```javascript\n// \u274c Insecure session config\napp.use(session({\n  secret: 'keyboard cat', // Hardcoded!\n  cookie: { secure: false }, // No HTTPS requirement\n}));\n\n// \u2713 Secure config\napp.use(session({\n  secret: process.env.SESSION_SECRET,\n  resave: false,\n  saveUninitialized: false,\n  cookie: {\n    secure: true, // HTTPS only\n    httpOnly: true, // No JS access\n    sameSite: 'strict', // CSRF protection\n    maxAge: 1000 * 60 * 60 * 24, // 24 hours\n  },\n}));\n```\n\n## Rate Limiting\n\n```javascript\n// Check for rate limiting on auth routes\nconst rateLimit = require('express-rate-limit');\n\nconst authLimiter = rateLimit({\n  windowMs: 15 * 60 * 1000, // 15 minutes\n  max: 5, // 5 attempts\n  message: 'Too many login attempts',\n});\n\napp.post('/api/login', authLimiter, loginHandler);\napp.post('/api/register', authLimiter, registerHandler);\napp.post('/api/forgot-password', authLimiter, forgotPasswordHandler);\n```\n\n</vulnerabilities>\n\n<commands>\n\n## Quick Audit Commands\n\n```bash\n# Check if Helmet is used\nrg -n 'helmet\\\\(' . -g \"*.js\" -g \"*.ts\"\n\n# Check if x-powered-by is disabled\nrg -n \"x-powered-by\" . -g \"*.js\" -g \"*.ts\"\n```\n\n```bash\n# Check for helmet\nrg \"helmet\" package.json\nrg \"require\\\\(['\\\"]helmet\" .\nrg \"from ['\\\"]helmet\" .\n\n# Find CORS config\nrg \"cors\\\\(\" . -g \"*.js\" -g \"*.ts\" -A 5\n\n# Find routes without auth middleware\nrg \"app\\\\.(get|post|put|delete|patch)\\\\(\" . -A 1 | grep -v \"require.*[Aa]uth\"\n\n# Find string interpolation in queries\nrg \"(query|find|findOne|exec).*\\\\`\" . -g \"*.js\" -g \"*.ts\"\n\n# Check session config\nrg \"session\\\\(\" . -A 10\n```\n\n</commands>\n\n<checklist>\n\n## Hardening Checklist\n\n- [ ] Helmet.js installed and used\n- [ ] CORS restricted to specific origins\n- [ ] Body parser has size limits\n- [ ] Auth middleware on all protected routes\n- [ ] Rate limiting on auth endpoints\n- [ ] Session cookies: secure, httpOnly, sameSite\n- [ ] No hardcoded secrets\n- [ ] Error handler doesn't leak stack traces\n- [ ] Input validation on all user input\n- [ ] Parameterized queries (no string concat)\n\n</checklist>\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "security-express",
-    "description": "|-",
-    "Examples": "",
-    "- user": "Audit Express session config\" \u2192 check secure, httpOnly, and sameSite flags"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

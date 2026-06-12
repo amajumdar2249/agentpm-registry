@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031570",
   "name": "clickhouse-core-workflow-b",
   "slug": "clickhouse-core-workflow-b",
   "description": "Insert, query, and aggregate data in ClickHouse with real SQL patterns.",
   "content": "# ClickHouse Insert & Query (Core Workflow B)\n\n## Overview\n\nInsert data efficiently and write analytical queries with aggregations,\nwindow functions, and materialized views.\n\n## Prerequisites\n\n- Tables created (see `clickhouse-core-workflow-a`)\n- `@clickhouse/client` connected\n\n## Instructions\n\n### Step 1: Bulk Insert Patterns\n\n```typescript\nimport { createClient } from '@clickhouse/client';\n\nconst client = createClient({\n  url: process.env.CLICKHOUSE_HOST!,\n  username: process.env.CLICKHOUSE_USER ?? 'default',\n  password: process.env.CLICKHOUSE_PASSWORD ?? '',\n});\n\n// Insert many rows efficiently \u2014 @clickhouse/client buffers internally\nawait client.insert({\n  table: 'analytics.events',\n  values: events,   // Array of objects matching table columns\n  format: 'JSONEachRow',\n});\n\n// Insert from file (CSV, Parquet, etc.)\nimport { createReadStream } from 'fs';\n\nawait client.insert({\n  table: 'analytics.events',\n  values: createReadStream('./data/events.csv'),\n  format: 'CSVWithNames',\n});\n```\n\n**Insert best practices:**\n\n- Batch rows: aim for 10K-100K rows per INSERT (not one at a time)\n- ClickHouse creates a new \"part\" per INSERT \u2014 too many small inserts cause \"too many parts\"\n- For real-time streams, buffer 1-5 seconds then flush\n\n### Step 2: Analytical Queries\n\n```sql\n-- Top events by tenant in the last 7 days\nSELECT\n    tenant_id,\n    event_type,\n    count()                  AS event_count,\n    uniqExact(user_id)       AS unique_users,\n    min(created_at)          AS first_seen,\n    max(created_at)          AS last_seen\nFROM analytics.events\nWHERE created_at >= now() - INTERVAL 7 DAY\nGROUP BY tenant_id, event_type\nORDER BY event_count DESC\nLIMIT 100;\n```\n\n```sql\n-- Funnel analysis: signup \u2192 activation \u2192 purchase\nSELECT\n    level,\n    count() AS users\nFROM (\n    SELECT\n        user_id,\n        groupArray(event_type) AS journey\n    FROM analytics.events\n    WHERE event_type IN ('signup', 'activation', 'purchase')\n      AND created_at >= today() - 30\n    GROUP BY user_id\n)\nARRAY JOIN arrayEnumerate(journey) AS level\nGROUP BY level\nORDER BY level;\n```\n\n```sql\n-- Retention: users active this week who were also active last week\nSELECT\n    count(DISTINCT curr.user_id) AS retained_users\nFROM analytics.events AS curr\nINNER JOIN analytics.events AS prev\n    ON curr.user_id = prev.user_id\nWHERE curr.created_at >= toMonday(today())\n  AND prev.created_at >= toMonday(today()) - 7\n  AND prev.created_at < toMonday(today());\n```\n\n### Step 3: Parameterized Queries in Node.js\n\n```typescript\n// Use {param:Type} syntax for safe parameterized queries\nconst rs = await client.query({\n  query: `\n    SELECT event_type, count() AS cnt\n    FROM analytics.events\n    WHERE tenant_id = {tenant_id:UInt32}\n      AND created_at >= {from_date:DateTime}\n    GROUP BY event_type\n    ORDER BY cnt DESC\n  `,\n  query_params: {\n    tenant_id: 1,\n    from_date: '2025-01-01 00:00:00',\n  },\n  format: 'JSONEachRow',\n});\nconst rows = await rs.json();\n```\n\n### Step 4: Materialized Views (Pre-Aggregation)\n\n```sql\n-- Source table receives raw events\n-- Materialized view aggregates automatically on INSERT\n\nCREATE MATERIALIZED VIEW analytics.hourly_stats_mv\nTO analytics.hourly_stats  -- target table\nAS\nSELECT\n    toStartOfHour(created_at) AS hour,\n    tenant_id,\n    event_type,\n    count()                   AS event_count,\n    uniqState(user_id)        AS unique_users_state\nFROM analytics.events\nGROUP BY hour, tenant_id, event_type;\n\n-- Target table uses AggregatingMergeTree\nCREATE TABLE analytics.hourly_stats (\n    hour              DateTime,\n    tenant_id         UInt32,\n    event_type        LowCardinality(String),\n    event_count       UInt64,\n    unique_users_state AggregateFunction(uniq, UInt64)\n)\nENGINE = AggregatingMergeTree()\nORDER BY (tenant_id, event_type, hour);\n\n-- Query the materialized view (merge aggregation states)\nSELECT\n    hour,\n    sum(event_count)           AS events,\n    uniqMerge(unique_users_state) AS unique_users\nFROM analytics.hourly_stats\nWHERE tenant_id = 1\nGROUP BY hour\nORDER BY hour;\n```\n\n### Step 5: Window Functions\n\n```sql\n-- Running total and rank within each tenant\nSELECT\n    tenant_id,\n    event_type,\n    count()   AS cnt,\n    sum(count()) OVER (PARTITION BY tenant_id ORDER BY count() DESC) AS running_total,\n    row_number() OVER (PARTITION BY tenant_id ORDER BY count() DESC) AS rank\nFROM analytics.events\nWHERE created_at >= today() - 7\nGROUP BY tenant_id, event_type\nORDER BY tenant_id, rank;\n```\n\n### Step 6: Common ClickHouse Functions\n\n| Function | Description | Example |\n|----------|-------------|---------|\n| `count()` | Row count | `count()` |\n| `uniq(col)` | Approximate distinct count (HyperLogLog) | `uniq(user_id)` |\n| `uniqExact(col)` | Exact distinct count | `uniqExact(user_id)` |\n| `quantile(0.95)(col)` | Percentile | `quantile(0.95)(latency_ms)` |\n| `arrayJoin(arr)` | Unnest array to rows | `arrayJoin(tags)` |\n| `JSONExtractString(col, key)` | Extract from JSON string | `JSONExtractString(properties, 'plan')` |\n| `toStartOfHour(dt)` | Truncate to hour | `toStartOfHour(created_at)` |\n| `formatReadableSize(n)` | Human-readable bytes | `formatReadableSize(bytes)` |\n| `if(cond, then, else)` | Conditional | `if(cnt > 0, cnt, NULL)` |\n| `multiIf(...)` | Multi-branch conditional | `multiIf(x>10, 'high', x>5, 'med', 'low')` |\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `Too many parts (300)` | Frequent small inserts | Batch inserts, increase `parts_to_throw_insert` |\n| `Memory limit exceeded` | Large GROUP BY / JOIN | Add WHERE filters, increase `max_memory_usage` |\n| `UNKNOWN_FUNCTION` | Wrong ClickHouse version | Check `SELECT version()` |\n| `Cannot parse datetime` | Wrong format | Use `YYYY-MM-DD HH:MM:SS` format |\n\n## Resources\n\n- [SQL Reference](https://clickhouse.com/docs/sql-reference)\n- [Aggregate Functions](https://clickhouse.com/docs/sql-reference/aggregate-functions)\n- [Materialized Views Guide](https://clickhouse.com/blog/using-materialized-views-in-clickhouse)\n\n## Next Steps\n\nFor error troubleshooting, see `clickhouse-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clickhouse-core-workflow-b",
-    "description": "Insert, query, and aggregate data in ClickHouse with real SQL patterns.",
-    "Trigger": "clickhouse query\", \"clickhouse insert\", \"clickhouse aggregate\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031762",
   "name": "databricks-security-basics",
   "slug": "databricks-security-basics",
   "description": "Apply Databricks security best practices for secrets and access control.",
   "content": "# Databricks Security Basics\n\n## Overview\n\nImplement Databricks security: secret scopes for credential storage, token rotation, least-privilege access via Unity Catalog grants, and security auditing via system tables. Secrets API uses `PUT /api/2.0/secrets/put` and values are automatically redacted in notebook output.\n\n## Prerequisites\n\n- Databricks CLI configured\n- Workspace admin access (for secret scope creation)\n- Unity Catalog enabled\n\n## Instructions\n\n### Step 1: Create and Manage Secret Scopes\n\n```bash\n# Create a Databricks-backed secret scope\ndatabricks secrets create-scope my-app-secrets\n\n# Create Azure Key Vault-backed scope (Azure only)\ndatabricks secrets create-scope azure-kv \\\n  --scope-backend-type AZURE_KEYVAULT \\\n  --resource-id \"/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.KeyVault/vaults/<vault>\" \\\n  --dns-name \"https://<vault>.vault.azure.net/\"\n\n# List all scopes\ndatabricks secrets list-scopes\n```\n\n### Step 2: Store and Access Secrets\n\n```bash\n# Store a secret (prompts for value interactively)\ndatabricks secrets put-secret my-app-secrets db-password\n\n# Store from CLI argument\ndatabricks secrets put-secret my-app-secrets api-key --string-value \"sk_live_abc123\"\n\n# List secrets (values always hidden)\ndatabricks secrets list-secrets my-app-secrets\n```\n\n```python\n# Access secrets in notebooks and jobs \u2014 values auto-redacted in output\ndb_password = dbutils.secrets.get(scope=\"my-app-secrets\", key=\"db-password\")\napi_key = dbutils.secrets.get(scope=\"my-app-secrets\", key=\"api-key\")\n\n# Printing shows [REDACTED] \u2014 Databricks prevents accidental exposure\nprint(f\"Password: {db_password}\")  # Output: Password: [REDACTED]\n\n# Use in JDBC connections\njdbc_url = f\"jdbc:postgresql://host:5432/db?user=app&password={db_password}\"\ndf = spark.read.format(\"jdbc\").option(\"url\", jdbc_url).load()\n```\n\n### Step 3: Secret Scope Access Control\n\n```bash\n# Grant READ to a user\ndatabricks secrets put-acl my-app-secrets user@company.com READ\n\n# Grant MANAGE to a group (full control)\ndatabricks secrets put-acl my-app-secrets data-engineers MANAGE\n\n# List ACLs for a scope\ndatabricks secrets list-acls my-app-secrets\n```\n\n### Step 4: Token Audit and Rotation\n\n```python\nfrom databricks.sdk import WorkspaceClient\nfrom datetime import datetime\n\nw = WorkspaceClient()\n\ndef audit_tokens() -> list[dict]:\n    \"\"\"Audit all PATs for expiration and rotation needs.\"\"\"\n    findings = []\n    for token in w.tokens.list():\n        created = datetime.fromtimestamp(token.creation_time / 1000)\n        expiry = datetime.fromtimestamp(token.expiry_time / 1000) if token.expiry_time else None\n\n        finding = {\n            \"token_id\": token.token_id,\n            \"comment\": token.comment,\n            \"created\": created.isoformat(),\n            \"expires\": expiry.isoformat() if expiry else \"NEVER\",\n            \"days_until_expiry\": (expiry - datetime.now()).days if expiry else None,\n        }\n\n        if not expiry:\n            finding[\"risk\"] = \"HIGH \u2014 no expiration set\"\n        elif (expiry - datetime.now()).days < 30:\n            finding[\"risk\"] = \"MEDIUM \u2014 expires within 30 days\"\n        else:\n            finding[\"risk\"] = \"LOW\"\n\n        findings.append(finding)\n    return findings\n\ndef rotate_token(old_token_id: str, lifetime_days: int = 90) -> str:\n    \"\"\"Create new token and delete old one.\"\"\"\n    new = w.tokens.create(\n        comment=f\"Rotated {datetime.now().isoformat()}\",\n        lifetime_seconds=lifetime_days * 86400,\n    )\n    w.tokens.delete(token_id=old_token_id)\n    return new.token_value  # Store this immediately \u2014 shown only once\n\nfor finding in audit_tokens():\n    print(f\"{finding['comment']}: {finding['risk']} (expires {finding['expires']})\")\n```\n\n### Step 5: Unity Catalog Least Privilege\n\n```sql\n-- Grant minimal access per role\n-- Engineers: read/write bronze+silver, read gold\nGRANT USAGE ON CATALOG analytics TO `data-engineers`;\nGRANT CREATE, MODIFY, SELECT ON SCHEMA analytics.bronze TO `data-engineers`;\nGRANT CREATE, MODIFY, SELECT ON SCHEMA analytics.silver TO `data-engineers`;\nGRANT SELECT ON SCHEMA analytics.gold TO `data-engineers`;\n\n-- Analysts: read-only on curated gold tables\nGRANT USAGE ON CATALOG analytics TO `data-analysts`;\nGRANT SELECT ON SCHEMA analytics.gold TO `data-analysts`;\n\n-- Audit current grants\nSHOW GRANTS ON SCHEMA analytics.gold;\nSHOW GRANTS `data-analysts` ON CATALOG analytics;\n```\n\n### Step 6: Column-Level Masking and Row-Level Security\n\n```sql\n-- Mask email for non-privileged users\nCREATE OR REPLACE FUNCTION analytics.gold.mask_email(email STRING)\n  RETURN IF(IS_ACCOUNT_GROUP_MEMBER('data-engineers'), email,\n            REGEXP_REPLACE(email, '(.).*@', '$1***@'));\n\nALTER TABLE analytics.gold.customers ALTER COLUMN email\n  SET MASK analytics.gold.mask_email;\n\n-- Row-level security: restrict by department\nCREATE OR REPLACE FUNCTION analytics.gold.dept_filter(dept STRING)\n  RETURN IF(IS_ACCOUNT_GROUP_MEMBER('data-admins'), true,\n            dept = session_user_department());\n\nALTER TABLE analytics.gold.sales\n  SET ROW FILTER analytics.gold.dept_filter ON (department);\n```\n\n### Step 7: Security Audit via System Tables\n\n```sql\n-- Recent permission changes (last 7 days)\nSELECT event_time, user_identity.email AS actor,\n       action_name, request_params\nFROM system.access.audit\nWHERE action_name IN ('grantPermission', 'revokePermission',\n                       'changeJobPermissions', 'changeClusterPermissions')\n  AND event_date >= current_date() - 7\nORDER BY event_time DESC;\n\n-- Failed authentication attempts\nSELECT event_time, user_identity.email, source_ip_address,\n       response.error_message\nFROM system.access.audit\nWHERE action_name = 'tokenLogin' AND response.status_code != 200\n  AND event_date >= current_date() - 7\nORDER BY event_time DESC;\n```\n\n## Output\n\n- Secret scopes with ACL-based access control\n- Token audit report identifying expiring/non-expiring tokens\n- Unity Catalog grants enforcing least privilege by role\n- Column masking and row-level security on sensitive tables\n- Audit queries for ongoing security monitoring\n\n## Error Handling\n\n| Security Issue | Detection | Mitigation |\n|---------------|-----------|------------|\n| Token without expiry | `audit_tokens()` shows `NEVER` | Set 90-day max lifetime via rotation |\n| Hardcoded credentials | Code review / secret scanning | Move to Databricks Secret Scopes |\n| Over-privileged service principal | `SHOW GRANTS` audit | Reduce to minimum required privileges |\n| Shared PATs across users | Audit log `tokenLogin` events | Individual service principals per app |\n\n## Examples\n\n### Security Checklist\n\n- [ ] All PATs have expiration dates (max 90 days)\n- [ ] Secrets stored in Databricks Secret Scopes, not env vars\n- [ ] No hardcoded credentials in notebooks or repos\n- [ ] Service principals for all automated workflows\n- [ ] Unity Catalog enforcing least privilege\n- [ ] Column masking on PII fields\n- [ ] IP access lists configured (Admin Console > Workspace Settings)\n- [ ] Cluster policies restrict instance types and auto-termination\n- [ ] Audit log queries scheduled for weekly review\n\n## Resources\n\n- [Secret Management](https://docs.databricks.com/aws/en/security/secrets/)\n- [Unity Catalog Security](https://docs.databricks.com/aws/en/data-governance/unity-catalog/)\n- [Row and Column Filters](https://docs.databricks.com/aws/en/data-governance/unity-catalog/row-and-column-filters)\n- [Audit Logs](https://docs.databricks.com/aws/en/admin/system-tables/audit-logs)\n\n## Next Steps\n\nFor production deployment, see `databricks-prod-checklist`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "databricks-security-basics",
-    "description": "Apply Databricks security best practices for secrets and access control.",
-    "allowed-tools": "Read, Write, Grep, Bash(databricks:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

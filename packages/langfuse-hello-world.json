@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032456",
   "name": "langfuse-hello-world",
   "slug": "langfuse-hello-world",
   "description": "Create a minimal working Langfuse trace example.",
   "content": "# Langfuse Hello World\n\n## Overview\n\nCreate your first Langfuse trace with real SDK calls. Demonstrates the trace/span/generation hierarchy, the `observe` wrapper, and the OpenAI drop-in integration.\n\n## Prerequisites\n\n- Completed `langfuse-install-auth` setup\n- Valid API credentials in environment variables\n- OpenAI API key (for the OpenAI integration example)\n\n## Instructions\n\n### Step 1: Hello World with v4+ Modular SDK\n\n```typescript\n// hello-langfuse.ts\nimport { startActiveObservation, observe, updateActiveObservation } from \"@langfuse/tracing\";\nimport { LangfuseSpanProcessor } from \"@langfuse/otel\";\nimport { NodeSDK } from \"@opentelemetry/sdk-node\";\n\n// Register OpenTelemetry processor (once at startup)\nconst sdk = new NodeSDK({\n  spanProcessors: [new LangfuseSpanProcessor()],\n});\nsdk.start();\n\nasync function main() {\n  // Create a top-level trace with startActiveObservation\n  await startActiveObservation(\"hello-world\", async (span) => {\n    span.update({\n      input: { message: \"Hello, Langfuse!\" },\n      metadata: { source: \"hello-world-example\" },\n    });\n\n    // Nested span -- automatically linked to parent\n    await startActiveObservation(\"process-input\", async (child) => {\n      child.update({ input: { text: \"processing...\" } });\n      await new Promise((r) => setTimeout(r, 100));\n      child.update({ output: { result: \"done\" } });\n    });\n\n    // Nested generation (LLM call tracking)\n    await startActiveObservation(\n      { name: \"llm-response\", asType: \"generation\" },\n      async (gen) => {\n        gen.update({\n          model: \"gpt-4o\",\n          input: [{ role: \"user\", content: \"Say hello\" }],\n          output: { content: \"Hello! How can I help you today?\" },\n          usage: { promptTokens: 5, completionTokens: 10, totalTokens: 15 },\n        });\n      }\n    );\n\n    span.update({ output: { status: \"completed\" } });\n  });\n\n  // Allow time for the span processor to flush\n  await sdk.shutdown();\n  console.log(\"Trace created! Check your Langfuse dashboard.\");\n}\n\nmain().catch(console.error);\n```\n\n### Step 2: Hello World with `observe` Wrapper\n\nThe `observe` wrapper traces existing functions without modifying internals:\n\n```typescript\nimport { observe, updateActiveObservation } from \"@langfuse/tracing\";\n\n// Wrap any async function -- it becomes a traced span\nconst processQuery = observe(async (query: string) => {\n  updateActiveObservation({ input: { query } });\n\n  // Simulate processing\n  const result = `Processed: ${query}`;\n\n  updateActiveObservation({ output: { result } });\n  return result;\n});\n\n// Wrap an LLM call as a generation\nconst generateAnswer = observe(\n  { name: \"generate-answer\", asType: \"generation\" },\n  async (prompt: string) => {\n    updateActiveObservation({\n      model: \"gpt-4o\",\n      input: [{ role: \"user\", content: prompt }],\n    });\n\n    const answer = \"Langfuse is an open-source LLM observability platform.\";\n\n    updateActiveObservation({\n      output: answer,\n      usage: { promptTokens: 10, completionTokens: 20 },\n    });\n    return answer;\n  }\n);\n\n// Both functions auto-nest when called within an observed context\nconst pipeline = observe(async () => {\n  await processQuery(\"What is Langfuse?\");\n  await generateAnswer(\"Explain Langfuse in one sentence.\");\n});\n\nawait pipeline();\n```\n\n### Step 3: Hello World with Legacy v3 SDK\n\n```typescript\nimport { Langfuse } from \"langfuse\";\n\nconst langfuse = new Langfuse();\n\nasync function helloLangfuse() {\n  const trace = langfuse.trace({\n    name: \"hello-world\",\n    userId: \"demo-user\",\n    metadata: { source: \"hello-world-example\" },\n    tags: [\"demo\", \"getting-started\"],\n  });\n\n  // Span: child operation\n  const span = trace.span({\n    name: \"process-input\",\n    input: { message: \"Hello, Langfuse!\" },\n  });\n  await new Promise((r) => setTimeout(r, 100));\n  span.end({ output: { result: \"Processed successfully!\" } });\n\n  // Generation: LLM call tracking\n  trace.generation({\n    name: \"llm-response\",\n    model: \"gpt-4o\",\n    input: [{ role: \"user\", content: \"Say hello\" }],\n    output: { content: \"Hello! How can I help you today?\" },\n    usage: { promptTokens: 5, completionTokens: 10, totalTokens: 15 },\n  });\n\n  await langfuse.flushAsync();\n  console.log(\"Trace URL:\", trace.getTraceUrl());\n}\n\nhelloLangfuse();\n```\n\n### Step 4: Python Hello World\n\n```python\nfrom langfuse.decorators import observe, langfuse_context\n\n@observe()\ndef process_query(query: str) -> str:\n    return f\"Processed: {query}\"\n\n@observe(as_type=\"generation\")\ndef generate_response(prompt: str) -> str:\n    langfuse_context.update_current_observation(\n        model=\"gpt-4o\",\n        usage={\"prompt_tokens\": 10, \"completion_tokens\": 20},\n    )\n    return \"Hello from Langfuse!\"\n\n@observe()\ndef main():\n    result = process_query(\"Hello!\")\n    response = generate_response(\"Say hello\")\n    return response\n\nmain()\n```\n\n## Trace Hierarchy\n\n```\nTrace: hello-world\n  \u251c\u2500\u2500 Span: process-input\n  \u2502     input: { message: \"Hello, Langfuse!\" }\n  \u2502     output: { result: \"Processed successfully!\" }\n  \u2514\u2500\u2500 Generation: llm-response\n        model: gpt-4o\n        input: [{ role: \"user\", content: \"Say hello\" }]\n        output: \"Hello! How can I help you today?\"\n        usage: { promptTokens: 5, completionTokens: 10 }\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Import error | SDK not installed | `npm install @langfuse/tracing @langfuse/otel @opentelemetry/sdk-node` |\n| Auth error (401) | Invalid credentials | Verify `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` |\n| Trace not appearing | Data not flushed | Call `sdk.shutdown()` (v4+) or `langfuse.flushAsync()` (v3) |\n| Network error | Host unreachable | Check `LANGFUSE_BASE_URL` value |\n| No auto-nesting | Missing OTel setup | Register `LangfuseSpanProcessor` with `NodeSDK` |\n\n## Resources\n\n- [Langfuse JS/TS SDK Cookbook](https://langfuse.com/guides/cookbook/js_langfuse_sdk)\n- [TypeScript SDK Instrumentation](https://langfuse.com/docs/observability/sdk/typescript/instrumentation)\n- [Python Decorators Guide](https://langfuse.com/docs/sdk/python/decorators)\n- [Observation Types](https://langfuse.com/docs/observability/features/observation-types)\n\n## Next Steps\n\nProceed to `langfuse-core-workflow-a` for real OpenAI/Anthropic tracing, or `langfuse-local-dev-loop` for development workflow setup.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "langfuse-hello-world",
-    "description": "Create a minimal working Langfuse trace example.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

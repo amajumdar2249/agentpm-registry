@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031875",
   "name": "exa-performance-tuning",
   "slug": "exa-performance-tuning",
   "description": "Optimize Exa API performance with search type selection, caching, and",
   "content": "# Exa Performance Tuning\n\n## Overview\n\nOptimize Exa search API response times for production workloads. Key levers: search type selection (instant < fast < auto < neural < deep), result count reduction, content scope control, result caching, and parallel query execution.\n\n## Latency by Search Type\n\n| Type | Typical Latency | Use Case |\n|------|----------------|----------|\n| `instant` | < 150ms | Real-time autocomplete, typeahead |\n| `fast` | p50 < 425ms | Speed-critical user-facing search |\n| `auto` | 300-1500ms | General purpose (default) |\n| `neural` | 500-2000ms | Best semantic quality |\n| `deep` | 2-5s | Maximum coverage, light deep search |\n| `deep-reasoning` | 5-15s | Complex research questions |\n\n## Instructions\n\n### Step 1: Match Search Type to Latency Budget\n\n```typescript\nimport Exa from \"exa-js\";\n\nconst exa = new Exa(process.env.EXA_API_KEY);\n\nfunction selectSearchType(latencyBudgetMs: number) {\n  if (latencyBudgetMs < 200) return \"instant\";\n  if (latencyBudgetMs < 500) return \"fast\";\n  if (latencyBudgetMs < 1500) return \"auto\";\n  if (latencyBudgetMs < 3000) return \"neural\";\n  return \"deep\";\n}\n\nasync function optimizedSearch(query: string, latencyBudgetMs: number) {\n  const type = selectSearchType(latencyBudgetMs);\n  const numResults = latencyBudgetMs < 500 ? 3 : latencyBudgetMs < 2000 ? 5 : 10;\n\n  return exa.search(query, { type, numResults });\n}\n```\n\n### Step 2: Minimize Content Retrieval\n\n```typescript\n// Each content option adds latency. Only request what you need.\n\n// Fastest: metadata only (no content retrieval)\nconst metadataOnly = await exa.search(\"query\", { numResults: 5 });\n\n// Medium: highlights only (much smaller than full text)\nconst highlightsOnly = await exa.searchAndContents(\"query\", {\n  numResults: 5,\n  highlights: { maxCharacters: 300 },\n  // No text or summary \u2014 saves content retrieval time\n});\n\n// Slower: full text (use maxCharacters to limit)\nconst withText = await exa.searchAndContents(\"query\", {\n  numResults: 3,  // fewer results = faster\n  text: { maxCharacters: 1000 },  // limit content size\n});\n```\n\n### Step 3: Cache Search Results\n\n```typescript\nimport { LRUCache } from \"lru-cache\";\n\nconst searchCache = new LRUCache<string, any>({\n  max: 5000,\n  ttl: 2 * 3600 * 1000, // 2-hour TTL\n});\n\nasync function cachedSearch(query: string, opts: any) {\n  const key = `${query}:${opts.type || \"auto\"}:${opts.numResults || 10}`;\n  const cached = searchCache.get(key);\n  if (cached) return cached; // Cache hit: 0ms vs 500-2000ms\n\n  const results = await exa.search(query, opts);\n  searchCache.set(key, results);\n  return results;\n}\n```\n\n### Step 4: Parallelize Independent Searches\n\n```typescript\n// Run independent queries concurrently instead of sequentially\nasync function parallelSearch(queries: string[]) {\n  const searches = queries.map(q =>\n    cachedSearch(q, { type: \"auto\", numResults: 3 })\n  );\n  return Promise.all(searches);\n  // 3 parallel searches: ~600ms total (limited by slowest)\n  // 3 sequential searches: ~1800ms total\n}\n```\n\n### Step 5: Two-Phase Search Pattern\n\n```typescript\n// Phase 1: Fast search for URLs only\n// Phase 2: Selective content retrieval for top results only\nasync function twoPhaseSearch(query: string) {\n  // Phase 1: metadata only (fast)\n  const results = await exa.search(query, { type: \"auto\", numResults: 10 });\n\n  // Phase 2: get content only for top 3 results\n  const topUrls = results.results.slice(0, 3).map(r => r.url);\n  const contents = await exa.getContents(topUrls, {\n    text: { maxCharacters: 2000 },\n    highlights: { maxCharacters: 500, query },\n  });\n\n  return contents;\n  // Saves content retrieval time for 7 results you won't use\n}\n```\n\n### Step 6: Query Normalization for Cache Hits\n\n```typescript\nfunction normalizeQuery(query: string): string {\n  return query\n    .toLowerCase()\n    .trim()\n    .replace(/\\s+/g, \" \")       // collapse whitespace\n    .replace(/[?.!,;:]+$/, \"\"); // strip trailing punctuation\n}\n\nasync function normalizedSearch(query: string, opts: any) {\n  return cachedSearch(normalizeQuery(query), opts);\n}\n// Increases cache hit rate by 20-40% for user-generated queries\n```\n\n## Performance Comparison\n\n| Strategy | Latency Savings | Implementation |\n|----------|----------------|----------------|\n| `instant` type | 5-10x faster than neural | One-line change |\n| Reduce numResults (10 -> 3) | ~200-500ms saved | One-line change |\n| Highlights instead of text | ~100-300ms saved | Replace `text` with `highlights` |\n| LRU cache | 100% for cache hits | ~20 lines |\n| Parallel queries | 2-3x throughput | `Promise.all` wrapper |\n| Two-phase search | ~30-50% for large result sets | ~15 lines |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Search taking 3s+ | Neural search on complex query | Switch to `fast` or `auto` type |\n| Timeout on content | Large pages, slow sources | Set `maxCharacters` limit |\n| Cache miss rate high | Unique queries each time | Normalize queries before caching |\n| Rate limit (429) | Too many concurrent searches | Add request queue with concurrency limit |\n\n## Resources\n\n- [Exa Search Types](https://docs.exa.ai/reference/search)\n- [Exa Contents Retrieval](https://docs.exa.ai/reference/contents-retrieval)\n\n## Next Steps\n\nFor cost optimization, see `exa-cost-tuning`. For reliability, see `exa-reliability-patterns`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "exa-performance-tuning",
-    "description": "Optimize Exa API performance with search type selection, caching, and",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

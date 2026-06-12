@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031516",
   "name": "clay-common-errors",
   "slug": "clay-common-errors",
   "description": "Diagnose and fix the most common Clay errors and integration issues.",
   "content": "# Clay Common Errors\n\n## Overview\n\nQuick reference for the top 12 most common Clay errors across webhooks, enrichment columns, HTTP API columns, Claygent, and CRM integrations. Each error includes the exact symptom, root cause, and fix.\n\n## Prerequisites\n\n- Clay account with an active table\n- Access to Clay table error indicators (red cells, exclamation marks)\n- Browser developer tools for webhook debugging\n\n## Instructions\n\n### Error 1: Webhook Returns 422 Unprocessable Entity\n\n**Symptom:** Data sent to webhook URL but rows never appear in table.\n\n**Cause:** Invalid JSON payload or missing Content-Type header.\n\n**Fix:**\n\n```bash\n# Always include Content-Type header\ncurl -X POST \"$CLAY_WEBHOOK_URL\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"email\": \"test@example.com\", \"domain\": \"example.com\"}'\n\n# Validate JSON before sending\necho '{\"email\": \"test@example.com\"}' | jq . || echo \"Invalid JSON!\"\n```\n\n---\n\n### Error 2: Webhook URL Returns 404\n\n**Symptom:** `404 Not Found` when POSTing to webhook URL.\n\n**Cause:** Table was deleted, webhook was replaced, or URL was copied incorrectly.\n\n**Fix:** Open the Clay table, click **+ Add > Webhooks > Monitor webhook**, and re-copy the URL. Each table has a unique webhook ID.\n\n---\n\n### Error 3: Enrichment Column Shows \"No Data Found\"\n\n**Symptom:** Enrichment column returns empty for most rows.\n\n**Cause:** Input data quality is poor (personal email domains, invalid domains, missing fields).\n\n**Fix:**\n\n```typescript\n// Pre-validate before sending to Clay\nconst personalDomains = ['gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'icloud.com'];\n\nfunction isEnrichable(row: { domain?: string; email?: string }): boolean {\n  if (!row.domain || !row.domain.includes('.')) return false;\n  if (personalDomains.some(d => row.domain!.endsWith(d))) return false;\n  if (row.email && personalDomains.some(d => row.email!.endsWith(d))) return false;\n  return true;\n}\n```\n\n---\n\n### Error 4: \"Credit Balance Insufficient\"\n\n**Symptom:** Enrichment stops mid-table with credit error.\n\n**Cause:** Monthly credit allowance exhausted.\n\n**Fix:** Check credit balance in **Settings > Plans & Billing**. Options:\n\n- Connect your own provider API keys (saves 70-80% credits)\n- Reduce waterfall depth (fewer providers = fewer credits per row)\n- Upgrade plan for more monthly credits\n\n---\n\n### Error 5: Webhook Submission Limit Reached (50K)\n\n**Symptom:** Webhook stops accepting new submissions silently.\n\n**Cause:** Each webhook source has a hard limit of 50,000 submissions.\n\n**Fix:** Create a new webhook source on the same table. The 50K limit persists even after deleting rows -- you must create a fresh webhook.\n\n---\n\n### Error 6: HTTP API Column Returns Error\n\n**Symptom:** Red error indicator on HTTP API enrichment column cells.\n\n**Cause:** Target API URL is wrong, auth header is incorrect, or response format unexpected.\n\n**Fix:**\n\n1. Click the errored cell to see the full error response\n2. Test the API call independently with curl:\n\n```bash\ncurl -X POST \"https://api.example.com/endpoint\" \\\n  -H \"Authorization: Bearer YOUR_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"test\": \"data\"}'\n```\n\n1. Verify the response JSON path selector matches the actual response structure\n\n---\n\n### Error 7: Claygent Returns \"Could Not Find Information\"\n\n**Symptom:** Claygent column returns empty or generic responses.\n\n**Cause:** Prompt is too vague, company is too small/private, or website blocks bots.\n\n**Fix:**\n\n- Make prompts specific: \"Find the CEO's name from the About page at {{domain}}\" vs \"Research this company\"\n- Add fallback instructions: \"If the information is not on the website, check LinkedIn and Crunchbase\"\n- Use **Navigator** mode for JavaScript-heavy sites\n\n---\n\n### Error 8: Enrichment Runs on Existing Rows Unexpectedly\n\n**Symptom:** Credits consumed on rows that were already enriched.\n\n**Cause:** Table-level auto-update is ON and a column was edited, triggering re-enrichment.\n\n**Fix:** Go to **Table Settings** and toggle auto-update OFF at the table level. Then enable auto-run only on specific columns that need it. The table-level setting is the parent: if OFF, no columns auto-run.\n\n---\n\n### Error 9: Rate Limited (429) on Webhook Submissions\n\n**Symptom:** `429 Too Many Requests` when sending data via webhook.\n\n**Cause:** Explorer plan has a 400 records/hour throttle.\n\n**Fix:**\n\n```typescript\n// Add delay between webhook submissions\nasync function sendWithThrottle(rows: any[], webhookUrl: string) {\n  for (const row of rows) {\n    const res = await fetch(webhookUrl, {\n      method: 'POST',\n      headers: { 'Content-Type': 'application/json' },\n      body: JSON.stringify(row),\n    });\n    if (res.status === 429) {\n      const retryAfter = parseInt(res.headers.get('Retry-After') || '60');\n      console.log(`Rate limited. Waiting ${retryAfter}s...`);\n      await new Promise(r => setTimeout(r, retryAfter * 1000));\n    }\n    await new Promise(r => setTimeout(r, 250)); // 250ms between requests\n  }\n}\n```\n\n---\n\n### Error 10: CRM Sync Creates Duplicate Contacts\n\n**Symptom:** Same contact appears multiple times in HubSpot/Salesforce.\n\n**Cause:** No deduplication key configured in the CRM push action.\n\n**Fix:** When configuring the CRM action column, use email as the unique identifier and select **Update existing record if found** rather than always creating new.\n\n---\n\n### Error 11: CSV Import Column Mapping Wrong\n\n**Symptom:** Data appears in wrong columns after CSV import.\n\n**Cause:** CSV headers don't match Clay column names exactly.\n\n**Fix:** Normalize headers before import: trim whitespace, match case exactly. \"Company Name\" and \"company_name\" are treated as different columns.\n\n---\n\n### Error 12: Formula Column Shows Error\n\n**Symptom:** Formula column displays `#ERROR` or `#REF`.\n\n**Cause:** Column name referenced in formula was renamed or deleted.\n\n**Fix:** Edit the formula column and update all column references to match current names. Clay formulas reference columns by their display name (case-sensitive).\n\n## Error Handling\n\n| Symptom | Quick Check | Likely Fix |\n|---------|------------|------------|\n| Red cell indicator | Click cell for error detail | Fix API config or input data |\n| Empty enrichment | Check provider connection | Reconnect in Settings > Connections |\n| No new rows from webhook | Test webhook URL with curl | Re-create webhook source |\n| Credits depleting fast | Check waterfall depth | Reduce to 2 providers, add conditions |\n\n## Resources\n\n- [Clay University -- HTTP API Integration](https://university.clay.com/docs/http-api-integration-overview)\n- [Clay Community Support](https://community.clay.com)\n- [Clay University -- Table Management](https://university.clay.com/docs/table-management-settings)\n\n## Next Steps\n\nFor systematic debugging, see `clay-debug-bundle`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clay-common-errors",
-    "description": "Diagnose and fix the most common Clay errors and integration issues.",
-    "allowed-tools": "Read, Grep, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

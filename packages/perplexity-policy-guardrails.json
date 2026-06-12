@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032894",
   "name": "perplexity-policy-guardrails",
   "slug": "perplexity-policy-guardrails",
   "description": "Implement content moderation, model selection policy, citation quality",
   "content": "# Perplexity Policy Guardrails\n\n## Overview\n\nPolicy enforcement for Perplexity Sonar API. Since Perplexity performs live web searches, guardrails must address: query content moderation (what users can search for), citation reliability (filtering low-quality sources), cost control (model selection + token limits), and responsible AI usage.\n\n## Policy Pipeline\n\n```\nUser Query\n    \u2502\n    \u25bc\nQuery Moderation (block harmful queries)\n    \u2502\n    \u25bc\nPII Sanitization (strip personal data)\n    \u2502\n    \u25bc\nQuota Check (daily limit by user tier)\n    \u2502\n    \u25bc\nModel Selection (enforce tier-appropriate model)\n    \u2502\n    \u25bc\nPerplexity API Call\n    \u2502\n    \u25bc\nCitation Quality Scoring (filter low-trust sources)\n    \u2502\n    \u25bc\nResponse to User\n```\n\n## Prerequisites\n\n- Perplexity API configured\n- Content moderation policy defined\n- User tier system in place\n- Redis for quota tracking (optional: in-memory for simple apps)\n\n## Instructions\n\n### Step 1: Query Content Moderation\n\n```typescript\nconst BLOCKED_PATTERNS = [\n  /\\b(write|generate|create)\\s+(malware|virus|exploit|ransomware)\\b/i,\n  /\\b(personal|private)\\s+(address|phone|ssn)\\s+of\\s+\\w+/i,\n  /\\b(bypass|circumvent|hack)\\s+(security|firewall|authentication)\\b/i,\n  /\\b(how to|tutorial)\\s+(stalk|dox|harass)\\b/i,\n];\n\nconst MAX_QUERY_LENGTH = 2000;\n\nclass PolicyError extends Error {\n  constructor(public code: string, message: string) {\n    super(message);\n    this.name = \"PolicyError\";\n  }\n}\n\nfunction moderateQuery(query: string): string {\n  if (query.length > MAX_QUERY_LENGTH) {\n    throw new PolicyError(\"QUERY_TOO_LONG\", `Query exceeds ${MAX_QUERY_LENGTH} characters`);\n  }\n\n  for (const pattern of BLOCKED_PATTERNS) {\n    if (pattern.test(query)) {\n      throw new PolicyError(\"CONTENT_BLOCKED\", \"Query blocked by content policy\");\n    }\n  }\n\n  return query;\n}\n```\n\n### Step 2: Model Selection Policy\n\n```typescript\ninterface ModelPolicy {\n  model: string;\n  maxTokens: number;\n  costPerRequest: number;\n}\n\nconst MODEL_POLICIES: Record<string, ModelPolicy> = {\n  free:       { model: \"sonar\",     maxTokens: 256,  costPerRequest: 0.005 },\n  basic:      { model: \"sonar\",     maxTokens: 1024, costPerRequest: 0.005 },\n  pro:        { model: \"sonar-pro\", maxTokens: 2048, costPerRequest: 0.02 },\n  enterprise: { model: \"sonar-pro\", maxTokens: 4096, costPerRequest: 0.02 },\n};\n\nfunction enforceModelPolicy(\n  userTier: string,\n  requestedModel?: string\n): ModelPolicy {\n  const policy = MODEL_POLICIES[userTier] || MODEL_POLICIES.free;\n\n  // Prevent free users from using expensive models\n  if (requestedModel === \"sonar-pro\" && ![\"pro\", \"enterprise\"].includes(userTier)) {\n    console.warn(`User tier ${userTier} not allowed sonar-pro, using sonar`);\n    return MODEL_POLICIES.free;\n  }\n\n  return requestedModel ? { ...policy, model: requestedModel } : policy;\n}\n```\n\n### Step 3: Per-User Usage Quotas\n\n```typescript\nclass UsageQuota {\n  private usage: Map<string, { count: number; resetAt: number }> = new Map();\n\n  private readonly limits: Record<string, number> = {\n    free: 50,\n    basic: 200,\n    pro: 1000,\n    enterprise: 5000,\n  };\n\n  check(userId: string, tier: string = \"free\"): void {\n    const key = `${userId}:${new Date().toISOString().slice(0, 10)}`;\n    const entry = this.usage.get(key) || { count: 0, resetAt: this.endOfDay() };\n\n    // Reset if past end of day\n    if (Date.now() > entry.resetAt) {\n      entry.count = 0;\n      entry.resetAt = this.endOfDay();\n    }\n\n    const limit = this.limits[tier] || this.limits.free;\n    if (entry.count >= limit) {\n      throw new PolicyError(\n        \"QUOTA_EXCEEDED\",\n        `Daily quota exceeded (${entry.count}/${limit}). Resets at midnight UTC.`\n      );\n    }\n\n    entry.count++;\n    this.usage.set(key, entry);\n  }\n\n  getUsage(userId: string): { used: number; limit: number; remaining: number } {\n    const key = `${userId}:${new Date().toISOString().slice(0, 10)}`;\n    const entry = this.usage.get(key);\n    const used = entry?.count || 0;\n    return { used, limit: 50, remaining: Math.max(0, 50 - used) };\n  }\n\n  private endOfDay(): number {\n    const d = new Date();\n    d.setUTCHours(23, 59, 59, 999);\n    return d.getTime();\n  }\n}\n```\n\n### Step 4: Citation Quality Scoring\n\n```typescript\nconst TRUSTED_TLDS = new Set([\"gov\", \"edu\", \"org\"]);\nconst HIGH_QUALITY_DOMAINS = new Set([\n  \"nature.com\", \"science.org\", \"arxiv.org\", \"wikipedia.org\",\n  \"nih.gov\", \"cdc.gov\", \"who.int\",\n]);\nconst LOW_QUALITY_DOMAINS = new Set([\n  \"reddit.com\", \"quora.com\", \"medium.com\", \"yahoo.com\",\n]);\n\ninterface CitationQuality {\n  url: string;\n  trust: \"high\" | \"medium\" | \"low\";\n  domain: string;\n}\n\nfunction scoreCitations(citations: string[]): {\n  scored: CitationQuality[];\n  highTrustPercent: number;\n} {\n  const scored = citations.map((url) => {\n    const domain = new URL(url).hostname;\n    const tld = domain.split(\".\").pop() || \"\";\n\n    let trust: \"high\" | \"medium\" | \"low\" = \"medium\";\n    if (TRUSTED_TLDS.has(tld) || HIGH_QUALITY_DOMAINS.has(domain)) {\n      trust = \"high\";\n    } else if (LOW_QUALITY_DOMAINS.has(domain)) {\n      trust = \"low\";\n    }\n\n    return { url, trust, domain };\n  });\n\n  const highTrust = scored.filter((s) => s.trust === \"high\").length;\n  return {\n    scored,\n    highTrustPercent: citations.length > 0 ? highTrust / citations.length : 0,\n  };\n}\n```\n\n### Step 5: Full Policy Pipeline\n\n```typescript\nconst quota = new UsageQuota();\n\nasync function policiedSearch(\n  query: string,\n  userId: string,\n  userTier: string = \"free\",\n  requestedModel?: string\n) {\n  // 1. Content moderation\n  const moderated = moderateQuery(query);\n\n  // 2. PII sanitization\n  const { clean } = sanitizeQuery(moderated);\n\n  // 3. Quota check\n  quota.check(userId, userTier);\n\n  // 4. Model policy\n  const policy = enforceModelPolicy(userTier, requestedModel);\n\n  // 5. API call\n  const response = await perplexity.chat.completions.create({\n    model: policy.model,\n    messages: [{ role: \"user\", content: clean }],\n    max_tokens: policy.maxTokens,\n  });\n\n  // 6. Citation quality\n  const citations = (response as any).citations || [];\n  const quality = scoreCitations(citations);\n\n  return {\n    answer: response.choices[0].message.content,\n    citations: quality.scored,\n    citationQuality: quality.highTrustPercent,\n    model: response.model,\n    tokens: response.usage?.total_tokens,\n  };\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Query blocked | Content moderation triggered | Review patterns, adjust if false positive |\n| Quota exceeded | User hit daily limit | Upgrade tier or wait for reset |\n| Model downgraded | User tier restricts access | Inform user of tier limitations |\n| Low citation quality | All sources from forums | Add `search_domain_filter` for trusted sources |\n\n## Output\n\n- Query content moderation with blocked patterns\n- Model selection enforced by user tier\n- Per-user daily quotas\n- Citation quality scoring and filtering\n- Full policy pipeline combining all layers\n\n## Resources\n\n- [Perplexity API Documentation](https://docs.perplexity.ai)\n- [Perplexity Responsible Use](https://www.perplexity.ai/hub)\n\n## Next Steps\n\nFor architecture patterns, see `perplexity-architecture-variants`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "perplexity-policy-guardrails",
-    "description": "Implement content moderation, model selection policy, citation quality",
-    "allowed-tools": "Read, Write, Edit, Bash(npx:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

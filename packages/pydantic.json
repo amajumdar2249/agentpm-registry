@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000001330",
   "name": "pydantic",
   "slug": "pydantic",
   "description": "Data validation and settings management using Python type annotations with Pydantic v2",
   "content": "\n# Pydantic v2 Framework Skill\n\nPydantic is a data validation library that uses Python type annotations to define data schemas, offering fast and extensible validation with automatic type coercion.\n\n## Quick Start\n\n### Basic Model Definition\n\n```python\nfrom pydantic import BaseModel\nfrom datetime import datetime\nfrom typing import Optional\n\nclass User(BaseModel):\n    id: int\n    name: str\n    email: str\n    signup_ts: Optional[datetime] = None\n    is_active: bool = True\n\n# Automatic type coercion\nuser = User(\n    id='123',  # String \u2192 int\n    name='John Doe',\n    email='john@example.com',\n    signup_ts='2017-06-01 12:22'  # String \u2192 datetime\n)\n```\n\n### Validation from Data Sources\n\n```python\n# From dict\nuser = User.model_validate({'id': 1, 'name': 'Alice', 'email': 'alice@test.com'})\n\n# From JSON\nuser = User.model_validate_json('{\"id\": 1, \"name\": \"Alice\", \"email\": \"alice@test.com\"}')\n\n# Serialization\nprint(user.model_dump())  # Python dict\nprint(user.model_dump_json())  # JSON string\n```\n\n## Common Patterns\n\n### Field Configuration\n\n```python\nfrom pydantic import BaseModel, Field, EmailStr, HttpUrl\nfrom typing import Annotated\n\nclass Product(BaseModel):\n    product_id: int = Field(alias='id', ge=1, description='Unique product identifier')\n    name: str = Field(min_length=1, max_length=200)\n    price: float = Field(gt=0, le=1000000)\n    email: EmailStr\n    website: HttpUrl\n    tags: list[str] = Field(default_factory=list, max_length=10)\n    internal_code: str = Field(exclude=True, default='N/A')\n\nclass User(BaseModel):\n    username: Annotated[str, Field(min_length=3, pattern=r'^[a-zA-Z0-9_]+$')]\n    age: int = Field(ge=0, le=150)\n```\n\n### Model Configuration\n\n```python\nfrom pydantic import BaseModel, ConfigDict\n\nclass StrictModel(BaseModel):\n    model_config = ConfigDict(\n        strict=True,              # No type coercion\n        frozen=True,              # Immutable instances\n        validate_assignment=True, # Validate on attribute assignment\n        extra='forbid',           # Reject extra fields\n        str_strip_whitespace=True,\n        populate_by_name=True,    # Accept both alias and field name\n        use_enum_values=True,     # Serialize enums as values\n    )\n\n    id: int\n    name: str\n```\n\n### Custom Validation\n\n```python\nfrom pydantic import BaseModel, model_validator, field_validator, ValidationError\nfrom typing import Any\n\nclass DateRange(BaseModel):\n    start_date: str\n    end_date: str\n\n    @field_validator('start_date', 'end_date')\n    @classmethod\n    def validate_date_format(cls, v: str) -> str:\n        # Custom validation logic\n        if not v:\n            raise ValueError('Date cannot be empty')\n        return v\n\n    @model_validator(mode='after')\n    def check_dates_order(self) -> 'DateRange':\n        # Cross-field validation\n        if self.start_date > self.end_date:\n            raise ValueError('start_date must be before end_date')\n        return self\n\n# Using the model\ntry:\n    date_range = DateRange(start_date='2024-01-01', end_date='2024-01-31')\nexcept ValidationError as e:\n    for error in e.errors():\n        print(f\"{error['loc']}: {error['msg']}\")\n```\n\n### Serialization Control\n\n```python\nfrom pydantic import BaseModel, Field, SecretStr\nfrom datetime import datetime\n\nclass User(BaseModel):\n    id: int\n    username: str\n    password: SecretStr\n    created_at: datetime\n    internal_data: dict = Field(exclude=True, default_factory=dict)\n\n# Serialization options\nuser = User(\n    id=1,\n    username='john',\n    password='secret',\n    created_at=datetime.now()\n)\n\n# Basic serialization\nprint(user.model_dump())  # Python dict\nprint(user.model_dump_json())  # JSON string\n\n# Excluding fields\nprint(user.model_dump(exclude={'password'}))\nprint(user.model_dump(exclude={'username', 'created_at'}))\n\n# Include only specific fields\nprint(user.model_dump(include={'id', 'username'}))\n\n# JSON-compatible serialization\nprint(user.model_dump(mode='json'))  # datetime \u2192 string\nprint(user.model_dump(by_alias=True))  # Use field aliases\n```\n\n### Custom Serialization\n\n```python\nfrom typing import Annotated, Any\nfrom pydantic import BaseModel, field_serializer, PlainSerializer\n\nclass Model(BaseModel):\n    number: int\n    created_at: datetime\n\n    @field_serializer('number')\n    def serialize_number(self, value: int) -> str:\n        return f\"{value:,}\"  # Format with commas\n\n    # Using Annotated with PlainSerializer\n    custom_field: Annotated[\n        float,\n        PlainSerializer(lambda x: round(x, 2), return_type=float)\n    ]\n```\n\n### Nested Models and Relationships\n\n```python\nfrom pydantic import BaseModel\nfrom typing import Optional, List\n\nclass Address(BaseModel):\n    street: str\n    city: str\n    country: str = 'USA'\n    zip_code: str\n\nclass User(BaseModel):\n    id: int\n    name: str\n    addresses: List[Address]\n    primary_address: Optional[Address] = None\n\n# Usage\nuser = User(\n    id=1,\n    name='John Doe',\n    addresses=[\n        {'street': '123 Main St', 'city': 'New York', 'zip_code': '10001'},\n        {'street': '456 Oak Ave', 'city': 'Boston', 'zip_code': '02101'}\n    ],\n    primary_address={'street': '123 Main St', 'city': 'New York', 'zip_code': '10001'}\n)\n```\n\n### Enum Integration\n\n```python\nfrom enum import Enum, IntEnum\nfrom pydantic import BaseModel\n\nclass Status(str, Enum):\n    PENDING = 'pending'\n    ACTIVE = 'active'\n    COMPLETED = 'completed'\n\nclass Priority(IntEnum):\n    LOW = 1\n    MEDIUM = 2\n    HIGH = 3\n\nclass Task(BaseModel):\n    title: str\n    status: Status = Status.PENDING\n    priority: Priority = Priority.MEDIUM\n\n    model_config = ConfigDict(use_enum_values=True)\n\n# Can use enum values or names\ntask1 = Task(title='Task 1', status='active', priority=3)\ntask2 = Task(title='Task 2', status=Status.ACTIVE, priority=Priority.HIGH)\n```\n\n### TypeAdapter for Standalone Validation\n\n```python\nfrom pydantic import TypeAdapter\nfrom typing import List, Optional\n\n# Validate individual types without full models\nint_adapter = TypeAdapter(int)\nprint(int_adapter.validate_python('123'))  # 123\n\nlist_adapter = TypeAdapter(List[int])\nprint(list_adapter.validate_python(['1', '2', '3']))  # [1, 2, 3]\n\n# Generate JSON schemas\nprint(int_adapter.json_schema())\nprint(list_adapter.json_schema())\n```\n\n### Data Validation Patterns\n\n```python\nfrom pydantic import BaseModel, ValidationError\nfrom typing import Union\n\nclass EmailValidator(BaseModel):\n    email: str\n\n    @field_validator('email')\n    @classmethod\n    def validate_email(cls, v: str) -> str:\n        if '@' not in v:\n            raise ValueError('Invalid email format')\n        return v.lower()\n\n# Validation error handling\ntry:\n    user = User(id='invalid', name='', email='test')\nexcept ValidationError as e:\n    print(f\"Errors: {e.error_count()}\")\n    for error in e.errors():\n        print(f\"  {error['loc']}: {error['msg']} ({error['type']})\")\n```\n\n## Requirements\n\n- Python 3.8+\n- Pydantic v2.x: `uv add pydantic`\n- Optional dependencies for enhanced types:\n  - `uv add pydantic[email]` for EmailStr\n  - `uv add pydantic[url]` for HttpUrl\n  - `uv add pydantic[typing-extensions]` for extended type support\n\n## Best Practices\n\n1. **Use specific types**: Prefer `conint(gt=0)` over `int` for positive numbers\n2. **Configure models**: Use `ConfigDict` to set global model behavior\n3. **Handle validation errors**: Always wrap model creation in try/catch blocks\n4. **Use field validators**: Implement custom validation logic with `@field_validator`\n5. **Control serialization**: Use `model_dump()` parameters to control output format\n6. **Leverage type coercion**: Pydantic automatically converts compatible types\n7. **Use nested models**: Break complex data into smaller, reusable models\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "pydantic",
-    "description": "Data validation and settings management using Python type annotations with Pydantic v2",
-    "when_to_use": "When you need to validate data structures, create settings models, serialize/deserialize data, or ensure type safety in Python applications"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

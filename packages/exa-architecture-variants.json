@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031856",
   "name": "exa-architecture-variants",
   "slug": "exa-architecture-variants",
   "description": "Choose and implement Exa architecture patterns at different scales:",
   "content": "# Exa Architecture Variants\n\n## Overview\n\nThree deployment architectures for Exa neural search at different scales. Each uses real Exa SDK methods: `search`, `searchAndContents`, `findSimilar`, `getContents`, and `answer`.\n\n## Decision Matrix\n\n| Factor | Direct Search | Cached Search | RAG Pipeline |\n|--------|--------------|---------------|--------------|\n| Volume | < 1K/day | 1K-50K/day | Any volume |\n| Latency | 500-2000ms | ~50ms (cached) | 3-8s total |\n| Use Case | Simple search UI | Content aggregation | AI answers with citations |\n| Complexity | Low | Medium | High |\n| Cache Required | No | Yes (Redis/LRU) | Yes |\n| Exa Methods | `searchAndContents` | `searchAndContents` + cache | All methods |\n\n## Instructions\n\n### Variant 1: Direct Search Integration\n\n**Best for:** Adding search to an existing app, < 1K queries/day.\n\n```typescript\nimport Exa from \"exa-js\";\nimport express from \"express\";\n\nconst app = express();\nconst exa = new Exa(process.env.EXA_API_KEY);\n\n// Simple search endpoint\napp.get(\"/api/search\", async (req, res) => {\n  const query = req.query.q as string;\n  if (!query) return res.status(400).json({ error: \"q required\" });\n\n  try {\n    const results = await exa.searchAndContents(query, {\n      type: \"auto\",\n      numResults: 5,\n      text: { maxCharacters: 500 },\n      highlights: { maxCharacters: 300, query },\n    });\n\n    res.json(results.results.map(r => ({\n      title: r.title,\n      url: r.url,\n      snippet: r.highlights?.join(\" \") || r.text?.substring(0, 200),\n      score: r.score,\n    })));\n  } catch (err: any) {\n    res.status(err.status || 500).json({ error: err.message });\n  }\n});\n```\n\n### Variant 2: Cached Search with Category Profiles\n\n**Best for:** High-traffic search, 1K-50K queries/day, content discovery.\n\n```typescript\nimport Exa from \"exa-js\";\nimport { LRUCache } from \"lru-cache\";\n\nconst exa = new Exa(process.env.EXA_API_KEY);\nconst cache = new LRUCache<string, any>({ max: 5000, ttl: 3600 * 1000 });\n\nconst PROFILES = {\n  news: {\n    type: \"auto\" as const,\n    category: \"news\" as const,\n    numResults: 10,\n    text: { maxCharacters: 500 },\n  },\n  research: {\n    type: \"neural\" as const,\n    category: \"research paper\" as const,\n    numResults: 10,\n    text: { maxCharacters: 2000 },\n    highlights: { maxCharacters: 500 },\n  },\n  companies: {\n    type: \"auto\" as const,\n    category: \"company\" as const,\n    numResults: 10,\n    text: { maxCharacters: 500 },\n  },\n};\n\nasync function cachedProfileSearch(\n  query: string,\n  profile: keyof typeof PROFILES\n) {\n  const key = `${query.toLowerCase()}:${profile}`;\n  const cached = cache.get(key);\n  if (cached) return cached;\n\n  const results = await exa.searchAndContents(query, PROFILES[profile]);\n  cache.set(key, results);\n  return results;\n}\n```\n\n### Variant 3: Full RAG Pipeline\n\n**Best for:** AI-powered answers, research agents, 50K+ queries/day.\n\n```typescript\nimport Exa from \"exa-js\";\nimport { LRUCache } from \"lru-cache\";\n\nconst exa = new Exa(process.env.EXA_API_KEY);\nconst contextCache = new LRUCache<string, any>({ max: 10000, ttl: 7200 * 1000 });\n\nclass ExaRAGPipeline {\n  // Phase 1: Search for relevant sources\n  async gatherContext(question: string, maxSources = 5) {\n    const cacheKey = question.toLowerCase().trim();\n    const cached = contextCache.get(cacheKey);\n    if (cached) return cached;\n\n    const results = await exa.searchAndContents(question, {\n      type: \"neural\",\n      numResults: maxSources,\n      text: { maxCharacters: 2000 },\n      highlights: { maxCharacters: 500, query: question },\n    });\n\n    contextCache.set(cacheKey, results);\n    return results;\n  }\n\n  // Phase 2: Expand with similar content\n  async expandContext(topResultUrl: string, numSimilar = 3) {\n    return exa.findSimilarAndContents(topResultUrl, {\n      numResults: numSimilar,\n      text: { maxCharacters: 1500 },\n      excludeSourceDomain: true,\n    });\n  }\n\n  // Phase 3: Format for LLM context injection\n  formatForLLM(results: any[]) {\n    return results.map((r, i) =>\n      `[Source ${i + 1}] ${r.title}\\n` +\n      `URL: ${r.url}\\n` +\n      `Content: ${r.text}\\n` +\n      `Key points: ${r.highlights?.join(\" | \") || \"N/A\"}`\n    ).join(\"\\n\\n---\\n\\n\");\n  }\n\n  // Phase 4: Use Exa's built-in answer endpoint\n  async getAnswer(question: string) {\n    const answer = await exa.answer(question, { text: true });\n    return {\n      answer: answer.answer,\n      sources: answer.results.map(r => ({\n        title: r.title,\n        url: r.url,\n      })),\n    };\n  }\n\n  // Full pipeline\n  async research(question: string) {\n    const context = await this.gatherContext(question, 5);\n\n    // Expand with similar content from top result\n    let expanded = { results: [] as any[] };\n    if (context.results[0]?.url) {\n      expanded = await this.expandContext(context.results[0].url);\n    }\n\n    const allResults = [...context.results, ...expanded.results];\n    const llmContext = this.formatForLLM(allResults);\n\n    return {\n      context: llmContext,\n      sourceCount: allResults.length,\n      sources: allResults.map(r => ({ title: r.title, url: r.url, score: r.score })),\n    };\n  }\n}\n```\n\n## Scaling Notes\n\n| Architecture | 10 QPS Limit Strategy |\n|-------------|----------------------|\n| Direct | Natural limit: ~864K searches/day at full rate |\n| Cached | 50% cache hit = ~1.7M effective searches/day |\n| RAG Pipeline | 2-3 API calls per question; cache aggressively |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Slow search in UI | No caching | Add LRU or Redis cache |\n| Stale cached results | Long TTL | Reduce TTL for time-sensitive profiles |\n| RAG hallucination | Poor source selection | Use highlights, increase numResults |\n| High API costs | No query deduplication | Cache layer deduplicates identical queries |\n\n## Resources\n\n- [Exa API Documentation](https://docs.exa.ai)\n- [Exa Contents Retrieval](https://docs.exa.ai/reference/contents-retrieval)\n- [Exa Find Similar](https://docs.exa.ai/reference/find-similar-links)\n\n## Next Steps\n\nFor reference architecture details, see `exa-reference-architecture`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "exa-architecture-variants",
-    "description": "Choose and implement Exa architecture patterns at different scales:",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

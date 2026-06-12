@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032707",
   "name": "notion-hello-world",
   "slug": "notion-hello-world",
   "description": "Create a minimal working Notion API example.",
   "content": "# Notion Hello World\n\n## Overview\n\nThree minimal examples covering the Notion API core surfaces: searching for pages, creating a test page in a database, and verifying the created page by retrieving it back.\n\n## Prerequisites\n\n- Completed `notion-install-auth` setup\n- `NOTION_TOKEN` environment variable set (internal integration token from https://www.notion.so/my-integrations)\n- At least one database shared with your integration via the Connections menu\n- Node.js 18+ with `@notionhq/client` or Python 3.8+ with `notion-client`\n\n## Instructions\n\n### Step 1: Search for Pages in Your Workspace\n\n```typescript\nimport { Client } from '@notionhq/client';\n\nconst notion = new Client({ auth: process.env.NOTION_TOKEN });\n\nasync function searchPages(query: string) {\n  const { results } = await notion.search({\n    query,\n    filter: { property: 'object', value: 'page' },\n    sort: { direction: 'descending', timestamp: 'last_edited_time' },\n    page_size: 5,\n  });\n\n  for (const page of results) {\n    if (page.object === 'page' && 'properties' in page) {\n      // Title lives under a property with type \"title\"\n      const titleProp = Object.values(page.properties).find(\n        (p) => p.type === 'title'\n      );\n      const title = titleProp?.type === 'title'\n        ? titleProp.title.map((t) => t.plain_text).join('')\n        : '(untitled)';\n      console.log(`Page: ${title} (${page.id})`);\n    }\n  }\n\n  return results;\n}\n\n// Usage: searchPages('meeting notes');\n```\n\n**What this does:** The `search` endpoint queries across all pages and databases your integration can access. The `filter` narrows results to pages only (use `value: 'database'` for databases). Results come back as partial page objects with properties included.\n\n### Step 2: Create a Test Page in a Database\n\n```typescript\nasync function createTestPage(databaseId: string) {\n  const page = await notion.pages.create({\n    parent: { database_id: databaseId },\n    properties: {\n      Name: {\n        title: [{ text: { content: 'Hello from the API!' } }],\n      },\n    },\n    // Optional: add inline content blocks\n    children: [\n      {\n        heading_2: {\n          rich_text: [{ text: { content: 'Getting Started' } }],\n        },\n      },\n      {\n        paragraph: {\n          rich_text: [\n            { text: { content: 'This page was created via the ' } },\n            { text: { content: 'Notion API' }, annotations: { bold: true } },\n            { text: { content: ' at ' + new Date().toISOString() + '.' } },\n          ],\n        },\n      },\n    ],\n  });\n\n  console.log(`Created page: ${page.id}`);\n  console.log(`URL: ${page.url}`);\n  return page;\n}\n```\n\n**What this does:** `pages.create` adds a new row to the target database. The `properties` object must match the database schema \u2014 `Name` with type `title` is the only universally required property. The optional `children` array appends block content (headings, paragraphs, to-dos, etc.) directly at creation time instead of requiring a separate `blocks.children.append` call.\n\n### Step 3: Verify by Retrieving the Created Page\n\n```typescript\nasync function verifyPage(pageId: string) {\n  const page = await notion.pages.retrieve({ page_id: pageId });\n\n  // Extract title\n  if ('properties' in page) {\n    const titleProp = Object.values(page.properties).find(\n      (p) => p.type === 'title'\n    );\n    const title = titleProp?.type === 'title'\n      ? titleProp.title.map((t) => t.plain_text).join('')\n      : '(untitled)';\n\n    console.log(`Verified: \"${title}\"`);\n    console.log(`Created: ${page.created_time}`);\n    console.log(`Last edited: ${page.last_edited_time}`);\n    console.log(`URL: ${page.url}`);\n  }\n\n  return page;\n}\n```\n\n**What this does:** `pages.retrieve` fetches the full page object including all properties. This confirms the page was created correctly and lets you inspect its metadata. The response includes `created_time`, `last_edited_time`, `url`, and the full `properties` object matching the parent database schema.\n\n## Output\n\n- Search results listing pages your integration can access\n- Newly created page in the target database with title and block content\n- Verification output confirming the page exists with correct metadata\n\n## Error Handling\n\n| Error | HTTP Code | Cause | Solution |\n|-------|-----------|-------|----------|\n| `unauthorized` | 401 | Invalid or expired token | Verify `NOTION_TOKEN` value at notion.so/my-integrations |\n| `object_not_found` | 404 | Page/database not shared with integration | Add your integration via the page's Connections menu (... > Connect to) |\n| `validation_error` | 400 | Property name/type mismatch | Retrieve the database schema with `databases.retrieve` first |\n| `rate_limited` | 429 | Exceeded 3 requests/second | Wait for `Retry-After` header value, then retry |\n| `conflict_error` | 409 | Transaction conflict | Retry the request after a brief delay |\n\n## Examples\n\n### Complete TypeScript Script\n\n```typescript\nimport { Client } from '@notionhq/client';\n\nconst notion = new Client({ auth: process.env.NOTION_TOKEN });\n\nasync function main() {\n  // 1. List users to verify connectivity\n  const { results: users } = await notion.users.list({});\n  console.log(`Connected! ${users.length} user(s) in workspace.\\n`);\n\n  // 2. Search for a database to use as the target\n  const { results } = await notion.search({\n    query: 'test',\n    filter: { property: 'object', value: 'page' },\n  });\n  console.log(`Found ${results.length} page(s) matching \"test\".\\n`);\n\n  // 3. Find a database for page creation\n  const dbSearch = await notion.search({\n    filter: { property: 'object', value: 'database' },\n  });\n  const db = dbSearch.results[0];\n  if (!db) {\n    console.log('No databases found. Share a database with your integration first.');\n    return;\n  }\n  console.log(`Using database: ${db.id}\\n`);\n\n  // 4. Create a test page\n  const page = await notion.pages.create({\n    parent: { database_id: db.id },\n    properties: {\n      Name: { title: [{ text: { content: 'Hello World!' } }] },\n    },\n  });\n  console.log(`Created page: ${page.id}`);\n  console.log(`URL: ${page.url}\\n`);\n\n  // 5. Verify it exists\n  const verified = await notion.pages.retrieve({ page_id: page.id });\n  console.log(`Verified: created at ${verified.created_time}`);\n}\n\nmain().catch(console.error);\n```\n\n### Python Example\n\n```python\nimport os\nfrom notion_client import Client\n\nnotion = Client(auth=os.environ[\"NOTION_TOKEN\"])\n\n# 1. Search for pages\nresults = notion.search(\n    query=\"test\",\n    filter={\"property\": \"object\", \"value\": \"page\"},\n)\nprint(f\"Found {len(results['results'])} page(s)\")\n\n# 2. Find a database\ndb_results = notion.search(\n    filter={\"property\": \"object\", \"value\": \"database\"},\n)\ndb_id = db_results[\"results\"][0][\"id\"]\nprint(f\"Using database: {db_id}\")\n\n# 3. Create a test page\npage = notion.pages.create(\n    parent={\"database_id\": db_id},\n    properties={\n        \"Name\": {\"title\": [{\"text\": {\"content\": \"Hello from Python!\"}}]},\n    },\n)\nprint(f\"Created page: {page['id']}\")\nprint(f\"URL: {page['url']}\")\n\n# 4. Verify\nverified = notion.pages.retrieve(page_id=page[\"id\"])\nprint(f\"Verified: created at {verified['created_time']}\")\n```\n\n## Resources\n\n- [Notion API Getting Started](https://developers.notion.com/docs/create-a-notion-integration)\n- [Search Endpoint Reference](https://developers.notion.com/reference/post-search)\n- [Create a Page Reference](https://developers.notion.com/reference/post-page)\n- [Retrieve a Page Reference](https://developers.notion.com/reference/retrieve-a-page)\n- [Working with Page Content](https://developers.notion.com/docs/working-with-page-content)\n\n## Next Steps\n\nProceed to `notion-local-dev-loop` for development workflow setup.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "notion-hello-world",
-    "description": "Create a minimal working Notion API example.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

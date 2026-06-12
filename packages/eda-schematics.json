@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000011461",
   "name": "eda-schematics",
   "slug": "eda-schematics",
   "description": "Schematic capture and wiring. Create schematic sheets, place symbols, add wires and net labels, organize hierarchical designs.",
   "content": "\n# EDA Schematics Skill\n\nCreate and wire schematics for electronics projects.\n\n## Auto-Activation Triggers\n\nThis skill activates when:\n- User asks to \"create schematic\", \"add component\", \"wire\"\n- User is working with `.kicad_sch` files\n- User asks about net names, connections, or ERC\n- Project has component selections but no schematic\n- User mentions schematic organization or sheets\n\n## Context Requirements\n\n**Requires:**\n- `docs/component-selections.md` - Selected components with LCSC numbers\n- `docs/design-constraints.json` - Project constraints\n- `datasheets/` - Component datasheets for reference circuits\n\n**Produces:**\n- `hardware/*.kicad_sch` - KiCad schematic file(s)\n- `docs/schematic-status.md` - Status and progress tracking\n\n## Workflow\n\n### 1. Load Context\n```\n@docs/design-constraints.json\n@docs/component-selections.md\n@datasheets/ (relevant datasheets)\n```\n\n**From design-constraints.json, extract:**\n- `power.topology` - LDO vs buck affects schematic complexity\n- `power.rails[]` - All voltage rails to implement\n- `board.layers` - 2-layer = simpler designs, 4+ = can be more complex\n- `thermal.budget` - Identify hot components for grouping\n- `dfmTargets.assembly` - Package sizes must match\n\n### 1.5. Validate Readiness\n\nBefore starting schematic:\n\n- [ ] All required components selected in `component-selections.md`?\n- [ ] MCU selected with known pinout?\n- [ ] Voltage regulators selected?\n- [ ] Critical passives (decoupling values) defined?\n- [ ] Datasheets downloaded for reference circuits?\n\nIf not, suggest running `/eda-source [role]` first.\n\n### 2. Plan Sheet Organization\n\nSee `reference/SCHEMATIC-HIERARCHY-DECISION.md` for detailed guidance.\n\nBased on complexity, organize into sheets:\n\n**Simple design (1-2 sheets):**\n- Sheet 1: Everything\n\n**Medium design (3-4 sheets):**\n- Sheet 1: Power (input, regulators)\n- Sheet 2: MCU and core logic\n- Sheet 3: Interfaces and I/O\n\n**Complex design (5+ sheets):**\n- Sheet 1: Power input and protection\n- Sheet 2: Voltage regulation\n- Sheet 3: MCU and clock\n- Sheet 4: Communication interfaces\n- Sheet 5: Connectors and I/O\n- Additional sheets as needed\n\n### 3. Create Schematic Structure\n- Create main schematic file\n- Add hierarchical sheets if multi-sheet\n- Set up page sizes and title blocks\n\n### 4. Place Components (Per Sheet)\nFor each component:\n1. Place symbol from library\n2. Set reference designator\n3. Set value\n4. Add LCSC part number to properties\n5. Position logically\n\n**Tool syntax:**\n```\nmcp__kicad-sch__add_component schematic_path=\"/path/to/file.kicad_sch\" lib_id=\"EDA-MCP:SymbolName\" reference=\"U1\" value=\"10k\" position=[100, 100]\n```\n\n- Use `symbol_ref` from `library_fetch` response (e.g., `EDA-MCP:ESP32-C3`)\n- For standard parts, use KiCad libraries (e.g., `Device:R`, `Device:C`)\n- Position uses grid-aligned coordinates (1.27mm grid)\n\n**Placement guidelines:**\n- Power flows top-to-bottom or left-to-right\n- Signal flows left-to-right\n- Group related components\n- Leave space for wiring\n\n### 5. Add Power Symbols\n- Place VCC symbols for each rail\n- Place GND symbols\n- Use consistent power symbol naming\n\n### 6. Wire Connections\nFollow the reference circuits from datasheets:\n1. Wire power connections first\n2. Add decoupling capacitors to power pins\n3. Wire critical signals (crystal, reset)\n4. Wire communication buses\n5. Wire remaining signals\n\nUse net labels for:\n- Inter-sheet connections\n- Buses\n- Avoiding wire crossing\n- Named signals (for clarity)\n\n### 7. Verify and Document\n- Check all pins connected or marked NC\n- Run ERC (electrical rules check)\n- Document status\n\nSee `reference/ERC-VIOLATIONS-GUIDE.md` for fixing common ERC errors.\n\n### 8. Pre-Layout Review\n\nBefore proceeding to layout, complete `reference/SCHEMATIC-REVIEW-CHECKLIST.md`:\n- Power section verification\n- Decoupling validation\n- Interface protection check\n- Test points present\n- Net naming consistency\n- Documentation complete\n\n## Net Naming Convention\n\nSee `reference/NET-NAMING.md` for complete conventions.\n\n**Quick reference:**\n```\nPower:    VCC_3V3, VCC_5V, VBAT, GND, GNDA\nReset:    MCU_RESET, nRESET\nSPI:      SPI1_MOSI, SPI1_MISO, SPI1_SCK, SPI1_CS\nI2C:      I2C1_SDA, I2C1_SCL\nUART:     UART1_TX, UART1_RX\nGPIO:     LED_STATUS, BTN_USER, or GPIO_PA0\n```\n\n## Output Format\n\n### schematic-status.md\n\n```markdown\n# Schematic Status\n\nProject: [name]\nUpdated: [date]\n\n## Summary\n- Total sheets: X\n- Components placed: Y\n- Wiring: Z% complete\n- ERC: X errors, Y warnings\n\n## Sheets\n\n### Sheet 1: Power\n- Status: Complete\n- Components: U1 (regulator), C1-C4 (caps)\n- Notes: ...\n\n### Sheet 2: MCU\n- Status: In Progress\n- Components: U2 (MCU), Y1 (crystal), C5-C10\n- Notes: Needs clock wiring\n\n## ERC Issues\n- [ ] Unconnected pin on U2.PA3 (intentional NC)\n- [x] Missing power flag (fixed)\n\n## Next Steps\n- Complete MCU clock circuit\n- Wire SPI bus to flash\n- Run final ERC\n```\n\n## Guidelines\n\n- Always check datasheets for reference circuits\n- Place decoupling caps within 3mm of IC power pins (in layout)\n- Use net labels for any signal that crosses sheets\n- Keep schematic readable - avoid wire spaghetti\n- Add notes for non-obvious connections\n- Mark intentionally unconnected pins with NC flag\n\n## Architecture Validation Warnings\n\nCheck these before proceeding to layout:\n\n| Condition | Warning |\n|-----------|---------|\n| Buck converter selected but no inductor in schematic | Missing critical component |\n| USB interface but no ESD protection | Add ESD diodes before layout |\n| External connector but no protection | Add TVS/ESD on exposed signals |\n| MCU with <100nF per VDD pin | Verify decoupling against datasheet |\n| Crystal but no load cap calculation | Recalculate CL values |\n| I2C bus but no pull-ups | Add pull-ups (4.7K-10K) |\n| SPI CS lines floating | Add pull-ups to prevent glitches |\n| Reset pin without RC debounce | Add debounce circuit |\n\n## Reference Documents\n\n| Document | Purpose |\n|----------|---------|\n| `reference/NET-NAMING.md` | Net naming conventions |\n| `reference/SYMBOL-ORGANIZATION.md` | Schematic layout patterns |\n| `reference/REFERENCE-CIRCUITS.md` | Common circuit patterns |\n| `reference/SCHEMATIC-HIERARCHY-DECISION.md` | Sheet organization guidance |\n| `reference/SCHEMATIC-REVIEW-CHECKLIST.md` | Pre-layout validation |\n| `reference/ERC-VIOLATIONS-GUIDE.md` | Fixing ERC errors |\n\n## Next Steps\n\nAfter schematic is complete:\n1. Generate netlist\n2. Run `/eda-layout` to begin PCB layout\n3. Update `design-constraints.json` stage to \"pcb\"\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "eda-schematics",
-    "description": "Schematic capture and wiring. Create schematic sheets, place symbols, add wires and net labels, organize hierarchical designs.",
-    "allowed-tools": "Read, Write, Glob, mcp__kicad-sch__create_schematic, mcp__kicad-sch__add_component, mcp__kicad-sch__search_components, mcp__kicad-sch__add_wire, mcp__kicad-sch__add_hierarchical_sheet, mcp__kicad-sch__add_sheet_pin, mcp__kicad-sch__add_hierarchical_label, mcp__kicad-sch__list_components, mcp__kicad-sch__get_schematic_info"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

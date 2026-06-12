@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031996",
   "name": "fireflies-observability",
   "slug": "fireflies-observability",
   "description": "Monitor Fireflies.ai integration health with metrics, alerts, and dashboards.",
   "content": "# Fireflies.ai Observability\n\n## Overview\n\nMonitor Fireflies.ai integration health: API connectivity, webhook delivery, transcript processing latency, and seat utilization. Built for Prometheus/Grafana but adaptable to any metrics system.\n\n## Prerequisites\n\n- Fireflies Business+ plan (for full API access)\n- Prometheus + Grafana (or equivalent metrics stack)\n- Webhook endpoint deployed and receiving events\n\n## Instructions\n\n### Step 1: Instrument the GraphQL Client\n\n```typescript\n// lib/fireflies-instrumented.ts\nimport { Counter, Histogram, Gauge } from \"prom-client\";\n\nconst apiRequests = new Counter({\n  name: \"fireflies_api_requests_total\",\n  help: \"Total Fireflies API requests\",\n  labelNames: [\"operation\", \"status\"],\n});\n\nconst apiLatency = new Histogram({\n  name: \"fireflies_api_latency_seconds\",\n  help: \"Fireflies API request latency\",\n  labelNames: [\"operation\"],\n  buckets: [0.1, 0.25, 0.5, 1, 2, 5, 10],\n});\n\nconst FIREFLIES_API = \"https://api.fireflies.ai/graphql\";\n\nexport async function firefliesQueryInstrumented(\n  operation: string,\n  query: string,\n  variables?: any\n) {\n  const timer = apiLatency.startTimer({ operation });\n\n  try {\n    const res = await fetch(FIREFLIES_API, {\n      method: \"POST\",\n      headers: {\n        \"Content-Type\": \"application/json\",\n        Authorization: `Bearer ${process.env.FIREFLIES_API_KEY}`,\n      },\n      body: JSON.stringify({ query, variables }),\n    });\n\n    const json = await res.json();\n\n    if (json.errors) {\n      apiRequests.inc({ operation, status: json.errors[0].code || \"error\" });\n      throw new Error(json.errors[0].message);\n    }\n\n    apiRequests.inc({ operation, status: \"success\" });\n    return json.data;\n  } catch (err) {\n    apiRequests.inc({ operation, status: \"failure\" });\n    throw err;\n  } finally {\n    timer();\n  }\n}\n```\n\n### Step 2: Webhook Event Metrics\n\n```typescript\nconst webhookEvents = new Counter({\n  name: \"fireflies_webhook_events_total\",\n  help: \"Webhook events received\",\n  labelNames: [\"event_type\", \"status\"],\n});\n\nconst webhookProcessingTime = new Histogram({\n  name: \"fireflies_webhook_processing_seconds\",\n  help: \"Time to process webhook events\",\n  buckets: [0.1, 0.5, 1, 5, 10, 30],\n});\n\nconst transcriptQueue = new Gauge({\n  name: \"fireflies_transcript_queue_depth\",\n  help: \"Number of transcripts queued for processing\",\n});\n\nexport async function handleWebhookWithMetrics(event: any) {\n  const timer = webhookProcessingTime.startTimer();\n  transcriptQueue.inc();\n\n  try {\n    await processTranscriptReady(event.meetingId);\n    webhookEvents.inc({ event_type: event.eventType, status: \"success\" });\n  } catch (err) {\n    webhookEvents.inc({ event_type: event.eventType, status: \"error\" });\n    throw err;\n  } finally {\n    timer();\n    transcriptQueue.dec();\n  }\n}\n```\n\n### Step 3: Health Check Probe\n\n```typescript\nconst healthStatus = new Gauge({\n  name: \"fireflies_health_status\",\n  help: \"Fireflies API health (1=healthy, 0=unhealthy)\",\n});\n\n// Run every 5 minutes\nasync function healthProbe() {\n  try {\n    const start = Date.now();\n    const data = await firefliesQueryInstrumented(\"health_check\", \"{ user { email } }\");\n    const latencyMs = Date.now() - start;\n\n    healthStatus.set(1);\n    console.log(`Fireflies health: OK (${latencyMs}ms)`);\n  } catch (err) {\n    healthStatus.set(0);\n    console.error(`Fireflies health: FAILED - ${(err as Error).message}`);\n  }\n}\n\nsetInterval(healthProbe, 5 * 60 * 1000);\n```\n\n### Step 4: Seat Utilization Tracking\n\n```typescript\nconst seatUtilization = new Gauge({\n  name: \"fireflies_seat_utilization\",\n  help: \"Transcripts per user\",\n  labelNames: [\"user_email\"],\n});\n\nconst totalSeats = new Gauge({\n  name: \"fireflies_total_seats\",\n  help: \"Total Fireflies seats\",\n});\n\n// Run daily\nasync function trackSeatUtilization() {\n  const data = await firefliesQueryInstrumented(\"seat_audit\", `{\n    users { email num_transcripts }\n  }`);\n\n  totalSeats.set(data.users.length);\n  for (const user of data.users) {\n    seatUtilization.set({ user_email: user.email }, user.num_transcripts);\n  }\n\n  const inactive = data.users.filter((u: any) => u.num_transcripts < 2);\n  if (inactive.length > 3) {\n    console.warn(`${inactive.length} seats with <2 transcripts -- review for cost savings`);\n  }\n}\n```\n\n### Step 5: Alerting Rules\n\n```yaml\n# prometheus/rules/fireflies.yml\ngroups:\n  - name: fireflies\n    rules:\n      - alert: FirefliesAPIDown\n        expr: fireflies_health_status == 0\n        for: 10m\n        labels:\n          severity: critical\n        annotations:\n          summary: \"Fireflies API unreachable for 10+ minutes\"\n\n      - alert: FirefliesHighErrorRate\n        expr: rate(fireflies_api_requests_total{status!=\"success\"}[5m]) > 0.1\n        for: 5m\n        labels:\n          severity: warning\n        annotations:\n          summary: \"Fireflies API error rate >10% over 5 minutes\"\n\n      - alert: FirefliesRateLimited\n        expr: rate(fireflies_api_requests_total{status=\"too_many_requests\"}[5m]) > 0\n        labels:\n          severity: warning\n        annotations:\n          summary: \"Fireflies API rate limiting detected\"\n\n      - alert: FirefliesWebhookBacklog\n        expr: fireflies_transcript_queue_depth > 50\n        for: 15m\n        labels:\n          severity: warning\n        annotations:\n          summary: \"Webhook processing backlog exceeds 50 transcripts\"\n\n      - alert: FirefliesSlowProcessing\n        expr: histogram_quantile(0.95, rate(fireflies_webhook_processing_seconds_bucket[1h])) > 30\n        labels:\n          severity: warning\n        annotations:\n          summary: \"Webhook processing P95 exceeds 30 seconds\"\n```\n\n### Step 6: Dashboard Panels (Grafana)\n\nKey panels to create:\n\n- **API Health**: `fireflies_health_status` (stat panel, green/red)\n- **Request Rate**: `rate(fireflies_api_requests_total[5m])` by status\n- **Latency P50/P95/P99**: `histogram_quantile` on `fireflies_api_latency_seconds`\n- **Webhook Events/Hour**: `increase(fireflies_webhook_events_total[1h])`\n- **Queue Depth**: `fireflies_transcript_queue_depth` (gauge)\n- **Seat Utilization**: `fireflies_seat_utilization` (table, sorted ascending)\n\n## Error Handling\n\n| Alert | Cause | Response |\n|-------|-------|----------|\n| API Down | Fireflies outage or key revoked | Check status page, verify API key |\n| High Error Rate | Schema change or auth issue | Inspect error codes in logs |\n| Rate Limited | Burst of requests | Enable request queuing |\n| Webhook Backlog | Processing bottleneck | Scale webhook workers |\n\n## Output\n\n- Instrumented GraphQL client with latency and error metrics\n- Webhook event tracking with queue depth monitoring\n- Health probe running on 5-minute interval\n- Prometheus alerting rules for critical conditions\n\n## Resources\n\n- [Fireflies API Docs](https://docs.fireflies.ai/)\n- [Prometheus Client](https://github.com/siimon/prom-client)\n\n## Next Steps\n\nFor incident response, see `fireflies-incident-runbook`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "fireflies-observability",
-    "description": "Monitor Fireflies.ai integration health with metrics, alerts, and dashboards.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

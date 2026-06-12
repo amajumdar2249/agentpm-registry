@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033522",
   "name": "webflow-deploy-integration",
   "slug": "webflow-deploy-integration",
   "description": "Deploy Webflow-powered applications to Vercel, Fly.io, and Google Cloud",
   "content": "# Webflow Deploy Integration\n\n## Overview\n\nDeploy Webflow Data API v2 integrations to Vercel, Fly.io, or Google Cloud Run\nwith secure token management, health checks, and webhook endpoint configuration.\n\n## Prerequisites\n\n- Working Webflow integration (tested locally)\n- Production API token with minimal scopes\n- Platform CLI installed (`vercel`, `fly`, or `gcloud`)\n\n## Instructions\n\n### Vercel Deployment\n\n```bash\n# Store Webflow secrets in Vercel\nvercel env add WEBFLOW_API_TOKEN production\nvercel env add WEBFLOW_SITE_ID production\nvercel env add WEBFLOW_WEBHOOK_SECRET production\n\n# Link and deploy\nvercel link\nvercel --prod\n```\n\n```json\n// vercel.json\n{\n  \"env\": {\n    \"WEBFLOW_API_TOKEN\": \"@webflow-api-token\",\n    \"WEBFLOW_SITE_ID\": \"@webflow-site-id\"\n  },\n  \"functions\": {\n    \"api/**/*.ts\": {\n      \"maxDuration\": 30\n    }\n  },\n  \"headers\": [\n    {\n      \"source\": \"/api/webhooks/webflow\",\n      \"headers\": [\n        { \"key\": \"Access-Control-Allow-Origin\", \"value\": \"https://api.webflow.com\" }\n      ]\n    }\n  ]\n}\n```\n\nVercel serverless function for webhook endpoint:\n\n```typescript\n// api/webhooks/webflow.ts (Vercel Edge/Serverless)\nimport type { VercelRequest, VercelResponse } from \"@vercel/node\";\nimport crypto from \"crypto\";\n\nexport default async function handler(req: VercelRequest, res: VercelResponse) {\n  if (req.method !== \"POST\") {\n    return res.status(405).json({ error: \"Method not allowed\" });\n  }\n\n  // Verify webhook signature\n  const signature = req.headers[\"x-webflow-signature\"] as string;\n  const rawBody = JSON.stringify(req.body);\n  const expected = crypto\n    .createHmac(\"sha256\", process.env.WEBFLOW_WEBHOOK_SECRET!)\n    .update(rawBody)\n    .digest(\"hex\");\n\n  if (signature !== expected) {\n    return res.status(401).json({ error: \"Invalid signature\" });\n  }\n\n  const { triggerType, payload } = req.body;\n  console.log(`Webhook received: ${triggerType}`);\n\n  // Handle different trigger types\n  switch (triggerType) {\n    case \"form_submission\":\n      await handleFormSubmission(payload);\n      break;\n    case \"ecomm_new_order\":\n      await handleNewOrder(payload);\n      break;\n    case \"site_publish\":\n      await handleSitePublish(payload);\n      break;\n  }\n\n  res.status(200).json({ received: true });\n}\n```\n\n### Fly.io Deployment\n\n```toml\n# fly.toml\napp = \"my-webflow-app\"\nprimary_region = \"iad\"\n\n[env]\n  NODE_ENV = \"production\"\n  PORT = \"3000\"\n\n[http_service]\n  internal_port = 3000\n  force_https = true\n  auto_stop_machines = \"suspend\"\n  auto_start_machines = true\n  min_machines_running = 1\n\n  [[http_service.checks]]\n    grace_period = \"10s\"\n    interval = \"30s\"\n    method = \"GET\"\n    path = \"/api/health\"\n    timeout = \"5s\"\n```\n\n```bash\n# Set Webflow secrets\nfly secrets set WEBFLOW_API_TOKEN=your-prod-token\nfly secrets set WEBFLOW_SITE_ID=your-site-id\nfly secrets set WEBFLOW_WEBHOOK_SECRET=your-webhook-secret\n\n# Deploy\nfly deploy\nfly status\n```\n\n### Google Cloud Run Deployment\n\n```dockerfile\n# Dockerfile\nFROM node:20-slim AS builder\nWORKDIR /app\nCOPY package*.json ./\nRUN npm ci\nCOPY . .\nRUN npm run build\n\nFROM node:20-slim\nWORKDIR /app\nCOPY --from=builder /app/dist ./dist\nCOPY --from=builder /app/node_modules ./node_modules\nCOPY --from=builder /app/package.json ./\n\nEXPOSE 3000\nCMD [\"node\", \"dist/index.js\"]\n```\n\n```bash\n# Store secrets in GCP Secret Manager\necho -n \"your-prod-token\" | \\\n  gcloud secrets create webflow-api-token --data-file=-\n\necho -n \"your-site-id\" | \\\n  gcloud secrets create webflow-site-id --data-file=-\n\n# Build and deploy\ngcloud builds submit --tag gcr.io/$PROJECT_ID/webflow-service\n\ngcloud run deploy webflow-service \\\n  --image gcr.io/$PROJECT_ID/webflow-service \\\n  --region us-central1 \\\n  --platform managed \\\n  --allow-unauthenticated \\\n  --set-secrets=\"WEBFLOW_API_TOKEN=webflow-api-token:latest,WEBFLOW_SITE_ID=webflow-site-id:latest\" \\\n  --min-instances=1 \\\n  --max-instances=10\n```\n\n### Register Webhook After Deployment\n\nOnce deployed, register your webhook URL with Webflow:\n\n```bash\n# Get your deployed URL\nWEBHOOK_URL=\"https://your-app.vercel.app/api/webhooks/webflow\"\n\n# Register webhooks for the events you need\nfor TRIGGER in form_submission site_publish ecomm_new_order; do\n  curl -X POST \"https://api.webflow.com/v2/sites/$WEBFLOW_SITE_ID/webhooks\" \\\n    -H \"Authorization: Bearer $WEBFLOW_API_TOKEN\" \\\n    -H \"Content-Type: application/json\" \\\n    -d \"{\n      \\\"triggerType\\\": \\\"$TRIGGER\\\",\n      \\\"url\\\": \\\"$WEBHOOK_URL\\\"\n    }\"\n  echo \" -> Registered $TRIGGER\"\ndone\n\n# Verify webhooks registered\ncurl -s \"https://api.webflow.com/v2/sites/$WEBFLOW_SITE_ID/webhooks\" \\\n  -H \"Authorization: Bearer $WEBFLOW_API_TOKEN\" | jq '.webhooks[].triggerType'\n```\n\n### Health Check Endpoint\n\n```typescript\n// api/health.ts \u2014 works on all platforms\nimport { WebflowClient } from \"webflow-api\";\n\nexport async function healthCheck() {\n  const checks: Record<string, any> = {};\n  const start = Date.now();\n\n  // Webflow API connectivity\n  try {\n    const webflow = new WebflowClient({\n      accessToken: process.env.WEBFLOW_API_TOKEN!,\n    });\n    const { sites } = await webflow.sites.list();\n    checks.webflow = {\n      status: \"connected\",\n      sites: sites?.length,\n      latencyMs: Date.now() - start,\n    };\n  } catch (error: any) {\n    checks.webflow = {\n      status: \"disconnected\",\n      error: error.statusCode,\n      latencyMs: Date.now() - start,\n    };\n  }\n\n  return {\n    status: checks.webflow.status === \"connected\" ? \"healthy\" : \"degraded\",\n    services: checks,\n    env: process.env.NODE_ENV,\n    timestamp: new Date().toISOString(),\n  };\n}\n```\n\n## Output\n\n- Application deployed to chosen platform\n- Webflow API token securely stored as platform secret\n- Webhook endpoints registered and verified\n- Health check endpoint monitoring Webflow connectivity\n- HTTPS enforced on all endpoints\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Secret not found at runtime | Wrong secret name | Verify with `fly secrets list` or `vercel env ls` |\n| Webhook 401 | Signature mismatch | Check WEBFLOW_WEBHOOK_SECRET matches |\n| Cold start timeout | Webflow API slow on first call | Set min instances > 0 |\n| Health check fails | Token not loaded | Verify secret mounting in container |\n| Deploy timeout | Large image | Use multi-stage Docker build |\n\n## Resources\n\n- [Vercel Environment Variables](https://vercel.com/docs/environment-variables)\n- [Fly.io Secrets](https://fly.io/docs/reference/secrets/)\n- [Cloud Run Secrets](https://cloud.google.com/run/docs/configuring/secrets)\n- [Webflow Webhooks](https://developers.webflow.com/data/docs/working-with-webhooks)\n\n## Next Steps\n\nFor webhook handling patterns, see `webflow-webhooks-events`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "webflow-deploy-integration",
-    "description": "Deploy Webflow-powered applications to Vercel, Fly.io, and Google Cloud",
-    "allowed-tools": "Read, Write, Edit, Bash(vercel:*), Bash(fly:*), Bash(gcloud:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

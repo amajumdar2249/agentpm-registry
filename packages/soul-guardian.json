@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000017862",
   "name": "soul-guardian",
   "slug": "soul-guardian",
   "description": "Drift detection + baseline integrity guard for agent workspace files with automatic alerting support",
   "content": "\n# soul-guardian \ud83d\udc7b\n\nProtects your agent's core files (SOUL.md, AGENTS.md, etc.) from unauthorized changes with automatic detection, restoration, and **user alerting**.\n\n## Operational Notes\n\n- Required runtime: `python3`\n- Optional runtime: `openclaw` for cron integration, `launchctl` for macOS scheduling, `bash` for the demo helper\n- Side effects: can auto-restore protected files to their approved baseline and writes audit/quarantine state locally\n- Network behavior: none by default\n- Trust model: any scheduling is opt-in, but restore mode intentionally overwrites drifted files\n\n\n## Release Artifact Verification\n\nFor standalone installs, verify the signed release manifest before trusting `SKILL.md`, `skill.json`, or the archive. The `skill.json` file is the package metadata/SBOM source, and the release pipeline signs `checksums.json` with the ClawSec release key.\n\n```bash\nset -euo pipefail\n\nSKILL_NAME=\"soul-guardian\"\nVERSION=\"0.0.6\"\nREPO=\"prompt-security/clawsec\"\nTAG=\"${SKILL_NAME}-v${VERSION}\"\nBASE=\"https://github.com/${REPO}/releases/download/${TAG}\"\nZIP_NAME=\"${SKILL_NAME}-v${VERSION}.zip\"\nTMP_DIR=\"$(mktemp -d)\"\ntrap 'rm -rf \"$TMP_DIR\"' EXIT\n\nRELEASE_PUBKEY_SHA256=\"711424e4535f84093fefb024cd1ca4ec87439e53907b305b79a631d5befba9c8\"\n\ncurl -fsSL \"$BASE/checksums.json\" -o \"$TMP_DIR/checksums.json\"\ncurl -fsSL \"$BASE/checksums.sig\" -o \"$TMP_DIR/checksums.sig\"\ncurl -fsSL \"$BASE/signing-public.pem\" -o \"$TMP_DIR/signing-public.pem\"\ncurl -fsSL \"$BASE/$ZIP_NAME\" -o \"$TMP_DIR/$ZIP_NAME\"\ncurl -fsSL \"$BASE/SKILL.md\" -o \"$TMP_DIR/SKILL.md\"\ncurl -fsSL \"$BASE/skill.json\" -o \"$TMP_DIR/skill.json\"\n\nACTUAL_PUBKEY_SHA256=\"$(openssl pkey -pubin -in \"$TMP_DIR/signing-public.pem\" -outform DER | shasum -a 256 | awk '{print $1}')\"\nif [ \"$ACTUAL_PUBKEY_SHA256\" != \"$RELEASE_PUBKEY_SHA256\" ]; then\n  echo \"ERROR: signing-public.pem fingerprint mismatch\" >&2\n  exit 1\nfi\n\nopenssl base64 -d -A -in \"$TMP_DIR/checksums.sig\" -out \"$TMP_DIR/checksums.sig.bin\"\nopenssl pkeyutl -verify -rawin -pubin \\\n  -inkey \"$TMP_DIR/signing-public.pem\" \\\n  -sigfile \"$TMP_DIR/checksums.sig.bin\" \\\n  -in \"$TMP_DIR/checksums.json\" >/dev/null\n\nhash_file() {\n  if command -v shasum >/dev/null 2>&1; then\n    shasum -a 256 \"$1\" | awk '{print $1}'\n  else\n    sha256sum \"$1\" | awk '{print $1}'\n  fi\n}\n\nverify_manifest_file() {\n  asset=\"$1\"\n  path=\"$2\"\n  expected=\"$(jq -r --arg asset \"$asset\" '.files[$asset].sha256 // empty' \"$TMP_DIR/checksums.json\")\"\n  if [ -z \"$expected\" ]; then\n    echo \"ERROR: checksums.json missing $asset\" >&2\n    exit 1\n  fi\n  actual=\"$(hash_file \"$path\")\"\n  if [ \"$actual\" != \"$expected\" ]; then\n    echo \"ERROR: checksum mismatch for $asset\" >&2\n    exit 1\n  fi\n}\n\nexpected_archive=\"$(jq -r '.archive.sha256 // empty' \"$TMP_DIR/checksums.json\")\"\nif [ -z \"$expected_archive\" ]; then\n  echo \"ERROR: checksums.json missing archive.sha256\" >&2\n  exit 1\nfi\nactual_archive=\"$(hash_file \"$TMP_DIR/$ZIP_NAME\")\"\nif [ \"$actual_archive\" != \"$expected_archive\" ]; then\n  echo \"ERROR: archive checksum mismatch\" >&2\n  exit 1\nfi\n\nverify_manifest_file \"SKILL.md\" \"$TMP_DIR/SKILL.md\"\nverify_manifest_file \"skill.json\" \"$TMP_DIR/skill.json\"\n\necho \"Signed release manifest, archive, SKILL.md, and skill.json verified.\"\n```\n\nOnly install or extract the archive after this verification succeeds.\n\n## Quick Start (3 Steps)\n\n### Step 1: Initialize baselines\n```bash\ncd ~/.openclaw/workspace\npython3 skills/soul-guardian/scripts/soul_guardian.py init --actor setup --note \"initial baseline\"\n```\n\n### Step 2: Enable monitoring\n```bash\npython3 skills/soul-guardian/scripts/soul_guardian.py enable-monitoring\n```\nThis shows you how to add monitoring to your workflow.\n\n### Step 3: Add to HEARTBEAT.md (Recommended)\n\nAdd this to your HEARTBEAT.md for automatic monitoring:\n\n```markdown\n## Soul Guardian Check\n- Run `python3 skills/soul-guardian/scripts/soul_guardian.py check --actor heartbeat --output-format alert`\n- If any output is produced, relay it to the user immediately as a security alert\n```\n\nThat's it! Soul Guardian will now:\n- \u2705 Detect unauthorized changes to protected files\n- \u2705 Auto-restore SOUL.md and AGENTS.md to approved baseline\n- \u2705 Alert you when drift is detected and handled\n\n---\n\n## What it protects (default policy)\n\n| File | Mode | Action on drift |\n|------|------|-----------------|\n| SOUL.md | restore | Auto-restore + alert |\n| AGENTS.md | restore | Auto-restore + alert |\n| USER.md | alert | Alert only |\n| TOOLS.md | alert | Alert only |\n| IDENTITY.md | alert | Alert only |\n| HEARTBEAT.md | alert | Alert only |\n| MEMORY.md | alert | Alert only |\n| memory/*.md | ignore | Ignored |\n\n## Commands\n\n### Check for drift (with alert output)\n```bash\npython3 skills/soul-guardian/scripts/soul_guardian.py check --output-format alert\n```\n- Silent if no drift\n- Outputs human-readable alert if drift detected\n- Perfect for heartbeat integration\n\n### Watch mode (continuous monitoring)\n```bash\npython3 skills/soul-guardian/scripts/soul_guardian.py watch --interval 30\n```\nRuns continuously, checking every 30 seconds.\n\n### Approve intentional changes\n```bash\npython3 skills/soul-guardian/scripts/soul_guardian.py approve --file SOUL.md --actor user --note \"intentional update\"\n```\n\n### View status\n```bash\npython3 skills/soul-guardian/scripts/soul_guardian.py status\n```\n\n### Verify audit log integrity\n```bash\npython3 skills/soul-guardian/scripts/soul_guardian.py verify-audit\n```\n\n---\n\n## Alert Format\n\nWhen drift is detected, the `--output-format alert` produces output like:\n\n```\n==================================================\n\ud83d\udea8 SOUL GUARDIAN SECURITY ALERT\n==================================================\n\n\ud83d\udcc4 FILE: SOUL.md\n   Mode: restore\n   Status: \u2705 RESTORED to approved baseline\n   Expected hash: abc123def456...\n   Found hash:    789xyz000111...\n   Diff saved: /path/to/patches/drift.patch\n\n==================================================\nReview changes and investigate the source of drift.\nIf intentional, run: soul_guardian.py approve --file <path>\n==================================================\n```\n\nThis output is designed to be relayed directly to the user in TUI/chat.\n\n---\n\n## Security Model\n\n**What it does:**\n- Detects filesystem drift vs approved baseline (sha256)\n- Produces unified diffs for review\n- Maintains tamper-evident audit log with hash chaining\n- Refuses to operate on symlinks\n- Uses atomic writes for restores\n\n**What it doesn't do:**\n- Cannot prove WHO made a change (actor is best-effort metadata)\n- Cannot protect if attacker controls both workspace AND state directory\n- Is not a substitute for backups\n\n**Recommendation:** Store state directory outside workspace for better resilience.\n\n---\n\n## Demo\n\nRun the full demo flow to see soul-guardian in action:\n\n```bash\nbash skills/soul-guardian/scripts/demo.sh\n```\n\nThis will:\n1. Verify clean state (silent check)\n2. Inject malicious content into SOUL.md\n3. Run heartbeat check (produces alert)\n4. Show SOUL.md was restored\n\n---\n\n## Troubleshooting\n\n**\"Not initialized\" error:**\nRun `init` first to set up baselines.\n\n**Drift keeps happening:**\nCheck what's modifying your files. Review the audit log and patches.\n\n**Want to approve a change:**\nRun `approve --file <path>` after reviewing the change.\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "soul-guardian",
-    "version": "0.0.6",
-    "description": "Drift detection + baseline integrity guard for agent workspace files with automatic alerting support",
-    "homepage": "https://clawsec.prompt.security",
-    "metadata": "{\"openclaw\":{\"emoji\":\"\ud83d\udc7b\",\"category\":\"security\"}}",
-    "clawdis": "",
-    "emoji": "\ud83d\udc7b",
-    "requires": "",
-    "bins": "[python3]"
+  "author": "agentpm",
+  "version": "0.0.6",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031295",
   "name": "apollo-rate-limits",
   "slug": "apollo-rate-limits",
   "description": "Implement Apollo.io rate limiting and backoff.",
   "content": "# Apollo Rate Limits\n\n## Overview\n\nImplement robust rate limiting and backoff for the Apollo.io API. Apollo uses **fixed-window rate limiting** with per-endpoint limits. Unlike hourly quotas, Apollo limits are **per minute** with a burst limit per second. Exceeding them returns HTTP 429.\n\n## Prerequisites\n\n- Valid Apollo API key\n- Node.js 18+\n\n## Instructions\n\n### Step 1: Understand Apollo's Rate Limit Structure\n\nApollo's official rate limits (as of 2025):\n\n```\nEndpoint Category           | Limit/min | Burst/sec | Notes\n----------------------------+-----------+-----------+-------------------------------\nPeople Search               | 100       | 10        | /mixed_people/api_search (free)\nPeople Enrichment           | 100       | 10        | /people/match (1 credit each)\nBulk People Enrichment      | 10        | 2         | /people/bulk_match (up to 10/call)\nOrganization Search         | 100       | 10        | /mixed_companies/search\nOrganization Enrichment     | 100       | 10        | /organizations/enrich\nContacts CRUD               | 100       | 10        | /contacts/*\nSequences                   | 100       | 10        | /emailer_campaigns/*\nDeals                       | 100       | 10        | /opportunities/*\n```\n\nResponse headers on every successful call:\n\n- `x-rate-limit-limit` \u2014 max requests per window\n- `x-rate-limit-remaining` \u2014 requests remaining in current window\n- `retry-after` \u2014 seconds to wait (only on 429 responses)\n\n### Step 2: Build a Per-Endpoint Rate Limiter\n\n```typescript\n// src/apollo/rate-limiter.ts\nexport class SlidingWindowLimiter {\n  private timestamps: number[] = [];\n\n  constructor(\n    private maxRequests: number = 100,\n    private windowMs: number = 60_000,\n  ) {}\n\n  async acquire(): Promise<void> {\n    const now = Date.now();\n    // Remove timestamps outside the window\n    this.timestamps = this.timestamps.filter((t) => now - t < this.windowMs);\n\n    if (this.timestamps.length >= this.maxRequests) {\n      const oldestInWindow = this.timestamps[0];\n      const waitMs = this.windowMs - (now - oldestInWindow) + 100;\n      console.warn(`[RateLimit] At capacity (${this.maxRequests}/${this.windowMs}ms). Waiting ${waitMs}ms`);\n      await new Promise((r) => setTimeout(r, waitMs));\n    }\n\n    this.timestamps.push(Date.now());\n  }\n\n  get remaining(): number {\n    const now = Date.now();\n    this.timestamps = this.timestamps.filter((t) => now - t < this.windowMs);\n    return this.maxRequests - this.timestamps.length;\n  }\n}\n\n// Create limiters per endpoint category\nexport const limiters = {\n  search: new SlidingWindowLimiter(100, 60_000),\n  enrichment: new SlidingWindowLimiter(100, 60_000),\n  bulkEnrichment: new SlidingWindowLimiter(10, 60_000),\n  contacts: new SlidingWindowLimiter(100, 60_000),\n  sequences: new SlidingWindowLimiter(100, 60_000),\n};\n```\n\n### Step 3: Exponential Backoff with Retry-After\n\n```typescript\n// src/apollo/backoff.ts\nexport async function withBackoff<T>(\n  fn: () => Promise<T>,\n  opts: { maxRetries?: number; baseMs?: number; maxMs?: number } = {},\n): Promise<T> {\n  const { maxRetries = 5, baseMs = 1000, maxMs = 60_000 } = opts;\n\n  for (let attempt = 0; attempt <= maxRetries; attempt++) {\n    try {\n      return await fn();\n    } catch (err: any) {\n      const status = err.response?.status;\n      if (status !== 429 && status < 500) throw err;\n      if (attempt === maxRetries) throw err;\n\n      // Prefer Retry-After header, fall back to exponential backoff\n      const retryAfter = err.response?.headers?.['retry-after'];\n      const delayMs = retryAfter\n        ? parseInt(retryAfter, 10) * 1000\n        : Math.min(baseMs * 2 ** attempt + Math.random() * 500, maxMs);\n\n      console.warn(`[Apollo] ${status} attempt ${attempt + 1}/${maxRetries + 1}, retry in ${Math.round(delayMs / 1000)}s`);\n      await new Promise((r) => setTimeout(r, delayMs));\n    }\n  }\n  throw new Error('Unreachable');\n}\n```\n\n### Step 4: Request Queue with Concurrency Control\n\n```typescript\n// src/apollo/queue.ts\nimport PQueue from 'p-queue';\nimport { limiters } from './rate-limiter';\n\ntype EndpointCategory = keyof typeof limiters;\n\nconst queues: Record<EndpointCategory, PQueue> = {\n  search: new PQueue({ concurrency: 5, intervalCap: 10, interval: 1000 }),\n  enrichment: new PQueue({ concurrency: 5, intervalCap: 10, interval: 1000 }),\n  bulkEnrichment: new PQueue({ concurrency: 2, intervalCap: 2, interval: 1000 }),\n  contacts: new PQueue({ concurrency: 5, intervalCap: 10, interval: 1000 }),\n  sequences: new PQueue({ concurrency: 3, intervalCap: 5, interval: 1000 }),\n};\n\nexport async function queuedRequest<T>(\n  category: EndpointCategory,\n  fn: () => Promise<T>,\n): Promise<T> {\n  await limiters[category].acquire();\n  return queues[category].add(() => fn()) as Promise<T>;\n}\n```\n\n### Step 5: Monitor Rate Limit Usage via Response Headers\n\n```typescript\n// src/apollo/rate-monitor.ts\nimport { AxiosInstance, AxiosResponse } from 'axios';\n\nexport function attachRateMonitor(client: AxiosInstance) {\n  client.interceptors.response.use((response: AxiosResponse) => {\n    const limit = response.headers['x-rate-limit-limit'];\n    const remaining = response.headers['x-rate-limit-remaining'];\n\n    if (limit && remaining) {\n      const pct = Math.round(((parseInt(limit) - parseInt(remaining)) / parseInt(limit)) * 100);\n      if (pct >= 80) {\n        console.warn(`[Apollo] Rate limit ${pct}% used (${remaining}/${limit} remaining) on ${response.config.url}`);\n      }\n    }\n    return response;\n  });\n}\n```\n\n## Output\n\n- Per-endpoint sliding window rate limiter matching Apollo's actual limits\n- Exponential backoff respecting `retry-after` headers\n- `PQueue`-based request queue with per-second burst control\n- Response header monitoring with 80% warning threshold\n\n## Error Handling\n\n| Scenario | Strategy |\n|----------|----------|\n| 429 with `retry-after` | Wait the specified seconds, then retry |\n| 429 without header | Exponential backoff: 1s, 2s, 4s, 8s, up to 60s |\n| Bulk enrichment limited | Use dedicated queue with 2/sec burst limit |\n| Near quota (>80%) | Log warning, defer non-critical requests |\n\n## Examples\n\n### Bulk Search with Rate Limiting\n\n```typescript\nimport { queuedRequest } from './apollo/queue';\nimport { withBackoff } from './apollo/backoff';\n\nconst domains = ['stripe.com', 'notion.so', 'linear.app', /* ... */];\n\nconst results = await Promise.all(\n  domains.map((domain) =>\n    queuedRequest('search', () =>\n      withBackoff(() =>\n        client.post('/mixed_people/api_search', {\n          q_organization_domains_list: [domain],\n          per_page: 25,\n        }),\n      ),\n    ),\n  ),\n);\nconsole.log(`Searched ${results.length} domains within rate limits`);\n```\n\n## Resources\n\n- [Apollo Rate Limits](https://docs.apollo.io/reference/rate-limits)\n- [API Usage Stats](https://docs.apollo.io/reference/view-api-usage-stats)\n- [p-queue Library](https://github.com/sindresorhus/p-queue)\n\n## Next Steps\n\nProceed to `apollo-security-basics` for API security best practices.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "apollo-rate-limits",
-    "description": "Implement Apollo.io rate limiting and backoff.",
-    "allowed-tools": "Read, Grep, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

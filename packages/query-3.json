@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000028191",
   "name": "query",
   "slug": "query-3",
   "description": ">",
   "content": "\nYou are helping the user query data using DuckDB.\n\nInput: `$@`\n\nFollow these steps in order.\n\n## Step 1 \u2014 Resolve state and determine the mode\n\nLook for an existing state file in either location:\n\n```bash\nSTATE_DIR=\"\"\ntest -f .duckdb-skills/state.sql && STATE_DIR=\".duckdb-skills\"\nPROJECT_ROOT=\"$(git rev-parse --show-toplevel 2>/dev/null || echo \"$PWD\")\"\nPROJECT_ID=\"$(echo \"$PROJECT_ROOT\" | tr '/' '-')\"\ntest -f \"$HOME/.duckdb-skills/$PROJECT_ID/state.sql\" && STATE_DIR=\"$HOME/.duckdb-skills/$PROJECT_ID\"\n```\n\nIf found, verify the databases it references are still accessible:\n\n```bash\nduckdb -init \"$STATE_DIR/state.sql\" -c \"SHOW DATABASES;\"\n```\n\nNow determine the mode:\n\n- **Ad-hoc mode** if: the `--file` flag is present, or the SQL references file paths/literals (e.g. `FROM 'data.csv'`), or `STATE_DIR` is empty.\n- **Session mode** if: `STATE_DIR` is set and the input references table names, is natural language, or is SQL without file references.\n\nIf no state file exists and no file is referenced, fall back to ad-hoc mode against `:memory:` \u2014 the user must reference files directly in their SQL.\n\nIf the state file exists but any ATTACH in it fails, warn the user and fall back to ad-hoc mode.\n\n## Step 2 \u2014 Check DuckDB is installed\n\n```bash\ncommand -v duckdb\n```\n\nIf not found, delegate to `/duckdb-skills:install-duckdb` and then continue.\n\n## Step 3 \u2014 Generate SQL if needed\n\nIf the input is natural language (not valid SQL), generate SQL using the Friendly SQL reference below.\n\nIn **session mode**, first retrieve the schema to inform query generation:\n\n```bash\nduckdb -init \"$STATE_DIR/state.sql\" -csv -c \"\nSELECT table_name FROM duckdb_tables() ORDER BY table_name;\n\"\n```\n\nThen for relevant tables:\n\n```bash\nduckdb -init \"$STATE_DIR/state.sql\" -csv -c \"DESCRIBE <table_name>;\"\n```\n\nUse the schema context and the Friendly SQL reference to generate the most appropriate query.\n\n## Step 4 \u2014 Estimate result size\n\nBefore executing, estimate whether the query could produce a very large result that would\nconsume excessive tokens when returned to this conversation.\n\n**Session mode** \u2014 check row counts for the tables involved:\n\n```bash\nduckdb -init \"$STATE_DIR/state.sql\" -csv -c \"\nSELECT table_name, estimated_size, column_count\nFROM duckdb_tables()\nWHERE table_name IN ('<table1>', '<table2>');\n\"\n```\n\n**Ad-hoc mode** \u2014 probe the source:\n\n```bash\nduckdb :memory: -csv -c \"\nSET allowed_paths=['FILE_PATH'];\nSET enable_external_access=false;\nSET allow_persistent_secrets=false;\nSET lock_configuration=true;\nSELECT count() AS row_count FROM 'FILE_PATH';\n\"\n```\n\n**Evaluate**:\n- If the query already has a `LIMIT`, `count()`, or other aggregation that bounds the output -> safe, proceed.\n- If the source has **>1M rows** and the query has no LIMIT or aggregation -> tell the user:\n  *\"This query would return a very large result set. Displaying it here would consume a lot of tokens and increase cost. I'd recommend adding `LIMIT 1000` or an aggregation to keep the output manageable.\"*\n  Ask for confirmation before running as-is.\n- If the data size is **>10 GB** -> additionally warn:\n  *\"This table is over 10 GB \u2014 the query may take a while to complete.\"*\n  Proceed if the user confirms.\n\nSkip this step for queries that are intrinsically bounded (e.g. `DESCRIBE`, `SUMMARIZE`, aggregations, `count()`).\n\n## Step 5 \u2014 Execute the query\n\n**Ad-hoc mode** (sandboxed \u2014 only the referenced file is accessible):\n\n```bash\nduckdb :memory: -csv <<'SQL'\nSET allowed_paths=['FILE_PATH'];\nSET enable_external_access=false;\nSET allow_persistent_secrets=false;\nSET lock_configuration=true;\n<QUERY>;\nSQL\n```\n\nReplace `FILE_PATH` with the actual file path extracted from the query or `--file` argument.\nIf multiple files are referenced, include all paths in the `allowed_paths` list.\n\n**Session mode** (user-trusted database):\n\n```bash\nduckdb -init \"$STATE_DIR/state.sql\" -csv -c \"<QUERY>\"\n```\n\nFor multi-line queries, use a heredoc with `-init`:\n\n```bash\nduckdb -init \"$STATE_DIR/state.sql\" -csv <<'SQL'\n<QUERY>;\nSQL\n```\n\nAlways use heredocs (`<<'SQL'`) for multi-line queries to avoid shell quoting issues.\n\n## Step 6 \u2014 Handle errors\n\n- **Syntax error**: show the error, suggest a corrected query, and re-run.\n- **Missing extension** (e.g. `Extension \"X\" not loaded`): delegate to `/duckdb-skills:install-duckdb <ext>`, then retry.\n- **Table not found** (session mode): list available tables with `FROM duckdb_tables()` and suggest corrections.\n- **File not found** (ad-hoc mode): use `find \"$PWD\" -name \"<filename>\" 2>/dev/null` to locate the file and suggest the corrected path.\n- **Persistent or unclear DuckDB error**: use `/duckdb-skills:duckdb-docs <error message or relevant keywords>` to search the documentation for guidance, then apply the fix and retry.\n\n## Step 7 \u2014 Present results\n\nShow the query output to the user. If the result has more than 100 rows, note the truncation and suggest adding `LIMIT` to the query.\n\nFor natural language questions, also provide a brief interpretation of the results.\n\n---\n\n## DuckDB Friendly SQL Reference\n\nWhen generating SQL, prefer these idiomatic DuckDB constructs:\n\n### Compact clauses\n- **FROM-first**: `FROM table WHERE x > 10` (implicit `SELECT *`)\n- **GROUP BY ALL**: auto-groups by all non-aggregate columns\n- **ORDER BY ALL**: orders by all columns for deterministic results\n- **SELECT * EXCLUDE (col1, col2)**: drop columns from wildcard\n- **SELECT * REPLACE (expr AS col)**: transform a column in-place\n- **UNION ALL BY NAME**: combine tables with different column orders\n- **Percentage LIMIT**: `LIMIT 10%` returns a percentage of rows\n- **Prefix aliases**: `SELECT x: 42` instead of `SELECT 42 AS x`\n- **Trailing commas** allowed in SELECT lists\n\n### Query features\n- **count()**: no need for `count(*)`\n- **Reusable aliases**: use column aliases in WHERE / GROUP BY / HAVING\n- **Lateral column aliases**: `SELECT i+1 AS j, j+2 AS k`\n- **COLUMNS(*)**: apply expressions across columns; supports regex, EXCLUDE, REPLACE, lambdas\n- **FILTER clause**: `count() FILTER (WHERE x > 10)` for conditional aggregation\n- **GROUPING SETS / CUBE / ROLLUP**: advanced multi-level aggregation\n- **Top-N per group**: `max(col, 3)` returns top 3 as a list; also `arg_max(arg, val, n)`, `min_by(arg, val, n)`\n- **DESCRIBE table_name**: schema summary (column names and types)\n- **SUMMARIZE table_name**: instant statistical profile\n- **PIVOT / UNPIVOT**: reshape between wide and long formats\n- **SET VARIABLE x = expr**: define SQL-level variables, reference with `getvariable('x')`\n\n### Data import\n- **Direct file queries**: `FROM 'file.csv'`, `FROM 'data.parquet'`\n- **Globbing**: `FROM 'data/part-*.parquet'` reads multiple files\n- **Auto-detection**: CSV headers and schemas are inferred automatically\n\n### Expressions and types\n- **Dot operator chaining**: `'hello'.upper()` or `col.trim().lower()`\n- **List comprehensions**: `[x*2 FOR x IN list_col]`\n- **List/string slicing**: `col[1:3]`, negative indexing `col[-1]`\n- **STRUCT.* notation**: `SELECT s.* FROM (SELECT {'a': 1, 'b': 2} AS s)`\n- **Square bracket lists**: `[1, 2, 3]`\n- **format()**: `format('{}->{}', a, b)` for string formatting\n\n### Joins\n- **ASOF joins**: approximate matching on ordered data (e.g. timestamps)\n- **POSITIONAL joins**: match rows by position, not keys\n- **LATERAL joins**: reference prior table expressions in subqueries\n\n### Data modification\n- **CREATE OR REPLACE TABLE**: no need for `DROP TABLE IF EXISTS` first\n- **CREATE TABLE ... AS SELECT (CTAS)**: create tables from query results\n- **INSERT INTO ... BY NAME**: match columns by name, not position\n- **INSERT OR IGNORE INTO / INSERT OR REPLACE INTO**: upsert patterns\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "query",
-    "description": ">",
-    "argument-hint": "<SQL or question> [--file path]",
-    "allowed-tools": "Bash"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

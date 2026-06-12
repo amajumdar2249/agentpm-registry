@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032090",
   "name": "gamma-core-workflow-a",
   "slug": "gamma-core-workflow-a",
   "description": "Generate presentations, documents, and webpages via Gamma API.",
   "content": "# Gamma Core Workflow A: Content Generation\n\n## Overview\n\nGenerate presentations, documents, webpages, and social posts using Gamma's Generate API (`POST /v1.0/generations`). This skill covers the full parameter set: content, output format, text mode, text amount, themes, image options, sharing, folders, and export format.\n\n## Prerequisites\n\n- Completed `gamma-sdk-patterns` (client wrapper ready)\n- Pro account with available credits\n- Workspace themes configured (optional)\n\n## API Parameters Reference\n\n| Parameter | Type | Options | Default |\n|-----------|------|---------|---------|\n| `content` | string | Your text/prompt | Required |\n| `outputFormat` | string | `presentation`, `document`, `webpage`, `social_post` | `presentation` |\n| `textMode` | string | `generate`, `condense`, `preserve` | `generate` |\n| `textAmount` | string | `brief`, `medium`, `detailed`, `extensive` | `medium` |\n| `themeId` | string | From `GET /v1.0/themes` | Workspace default |\n| `imageOptions.style` | string | Free text (e.g., `\"photorealistic\"`, `\"watercolor illustration\"`) | AI default |\n| `exportAs` | string | `pdf`, `pptx`, `png` | None (no auto-export) |\n| `sharingOptions` | object | `workspaceAccess`, `externalAccess` | Workspace defaults |\n| `folderIds` | string[] | From `GET /v1.0/folders` | Root folder |\n\n## Instructions\n\n### Step 1: Basic Presentation Generation\n\n```typescript\nimport { createGammaClient, pollUntilDone } from \"./lib/gamma\";\n\nconst gamma = createGammaClient({ apiKey: process.env.GAMMA_API_KEY! });\n\n// Simple generation \u2014 just content and format\nconst { generationId } = await gamma.generate({\n  content: \"Create a 10-card pitch deck for a sustainable energy startup\",\n  outputFormat: \"presentation\",\n});\n\nconst result = await pollUntilDone(gamma, generationId);\nconsole.log(`View: ${result.gammaUrl}`);\n```\n\n### Step 2: Full Parameter Generation\n\n```typescript\n// Use all available parameters for precise control\nasync function generateFullControl() {\n  // First, discover workspace themes\n  const themes = await gamma.listThemes();\n  const corporateTheme = themes.find((t) => t.name.includes(\"Corporate\"));\n\n  // Discover folders\n  const folders = await gamma.listFolders();\n  const reportsFolder = folders.find((f) => f.name === \"Reports\");\n\n  const { generationId } = await gamma.generate({\n    content: `\n      Q1 2026 Business Review\n      - Revenue up 23% YoY\n      - Customer acquisition cost reduced by 15%\n      - Three new product lines launched\n      - Team grew from 45 to 62 employees\n    `,\n    outputFormat: \"presentation\",\n    textMode: \"generate\",      // AI expands your bullet points\n    textAmount: \"detailed\",     // More text per card\n    themeId: corporateTheme?.id,\n    exportAs: \"pptx\",           // Auto-generate PPTX download\n    imageOptions: {\n      style: \"professional corporate photography\",\n    },\n    sharingOptions: {\n      workspaceAccess: \"comment\",   // Team can comment\n      externalAccess: \"view\",       // External viewers read-only\n    },\n    folderIds: reportsFolder ? [reportsFolder.id] : [],\n  });\n\n  const result = await pollUntilDone(gamma, generationId);\n  console.log(`View: ${result.gammaUrl}`);\n  console.log(`Download PPTX: ${result.exportUrl}`);\n  console.log(`Credits used: ${result.creditsUsed}`);\n}\n```\n\n### Step 3: Text Mode Comparison\n\n```typescript\n// Same content, different text modes\nconst content = \"Benefits of remote work: flexibility, reduced commute, global talent access\";\n\n// \"generate\" \u2014 AI expands bullets into full paragraphs\nawait gamma.generate({ content, textMode: \"generate\", outputFormat: \"presentation\" });\n\n// \"condense\" \u2014 AI summarizes, keeps it concise\nawait gamma.generate({ content, textMode: \"condense\", outputFormat: \"presentation\" });\n\n// \"preserve\" \u2014 uses your text as-is, no AI rewriting\nawait gamma.generate({ content, textMode: \"preserve\", outputFormat: \"presentation\" });\n```\n\n### Step 4: Document and Webpage Generation\n\n```typescript\n// Long-form document\nconst { generationId: docId } = await gamma.generate({\n  content: \"Comprehensive guide to implementing CI/CD pipelines with GitHub Actions\",\n  outputFormat: \"document\",\n  textAmount: \"extensive\",\n  exportAs: \"pdf\",\n});\n\n// Webpage\nconst { generationId: webId } = await gamma.generate({\n  content: \"Product landing page for an AI-powered code review tool\",\n  outputFormat: \"webpage\",\n  imageOptions: { style: \"modern minimalist tech\" },\n});\n\n// Social post\nconst { generationId: socialId } = await gamma.generate({\n  content: \"Announcing our Series A funding round of $12M\",\n  outputFormat: \"social_post\",\n  textAmount: \"brief\",\n});\n```\n\n### Step 5: Batch Generation with Rate Limiting\n\n```typescript\nimport pLimit from \"p-limit\";\n\nconst limit = pLimit(3); // Max 3 concurrent generations\n\nconst topics = [\n  \"Machine Learning Fundamentals\",\n  \"Cloud Architecture Best Practices\",\n  \"API Design Patterns\",\n  \"DevOps Culture and Practices\",\n];\n\nconst results = await Promise.allSettled(\n  topics.map((topic) =>\n    limit(async () => {\n      const { generationId } = await gamma.generate({\n        content: `Create a training deck: ${topic}`,\n        outputFormat: \"presentation\",\n        textAmount: \"medium\",\n        exportAs: \"pdf\",\n      });\n      return pollUntilDone(gamma, generationId);\n    })\n  )\n);\n\nresults.forEach((r, i) => {\n  if (r.status === \"fulfilled\") {\n    console.log(`${topics[i]}: ${r.value.gammaUrl}`);\n  } else {\n    console.error(`${topics[i]}: FAILED \u2014 ${r.reason.message}`);\n  }\n});\n```\n\n### Step 6: curl Reference\n\n```bash\n# Generate with all parameters\ncurl -X POST \"https://public-api.gamma.app/v1.0/generations\" \\\n  -H \"X-API-KEY: ${GAMMA_API_KEY}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"content\": \"5-card overview of AI in healthcare\",\n    \"outputFormat\": \"presentation\",\n    \"textMode\": \"generate\",\n    \"textAmount\": \"medium\",\n    \"themeId\": \"theme_abc123\",\n    \"exportAs\": \"pdf\",\n    \"imageOptions\": { \"style\": \"medical illustration\" },\n    \"sharingOptions\": {\n      \"workspaceAccess\": \"edit\",\n      \"externalAccess\": \"view\"\n    }\n  }'\n```\n\n## Credit Cost Awareness\n\n| Image Model Tier | Credits per Image |\n|-------------------|-------------------|\n| Standard | 2-15 |\n| Advanced | 20-33 |\n| Premium | 34-75 |\n| Ultra | 30-125 |\n\nA 10-card deck with 5 standard images costs approximately 20-60 credits.\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| 422 Unprocessable | Invalid parameter combination | Check parameter types and allowed values |\n| `status: \"failed\"` | Content too complex or long | Simplify content or reduce scope |\n| 429 Rate Limited | Too many concurrent generations | Use `p-limit` for concurrency control |\n| Empty `exportUrl` | No `exportAs` specified | Add `exportAs: \"pdf\"` to request |\n\n## Resources\n\n- [Generate a Gamma](https://developers.gamma.app/reference/generate-a-gamma)\n- [Generate API Parameters Explained](https://developers.gamma.app/guides/generate-api-parameters-explained)\n- [Themes and Folders APIs](https://developers.gamma.app/docs/list-themes-and-list-folders-apis-explained)\n\n## Next Steps\n\nProceed to `gamma-core-workflow-b` for template-based generation and export retrieval.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "gamma-core-workflow-a",
-    "description": "Generate presentations, documents, and webpages via Gamma API.",
-    "Trigger": "gamma generate\", \"gamma presentation from text\",",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Bash(node:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

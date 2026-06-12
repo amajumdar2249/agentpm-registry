@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032517",
   "name": "linear-upgrade-migration",
   "slug": "linear-upgrade-migration",
   "description": "Upgrade Linear SDK versions and handle breaking changes safely.",
   "content": "# Linear Upgrade Migration\n\n## Overview\n\nSafely upgrade `@linear/sdk` versions with zero downtime. The SDK is auto-generated from Linear's GraphQL schema -- major versions can rename fields, change return types, add required parameters, or remove deprecated methods. This skill covers version checking, upgrade procedure, compatibility layers, and rollback.\n\n## Prerequisites\n\n- Existing Linear integration with version control (Git)\n- Test suite covering Linear SDK operations\n- Understanding of semantic versioning\n\n## Instructions\n\n### Step 1: Check Current vs Latest Version\n\n```bash\nset -euo pipefail\n# Current installed version\nnpm list @linear/sdk 2>/dev/null || echo \"Not installed\"\n\n# Latest available\nnpm view @linear/sdk version\n\n# All recent versions\nnpm view @linear/sdk versions --json | jq '.[-10:]'\n```\n\n### Step 2: Review Changelog for Breaking Changes\n\n```bash\nset -euo pipefail\n# View SDK changelog on GitHub\nnpm view @linear/sdk repository.url\n# Then check: https://github.com/linear/linear/blob/master/packages/sdk/CHANGELOG.md\n\n# Also review Linear's API changelog:\n# https://linear.app/changelog (filter for API/developer updates)\n```\n\nCommon breaking changes between major versions:\n\n- **Renamed fields**: e.g., `issue.state` property vs lazy relation\n- **Changed return types**: direct value to paginated connection\n- **New required parameters**: mutations gaining mandatory fields\n- **Removed methods**: deprecated methods dropped\n- **ESM/CJS**: module system changes\n\n### Step 3: Create Upgrade Branch and Install\n\n```bash\nset -euo pipefail\ngit checkout -b upgrade/linear-sdk-$(npm view @linear/sdk version)\nnpm install @linear/sdk@latest\n\n# Immediately check for type errors\nnpx tsc --noEmit 2>&1 | head -50\n```\n\n### Step 4: Fix Type Errors with Compatibility Layer\n\n```typescript\n// src/linear-compat.ts\n// Bridge pattern for gradual migration across SDK versions\n\nimport { LinearClient } from \"@linear/sdk\";\n\n/**\n * Normalize issue state access across SDK versions.\n * SDK v2: issue.state was a direct string property\n * SDK v3+: issue.state is a lazy-loaded WorkflowState relation\n */\nexport async function getIssueStateName(issue: any): Promise<string> {\n  if (typeof issue.state === \"string\") return issue.state;\n  const state = await issue.state;\n  return state?.name ?? \"unknown\";\n}\n\nexport async function getIssueStateType(issue: any): Promise<string> {\n  if (typeof issue.stateType === \"string\") return issue.stateType;\n  const state = await issue.state;\n  return state?.type ?? \"unknown\";\n}\n\n/**\n * Normalize team access \u2014 some versions changed from direct to paginated.\n */\nexport async function getTeamByKey(client: LinearClient, key: string) {\n  const teams = await client.teams({ filter: { key: { eq: key } } });\n  return teams.nodes[0];\n}\n\n/**\n * Normalize issue creation return \u2014 handle both success shapes.\n */\nexport async function createIssue(\n  client: LinearClient,\n  input: { teamId: string; title: string; [key: string]: any }\n) {\n  const result = await client.createIssue(input);\n  // Some versions return { success, issue } others return directly\n  if (\"success\" in result) {\n    return { success: result.success, issue: await result.issue };\n  }\n  return { success: true, issue: result };\n}\n```\n\n### Step 5: Run Tests and Fix Failures\n\n```bash\nset -euo pipefail\n# Type-check\nnpx tsc --noEmit\n\n# Run unit tests\nnpm test\n\n# Run integration tests (if API key available)\nnpm run test:integration 2>&1 || true\n\n# Lint\nnpm run lint 2>&1 || true\n```\n\nCommon fixes:\n\n```typescript\n// Fix: Property 'x' does not exist\n// Old: issue.statusName\n// New: (await issue.state)?.name\n\n// Fix: Type 'X' is not assignable to type 'Y'\n// Old: const states: string[] = team.states\n// New: const states = await team.states()\n\n// Fix: Expected 2 arguments but got 1\n// Check if mutation added required parameter\n// Old: client.updateIssue(id, { title: \"new\" })\n// New: client.updateIssue(id, { title: \"new\" })  // usually same\n```\n\n### Step 6: Test in Staging Before Production\n\n```bash\nset -euo pipefail\n# Deploy to staging\nnpm run build\nnpm run deploy:staging\n\n# Run integration tests against staging\nLINEAR_API_KEY=$STAGING_LINEAR_API_KEY npm run test:integration\n\n# Check health endpoint\ncurl -s https://staging.yourapp.com/health/linear | jq .\n```\n\n### Step 7: Deploy with Rollback Plan\n\n```bash\nset -euo pipefail\n# Commit upgrade\ngit add package.json package-lock.json src/linear-compat.ts\ngit commit -m \"chore: upgrade @linear/sdk to $(npm list @linear/sdk --json | jq -r '.dependencies[\"@linear/sdk\"].version')\"\ngit push origin upgrade/linear-sdk-*\n\n# If something breaks in production:\ngit revert HEAD\nnpm install  # Restores previous version\nnpm run deploy\n```\n\n## Version Compatibility\n\n| SDK Range | Node.js | TypeScript | Notable Changes |\n|-----------|---------|------------|-----------------|\n| 1.x | 14+ | 4.5+ | Initial release, callback-style |\n| 2.x-16.x | 16+ | 4.7+ | ESM support, typed models |\n| 17.x-28.x | 18+ | 5.0+ | Strict types, new entity models |\n| Latest | 18+ | 5.0+ | Refresh tokens, initiatives, agents |\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `Property does not exist` | Renamed field | Check changelog, update field name |\n| `Type is not assignable` | Changed return type | Update type annotations |\n| `Module not found` | ESM/CJS mismatch | Update import syntax or `tsconfig` |\n| `Cannot find name` | Removed export | Replace with new API equivalent |\n| Tests pass, prod fails | SDK version mismatch in lockfile | Delete `node_modules`, `npm ci` |\n\n## Examples\n\n### Pre-Upgrade Audit Script\n\n```typescript\n// scripts/audit-linear-usage.ts\n// Run before upgrading to find all SDK touchpoints\n\nimport { readFileSync } from \"fs\";\nimport { globSync } from \"glob\";\n\nconst files = globSync(\"src/**/*.ts\");\nconst patterns = [\n  /LinearClient/g,\n  /client\\.issues/g,\n  /client\\.createIssue/g,\n  /client\\.updateIssue/g,\n  /\\.state\\b/g,\n  /\\.assignee\\b/g,\n  /rawRequest/g,\n];\n\nfor (const file of files) {\n  const content = readFileSync(file, \"utf-8\");\n  for (const pattern of patterns) {\n    const matches = content.match(pattern);\n    if (matches) {\n      console.log(`${file}: ${pattern.source} (${matches.length} occurrences)`);\n    }\n  }\n}\n```\n\n## Resources\n\n- [SDK Changelog](https://github.com/linear/linear/blob/master/packages/sdk/CHANGELOG.md)\n- [API Changelog](https://linear.app/changelog)\n- [SDK npm Page](https://www.npmjs.com/package/@linear/sdk)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "linear-upgrade-migration",
-    "description": "Upgrade Linear SDK versions and handle breaking changes safely.",
-    "Trigger": "upgrade linear SDK\", \"linear SDK migration\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(npx:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

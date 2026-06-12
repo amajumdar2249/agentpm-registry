@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000011173",
   "name": "unity-shaders-rendering",
   "slug": "unity-shaders-rendering",
   "description": "|",
   "content": "\n# Unity Shaders and Rendering\n\n## Overview\n\nReference for Unity's rendering systems, shader development, lighting configuration, and visual effects. Covers all three render pipelines, Shader Graph, hand-written shaders, and VFX Graph.\n\n## Render Pipeline Comparison\n\n| Feature | Built-in RP | URP | HDRP |\n|---------|------------|-----|------|\n| Target | Legacy projects | Mobile, VR, wide range | High-end PC/console |\n| Shader language | Surface shaders + HLSL | HLSL (no surface shaders) | HLSL |\n| Shader Graph | Yes | Yes | Yes |\n| SRP Batcher | No | Yes | Yes |\n| Render Features | No | Yes (ScriptableRendererFeature) | Custom Pass |\n| Post-processing | Post Processing Stack v2 | Volume system (built-in) | Volume system (built-in) |\n| Ray tracing | No | No (probe-based) | Yes (DXR) |\n| Performance | Moderate | Optimized for scale | Highest fidelity |\n\n**Recommendation:** Use URP for new projects unless targeting high-end visuals exclusively (HDRP). Built-in RP is legacy -- migrate when possible.\n\n## Shader Graph\n\n### Getting Started\n\n1. Right-click in Project: Create > Shader Graph > URP > Lit Shader Graph\n2. Double-click to open Shader Graph editor\n3. Build node network connecting to Master Stack outputs\n4. Create a Material using the shader, assign to renderers\n\n### Master Stack Outputs (URP Lit)\n\n| Output | Type | Purpose |\n|--------|------|---------|\n| Base Color | Color (RGB) | Albedo/diffuse color |\n| Normal | Vector3 | Tangent-space normal map |\n| Metallic | Float (0-1) | Metal vs. dielectric |\n| Smoothness | Float (0-1) | Roughness inverse |\n| Emission | Color (RGB) | Self-illumination |\n| Alpha | Float (0-1) | Transparency |\n| Alpha Clip Threshold | Float | Cutoff for alpha testing |\n\n### Common Node Patterns\n\n| Effect | Key Nodes |\n|--------|-----------|\n| **Dissolve** | Noise > Step > Alpha Clip + Edge emission |\n| **Scrolling UV** | Time > Multiply > Add to UV |\n| **Fresnel glow** | Fresnel Effect > Multiply color > Emission |\n| **Triplanar mapping** | Triplanar node (avoids UV stretching) |\n| **Color shift** | Lerp between colors using parameter or time |\n| **Vertex displacement** | Noise > Multiply > Add to Position |\n| **Outline** | Two-pass: inverted hull in custom render feature |\n\n### Shader Graph Sub Graphs\n\nExtract reusable node groups into Sub Graphs (Create > Shader Graph > Sub Graph). Use for shared noise functions, UV transformations, or custom lighting models.\n\n## Hand-Written Shaders (ShaderLab + HLSL)\n\n### URP Shader Structure\n\n```hlsl\nShader \"Custom/SimpleUnlit\"\n{\n    Properties\n    {\n        _MainTex (\"Texture\", 2D) = \"white\" {}\n        _Color (\"Color\", Color) = (1,1,1,1)\n    }\n\n    SubShader\n    {\n        Tags { \"RenderType\"=\"Opaque\" \"RenderPipeline\"=\"UniversalPipeline\" }\n\n        Pass\n        {\n            HLSLPROGRAM\n            #pragma vertex vert\n            #pragma fragment frag\n\n            #include \"Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl\"\n\n            struct Attributes\n            {\n                float4 positionOS : POSITION;\n                float2 uv : TEXCOORD0;\n            };\n\n            struct Varyings\n            {\n                float4 positionHCS : SV_POSITION;\n                float2 uv : TEXCOORD0;\n            };\n\n            TEXTURE2D(_MainTex);\n            SAMPLER(sampler_MainTex);\n\n            CBUFFER_START(UnityPerMaterial)\n                float4 _MainTex_ST;\n                half4 _Color;\n            CBUFFER_END\n\n            Varyings vert(Attributes IN)\n            {\n                Varyings OUT;\n                OUT.positionHCS = TransformObjectToHClip(IN.positionOS.xyz);\n                OUT.uv = TRANSFORM_TEX(IN.uv, _MainTex);\n                return OUT;\n            }\n\n            half4 frag(Varyings IN) : SV_Target\n            {\n                half4 tex = SAMPLE_TEXTURE2D(_MainTex, sampler_MainTex, IN.uv);\n                return tex * _Color;\n            }\n            ENDHLSL\n        }\n    }\n}\n```\n\n**Key differences from Built-in shaders:**\n- Use `HLSLPROGRAM`/`ENDHLSL` (not `CGPROGRAM`/`ENDCG`)\n- Include URP shader library, not UnityCG.cginc\n- Use `TEXTURE2D`/`SAMPLER` macros (not `sampler2D`)\n- Wrap properties in `CBUFFER_START(UnityPerMaterial)` for SRP Batcher compatibility\n\n## Lighting\n\n### Light Types\n\n| Type | Use For | Shadow Cost |\n|------|---------|-------------|\n| Directional | Sun, global illumination | Low (cascaded shadow maps) |\n| Point | Torches, lamps | Medium |\n| Spot | Flashlights, stage lights | Medium |\n| Area (baked only) | Soft window light, panels | High (bake only) |\n\n### Lighting Modes\n\n| Mode | Description | Best For |\n|------|-------------|----------|\n| Realtime | Computed every frame | Dynamic objects, few lights |\n| Baked | Pre-computed into lightmaps | Static environments |\n| Mixed | Baked indirect + realtime direct | Best balance |\n\n### Lightmap Baking Tips\n\n- Set lightmap resolution based on scene scale (10-40 texels/unit for indoor)\n- Use Light Probes for dynamic objects in baked scenes\n- Use Reflection Probes for metallic/reflective surfaces\n- Enable GPU Lightmapper for faster bake times\n- Mark objects as Contribute GI in the Static flags\n\n## Post-Processing (Volume System)\n\n```text\nSetup:\n1. Add a Volume (Global or Local) to the scene\n2. Create a Volume Profile asset\n3. Add overrides: Bloom, Color Adjustments, Tonemapping, etc.\n4. Camera must have Post Processing enabled (URP Camera settings)\n```\n\n| Effect | Performance | Notes |\n|--------|-------------|-------|\n| Bloom | Low | Use threshold to control intensity |\n| Color Adjustments | Very Low | Saturation, contrast, color filter |\n| Tonemapping | Very Low | ACES for cinematic look |\n| Vignette | Very Low | Frame darkening |\n| Ambient Occlusion (SSAO) | Medium | Disable on mobile |\n| Depth of Field | High | Use Bokeh only for cinematics |\n| Motion Blur | Medium | Can cause motion sickness in VR |\n\n## VFX Graph vs Particle System\n\n| Feature | Particle System (Shuriken) | VFX Graph |\n|---------|---------------------------|-----------|\n| Execution | CPU | GPU (compute shader) |\n| Particle count | Thousands | Millions |\n| Complexity | Component-based, simple | Node-based, complex |\n| Platform | All | Compute shader capable only |\n| Integration | Physics, collision | Limited physics |\n\nUse Particle System for gameplay-integrated effects (physics collisions, small counts). Use VFX Graph for visual spectacles (rain, fire, magic, ambient particles).\n\n## URP Render Features\n\nExtend URP rendering with custom ScriptableRendererFeatures:\n\n```csharp\npublic class OutlineFeature : ScriptableRendererFeature\n{\n    OutlinePass _pass;\n\n    public override void Create()\n    {\n        _pass = new OutlinePass();\n        _pass.renderPassEvent = RenderPassEvent.AfterRenderingOpaques;\n    }\n\n    public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData data)\n    {\n        renderer.EnqueuePass(_pass);\n    }\n}\n```\n\nCommon uses: custom outlines, screen-space effects, render texture generation, stencil-based effects.\n\n## Additional Resources\n\n### Reference Files\n- **`references/shader-recipes.md`** -- Complete shader implementations: toon/cel shading, water, dissolve, hologram, force field, procedural skybox, stencil portal, vertex animation, custom lighting models\n- **`references/lighting-vfx-detail.md`** -- Advanced lighting setups, GI troubleshooting, VFX Graph cookbook (fire, smoke, electricity, portals), Scriptable Render Pipeline customization, custom render passes\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "unity-shaders-rendering",
-    "description": "|",
-    "PROACTIVELY activate for": "(1) writing shaders in Shader Graph, HLSL, or ShaderLab, (2) URP and HDRP shader authoring, (3) custom render pipeline work (SRP), (4) lighting setup (baked vs realtime, lightmaps, Global Illumination), (5) post-processing stacks, (6) reflection probes and light probes, (7) custom render features and full-screen passes, (8) shader stripping and variant management, (9) compute shaders, (10) ray tracing in HDRP.",
-    "Provides": "Shader Graph templates, HLSL snippets, URP/HDRP differences, lighting setup recipes, render-feature examples, and shader-variant guidance."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

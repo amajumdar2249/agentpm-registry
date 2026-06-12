@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033440",
   "name": "vastai-core-workflow-b",
   "slug": "vastai-core-workflow-b",
   "description": "Execute Vast.ai secondary workflow: multi-instance orchestration, spot",
   "content": "# Vast.ai Core Workflow B: Multi-Instance & Cost Optimization\n\n## Overview\n\nSecondary workflow for Vast.ai: orchestrate multiple GPU instances for distributed training, implement automatic spot interruption recovery with checkpoint-based resume, and analyze spending to reduce per-job cost.\n\n## Prerequisites\n\n- Completed `vastai-core-workflow-a`\n- Understanding of distributed training (PyTorch DDP, DeepSpeed)\n- Checkpoint-based training pipeline\n\n## Instructions\n\n### Step 1: Multi-Instance Provisioning\n\n```python\nimport subprocess, json, time\nfrom concurrent.futures import ThreadPoolExecutor\n\ndef provision_cluster(num_nodes, gpu_name=\"A100\", min_vram=80, image=\"\"):\n    \"\"\"Provision multiple GPU instances for distributed training.\"\"\"\n    # Search for matching offers\n    query = (f\"num_gpus=1 gpu_name={gpu_name} gpu_ram>={min_vram} \"\n             f\"reliability>0.98 inet_down>500 rentable=true\")\n    result = subprocess.run(\n        [\"vastai\", \"search\", \"offers\", query, \"--order\", \"dph_total\",\n         \"--raw\", \"--limit\", str(num_nodes * 3)],\n        capture_output=True, text=True, check=True,\n    )\n    offers = json.loads(result.stdout)\n    if len(offers) < num_nodes:\n        raise RuntimeError(f\"Only {len(offers)} offers, need {num_nodes}\")\n\n    # Provision nodes in parallel\n    instances = []\n    for i, offer in enumerate(offers[:num_nodes]):\n        inst_id = provision_single(offer[\"id\"], image, rank=i)\n        instances.append({\"id\": inst_id, \"rank\": i, \"offer\": offer})\n\n    # Wait for all to be running\n    for inst in instances:\n        info = wait_for_running(inst[\"id\"])\n        inst.update({\"ssh_host\": info[\"ssh_host\"], \"ssh_port\": info[\"ssh_port\"]})\n\n    return instances\n```\n\n### Step 2: Spot Interruption Recovery\n\n```python\nclass SpotRecoveryManager:\n    \"\"\"Monitor instances and replace preempted spot instances.\"\"\"\n\n    def __init__(self, client, checkpoint_dir=\"/workspace/checkpoints\"):\n        self.client = client\n        self.checkpoint_dir = checkpoint_dir\n\n    def monitor_and_recover(self, instances, image, poll_interval=60):\n        \"\"\"Poll instance status; replace any that are destroyed/error.\"\"\"\n        while True:\n            for inst in instances:\n                result = subprocess.run(\n                    [\"vastai\", \"show\", \"instance\", str(inst[\"id\"]), \"--raw\"],\n                    capture_output=True, text=True,\n                )\n                info = json.loads(result.stdout)\n                status = info.get(\"actual_status\", \"unknown\")\n\n                if status in (\"exited\", \"error\", \"offline\"):\n                    print(f\"Instance {inst['id']} lost (status={status}). Replacing...\")\n                    new_inst = self.replace_instance(inst, image)\n                    inst.update(new_inst)\n\n            time.sleep(poll_interval)\n\n    def replace_instance(self, old_inst, image):\n        \"\"\"Provision replacement and resume from last checkpoint.\"\"\"\n        # Search for a new offer\n        offers = search_offers(gpu_name=old_inst[\"offer\"][\"gpu_name\"])\n        new_id = provision_single(offers[0][\"id\"], image, rank=old_inst[\"rank\"])\n        info = wait_for_running(new_id)\n\n        # Upload last checkpoint to new instance\n        subprocess.run([\n            \"scp\", \"-P\", str(info[\"ssh_port\"]), \"-r\",\n            f\"{self.checkpoint_dir}/\",\n            f\"root@{info['ssh_host']}:/workspace/checkpoints/\",\n        ], check=True)\n\n        return {\"id\": new_id, \"ssh_host\": info[\"ssh_host\"],\n                \"ssh_port\": info[\"ssh_port\"]}\n```\n\n### Step 3: Cost Analysis\n\n```python\ndef analyze_spending():\n    \"\"\"Pull billing history and compute cost-per-GPU-hour by GPU type.\"\"\"\n    result = subprocess.run(\n        [\"vastai\", \"show\", \"invoices\", \"--raw\"],\n        capture_output=True, text=True,\n    )\n    invoices = json.loads(result.stdout)\n\n    # Aggregate by GPU type\n    by_gpu = {}\n    for inv in invoices:\n        gpu = inv.get(\"gpu_name\", \"unknown\")\n        cost = inv.get(\"total_cost\", 0)\n        hours = inv.get(\"duration_hours\", 0)\n        if gpu not in by_gpu:\n            by_gpu[gpu] = {\"total_cost\": 0, \"total_hours\": 0}\n        by_gpu[gpu][\"total_cost\"] += cost\n        by_gpu[gpu][\"total_hours\"] += hours\n\n    print(\"GPU Cost Summary:\")\n    for gpu, data in sorted(by_gpu.items(), key=lambda x: x[1][\"total_cost\"], reverse=True):\n        avg = data[\"total_cost\"] / max(data[\"total_hours\"], 1)\n        print(f\"  {gpu}: ${data['total_cost']:.2f} total, \"\n              f\"{data['total_hours']:.1f}hrs, ${avg:.3f}/hr avg\")\n```\n\n### Step 4: Destroy Cluster\n\n```python\ndef destroy_cluster(instances):\n    \"\"\"Destroy all instances in a cluster to stop billing.\"\"\"\n    for inst in instances:\n        subprocess.run(\n            [\"vastai\", \"destroy\", \"instance\", str(inst[\"id\"])],\n            check=True,\n        )\n        print(f\"Destroyed instance {inst['id']} (rank {inst['rank']})\")\n    print(f\"All {len(instances)} instances destroyed \u2014 billing stopped\")\n```\n\n## Output\n\n- Multi-node GPU cluster provisioned from marketplace offers\n- Automatic spot interruption detection and recovery with checkpoint resume\n- Cost analysis report comparing GPU types and actual spend\n- Clean cluster teardown stopping all billing\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Insufficient offers for cluster | Not enough matching GPUs available | Reduce `num_nodes` or relax GPU requirements |\n| Checkpoint corruption on transfer | Interrupted SCP during preemption | Verify checkpoint integrity with hash check before resume |\n| Node communication failure | Firewall between instances | Use instances from the same datacenter if possible |\n| Budget exceeded | Unexpected spot price spikes | Set `dph_total` ceiling in search query |\n\n## Resources\n\n- [Vast.ai Instance Types](https://docs.vast.ai/api-reference/instances/create-instance)\n- [Search Filtering](https://docs.vast.ai/search-and-filter-gpu-offers)\n- [CLI Reference](https://docs.vast.ai/cli/get-started)\n\n## Next Steps\n\nFor common errors, see `vastai-common-errors`.\n\n## Examples\n\n**Distributed fine-tuning**: Provision 4x A100 instances, configure PyTorch DDP with `torchrun --nproc_per_node=1 --nnodes=4`, save checkpoints every 500 steps, and implement spot recovery to auto-resume from the latest checkpoint.\n\n**Cost comparison**: Run the same workload on RTX 4090 ($0.20/hr) vs A100 ($1.50/hr) and compare wall-clock time vs total cost to find the optimal GPU type for your specific model.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "vastai-core-workflow-b",
-    "description": "Execute Vast.ai secondary workflow: multi-instance orchestration, spot",
-    "allowed-tools": "Read, Write, Edit, Bash(vastai:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

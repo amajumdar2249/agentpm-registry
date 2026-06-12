@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000043869",
   "name": "vtex-io-service-paths-and-cdn",
   "slug": "vtex-io-service-paths-and-cdn-3",
   "description": "Apply when defining service.json routes, choosing public vs segment vs private URL prefixes for VTEX IO services, or setting HTTP cache headers that interact with the VTEX edge and CDN. Covers path patterns, cookie visibility, edge caching behavior, and aligning Cache-Control with data sensitivity. Use for Node or .NET IO backends where request path and response headers determine CDN safety.",
   "content": "\n# VTEX IO service paths and CDN behavior\n\n## When this skill applies\n\nUse this skill when you define or change **`service.json` routes** for a VTEX IO backend and need the edge (CDN) to pass the **right cookies** and apply the **right caching** for that endpoint\u2019s data.\n\n- Choosing between **public**, **segment** (`/_v/segment/...`), and **private** (`/_v/private/...`) path prefixes for a route\n- Setting **`Cache-Control`** (and related headers) on HTTP responses so **public** cache behavior matches **data scope** (anonymous vs segment vs authenticated shopper)\n- Explaining why a route **does not** receive `vtex_session` or `vtex_segment` cookies\n- Troubleshooting **CloudFront** or edge behavior when cookies are missing (see official troubleshooting)\n\nDo not use this skill for:\n\n- Application-level LRU caches, VBase, or stale-while-revalidate orchestration \u2192 use **vtex-io-application-performance**\n- GraphQL field-level `@cacheControl` only \u2192 use **vtex-io-graphql-api** alongside this skill\n\n## Decision rules\n\n- Paths are declared in **`service.json`** under `routes`. The **prefix** you choose (`/yourPath`, `/_v/segment/yourPath`, `/_v/private/yourPath`) controls **cookie forwarding** and **whether VTEX may cache the service response at the edge**\u2014see the [Service path patterns](https://developers.vtex.com/docs/guides/service-path-patterns) table.\n- **Public** (`{yourPath}`): **No guarantee** the app receives request cookies. The edge **may cache** responses when possible. Use for **non-user-specific** data (e.g. static reference data that is safe to share across shoppers).\n- **Segment** (`/_v/segment/{yourPath}`): The app receives **`vtex_segment`**. The edge caches **per segment**. Use when the response depends on **segment** (currency, region, sales channel, etc.) but **not** on authenticated identity.\n- **Private** (`/_v/private/{yourPath}`): The app receives **`vtex_segment`** and **`vtex_session`**. The edge **does not cache** the service response. Use for **identity- or session-scoped** data (orders, addresses, profile).\n- **`Cache-Control` on responses** must align with **classification**: never signal **CDN/shared cache** for payloads that embed **secrets**, **per-user** data, or **authorization** decisions unless the contract is explicitly designed for that (e.g. immutable public assets). When in doubt, prefer **private paths** and **no-store / private** cache directives for shopper-specific JSON.\n- Read [Sessions System overview](https://developers.vtex.com/docs/guides/sessions-system-overview) for how cookies relate to paths and sessions.\n\n## Hard constraints\n\n### Constraint: Do not use a public or segment-cached path for private or auth-scoped payloads\n\nRoutes that return **authenticated shopper data**, **PII**, or **authorization-sensitive** JSON **must not** rely on **public** paths or **edge-cached** responses that could serve one user\u2019s data to another.\n\n**Why this matters** \u2014 The edge may cache or route without the session context you expect; misclassified data can leak across users or segments.\n\n**Detection** \u2014 A route under a **public** path returns **order history**, **addresses**, **tokens**, or **account-specific** fields; or **`Cache-Control`** suggests long-lived public caching for such payloads.\n\n**Correct** \u2014 Use `/_v/private/...` for the route (or a pattern that receives `vtex_session`), and set **appropriate** `Cache-Control` (e.g. `private, no-store` for JSON APIs that are not cacheable). Note: the **path prefix** (`/_v/private/`) controls **CDN and cookie** behavior; the `\"public\": true` field controls **whether VTEX auth tokens are required** to call the route\u2014these are **orthogonal**.\n\n```json\n{\n  \"routes\": {\n    \"myOrders\": {\n      \"path\": \"/_v/private/my-app/orders\",\n      \"public\": true\n    }\n  }\n}\n```\n\n**Wrong** \u2014 Exposing `GET /my-app/orders` as a **public** path (no `/_v/private/` or `/_v/segment/` prefix) and returning **per-user** JSON while **assuming** the browser session is always visible to the service.\n\n## Preferred pattern\n\n1. **Classify the response** (anonymous, segment, authenticated) **before** picking the path prefix.\n2. **Map** to **public** / **segment** / **private** per [Service path patterns](https://developers.vtex.com/docs/guides/service-path-patterns).\n3. **Set** response headers **explicitly** where the platform allows: align **`Cache-Control`** with the same classification (public immutable vs private vs no-store).\n4. **Document** any path that must stay **private** for security or compliance so storefronts and BFFs do not link-cache it incorrectly.\n\n## Common failure modes\n\n- **Assuming cookies on public routes** \u2014 Services do not reliably receive `vtex_session` on public paths; identity logic fails intermittently.\n- **Caching personalized JSON at the edge** \u2014 Long `max-age` on user-specific responses without `private` path + correct cache policy.\n- **Mixing concerns** \u2014 One route returns both **public catalog** and **private account** data; split endpoints or use **private** + server-side auth checks.\n- **Ignoring segment** \u2014 Price or promo that varies by **currency** or **segment** is served on a **public** path and **cached** for the wrong segment.\n\n## Review checklist\n\n- [ ] Is each route\u2019s **path prefix** (`public` / `/_v/segment` / `/_v/private`) justified by **cookie** and **Caching behavior** in the official table?\n- [ ] For **shopper-specific** or **auth** responses, is the route **private** (or otherwise protected) and **not** edge-cacheable inappropriately?\n- [ ] Do **`Cache-Control`** (and related) headers **match** data sensitivity?\n- [ ] Are **parallel** calls from the client using the **correct** path for each payload type?\n\n## Related skills\n\n- [vtex-io-application-performance](../vtex-io-application-performance/SKILL.md) \u2014 Application performance (LRU, VBase, AppSettings, parallel fetches, tenant keys)\n- [vtex-io-service-apps](../vtex-io-service-apps/SKILL.md) \u2014 `service.json` and Service entry\n- [vtex-io-graphql-api](../vtex-io-graphql-api/SKILL.md) \u2014 GraphQL cache and `@cacheControl`\n- [headless-caching-strategy](../../../headless/skills/headless-caching-strategy/SKILL.md) \u2014 Storefront / BFF caching\n\n## Reference\n\n- [Service path patterns](https://developers.vtex.com/docs/guides/service-path-patterns) \u2014 Path formats, cookies, caching, use cases\n- [Sessions System overview](https://developers.vtex.com/docs/guides/sessions-system-overview) \u2014 `vtex_segment`, `vtex_session`, session behavior\n- [App Development](https://developers.vtex.com/docs/app-development) \u2014 VTEX IO app development hub\n- [VTEX IO Engineering guidelines](https://developers.vtex.com/docs/guides/vtex-io-documentation-engineering-guidelines) \u2014 Scalability and IO development practices\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "vtex-io-service-paths-and-cdn",
-    "description": "Apply when defining service.json routes, choosing public vs segment vs private URL prefixes for VTEX IO services, or setting HTTP cache headers that interact with the VTEX edge and CDN. Covers path patterns, cookie visibility, edge caching behavior, and aligning Cache-Control with data sensitivity. Use for Node or .NET IO backends where request path and response headers determine CDN safety."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

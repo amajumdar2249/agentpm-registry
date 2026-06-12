@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032864",
   "name": "palantir-observability",
   "slug": "palantir-observability",
   "description": "Set up observability for Palantir Foundry integrations with metrics,",
   "content": "# Palantir Observability\n\n## Overview\n\nSet up comprehensive observability for Foundry integrations: structured logging with request IDs, Prometheus metrics for API latency/errors, health check endpoints, and alert rules.\n\n## Prerequisites\n\n- Working Foundry integration\n- Prometheus + Grafana (or equivalent monitoring stack)\n- Familiarity with `palantir-prod-checklist`\n\n## Instructions\n\n### Step 1: Structured Logging\n\n```python\nimport logging, json, time, uuid\n\nclass FoundryLogger:\n    def __init__(self):\n        self.logger = logging.getLogger(\"foundry\")\n        handler = logging.StreamHandler()\n        handler.setFormatter(logging.Formatter(\"%(message)s\"))\n        self.logger.addHandler(handler)\n        self.logger.setLevel(logging.INFO)\n\n    def log_api_call(self, method: str, endpoint: str, status: int, duration_ms: float):\n        self.logger.info(json.dumps({\n            \"timestamp\": time.strftime(\"%Y-%m-%dT%H:%M:%SZ\", time.gmtime()),\n            \"request_id\": str(uuid.uuid4())[:8],\n            \"service\": \"foundry\",\n            \"method\": method,\n            \"endpoint\": endpoint,\n            \"status\": status,\n            \"duration_ms\": round(duration_ms, 2),\n            \"level\": \"error\" if status >= 400 else \"info\",\n        }))\n```\n\n### Step 2: Prometheus Metrics\n\n```python\nfrom prometheus_client import Counter, Histogram, Gauge\n\nfoundry_requests = Counter(\n    \"foundry_api_requests_total\",\n    \"Total Foundry API requests\",\n    [\"method\", \"endpoint\", \"status\"],\n)\nfoundry_latency = Histogram(\n    \"foundry_api_latency_seconds\",\n    \"Foundry API request latency\",\n    [\"endpoint\"],\n    buckets=[0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],\n)\nfoundry_health = Gauge(\n    \"foundry_api_healthy\",\n    \"1 if Foundry API is reachable, 0 otherwise\",\n)\n\ndef instrumented_call(client, method, *args, **kwargs):\n    endpoint = method.__qualname__\n    start = time.monotonic()\n    try:\n        result = method(*args, **kwargs)\n        status = 200\n        return result\n    except foundry.ApiError as e:\n        status = e.status_code\n        raise\n    finally:\n        duration = time.monotonic() - start\n        foundry_requests.labels(method=\"API\", endpoint=endpoint, status=str(status)).inc()\n        foundry_latency.labels(endpoint=endpoint).observe(duration)\n```\n\n### Step 3: Health Check with Metrics\n\n```python\nimport time\n\nasync def foundry_health_check():\n    start = time.monotonic()\n    try:\n        list(client.ontologies.Ontology.list())\n        latency = (time.monotonic() - start) * 1000\n        foundry_health.set(1)\n        return {\"status\": \"healthy\", \"latency_ms\": round(latency, 1)}\n    except Exception as e:\n        foundry_health.set(0)\n        return {\"status\": \"unhealthy\", \"error\": str(e)}\n```\n\n### Step 4: Alert Rules (Prometheus)\n\n```yaml\ngroups:\n  - name: foundry\n    rules:\n      - alert: FoundryAPIDown\n        expr: foundry_api_healthy == 0\n        for: 2m\n        labels:\n          severity: critical\n        annotations:\n          summary: \"Foundry API unreachable for 2+ minutes\"\n\n      - alert: FoundryHighErrorRate\n        expr: rate(foundry_api_requests_total{status=~\"5..\"}[5m]) > 0.05\n        for: 5m\n        labels:\n          severity: warning\n\n      - alert: FoundryHighLatency\n        expr: histogram_quantile(0.99, foundry_api_latency_seconds_bucket) > 10\n        for: 10m\n        labels:\n          severity: warning\n```\n\n### Step 5: Dashboard Queries (Grafana)\n\n```\n# Request rate by status\nrate(foundry_api_requests_total[5m])\n\n# P99 latency\nhistogram_quantile(0.99, rate(foundry_api_latency_seconds_bucket[5m]))\n\n# Error ratio\nsum(rate(foundry_api_requests_total{status=~\"[45]..\"}[5m]))\n/ sum(rate(foundry_api_requests_total[5m]))\n```\n\n## Output\n\n- Structured JSON logging with request IDs\n- Prometheus metrics for requests, latency, and health\n- Alert rules for API downtime, error rate, and latency\n- Grafana dashboard queries\n\n## Error Handling\n\n| Alert | Threshold | Action |\n|-------|-----------|--------|\n| API Down | Health check fails 2min | Page on-call, check `palantir-incident-runbook` |\n| High Error Rate | 5xx > 5% for 5min | Check Foundry status, review logs |\n| High Latency | p99 > 10s for 10min | Review query complexity, check Foundry load |\n| Rate Limited | 429 count spike | Tune rate limiter settings |\n\n## Resources\n\n- [Prometheus Python Client](https://github.com/prometheus/client_python)\n- [Foundry API Reference](https://www.palantir.com/docs/foundry/api/general/overview/introduction)\n\n## Next Steps\n\nFor multi-environment setup, see `palantir-multi-env-setup`.\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "palantir-observability",
-    "description": "Set up observability for Palantir Foundry integrations with metrics,",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "2.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

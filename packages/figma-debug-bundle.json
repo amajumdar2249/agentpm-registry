@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031911",
   "name": "figma-debug-bundle",
   "slug": "figma-debug-bundle",
   "description": "Collect Figma API diagnostic evidence for support tickets and troubleshooting.",
   "content": "# Figma Debug Bundle\n\n## Overview\n\nCollect all diagnostic data needed to troubleshoot Figma REST API issues or submit a support request. Outputs a redacted archive with connectivity tests, token validation, rate limit status, and API response samples.\n\n## Prerequisites\n\n- `FIGMA_PAT` environment variable set\n- `curl` and `jq` available\n- A Figma file key to test against\n\n## Instructions\n\n### Step 1: Create Debug Bundle Script\n\n```bash\n#!/bin/bash\n# figma-debug-bundle.sh\nset -euo pipefail\n\nBUNDLE_DIR=\"figma-debug-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE_DIR\"\n\necho \"=== Figma Debug Bundle ===\" | tee \"$BUNDLE_DIR/summary.txt\"\necho \"Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"---\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# 1. Environment info\necho \"--- Environment ---\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"Node: $(node --version 2>/dev/null || echo 'not installed')\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"npm: $(npm --version 2>/dev/null || echo 'not installed')\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"OS: $(uname -srm)\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"PAT configured: ${FIGMA_PAT:+YES (${#FIGMA_PAT} chars)}\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"File key: ${FIGMA_FILE_KEY:-NOT SET}\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# 2. API connectivity test\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"--- Connectivity ---\" >> \"$BUNDLE_DIR/summary.txt\"\necho -n \"GET /v1/me: \" >> \"$BUNDLE_DIR/summary.txt\"\ncurl -s -o \"$BUNDLE_DIR/me.json\" -w \"%{http_code} %{time_total}s\" \\\n  -H \"X-Figma-Token: ${FIGMA_PAT}\" \\\n  https://api.figma.com/v1/me >> \"$BUNDLE_DIR/summary.txt\"\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# 3. File access test (if key is set)\nif [ -n \"${FIGMA_FILE_KEY:-}\" ]; then\n  echo -n \"GET /v1/files: \" >> \"$BUNDLE_DIR/summary.txt\"\n  curl -s -o \"$BUNDLE_DIR/file-meta.json\" -w \"%{http_code} %{time_total}s\" \\\n    -H \"X-Figma-Token: ${FIGMA_PAT}\" \\\n    \"https://api.figma.com/v1/files/${FIGMA_FILE_KEY}?depth=1\" >> \"$BUNDLE_DIR/summary.txt\"\n  echo \"\" >> \"$BUNDLE_DIR/summary.txt\"\nfi\n\n# 4. Rate limit check (capture response headers)\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"--- Rate Limit Headers ---\" >> \"$BUNDLE_DIR/summary.txt\"\ncurl -s -D \"$BUNDLE_DIR/headers.txt\" -o /dev/null \\\n  -H \"X-Figma-Token: ${FIGMA_PAT}\" \\\n  https://api.figma.com/v1/me\ngrep -iE \"(rate|retry|figma)\" \"$BUNDLE_DIR/headers.txt\" >> \"$BUNDLE_DIR/summary.txt\" 2>/dev/null || echo \"No rate limit headers\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# 5. Redact sensitive data\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"--- Redaction ---\" >> \"$BUNDLE_DIR/summary.txt\"\n# Remove email from /v1/me response\nif [ -f \"$BUNDLE_DIR/me.json\" ]; then\n  jq '{handle: .handle, id: .id, img_url: \"[REDACTED]\", email: \"[REDACTED]\"}' \\\n    \"$BUNDLE_DIR/me.json\" > \"$BUNDLE_DIR/me-redacted.json\" 2>/dev/null || true\n  rm -f \"$BUNDLE_DIR/me.json\"\nfi\n\n# Remove raw headers (may contain token in other tools)\nrm -f \"$BUNDLE_DIR/headers.txt\"\n\necho \"Redaction complete\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# 6. Package\ntar -czf \"$BUNDLE_DIR.tar.gz\" \"$BUNDLE_DIR\"\nrm -rf \"$BUNDLE_DIR\"\necho \"Bundle created: $BUNDLE_DIR.tar.gz\"\n```\n\n### Step 2: Run the Bundle\n\n```bash\nchmod +x figma-debug-bundle.sh\n./figma-debug-bundle.sh\n```\n\n### Step 3: Review Before Sharing\n\n```bash\n# Inspect the bundle contents\ntar -tzf figma-debug-*.tar.gz\n# Extract and review\ntar -xzf figma-debug-*.tar.gz\ncat figma-debug-*/summary.txt\n```\n\n## Output\n\n- `figma-debug-YYYYMMDD-HHMMSS.tar.gz` containing:\n  - `summary.txt` -- environment, connectivity, rate limit status\n  - `me-redacted.json` -- authenticated user (email redacted)\n  - `file-meta.json` -- file metadata (if file key provided)\n\n## Error Handling\n\n| Item | What It Catches | Why It Matters |\n|------|----------------|----------------|\n| `/v1/me` response code | Token validity | 403 = expired/invalid PAT |\n| `/v1/files` response code | File access | 404 = wrong key, 403 = not shared |\n| Rate limit headers | Throttling state | `Retry-After` shows if currently limited |\n| Response time | Latency issues | >2s suggests network or server problems |\n\n## Examples\n\n### ALWAYS REDACT Before Sharing\n\n- Personal access tokens (`figd_*`)\n- Email addresses\n- OAuth client secrets\n- File content (unless relevant to the bug)\n\n### Safe to Include\n\n- HTTP status codes and response times\n- Error message text\n- Node IDs and file keys (not secrets)\n- Rate limit header values\n\n## Resources\n\n- [Figma Support](https://help.figma.com/hc/en-us/requests/new)\n- [Figma Status Page](https://status.figma.com)\n- [Figma Developer Forum](https://forum.figma.com/)\n\n## Next Steps\n\nFor rate limit issues, see `figma-rate-limits`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "figma-debug-bundle",
-    "description": "Collect Figma API diagnostic evidence for support tickets and troubleshooting.",
-    "allowed-tools": "Read, Bash(curl:*), Bash(tar:*), Bash(node:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

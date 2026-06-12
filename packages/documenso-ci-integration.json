@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031789",
   "name": "documenso-ci-integration",
   "slug": "documenso-ci-integration",
   "description": "Configure CI/CD pipelines for Documenso integrations.",
   "content": "# Documenso CI Integration\n\n## Overview\n\nConfigure CI/CD pipelines for Documenso integrations with GitHub Actions. Covers unit testing with mocks, integration testing against staging, and deployment workflows with secret management.\n\n## Prerequisites\n\n- GitHub repository with Actions enabled\n- Documenso staging API key\n- Test environment configured (see `documenso-local-dev-loop`)\n\n## Instructions\n\n### Step 1: GitHub Actions Workflow\n\n```yaml\n# .github/workflows/documenso-ci.yml\nname: Documenso CI\n\non:\n  push:\n    branches: [main, develop]\n  pull_request:\n    branches: [main]\n\nenv:\n  NODE_ENV: test\n\njobs:\n  unit-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n      - run: npm test\n        # Unit tests use mocks \u2014 no API key needed\n\n  integration-tests:\n    runs-on: ubuntu-latest\n    if: github.event_name == 'push'  # Only on push to main/develop\n    needs: unit-tests\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n      - run: npm run test:integration\n        env:\n          DOCUMENSO_API_KEY: ${{ secrets.DOCUMENSO_STAGING_API_KEY }}\n      - run: npm run test:cleanup  # Remove test documents\n        env:\n          DOCUMENSO_API_KEY: ${{ secrets.DOCUMENSO_STAGING_API_KEY }}\n        if: always()\n```\n\n### Step 2: Unit Tests with Mocked SDK\n\n```typescript\n// tests/unit/document-service.test.ts\nimport { describe, it, expect, vi, beforeEach } from \"vitest\";\nimport { createMockClient } from \"../mocks/documenso\";\nimport { DocumentService } from \"../../src/services/document-service\";\n\ndescribe(\"DocumentService\", () => {\n  let service: DocumentService;\n  let mockClient: ReturnType<typeof createMockClient>;\n\n  beforeEach(() => {\n    mockClient = createMockClient();\n    service = new DocumentService(mockClient as any);\n  });\n\n  it(\"creates document with recipients and sends\", async () => {\n    const result = await service.createAndSend({\n      title: \"Test Contract\",\n      pdfPath: \"./fixtures/test.pdf\",\n      signers: [{ email: \"test@example.com\", name: \"Test User\" }],\n    });\n\n    expect(mockClient.documents.createV0).toHaveBeenCalledWith({ title: \"Test Contract\" });\n    expect(mockClient.documentsRecipients.createV0).toHaveBeenCalled();\n    expect(mockClient.documents.sendV0).toHaveBeenCalled();\n    expect(result.documentId).toBe(1);\n  });\n\n  it(\"handles API errors gracefully\", async () => {\n    mockClient.documents.createV0.mockRejectedValue(\n      Object.assign(new Error(\"Unauthorized\"), { statusCode: 401 })\n    );\n\n    await expect(service.createAndSend({\n      title: \"Test\",\n      pdfPath: \"./fixtures/test.pdf\",\n      signers: [],\n    })).rejects.toThrow(\"Unauthorized\");\n  });\n});\n```\n\n### Step 3: Integration Tests Against Staging\n\n```typescript\n// tests/integration/document-lifecycle.test.ts\nimport { describe, it, expect, afterAll } from \"vitest\";\nimport { Documenso } from \"@documenso/sdk-typescript\";\n\nconst client = new Documenso({ apiKey: process.env.DOCUMENSO_API_KEY! });\nconst testDocIds: number[] = [];\n\ndescribe(\"Document Lifecycle (Integration)\", () => {\n  it(\"creates a document\", async () => {\n    const doc = await client.documents.createV0({\n      title: \"[CI-TEST] Integration Test\",\n    });\n    testDocIds.push(doc.documentId);\n    expect(doc.documentId).toBeGreaterThan(0);\n  }, 30000);\n\n  it(\"lists documents\", async () => {\n    const { documents } = await client.documents.findV0({ page: 1, perPage: 5 });\n    expect(documents.length).toBeGreaterThan(0);\n  }, 15000);\n\n  afterAll(async () => {\n    // Cleanup: delete test documents\n    for (const id of testDocIds) {\n      try {\n        await client.documents.deleteV0(id);\n      } catch {\n        console.warn(`Cleanup: could not delete document ${id}`);\n      }\n    }\n  });\n});\n```\n\n### Step 4: Add Secrets to GitHub\n\n```bash\n# Using GitHub CLI\ngh secret set DOCUMENSO_STAGING_API_KEY --body \"api_stg_xxxxxxxxxxxx\"\ngh secret set DOCUMENSO_WEBHOOK_SECRET --body \"whsec_xxxxxxxxxxxx\"\n\n# Verify secrets exist\ngh secret list\n```\n\n### Step 5: Package.json Scripts\n\n```json\n{\n  \"scripts\": {\n    \"test\": \"vitest run tests/unit/\",\n    \"test:integration\": \"vitest run tests/integration/ --timeout 60000\",\n    \"test:cleanup\": \"tsx scripts/cleanup-test-docs.ts\",\n    \"test:all\": \"npm test && npm run test:integration\"\n  }\n}\n```\n\n### Step 6: Pre-commit Hook (Optional)\n\n```bash\n# .husky/pre-commit\nnpm test -- --run\n```\n\nThis runs unit tests (with mocks) before every commit, catching issues early without needing API access.\n\n## CI Strategy Summary\n\n| Test Type | Runs On | API Key Needed? | Speed |\n|-----------|---------|-----------------|-------|\n| Unit tests (mocks) | Every push + PR | No | Fast (~5s) |\n| Integration tests | Push to main/develop only | Yes (staging) | Slow (~30s) |\n| Cleanup | After integration tests | Yes (staging) | Fast |\n\n## Error Handling\n\n| CI Issue | Cause | Solution |\n|----------|-------|----------|\n| Integration test timeout | Slow API | Increase vitest `timeout` to 60s |\n| Rate limit in CI | Too many test runs | Use mocks for PRs, live API only on main |\n| Secret not found | Missing GitHub secret | Add via `gh secret set` |\n| Stale test data | Cleanup didn't run | Run `npm run test:cleanup` manually |\n\n## Resources\n\n- [GitHub Actions Documentation](https://docs.github.com/en/actions)\n- [Vitest Documentation](https://vitest.dev/)\n- [Documenso SDK Testing](https://github.com/documenso/sdk-typescript)\n\n## Next Steps\n\nFor deployment strategies, see `documenso-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "documenso-ci-integration",
-    "description": "Configure CI/CD pipelines for Documenso integrations.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

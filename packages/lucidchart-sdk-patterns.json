@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032575",
   "name": "lucidchart-sdk-patterns",
   "slug": "lucidchart-sdk-patterns",
   "description": "Sdk Patterns for Lucidchart.",
   "content": "# Lucidchart SDK Patterns\n\n## Overview\n\nLucid's REST API uses OAuth 2.0 with versioned `Lucid-Api-Version` headers to manage documents, pages, shapes, data-linked fields, and collaborative comments. A structured SDK client is essential because the API requires version negotiation on every request, returns deeply nested shape tree hierarchies, and enforces document-level locking for concurrent edits. These patterns provide OAuth token lifecycle management, typed shape and document models, fluent query building for filtered shape searches, and mock factories for diagramming test scenarios.\n\n## Prerequisites\n\n- Node.js 18+, TypeScript 5+\n- `LUCID_CLIENT_ID` and `LUCID_CLIENT_SECRET` environment variables (OAuth 2.0 app credentials)\n- `LUCID_ACCESS_TOKEN` or refresh token flow for per-user access\n- `axios` or `node-fetch` for HTTP transport\n\n## Singleton Client\n\n```typescript\ninterface LucidConfig {\n  clientId: string;\n  clientSecret: string;\n  accessToken: string;\n  apiVersion?: string;\n  baseUrl?: string;\n}\n\nlet client: LucidClient | null = null;\n\nexport function getLucidClient(overrides?: Partial<LucidConfig>): LucidClient {\n  if (!client) {\n    const config: LucidConfig = {\n      clientId: process.env.LUCID_CLIENT_ID ?? '',\n      clientSecret: process.env.LUCID_CLIENT_SECRET ?? '',\n      accessToken: process.env.LUCID_ACCESS_TOKEN ?? '',\n      apiVersion: '2',\n      baseUrl: 'https://api.lucid.co',\n      ...overrides,\n    };\n    if (!config.accessToken) throw new Error('LUCID_ACCESS_TOKEN is required');\n    client = new LucidClient(config);\n  }\n  return client;\n}\n```\n\n## Error Wrapper\n\n```typescript\ninterface LucidApiError { status: number; errorCode: string; message: string; documentId?: string; }\n\nasync function safeLucid<T>(fn: () => Promise<T>): Promise<T> {\n  try { return await fn(); }\n  catch (err: any) {\n    const parsed: LucidApiError = {\n      status: err.response?.status ?? 500,\n      errorCode: err.response?.data?.errorCode ?? 'INTERNAL',\n      message: err.response?.data?.message ?? err.message,\n      documentId: err.response?.data?.documentId,\n    };\n    if (parsed.status === 429) {\n      const wait = parseInt(err.response?.headers?.['x-ratelimit-reset'] ?? '10', 10);\n      await new Promise(r => setTimeout(r, wait * 1000));\n      return fn();\n    }\n    if (parsed.errorCode === 'DOCUMENT_LOCKED') throw new Error(`Document ${parsed.documentId} is locked by another editor`);\n    if (parsed.status === 403) throw new Error(`Insufficient permissions: ${parsed.message}`);\n    throw new Error(`Lucid ${parsed.errorCode} (${parsed.status}): ${parsed.message}`);\n  }\n}\n```\n\n## Request Builder\n\n```typescript\nclass ShapeQueryBuilder {\n  private params: Record<string, string> = {};\n  inDocument(docId: string) { this.params.documentId = docId; return this; }\n  onPage(pageId: string) { this.params.pageId = pageId; return this; }\n  ofType(shapeType: string) { this.params.className = shapeType; return this; }\n  withDataField(key: string, value: string) { this.params[`data.${key}`] = value; return this; }\n  limit(n: number) { this.params.limit = String(Math.min(n, 200)); return this; }\n  offset(n: number) { this.params.offset = String(n); return this; }\n  build(): URLSearchParams { return new URLSearchParams(this.params); }\n}\n```\n\n## Response Types\n\n```typescript\ninterface LucidDocument { id: string; title: string; editUrl: string; pageCount: number; lastModified: string; owner: string; }\ninterface LucidPage { id: string; title: string; index: number; width: number; height: number; }\ninterface LucidShape { id: string; className: string; boundingBox: { x: number; y: number; w: number; h: number }; text: string; dataFields: Record<string, string>; }\ninterface LucidComment { id: string; author: string; body: string; shapeId?: string; resolved: boolean; createdAt: string; }\n```\n\n## Middleware Pattern\n\n```typescript\ntype Middleware = (req: RequestInit, next: () => Promise<Response>) => Promise<Response>;\n\nconst versionMiddleware: Middleware = (req, next) => {\n  req.headers = { ...req.headers as Record<string, string>, 'Lucid-Api-Version': '2' };\n  return next();\n};\nconst oauthRefreshMiddleware = (refreshToken: string): Middleware => async (req, next) => {\n  const res = await next();\n  if (res.status === 401) {\n    const tokens = await refreshOAuthToken(refreshToken);\n    (req.headers as Record<string, string>).Authorization = `Bearer ${tokens.access_token}`;\n    return next();\n  }\n  return res;\n};\n```\n\n## Testing Utilities\n\n```typescript\nfunction mockDocument(overrides?: Partial<LucidDocument>): LucidDocument {\n  return { id: 'doc_abc123', title: 'Architecture Diagram', editUrl: 'https://lucid.app/documents/edit/doc_abc123', pageCount: 3, lastModified: '2025-06-01T12:00:00Z', owner: 'user@example.com', ...overrides };\n}\nfunction mockShape(overrides?: Partial<LucidShape>): LucidShape {\n  return { id: 'shape_001', className: 'ProcessBlock', boundingBox: { x: 100, y: 50, w: 200, h: 100 }, text: 'API Gateway', dataFields: {}, ...overrides };\n}\nfunction mockComment(shapeId: string): LucidComment {\n  return { id: 'cmt_xyz', author: 'reviewer@example.com', body: 'Needs error path', shapeId, resolved: false, createdAt: '2025-06-02T09:00:00Z' };\n}\n```\n\n## Error Handling\n\n| Pattern | When to Use | Example |\n|---------|-------------|---------|\n| Version negotiation | API returns 400 on outdated version header | Catch version mismatch, retry with server-suggested version |\n| Document lock retry | 409 DOCUMENT_LOCKED during shape updates | Exponential backoff up to 3 retries, then surface to user |\n| OAuth token refresh | 401 on any endpoint | Use refresh token middleware, update stored access token |\n| Permission escalation | 403 on shared document operations | Check document sharing settings before write operations |\n| Shape tree validation | Creating shapes with invalid parent references | Validate page and container IDs exist before shape POST |\n\n## Resources\n\n- [Lucid API Reference](https://developer.lucid.co/reference/overview)\n\n## Next Steps\n\nApply in `lucidchart-core-workflow-a`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "lucidchart-sdk-patterns",
-    "description": "Sdk Patterns for Lucidchart.",
-    "Trigger": "lucidchart sdk patterns\".",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

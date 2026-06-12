@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000021690",
   "name": "supabase-patterns",
   "slug": "supabase-patterns-2",
   "description": "Generic Supabase best practices for Row Level Security, realtime subscriptions, storage, and edge functions. Framework-agnostic.",
   "content": "\n# Supabase Patterns Skill\n\nUniversal patterns for working with Supabase in any project. Covers RLS policies, realtime, storage, edge functions, and migrations.\n\n## Design Principle\n\nThis skill is **framework-generic**. It provides universal Supabase patterns:\n- NOT tailored to Book-Vetting, ocr-service, or any specific project\n- Covers common patterns applicable across all Supabase projects\n- Project-specific configurations go in project-specific skills\n\n## Variables\n\n| Variable | Default | Description |\n|----------|---------|-------------|\n| SUPABASE_DIR | supabase | Directory for Supabase config |\n| ENFORCE_RLS | true | Require RLS on all tables |\n| REALTIME_ENABLED | auto | Auto-detect realtime tables |\n\n## Instructions\n\n**MANDATORY** - Follow the Workflow steps below in order.\n\n1. Check Supabase project configuration\n2. Review existing RLS policies\n3. Follow security-first patterns\n4. Keep migrations organized\n\n## Red Flags - STOP and Reconsider\n\nIf you're about to:\n- Create a table without RLS policies\n- Use service role key in client-side code\n- Skip migrations for schema changes\n- Expose sensitive data in realtime\n\n**STOP** -> Add RLS policies -> Use appropriate keys -> Then proceed\n\n## Cookbook\n\n### RLS Policies\n- IF: Creating or modifying RLS policies\n- THEN: Read and execute `./cookbook/rls-policies.md`\n\n### Realtime Subscriptions\n- IF: Setting up realtime features\n- THEN: Read and execute `./cookbook/realtime-subscriptions.md`\n\n### Storage Patterns\n- IF: Working with Supabase Storage\n- THEN: Read and execute `./cookbook/storage-patterns.md`\n\n## Quick Reference\n\n### Project Structure\n\n```\nsupabase/\n\u251c\u2500\u2500 config.toml           # Project config\n\u251c\u2500\u2500 migrations/           # SQL migrations\n\u2502   \u251c\u2500\u2500 20231201000000_initial.sql\n\u2502   \u2514\u2500\u2500 20231202000000_add_users.sql\n\u251c\u2500\u2500 seed.sql             # Seed data\n\u2514\u2500\u2500 functions/           # Edge functions\n    \u2514\u2500\u2500 hello/\n        \u2514\u2500\u2500 index.ts\n```\n\n### Key Commands\n\n```bash\n# Initialize project\nsupabase init\n\n# Start local development\nsupabase start\n\n# Generate migration\nsupabase migration new my_migration\n\n# Push to remote\nsupabase db push\n\n# Generate types\nsupabase gen types typescript --local > types/supabase.ts\n```\n\n### RLS Policy Patterns\n\n```sql\n-- Enable RLS\nALTER TABLE posts ENABLE ROW LEVEL SECURITY;\n\n-- User owns row\nCREATE POLICY \"Users can view own posts\"\n  ON posts FOR SELECT\n  USING (auth.uid() = user_id);\n\n-- User can insert own\nCREATE POLICY \"Users can create posts\"\n  ON posts FOR INSERT\n  WITH CHECK (auth.uid() = user_id);\n\n-- Public read\nCREATE POLICY \"Public read\"\n  ON posts FOR SELECT\n  USING (is_public = true);\n```\n\n### Client Patterns\n\n```typescript\n// Initialize client\nimport { createClient } from '@supabase/supabase-js';\nimport type { Database } from './types/supabase';\n\nconst supabase = createClient<Database>(\n  process.env.SUPABASE_URL!,\n  process.env.SUPABASE_ANON_KEY!\n);\n\n// Query with types\nconst { data, error } = await supabase\n  .from('posts')\n  .select('*')\n  .eq('user_id', userId);\n\n// Insert\nconst { data, error } = await supabase\n  .from('posts')\n  .insert({ title, content, user_id: userId })\n  .select()\n  .single();\n```\n\n### Realtime Pattern\n\n```typescript\n// Subscribe to changes\nconst subscription = supabase\n  .channel('posts')\n  .on(\n    'postgres_changes',\n    { event: '*', schema: 'public', table: 'posts' },\n    (payload) => {\n      console.log('Change:', payload);\n    }\n  )\n  .subscribe();\n\n// Cleanup\nsubscription.unsubscribe();\n```\n\n### Storage Pattern\n\n```typescript\n// Upload file\nconst { data, error } = await supabase.storage\n  .from('avatars')\n  .upload(`${userId}/avatar.png`, file, {\n    upsert: true,\n    contentType: 'image/png'\n  });\n\n// Get public URL\nconst { data: { publicUrl } } = supabase.storage\n  .from('avatars')\n  .getPublicUrl(`${userId}/avatar.png`);\n```\n\n## Security Checklist\n\n### Before Production\n\n- [ ] RLS enabled on ALL tables\n- [ ] Service role key NOT in client code\n- [ ] Anon key for public operations only\n- [ ] Storage buckets have policies\n- [ ] Sensitive columns excluded from realtime\n- [ ] API rate limiting configured\n- [ ] CORS properly configured\n\n### RLS Checklist\n\n- [ ] Every table has RLS enabled\n- [ ] SELECT policies defined\n- [ ] INSERT/UPDATE/DELETE policies defined\n- [ ] Policies tested with different roles\n- [ ] No overly permissive policies\n\n## Integration\n\n### With Schema Alignment\n\nSupabase migrations should align with ORM models:\n\n```sql\n-- supabase/migrations/20231201000000_users.sql\nCREATE TABLE users (\n  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  email TEXT UNIQUE NOT NULL,\n  name TEXT,\n  created_at TIMESTAMPTZ DEFAULT now()\n);\n```\n\nShould match:\n\n```python\n# SQLAlchemy model\nclass User(Base):\n    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)\n    email: Mapped[str] = mapped_column(unique=True)\n    name: Mapped[str | None]\n    created_at: Mapped[datetime] = mapped_column(server_default=func.now())\n```\n\n### Type Generation\n\n```bash\n# Generate TypeScript types from local schema\nsupabase gen types typescript --local > types/supabase.ts\n\n# Use in client\nimport type { Database } from './types/supabase';\ntype Post = Database['public']['Tables']['posts']['Row'];\n```\n\n## Best Practices\n\n1. **RLS first**: Always add RLS policies when creating tables\n2. **Migrations for everything**: Never modify schema directly\n3. **Type safety**: Generate and use TypeScript types\n4. **Key hygiene**: Use anon key client-side, service key server-side only\n5. **Test policies**: Test RLS with actual user contexts\n6. **Realtime carefully**: Only enable for tables that need it\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "supabase-patterns",
-    "description": "Generic Supabase best practices for Row Level Security, realtime subscriptions, storage, and edge functions. Framework-agnostic."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000020534",
   "name": "inngest-handler",
   "slug": "inngest-handler-2",
   "description": "Create and manage Inngest functions for reliable background jobs, workflows, and scheduled tasks.",
   "content": "\n# Inngest Function Handler Skill\n\nThis skill defines the standards for building durable, multi-step workflows using Inngest.\n\n## \ud83d\udea8 HARD RULES (Strictly Follow)\n\n1.  **NO `setTimeout` / `setInterval`**:\n    -   \u274c **Bad**: `await new Promise(r => setTimeout(r, 1000))`\n    -   \u2705 **Good**: `await step.sleep(\"wait-1s\", \"1s\")`\n    -   *Reason*: Serverless functions time out; Inngest sleeps persist for up to a year.\n\n2.  **NO Side Effects Outside Steps**:\n    -   Any database write, API call, or non-deterministic logic (random, date) **MUST** be wrapped in `step.run()`.\n    -   *Reason*: Inngest functions execute multiple times (memoization). Code outside steps runs every time.\n\n3.  **Deterministic Steps**:\n    -   Steps are memoized by their ID (1st arg). IDs must be unique and stable.\n    -   Do not dynamically generate step IDs unless you know what you are doing (e.g., inside loops with index).\n\n4.  **Return Data from Steps**:\n    -   If you need a value later, return it from the step.\n    -   \u274c **Bad**: `let userId; await step.run(..., () => { userId = ... })`\n    -   \u2705 **Good**: `const userId = await step.run(..., () => { return ... })`\n\n## Core Patterns\n\n### 1. Multi-Step Execution\nWrap all logic in steps to ensure retriability and resumability.\n\n```typescript\nexport const processOrder = inngest.createFunction(\n  { id: \"process-order\" },\n  { event: \"shop/order.created\" },\n  async ({ event, step }) => {\n    // 1. Step: Validate (Retriable)\n    const user = await step.run(\"get-user\", async () => {\n      return await db.users.findById(event.data.userId);\n    });\n\n    // 2. Step: Sleep (Durable pause)\n    await step.sleep(\"wait-for-payment\", \"1h\");\n\n    // 3. Step: Wait for Event (Human/System interaction)\n    const payment = await step.waitForEvent(\"wait-payment\", {\n      event: \"shop/payment.success\",\n      match: \"data.orderId\",\n      timeout: \"24h\"\n    });\n\n    // 4. Step: Conditional Logic\n    if (!payment) {\n        await step.run(\"cancel-order\", async () => { ... });\n    }\n  }\n);\n```\n\n### 2. Parallelism\nRun steps concurrently to speed up execution.\n\n```typescript\nconst [user, subscription] = await Promise.all([\n  step.run(\"fetch-user\", () => db.users.find(...)),\n  step.run(\"fetch-sub\", () => stripe.subscriptions.retrieve(...))\n]);\n```\n\n### 3. Working with Loops\nInside loops, ensure step IDs are unique.\n\n```typescript\nconst items = event.data.items;\nfor (const item of items) {\n  // Use dynamic ID to ensure uniqueness per item\n  await step.run(`process-item-${item.id}`, async () => {\n    await processItem(item);\n    });\n}\n```\n\n## Configuration & Flow Control\n\n### Rate Limiting & Throttling\nPrevent overwhelming 3rd party APIs.\n\n```typescript\ninngest.createFunction({\n    id: \"sync-crm\",\n    // Max 10 requests per minute per user\n    rateLimit: { limit: 10, period: \"1m\", key: \"event.data.userId\" },\n    // Drop events if queue is full\n    throttle: { limit: 5, period: \"1s\" } \n}, ...);\n```\n\n### Debounce\nProcess only the latest event in a window (e.g., search indexing).\n\n```typescript\ninngest.createFunction({\n    id: \"index-product\",\n    // Wait 10s for more events; only run with the latest data\n    debounce: { period: \"10s\", key: \"event.data.productId\" }\n}, ...);\n```\n\n### Priority\nPrioritize specific events (e.g., Paid users).\n\n```typescript\ninngest.createFunction({\n    id: \"generate-report\",\n    // High number = High priority\n    priority: { run: \"event.data.plan === 'enterprise' ? 100 : 0\" }\n}, ...);\n```\n\n## Error Handling\n\n### Automatic Retries\nInngest retries steps automatically on error (default ~4-5 times with backoff).\n-   **Customize**: `{ retries: 10 }` in config.\n\n### Non-Retriable Errors\nStop execution immediately if the error is fatal (e.g., 400 Bad Request).\n\n```typescript\nimport { NonRetriableError } from \"inngest\";\n\nawait step.run(\"validate\", async () => {\n  if (!isValid) throw new NonRetriableError(\"Invalid payload\");\n});\n```\n\n### Failure Handlers (Rollbacks)\nExecute cleanup logic if the function fails after all retries.\n\n```typescript\nexport const riskyFunc = inngest.createFunction(\n  { \n    id: \"risky-transfer\",\n    // Runs if main handler fails\n    onFailure: async ({ error, event, step }) => {\n      await step.run(\"rollback-funds\", async () => {\n        await reverseTransfer(event.data.transferId);\n      });\n      await step.run(\"notify-admin\", async () => {\n        await sendAlert(`Transfer failed: ${error.message}`);\n      });\n    }\n  },\n  { event: \"bank/transfer.init\" },\n  async ({ step }) => { /* ... */ }\n);\n```\n\n## Registration\n**MANDATORY**: All functions must be imported and exported in `src/lib/inngest/functions/index.ts`.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "inngest-handler",
-    "description": "Create and manage Inngest functions for reliable background jobs, workflows, and scheduled tasks."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

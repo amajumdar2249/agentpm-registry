@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000016327",
   "name": "exploring-codebases",
   "slug": "exploring-codebases",
   "description": ">-",
   "content": "\n# Exploring Codebases\n\nExploratory code analysis for unfamiliar repositories. Orchestrates\ntree-sitting (structural) and featuring (semantic) over a local copy.\n\n## Workflow\n\nFive numbered steps, in order. Do not skip step 0.\n\n### 0. Setup (once per session)\n\n```bash\nuv venv /home/claude/.venv 2>/dev/null\nuv pip install tree-sitter-language-pack --python /home/claude/.venv/bin/python\nexport PYTHON=/home/claude/.venv/bin/python\nexport TREESIT=/mnt/skills/user/tree-sitting/scripts/treesit.py\nexport GATHER=/mnt/skills/user/featuring/scripts/gather.py\n```\n\nIf step 2's `--stats` later reports `Scanned 0 files ... Errors: 1`, the\nlanguage pack isn't loaded \u2014 come back here and install. Treesit fails\nsilently on missing deps; it does not raise a useful error.\n\n### 1. Get the repo (tarball, not per-file)\n\n```bash\nOWNER=...\nREPO=...\nREF=main                    # branch name, tag, or SHA. For a PR: pull/N/head\ncurl -sL -H \"Authorization: Bearer $GH_TOKEN\" \\\n  \"https://api.github.com/repos/$OWNER/$REPO/tarball/$REF\" -o /tmp/$REPO.tar.gz\nmkdir -p /tmp/$REPO && tar -xzf /tmp/$REPO.tar.gz -C /tmp/$REPO --strip-components=1\nls /tmp/$REPO | head        # sanity check \u2014 did extraction land?\n```\n\nOne HTTP call gets the whole repo. Do NOT curl README, cat files, or\nfetch via `contents/PATH` first \u2014 they're in the tarball. The\nAuthorization header is only needed for private repos; public repos\nwork without it.\n\n**Ref selection matters.** If exploring a feature branch, PR, or tag,\nset `REF` accordingly. The default `main` will silently give you stale\ncode if the question is about an unmerged branch.\n\n### 2. Structural scan\n\n```bash\n$PYTHON $TREESIT /tmp/$REPO --stats\n```\n\nRead the output. It gives file counts, symbol counts, languages, and\nper-directory symbol density. This IS the orienting artifact \u2014 treat it\nas the product of this step, not warm-up.\n\n**Drill only if you have a specific question.** For pure \"what is this\nrepo\" exploration, skip drilling and go to step 3 \u2014 featuring surfaces\nthe interesting paths for you. Drill when a user asked about a specific\nsubsystem, or when step 3's output raises a question that needs source.\n\n**When you do drill, batch queries in one invocation.** Every treesit\ncall pays the full scan cost. Multiple queries added to the same command\nshare that scan and each additional query adds ~0ms. If you're about to\nmake a second treesit call on the same path, fold it into the first.\n\n```bash\n# GOOD \u2014 one scan, three answers\n$PYTHON $TREESIT /tmp/$REPO --path=SUBDIR --detail=full \\\n  'find:*Handler*:function' 'source:main' 'refs:Config'\n\n# BAD \u2014 three scans, three answers (3\u00d7 the cost for the same information)\n$PYTHON $TREESIT /tmp/$REPO --path=SUBDIR --detail=full\n$PYTHON $TREESIT /tmp/$REPO 'find:*Handler*:function'\n$PYTHON $TREESIT /tmp/$REPO 'refs:Config'\n```\n\n### 3. Feature synthesis\n\n```bash\n$PYTHON $GATHER /tmp/$REPO \\\n  --skip tests,.github,node_modules --source-budget 8000\n```\n\nOutput includes a \"Candidate areas for sub-files (by symbol density)\"\nlist near the top \u2014 that's your drill-target picker, ranked.\n\n### 4. Reason about the combined output\n\nSynthesize 2+3: capabilities, feature groups, architecture, entry\npoints, anomalies. Produce `_FEATURES.md` when warranted. This is the\nLLM step; everything before was mechanical.\n\n## When to Use This vs Other Skills\n\n| Situation | Use |\n|-----------|-----|\n| \"I just cloned this, what is it?\" | **exploring-codebases** (this skill) |\n| \"Where is the retry logic?\" | searching-codebases |\n| \"Find all files matching `class.*Error`\" | searching-codebases |\n| \"Show me the symbols in auth.py\" | tree-sitting directly |\n| \"Which files are most about CSRF / sessions / queryset filtering?\" | bm25 |\n| \"Rank these docs by relevance to a multi-word concept\" | bm25 |\n| \"Document what this codebase does\" | featuring directly |\n\nExploring is the **divergent** skill \u2014 you don't know what you're looking\nfor yet. Searching is the **convergent** skill \u2014 you know what you want.\n\n### Pairing bm25 with this workflow\n\nOnce steps 2\u20133 have surfaced the rough shape of the repo, `bm25` is the\nnatural complement when you want **ranked content search** beyond grep\nand beyond exact-symbol lookup. It ranks files by lexical relevance to a\nmulti-word query, which is useful for \"what's this codebase actually\n*about* when I search for X?\" \u2014 particularly when you don't yet know the\nsymbol name to feed to `tree-sitting`.\n\n```bash\nBM25=/mnt/skills/user/bm25/scripts/bm25.py\n\n# Pass multiple queries \u2014 index builds once, all queries reuse it\npython3 $BM25 /tmp/$REPO 'auth flow' 'session backend' 'middleware pipeline' \\\n  --exclude 'tests/*' --exclude '*/tests/*' --top-k 5\n```\n\nTwo patterns that pair especially well:\n\n1. **bm25 \u2192 tree-sitting.** Use bm25 to find the top-ranked files for a\n   concept; then `tree-sitting source:Symbol:path/to/file.py` to read\n   the actual implementation.\n2. **bm25 with `--exclude 'tests/*'`.** Test directories tend to dominate\n   keyword queries because test names redundantly mention domain terms.\n   Excluding them up front lands you on implementation files.\n\nbm25 is corpus-agnostic \u2014 it'll also work on `project` knowledge stores\nor `uploads/` if your exploration spans docs, transcripts, or PDFs.\n\n## Notes\n\n- **Large repos (>100 files)**: use `--skip tests,vendored,docs,...` in\n  step 2 to focus the scan.\n- **Monorepos**: treat each package/service as a separate exploration.\n  Generate per-subsystem `_FEATURES.md` files linked from a root index.\n- **Drill heuristics** (if step 2 drilling is warranted): directories\n  with high symbol-to-file ratio (dense logic), entry-point names\n  (`main`, `cli`, `app`, `server`, `routes`), files with many imports\n  (integration points).\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "exploring-codebases",
-    "description": ">-",
-    "metadata": "",
-    "version": "2.3.0"
+  "author": "agentpm",
+  "version": "2.3.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

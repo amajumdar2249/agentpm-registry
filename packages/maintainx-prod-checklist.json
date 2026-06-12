@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032596",
   "name": "maintainx-prod-checklist",
   "slug": "maintainx-prod-checklist",
   "description": "Production deployment checklist for MaintainX integrations.",
   "content": "# MaintainX Production Checklist\n\n## Overview\n\nComprehensive pre-deployment and post-deployment checklist for MaintainX integrations covering security, reliability, observability, and data integrity.\n\n## Prerequisites\n\n- MaintainX integration developed and tested\n- Production MaintainX account with API access\n- Deployment infrastructure ready (Cloud Run, K8s, or similar)\n\n## Instructions\n\n### Step 1: Authentication & Security\n\n```bash\n# Verify production API key works\ncurl -s -o /dev/null -w \"HTTP %{http_code}\" \\\n  https://api.getmaintainx.com/v1/users?limit=1 \\\n  -H \"Authorization: Bearer $MAINTAINX_API_KEY_PROD\"\n\n# Verify no secrets in codebase\nnpx gitleaks detect --source . --no-git\n```\n\n- [ ] API key stored in secret manager (not env file or code)\n- [ ] `.env` and `*.key` files in `.gitignore`\n- [ ] Pre-commit hook blocking secret commits\n- [ ] API key rotation schedule set (every 90 days)\n- [ ] Input validation on all user-provided data (Zod or similar)\n\n### Step 2: Error Handling & Resilience\n\n- [ ] Retry logic with exponential backoff for 429 and 5xx errors\n- [ ] `Retry-After` header honored on 429 responses\n- [ ] Circuit breaker for cascading failure prevention\n- [ ] Graceful degradation when MaintainX API is down\n- [ ] Request timeout set (30 seconds recommended)\n\n```typescript\n// Verify retry logic is configured\nconst client = axios.create({\n  baseURL: 'https://api.getmaintainx.com/v1',\n  timeout: 30_000,  // 30 second timeout\n  headers: { Authorization: `Bearer ${apiKey}` },\n});\n```\n\n### Step 3: Data Integrity\n\n- [ ] Cursor-based pagination handles all list endpoints\n- [ ] Idempotency keys on webhook handlers (prevent duplicate processing)\n- [ ] Data sync state persisted (survives restarts)\n- [ ] Reconciliation job runs daily to detect drift\n- [ ] Work order status transitions follow valid paths only\n\n### Step 4: Observability\n\n- [ ] Structured JSON logging (not console.log in production)\n- [ ] API request metrics (count, latency, error rate)\n- [ ] Health check endpoint (`/health`) returning API connectivity status\n- [ ] Readiness probe (`/ready`) for container orchestration\n- [ ] Alerting configured for error rate > 5%, latency > 5s, sync lag > 15min\n\n### Step 5: Performance\n\n- [ ] Connection pooling with keep-alive enabled\n- [ ] Response caching for static resources (users, locations, teams)\n- [ ] Max page size (100) used for pagination\n- [ ] Webhook-driven updates instead of polling where possible\n- [ ] Rate limiting to stay within API quotas\n\n### Step 6: Deployment\n\n- [ ] Multi-stage Docker build (small production image)\n- [ ] Non-root user in container\n- [ ] Resource limits set (CPU, memory)\n- [ ] Auto-scaling configured (min 1 instance for webhooks)\n- [ ] Rollback procedure documented and tested\n\n## Post-Deployment Verification\n\n```bash\n#!/bin/bash\necho \"=== Post-Deployment Verification ===\"\n\n# 1. Health check\necho -n \"Health check: \"\ncurl -s http://YOUR_SERVICE_URL/health | jq -r '.status'\n\n# 2. API connectivity\necho -n \"MaintainX API: \"\ncurl -s -o /dev/null -w \"%{http_code}\" \\\n  https://api.getmaintainx.com/v1/users?limit=1 \\\n  -H \"Authorization: Bearer $MAINTAINX_API_KEY_PROD\"\necho \"\"\n\n# 3. Create test work order\necho \"Creating test work order...\"\nWO=$(curl -s -X POST https://api.getmaintainx.com/v1/workorders \\\n  -H \"Authorization: Bearer $MAINTAINX_API_KEY_PROD\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"title\":\"Post-deploy verification test\",\"priority\":\"LOW\"}')\nWO_ID=$(echo $WO | jq -r '.id')\necho \"  Created: #$WO_ID\"\n\n# 4. Verify retrieval\necho -n \"Retrieve test: \"\ncurl -s \"https://api.getmaintainx.com/v1/workorders/$WO_ID\" \\\n  -H \"Authorization: Bearer $MAINTAINX_API_KEY_PROD\" | jq -r '.status'\n\n# 5. Clean up\ncurl -s -X PATCH \"https://api.getmaintainx.com/v1/workorders/$WO_ID\" \\\n  -H \"Authorization: Bearer $MAINTAINX_API_KEY_PROD\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"status\":\"CLOSED\"}' > /dev/null\necho \"  Cleaned up test work order #$WO_ID\"\n\n# 6. Check metrics endpoint\necho -n \"Metrics endpoint: \"\ncurl -s -o /dev/null -w \"%{http_code}\" http://YOUR_SERVICE_URL/metrics\necho \"\"\n\necho \"=== Verification complete ===\"\n```\n\n## Go-Live Readiness Summary\n\n| Category | Requirement | Priority |\n|----------|------------|----------|\n| Auth | Secret manager, no hardcoded keys | P0 |\n| Errors | Retry + backoff for 429/5xx | P0 |\n| Data | Pagination, idempotency, sync state | P0 |\n| Observability | Logging, metrics, health check | P0 |\n| Performance | Connection pooling, caching | P1 |\n| Security | Input validation, audit logging | P1 |\n| Deployment | Docker, non-root, resource limits | P1 |\n| Recovery | Rollback procedure, reconciliation | P2 |\n\n## Output\n\n- All P0 checklist items verified before go-live\n- Post-deployment verification script run successfully\n- Test work order created and cleaned up in production\n- Health check and metrics endpoints responding\n- Go-live readiness documented\n\n## Error Handling\n\n| Issue | Check | Solution |\n|-------|-------|----------|\n| Health check fails post-deploy | `curl /health` | Check API key is mounted, restart pod |\n| Test work order creation fails | Check HTTP status | Verify API key permissions and plan tier |\n| Metrics endpoint 404 | Check route config | Ensure metrics server started on correct port |\n| High error rate after deploy | Check logs | Roll back, investigate, fix, redeploy |\n\n## Resources\n\n- [MaintainX API Reference](https://developer.maintainx.com/reference)\n- [MaintainX Status Page](https://status.getmaintainx.com)\n- [12-Factor App](https://12factor.net/)\n\n## Next Steps\n\nFor API version migrations, see `maintainx-upgrade-migration`.\n\n## Examples\n\n**Automated pre-deploy gate in CI**:\n\n```yaml\n# .github/workflows/deploy.yml\njobs:\n  pre-deploy-check:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - run: npx gitleaks detect --source . --no-git\n      - run: npm run test -- --coverage --coverageThreshold='{\"global\":{\"branches\":80}}'\n      - run: npm run lint\n      - run: npm run typecheck\n```\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "maintainx-prod-checklist",
-    "description": "Production deployment checklist for MaintainX integrations.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(node:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

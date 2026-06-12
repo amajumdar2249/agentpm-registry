@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032096",
   "name": "gamma-enterprise-rbac",
   "slug": "gamma-enterprise-rbac",
   "description": "Implement enterprise role-based access control for Gamma integrations.",
   "content": "# Gamma Enterprise RBAC\n\n## Overview\n\nImplement role-based access control for Gamma API integrations. Gamma's API uses a single API key per workspace -- granular permissions must be implemented in your application layer. The Teams and Business plans support workspace-level collaboration with shared themes and folders.\n\n## Prerequisites\n\n- Gamma Teams or Business subscription\n- Application database for user/role storage\n- Completed `gamma-install-auth` setup\n\n## Gamma Access Model\n\n```\nGamma Workspace (1 API key)\n\u251c\u2500\u2500 Themes (shared across workspace)\n\u251c\u2500\u2500 Folders (shared across workspace)\n\u2514\u2500\u2500 Generations (tied to API key, not individual users)\n\nYour Application Layer (you implement this):\n\u251c\u2500\u2500 Organization\n\u2502   \u251c\u2500\u2500 Admin (manage API key, configure themes)\n\u2502   \u251c\u2500\u2500 Editor (generate presentations, use templates)\n\u2502   \u251c\u2500\u2500 Viewer (view generated presentations, download exports)\n\u2502   \u2514\u2500\u2500 Guest (no generation access)\n```\n\n**Key point:** Gamma's API does not have per-user authentication. All API calls use the workspace API key. You must enforce per-user permissions in your application.\n\n## Instructions\n\n### Step 1: Define Role Hierarchy\n\n```typescript\n// src/auth/gamma-roles.ts\ntype GammaRole = \"guest\" | \"viewer\" | \"editor\" | \"admin\";\n\nconst PERMISSIONS: Record<GammaRole, string[]> = {\n  guest: [],\n  viewer: [\"generation:view\", \"export:download\"],\n  editor: [\"generation:view\", \"generation:create\", \"export:download\", \"template:use\"],\n  admin: [\n    \"generation:view\", \"generation:create\", \"export:download\",\n    \"template:use\", \"template:manage\", \"theme:manage\",\n    \"settings:manage\", \"member:manage\",\n  ],\n};\n\nfunction hasPermission(role: GammaRole, permission: string): boolean {\n  return PERMISSIONS[role]?.includes(permission) ?? false;\n}\n```\n\n### Step 2: Authorization Middleware\n\n```typescript\n// src/middleware/gamma-auth.ts\nimport { Request, Response, NextFunction } from \"express\";\n\nfunction requireGammaPermission(permission: string) {\n  return (req: Request, res: Response, next: NextFunction) => {\n    const user = req.user; // Set by your auth middleware\n    if (!user) return res.status(401).json({ error: \"Unauthorized\" });\n\n    if (!hasPermission(user.gammaRole, permission)) {\n      return res.status(403).json({\n        error: \"Forbidden\",\n        required: permission,\n        userRole: user.gammaRole,\n      });\n    }\n    next();\n  };\n}\n\n// Usage\napp.post(\"/api/presentations\",\n  requireGammaPermission(\"generation:create\"),\n  async (req, res) => {\n    const gamma = createGammaClient({ apiKey: process.env.GAMMA_API_KEY! });\n    const { generationId } = await gamma.generate(req.body);\n    // Track ownership in your database\n    await db.generations.create({\n      data: { generationId, userId: req.user.id, teamId: req.user.teamId },\n    });\n    res.json({ generationId });\n  }\n);\n\napp.get(\"/api/presentations/:id\",\n  requireGammaPermission(\"generation:view\"),\n  async (req, res) => {\n    // Only return if user owns it or is in the same team\n    const gen = await db.generations.findFirst({\n      where: { generationId: req.params.id, teamId: req.user.teamId },\n    });\n    if (!gen) return res.status(404).json({ error: \"Not found\" });\n    res.json(gen);\n  }\n);\n```\n\n### Step 3: Multi-Tenant Workspace Isolation\n\n```typescript\n// src/tenant/gamma-tenant.ts\n// Each tenant can have their own Gamma workspace (API key)\n// or share a workspace with resource-level isolation\n\ninterface Tenant {\n  id: string;\n  name: string;\n  gammaApiKey: string; // Encrypted in database\n}\n\nclass TenantGammaService {\n  private clients = new Map<string, ReturnType<typeof createGammaClient>>();\n\n  getClient(tenant: Tenant) {\n    if (!this.clients.has(tenant.id)) {\n      this.clients.set(\n        tenant.id,\n        createGammaClient({ apiKey: tenant.gammaApiKey })\n      );\n    }\n    return this.clients.get(tenant.id)!;\n  }\n\n  async generate(tenant: Tenant, userId: string, content: string, options: any = {}) {\n    const gamma = this.getClient(tenant);\n    const { generationId } = await gamma.generate({\n      content,\n      ...options,\n    });\n\n    // Track with tenant isolation\n    await db.generations.create({\n      data: { generationId, tenantId: tenant.id, userId },\n    });\n\n    return { generationId };\n  }\n}\n```\n\n### Step 4: Credit Quota Per User/Team\n\n```typescript\n// src/quota/gamma-quotas.ts\ninterface Quota {\n  maxGenerationsPerDay: number;\n  maxCreditsPerMonth: number;\n}\n\nconst ROLE_QUOTAS: Record<GammaRole, Quota> = {\n  guest: { maxGenerationsPerDay: 0, maxCreditsPerMonth: 0 },\n  viewer: { maxGenerationsPerDay: 0, maxCreditsPerMonth: 0 },\n  editor: { maxGenerationsPerDay: 10, maxCreditsPerMonth: 500 },\n  admin: { maxGenerationsPerDay: 50, maxCreditsPerMonth: 5000 },\n};\n\nasync function checkQuota(userId: string, role: GammaRole): Promise<boolean> {\n  const quota = ROLE_QUOTAS[role];\n  if (quota.maxGenerationsPerDay === 0) return false;\n\n  const todayCount = await db.generations.count({\n    where: {\n      userId,\n      createdAt: { gte: new Date(new Date().toDateString()) },\n    },\n  });\n\n  return todayCount < quota.maxGenerationsPerDay;\n}\n```\n\n### Step 5: Audit Logging\n\n```typescript\n// src/audit/gamma-audit.ts\nasync function auditGammaAction(entry: {\n  userId: string;\n  teamId: string;\n  action: string;\n  resourceId?: string;\n  metadata?: Record<string, any>;\n}) {\n  await db.auditLog.create({\n    data: {\n      ...entry,\n      timestamp: new Date(),\n      service: \"gamma\",\n    },\n  });\n}\n\n// Usage\nawait auditGammaAction({\n  userId: req.user.id,\n  teamId: req.user.teamId,\n  action: \"generation.create\",\n  resourceId: generationId,\n  metadata: { outputFormat: \"presentation\", credits: result.creditsUsed },\n});\n```\n\n## Permission Matrix\n\n| Permission | Guest | Viewer | Editor | Admin |\n|------------|-------|--------|--------|-------|\n| View presentations | No | Yes | Yes | Yes |\n| Download exports | No | Yes | Yes | Yes |\n| Create generations | No | No | Yes | Yes |\n| Use templates | No | No | Yes | Yes |\n| Manage themes/folders | No | No | No | Yes |\n| Manage team members | No | No | No | Yes |\n| Configure API key | No | No | No | Yes |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| 403 Forbidden | Insufficient role | Check user's `gammaRole` assignment |\n| Cross-tenant access | Wrong API key | Verify tenant isolation in `getClient()` |\n| Quota exceeded | Too many generations | Show remaining quota, wait for reset |\n| Privilege escalation | Missing role check | Verify middleware on all routes |\n\n## Resources\n\n- [Gamma Teams](https://gamma.app/pricing)\n- [RBAC Best Practices](https://csrc.nist.gov/projects/role-based-access-control)\n- [OWASP Access Control](https://cheatsheetseries.owasp.org/cheatsheets/Access_Control_Cheat_Sheet.html)\n\n## Next Steps\n\nProceed to `gamma-migration-deep-dive` for platform migration.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "gamma-enterprise-rbac",
-    "description": "Implement enterprise role-based access control for Gamma integrations.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

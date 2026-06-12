@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000029325",
   "name": "bio-epidemiological-genomics-pathogen-typing",
   "slug": "bio-epidemiological-genomics-pathogen-typing-2",
   "description": "Perform multi-locus sequence typing (MLST), core genome MLST, and SNP-based strain typing for bacterial isolate characterization using mlst and chewBBACA. Use when identifying strain types, tracking outbreak clones, or characterizing bacterial isolates.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: mlst 2.23+, numpy 1.26+, pandas 2.2+, scanpy 1.10+, scipy 1.12+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Pathogen Typing\n\n**\"Type my bacterial isolates by MLST\"** \u2192 Assign multi-locus sequence types to bacterial genomes for isolate characterization, outbreak clone identification, and strain tracking.\n- CLI: `mlst assembly.fasta` for 7-gene MLST typing\n- CLI: `chewBBACA.py AlleleCall` for core genome MLST (cgMLST)\n\n## MLST with mlst Tool\n\n```bash\n# Install mlst\nconda install -c bioconda mlst\n\n# Basic MLST typing\nmlst genome.fasta\n# Output: genome.fasta  ecoli  ST131  adk(53) fumC(40) gyrB(47) ...\n\n# Batch typing\nmlst *.fasta > typing_results.tsv\n\n# Specify scheme\nmlst --scheme senterica genome.fasta\n\n# List available schemes\nmlst --list\n\n# Include allele sequences in output\nmlst --csv genome.fasta > results.csv\n```\n\n## Parse MLST Results\n\n```python\nimport pandas as pd\nimport subprocess\n\ndef run_mlst(fasta_files, scheme=None):\n    '''Run MLST on multiple genomes\n\n    Returns DataFrame with:\n    - Sample name\n    - Scheme (auto-detected or specified)\n    - Sequence type (ST)\n    - Allele profiles\n\n    ST interpretation:\n    - Known ST: Matches existing type in database\n    - Novel allele: New allele combination, may be unreported ST\n    - Failed: Unable to determine (poor assembly or wrong scheme)\n    '''\n    cmd = ['mlst'] + fasta_files\n    if scheme:\n        cmd.extend(['--scheme', scheme])\n\n    result = subprocess.run(cmd, capture_output=True, text=True)\n\n    lines = result.stdout.strip().split('\\n')\n    data = [line.split('\\t') for line in lines]\n\n    return pd.DataFrame(data, columns=['file', 'scheme', 'ST'] +\n                       [f'locus{i}' for i in range(1, len(data[0])-2)])\n```\n\n## Core Genome MLST (cgMLST)\n\n```bash\n# chewBBACA for cgMLST\npip install chewbbaca\n\n# Download or create schema\nchewBBACA.py DownloadSchema -sp \"Salmonella enterica\" -o schema_dir\n\n# Run cgMLST\nchewBBACA.py AlleleCall -i genomes/ -g schema_dir -o results/\n\n# Analyze results\nchewBBACA.py ExtractCgMLST -i results/results_alleles.tsv \\\n    -o cgmlst_results.tsv --threshold 0.95\n```\n\n## cgMLST Distance Analysis\n\n**Goal:** Compute pairwise allelic distances between isolates and cluster them to identify potential outbreak groups.\n\n**Approach:** Count allelic differences between each pair of isolate profiles (ignoring missing data), then apply single-linkage hierarchical clustering with a pathogen-specific distance threshold.\n\n```python\nimport pandas as pd\nimport numpy as np\n\ndef calculate_cgmlst_distance(profiles):\n    '''Calculate allelic distances between isolates\n\n    Distance interpretation (typical thresholds):\n    - 0-5 allele differences: Same cluster (likely recent transmission)\n    - 6-15 differences: Related (possible epidemiological link)\n    - >15 differences: Different clones\n\n    Note: Thresholds are pathogen-specific. Consult literature.\n    '''\n    n = len(profiles)\n    distances = np.zeros((n, n))\n\n    for i in range(n):\n        for j in range(i+1, n):\n            # Count allelic differences (excluding missing data)\n            diff = sum(1 for a, b in zip(profiles.iloc[i], profiles.iloc[j])\n                      if a != b and a != 0 and b != 0)\n            distances[i, j] = distances[j, i] = diff\n\n    return pd.DataFrame(distances, index=profiles.index, columns=profiles.index)\n\n\ndef identify_clusters(distance_matrix, threshold=5):\n    '''Identify cgMLST clusters\n\n    Threshold values by organism:\n    - E. coli: 10 alleles\n    - Salmonella: 7 alleles\n    - Listeria: 7 alleles\n    - S. aureus: 24 alleles\n    '''\n    from scipy.cluster.hierarchy import linkage, fcluster\n\n    # Convert to condensed distance matrix\n    condensed = distance_matrix.values[np.triu_indices(len(distance_matrix), k=1)]\n\n    # Hierarchical clustering\n    Z = linkage(condensed, method='single')\n    clusters = fcluster(Z, t=threshold, criterion='distance')\n\n    return dict(zip(distance_matrix.index, clusters))\n```\n\n## SNP-Based Typing\n\n```python\ndef snp_typing_from_vcf(vcf_file, reference_positions):\n    '''Extract SNP profile for typing\n\n    Some organisms use canonical SNP positions for typing\n    (e.g., Mycobacterium tuberculosis lineages)\n    '''\n    from cyvcf2 import VCF\n\n    vcf = VCF(vcf_file)\n    profile = {}\n\n    for pos in reference_positions:\n        chrom, position = pos.split(':')\n        for variant in vcf(f'{chrom}:{position}-{position}'):\n            profile[pos] = variant.ALT[0] if variant.ALT else variant.REF\n\n    return profile\n```\n\n## Enterobase Integration\n\n```python\nimport requests\n\ndef query_enterobase(st, organism='ecoli'):\n    '''Query Enterobase for ST metadata\n\n    Enterobase provides:\n    - Geographic distribution\n    - Temporal trends\n    - Associated serotypes\n    - Virulence gene profiles\n    '''\n    # Note: Requires API token\n    url = f'https://enterobase.warwick.ac.uk/api/v2.0/{organism}/sts/{st}'\n\n    # Would need authentication headers\n    # response = requests.get(url, headers={'Authorization': f'Bearer {token}'})\n\n    print(f'Query Enterobase for ST{st}: {url}')\n    return None  # Placeholder - requires authentication\n```\n\n## Related Skills\n\n- epidemiological-genomics/phylodynamics - Time-scaled trees from typed isolates\n- epidemiological-genomics/transmission-inference - Outbreak investigation\n- metagenomics/kraken-classification - Species identification\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-epidemiological-genomics-pathogen-typing",
-    "description": "Perform multi-locus sequence typing (MLST), core genome MLST, and SNP-based strain typing for bacterial isolate characterization using mlst and chewBBACA. Use when identifying strain types, tracking outbreak clones, or characterizing bacterial isolates.",
-    "tool_type": "cli",
-    "primary_tool": "mlst"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

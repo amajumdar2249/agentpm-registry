@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031953",
   "name": "firecrawl-ci-integration",
   "slug": "firecrawl-ci-integration",
   "description": "Configure Firecrawl CI/CD integration with GitHub Actions and automated",
   "content": "# Firecrawl CI Integration\n\n## Overview\n\nSet up CI/CD pipelines to test Firecrawl integrations automatically. Covers GitHub Actions workflow, API key secrets management, integration tests that validate real scraping, and mock-based unit tests for PRs.\n\n## Prerequisites\n\n- GitHub repository with Actions enabled\n- Firecrawl API key for testing (separate from production)\n- `@mendable/firecrawl-js` installed\n\n## Instructions\n\n### Step 1: Configure Secrets\n\n```bash\nset -euo pipefail\n# Store test API key in GitHub Actions secrets\ngh secret set FIRECRAWL_API_KEY --body \"fc-test-key-here\"\n```\n\n### Step 2: GitHub Actions Workflow\n\n```yaml\n# .github/workflows/firecrawl-tests.yml\nname: Firecrawl Integration Tests\n\non:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n\njobs:\n  unit-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: \"20\"\n          cache: \"npm\"\n      - run: npm ci\n      - run: npm test -- --coverage\n        # Unit tests use mocked SDK \u2014 no API key needed\n\n  integration-tests:\n    runs-on: ubuntu-latest\n    if: github.event_name == 'push'  # Only on merge, not PRs (saves credits)\n    env:\n      FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: \"20\"\n          cache: \"npm\"\n      - run: npm ci\n      - run: npm run test:integration\n        timeout-minutes: 5\n```\n\n### Step 3: Integration Tests\n\n```typescript\n// tests/firecrawl.integration.test.ts\nimport { describe, it, expect } from \"vitest\";\nimport FirecrawlApp from \"@mendable/firecrawl-js\";\n\nconst SKIP = !process.env.FIRECRAWL_API_KEY;\n\ndescribe.skipIf(SKIP)(\"Firecrawl Integration\", () => {\n  const firecrawl = new FirecrawlApp({\n    apiKey: process.env.FIRECRAWL_API_KEY!,\n  });\n\n  it(\"scrapes a page to markdown\", async () => {\n    const result = await firecrawl.scrapeUrl(\"https://example.com\", {\n      formats: [\"markdown\"],\n    });\n    expect(result.success).toBe(true);\n    expect(result.markdown).toBeDefined();\n    expect(result.markdown!.length).toBeGreaterThan(50);\n    expect(result.metadata?.title).toBeDefined();\n  }, 30000);\n\n  it(\"maps a site for URLs\", async () => {\n    const result = await firecrawl.mapUrl(\"https://docs.firecrawl.dev\");\n    expect(result.links).toBeDefined();\n    expect(result.links!.length).toBeGreaterThan(0);\n  }, 30000);\n\n  it(\"extracts structured data\", async () => {\n    const result = await firecrawl.scrapeUrl(\"https://example.com\", {\n      formats: [\"extract\"],\n      extract: {\n        schema: {\n          type: \"object\",\n          properties: {\n            title: { type: \"string\" },\n            description: { type: \"string\" },\n          },\n        },\n      },\n    });\n    expect(result.extract).toBeDefined();\n    expect(result.extract?.title).toBeDefined();\n  }, 30000);\n});\n```\n\n### Step 4: Mock-Based Unit Tests (No API Key)\n\n```typescript\n// tests/scraper.unit.test.ts\nimport { describe, it, expect, vi } from \"vitest\";\n\nvi.mock(\"@mendable/firecrawl-js\", () => ({\n  default: vi.fn().mockImplementation(() => ({\n    scrapeUrl: vi.fn().mockResolvedValue({\n      success: true,\n      markdown: \"# Test Page\\n\\nContent here\",\n      metadata: { title: \"Test\", sourceURL: \"https://example.com\" },\n    }),\n    mapUrl: vi.fn().mockResolvedValue({\n      success: true,\n      links: [\"https://example.com/a\", \"https://example.com/b\"],\n    }),\n  })),\n}));\n\nimport { processPage } from \"../src/scraper\";\n\ndescribe(\"Scraper Unit Tests\", () => {\n  it(\"processes scraped content correctly\", async () => {\n    const result = await processPage(\"https://example.com\");\n    expect(result.title).toBe(\"Test\");\n    expect(result.content).toContain(\"Content here\");\n  });\n});\n```\n\n### Step 5: Credit-Aware CI\n\n```yaml\n# Only run expensive crawl tests on release tags\nintegration-crawl:\n  runs-on: ubuntu-latest\n  if: startsWith(github.ref, 'refs/tags/v')\n  env:\n    FIRECRAWL_API_KEY: ${{ secrets.FIRECRAWL_API_KEY }}\n  steps:\n    - uses: actions/checkout@v4\n    - uses: actions/setup-node@v4\n      with:\n        node-version: \"20\"\n    - run: npm ci\n    - run: npm run test:crawl\n      timeout-minutes: 10\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Secret not found | Missing GitHub secret | `gh secret set FIRECRAWL_API_KEY` |\n| Integration test timeout | Slow scrape response | Increase timeout to 30s+ |\n| Tests pass locally, fail in CI | Missing env var | Use `skipIf(!process.env.FIRECRAWL_API_KEY)` |\n| Credit burn from PRs | Integration tests on every PR | Run integration tests only on merge |\n\n## Resources\n\n- [GitHub Actions Secrets](https://docs.github.com/en/actions/security-for-github-actions/using-secrets-in-github-actions)\n- [Vitest](https://vitest.dev/)\n- [Firecrawl Node SDK](https://docs.firecrawl.dev/sdks/node)\n\n## Next Steps\n\nFor deployment patterns, see `firecrawl-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "firecrawl-ci-integration",
-    "description": "Configure Firecrawl CI/CD integration with GitHub Actions and automated",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

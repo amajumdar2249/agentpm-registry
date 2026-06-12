@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033451",
   "name": "vastai-multi-env-setup",
   "slug": "vastai-multi-env-setup",
   "description": "Configure Vast.ai GPU cloud across dev, staging, and production environments.",
   "content": "# Vast.ai Multi-Environment Setup\n\n## Overview\n\nConfigure separate Vast.ai environments for development, staging, and production by using different API keys, GPU profiles, and spending limits. Vast.ai does not have built-in environment isolation, so you implement it through configuration.\n\n## Prerequisites\n\n- Vast.ai accounts or API keys per environment\n- Secrets manager for key storage\n- Understanding of GPU profile requirements per tier\n\n## Instructions\n\n### Step 1: Environment Configuration\n\n```python\n# config.py \u2014 environment-specific Vast.ai settings\nimport os\nfrom dataclasses import dataclass\n\n@dataclass\nclass VastEnvConfig:\n    name: str\n    api_key: str\n    max_dph: float           # Maximum $/hr per instance\n    max_instances: int       # Concurrent instance limit\n    max_daily_spend: float   # Daily budget cap\n    gpu_whitelist: list      # Allowed GPU types\n    reliability_min: float   # Minimum reliability score\n    auto_destroy_hours: int  # Auto-destroy timeout\n\nENVIRONMENTS = {\n    \"development\": VastEnvConfig(\n        name=\"development\",\n        api_key=os.environ.get(\"VASTAI_DEV_KEY\", \"\"),\n        max_dph=0.25,\n        max_instances=2,\n        max_daily_spend=5.00,\n        gpu_whitelist=[\"RTX_3090\", \"RTX_4090\"],\n        reliability_min=0.90,\n        auto_destroy_hours=2,\n    ),\n    \"staging\": VastEnvConfig(\n        name=\"staging\",\n        api_key=os.environ.get(\"VASTAI_STAGING_KEY\", \"\"),\n        max_dph=2.00,\n        max_instances=4,\n        max_daily_spend=50.00,\n        gpu_whitelist=[\"RTX_4090\", \"A100\"],\n        reliability_min=0.95,\n        auto_destroy_hours=12,\n    ),\n    \"production\": VastEnvConfig(\n        name=\"production\",\n        api_key=os.environ.get(\"VASTAI_PROD_KEY\", \"\"),\n        max_dph=4.00,\n        max_instances=16,\n        max_daily_spend=500.00,\n        gpu_whitelist=[\"A100\", \"H100_SXM\"],\n        reliability_min=0.98,\n        auto_destroy_hours=48,\n    ),\n}\n\ndef get_config(env=None):\n    env = env or os.environ.get(\"VASTAI_ENV\", \"development\")\n    return ENVIRONMENTS[env]\n```\n\n### Step 2: Environment-Aware Client\n\n```python\nclass EnvAwareVastClient:\n    def __init__(self, env=\"development\"):\n        self.config = get_config(env)\n        self.client = VastClient(api_key=self.config.api_key)\n\n    def search_offers(self, **overrides):\n        query = {\n            \"rentable\": {\"eq\": True},\n            \"reliability2\": {\"gte\": self.config.reliability_min},\n            \"dph_total\": {\"lte\": overrides.get(\"max_dph\", self.config.max_dph)},\n        }\n        gpu = overrides.get(\"gpu_name\", self.config.gpu_whitelist[0])\n        query[\"gpu_name\"] = {\"eq\": gpu}\n        return self.client.search_offers(query)\n\n    def create_instance(self, offer_id, image, disk_gb=20):\n        # Enforce instance limit\n        current = len([i for i in self.client.show_instances()\n                      if i.get(\"actual_status\") == \"running\"])\n        if current >= self.config.max_instances:\n            raise RuntimeError(\n                f\"{self.config.name}: Instance limit reached ({current}/{self.config.max_instances})\")\n        return self.client.create_instance(offer_id, image, disk_gb)\n```\n\n### Step 3: Environment Variables\n\n```bash\n# .env.development\nVASTAI_ENV=development\nVASTAI_DEV_KEY=dev-api-key-here\n\n# .env.staging\nVASTAI_ENV=staging\nVASTAI_STAGING_KEY=staging-api-key-here\n\n# .env.production (in secrets manager, never in files)\nVASTAI_ENV=production\nVASTAI_PROD_KEY=prod-api-key-here\n```\n\n### Step 4: Docker Image Tagging by Environment\n\n```bash\n# Dev: use latest for quick iteration\ndocker tag training:latest ghcr.io/org/training:dev\n\n# Staging: use specific commit hash\ndocker tag training:latest ghcr.io/org/training:stg-$(git rev-parse --short HEAD)\n\n# Production: use semantic version\ndocker tag training:latest ghcr.io/org/training:v1.2.3\n```\n\n## Output\n\n- Environment-specific configuration (dev, staging, production)\n- Instance limits and budget caps per environment\n- GPU whitelist enforcement\n- Docker image tagging strategy\n- Environment-aware client wrapper\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Wrong environment selected | `VASTAI_ENV` not set | Default to `development` for safety |\n| Instance limit exceeded | Too many concurrent instances | Destroy idle instances or increase limit |\n| Daily budget exceeded | Expensive GPUs running too long | Implement auto-destroy timeout |\n| Dev key used in prod | Environment variable misconfigured | Validate key matches expected account |\n\n## Resources\n\n- [Vast.ai CLI](https://docs.vast.ai/cli/get-started)\n- [REST API](https://vast.ai/developers/api)\n\n## Next Steps\n\nFor observability and monitoring, see `vastai-observability`.\n\n## Examples\n\n**Dev workflow**: `VASTAI_ENV=development python deploy.py --gpu RTX_4090` \u2014 enforces $0.25/hr max, 2 instance limit, auto-destroy after 2 hours.\n\n**Prod deployment**: `VASTAI_ENV=production python deploy.py --gpu H100_SXM --gpus 4` \u2014 allows up to 16 instances at $4/hr with 48-hour timeout.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "vastai-multi-env-setup",
-    "description": "Configure Vast.ai GPU cloud across dev, staging, and production environments.",
-    "allowed-tools": "Read, Write, Edit, Bash(vastai:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

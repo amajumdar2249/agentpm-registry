@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000040033",
   "name": "tree-sitting",
   "slug": "tree-sitting-2",
   "description": "AST-powered code navigation via tree-sitter. Auto-scans codebases and provides progressive-disclosure tree views with symbol search, source retrieval, and reference finding. Each invocation is self-contained \u2014 no cross-process state. Use when exploring unfamiliar repos, navigating code, or needing fast symbol lookup. Triggers on \"map this codebase\", \"explore repo\", \"find symbol\", \"navigate code\", \"tree-sitter\", or when starting work on an unfamiliar repository.",
   "content": "\n# tree-sitting\n\nAST-powered code navigation using tree-sitter. Each invocation auto-scans\nthe codebase (~700ms for 250 files), then runs queries at sub-millisecond speed.\n\n## Setup\n\n```bash\nuv pip install --system --break-system-packages tree-sitter\n```\n\nGrammars are loaded from bundled `parsers/*.so` files \u2014 no network fetch,\nno `tree-sitter-language-pack` dependency. Install is <1s.\n\n## Usage: CLI (treesit.py)\n\nEvery call auto-scans, prints a tree overview, then runs any queries.\nNo state to manage between calls.\n\n```bash\nTREESIT=/mnt/skills/user/tree-sitting/scripts/treesit.py\n\n# Orient: root-level overview (default depth=1)\npython3 $TREESIT /path/to/repo\n\n# Featuring: complete tree, minimal detail\npython3 $TREESIT /path/to/repo --depth=-1 --detail=sparse\n\n# Explore a subdirectory in full detail\npython3 $TREESIT /path/to/repo --path=src/core --detail=full\n\n# Run queries (tree overview + query results)\npython3 $TREESIT /path/to/repo 'find:Parser*' 'source:parse_input'\n\n# Queries only, no tree\npython3 $TREESIT /path/to/repo --no-tree 'refs:AuthToken'\n```\n\n### Options\n\n| Option | Default | Description |\n|--------|---------|-------------|\n| `--depth N` | 1 | Directory depth: -1=all, 0=root only, 1=one level |\n| `--detail LEVEL` | normal | Node detail: sparse, normal, full |\n| `--path DIR` | (root) | Scope to subdirectory |\n| `--skip DIRS` | | Extra dirs to skip (comma-separated) |\n| `--no-tree` | | Suppress tree overview, show only queries |\n| `--stats` | | Show scan timing and counts |\n\n### Detail Levels\n\nAll levels include line ranges (`:start-end`) so you can feed the\nwindow straight into `Read --offset/--limit` without another scan.\n\n| Level | Tree-overview row (per file) | Use case |\n|-------|------------------------------|----------|\n| `sparse` | `file: name:1-10, Other:30-90 +3` | featuring: see the full shape |\n| `normal` | `file: name(f):1-10, Other(c):30-90 +3` | exploring: quick orientation |\n| `full` | full per-symbol formatter + children + imports | exploring: deep dive into a directory |\n\n### Queries\n\nAppend after the repo path. Multiple queries per call.\n\n| Query | Example | Description |\n|-------|---------|-------------|\n| `find:PATTERN[:KIND[:LIMIT]]` | `find:*Handler*:function` | Symbol search (glob/substring) |\n| `symbols:FILE` | `symbols:src/api.py` | All symbols in a file |\n| `source:SYMBOL[:FILE]` | `source:parse_input` | Source code of a symbol |\n| `refs:SYMBOL[:LIMIT]` | `refs:AuthToken:30` | Text references across codebase |\n| `imports:FILE` | `imports:src/api.py` | Import list for a file |\n| `dir:PATH` | `dir:src/core` | Directory overview (engine format) |\n\n### Workflow\n\n```\n1. treesit.py /repo                           \u2192 orient: what dirs, how big\n2. treesit.py /repo --path=src/core           \u2192 drill into interesting directory\n3. treesit.py /repo 'find:Parser*'            \u2192 find specific symbols\n4. treesit.py /repo 'source:parse_input'      \u2192 read implementation\n5. treesit.py /repo 'refs:ParseState'         \u2192 find usage across codebase\n```\n\nEach call is self-contained. No need to \"scan first, query later\" \u2014\nscan happens automatically every time (~700ms).\n\n## Usage: Direct Python (single invocation)\n\nFor custom scripts that need the engine API directly:\n\n```python\nimport sys; sys.path.insert(0, '/mnt/skills/user/tree-sitting/scripts')\nfrom engine import CodeCache\n\ncache = CodeCache()\ncache.scan('/path/to/repo')\n# All queries in the SAME invocation:\nprint(cache.tree_overview())\nprint(cache.find_symbol('ClassName'))\nprint(cache.get_source_range('src/core/parser.c', 100, 150))\n```\n\n**Important:** The cache is in-memory only. All scan + query calls MUST\nhappen in the same Python process. Splitting across separate `python -c`\ninvocations loses the cache \u2014 use `treesit.py` instead.\n\n## Supported Languages\n\nBundled grammars (work out of the box):\n**Python, JavaScript, TypeScript, TSX, Go, Rust, Ruby, Java, C, HTML, Markdown, Mojo.**\n\nThree-tier extraction for bundled languages:\n\n1. **Custom extractors** (richest \u2014 signatures, hierarchy, docstrings): Python, C, Go, Rust, JavaScript, TypeScript, TSX, Ruby, Markdown (heading outline)\n2. **tags.scm queries** (community-maintained \u2014 kinds, docs): Java, Mojo\n3. **Generic heuristic** (names + kinds + locations): HTML and any future bundled grammars\n\n### Adding a grammar\n\nFiles with unsupported extensions are silently skipped (they show as `SKIP (no parser)` with `--stats`). To add a grammar, drop a compiled `libtree_sitter_<lang>.so` into `parsers/` \u2014 the engine picks it up automatically on the next run. Build from the grammar's repo (each `tree-sitter/tree-sitter-<lang>` repo has a `src/` directory you can compile with `cc -shared -fPIC -I src src/parser.c src/scanner.c -o libtree_sitter_<lang>.so`, or use `tree-sitter build`).\n\nIf you need a language urgently and can't build the `.so`, you can try installing `tree-sitter-language-pack` as a fallback (`uv pip install --system --break-system-packages 'tree-sitter-language-pack<1.6.3'`) \u2014 but note 1.6.3 ships a broken wheel (only `_native/`, missing the `tree_sitter_language_pack/` python module \u2192 `ModuleNotFoundError` despite pip showing it installed); 1.6.2 and earlier work, hence the `<1.6.3` pin and try to download grammars at runtime from a domain that may not be in your network allowlist. Bundling the `.so` is the reliable path.\n\n## What It Extracts\n\n- **Symbols**: functions, classes, structs, enums, methods, constants, defines, types\n- **Signatures**: parameter lists and return types (Python, C; partial for others)\n- **Doc comments**: first-line summaries from docstrings, JSDoc, Doxygen, `///`, `#`\n- **Line ranges**: start and end line for every symbol\n- **Imports**: per-file dependency tracking\n- **Hierarchy**: class\u2192methods, struct\u2192fields (Python, C)\n\n## Architecture\n\n```\nCodeCache (in-memory, per-invocation)\n  \u251c\u2500\u2500 files: {relpath \u2192 FileEntry(source, tree, symbols, imports)}\n  \u251c\u2500\u2500 _symbol_index: {name \u2192 [Symbol, ...]}  \u2190 fast lookup\n  \u2514\u2500\u2500 methods: scan(), find_symbol(), file_symbols(), dir_overview(), ...\n       \u2502\n       \u2514\u2500\u2500 treesit.py CLI \u2014 auto-scan + progressive-disclosure tree + queries\n```\n\nParse cost is paid once per invocation. The symbol index enables O(1) exact\nmatch and O(n) substring/glob search where n is the number of unique symbol\nnames (not files).\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "tree-sitting",
-    "description": "AST-powered code navigation via tree-sitter. Auto-scans codebases and provides progressive-disclosure tree views with symbol search, source retrieval, and reference finding. Each invocation is self-contained \u2014 no cross-process state. Use when exploring unfamiliar repos, navigating code, or needing fast symbol lookup. Triggers on \"map this codebase\", \"explore repo\", \"find symbol\", \"navigate code\", \"tree-sitter\", or when starting work on an unfamiliar repository.",
-    "metadata": "",
-    "version": "0.6.0"
+  "author": "agentpm",
+  "version": "0.6.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

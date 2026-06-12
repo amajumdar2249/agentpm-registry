@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031314",
   "name": "appfolio-reference-architecture",
   "slug": "appfolio-reference-architecture",
   "description": "Reference architecture for AppFolio property management integration.",
   "content": "# AppFolio Reference Architecture\n\n## Overview\n\nProduction architecture for property management integrations with the AppFolio Stack API. Designed for multi-property portfolios requiring real-time vacancy tracking, tenant lifecycle management, work order routing, and accounting reconciliation. Key design drivers: data freshness for leasing decisions, idempotent sync for financial accuracy, and tenant-facing portal responsiveness.\n\n## Architecture Diagram\n\n```\nDashboard (React) \u2500\u2500\u2192 Property Service \u2500\u2500\u2192 Redis Cache \u2500\u2500\u2192 AppFolio Stack API\n                           \u2193                                 /properties\n                      Queue (Bull) \u2500\u2500\u2192 Sync Worker           /tenants\n                           \u2193                                 /leases\n                      Webhook Handler \u2190\u2500\u2500 AppFolio Events    /work-orders\n                           \u2193                                 /bills\n                      Accounting Sync \u2500\u2500\u2192 QuickBooks/Xero\n```\n\n## Service Layer\n\n```typescript\nclass PropertyService {\n  constructor(private client: AppFolioClient, private cache: CacheLayer) {}\n\n  async getPortfolioSummary(propertyIds: string[]): Promise<PortfolioSummary> {\n    const properties = await Promise.all(\n      propertyIds.map(id => this.cache.getOrFetch(`prop:${id}`, () => this.client.get(`/properties/${id}`)))\n    );\n    return { totalUnits: properties.reduce((sum, p) => sum + p.units.length, 0),\n             vacancyRate: this.calcVacancy(properties), pendingWorkOrders: await this.getPendingOrders(propertyIds) };\n  }\n\n  async routeWorkOrder(order: WorkOrderRequest): Promise<string> {\n    const property = await this.client.get(`/properties/${order.propertyId}`);\n    const vendor = this.selectVendor(property.region, order.category);\n    return this.client.post('/work-orders', { ...order, assigned_vendor: vendor });\n  }\n}\n```\n\n## Caching Strategy\n\n```typescript\nconst CACHE_CONFIG = {\n  properties: { ttl: 300, prefix: 'prop' },     // 5 min \u2014 changes infrequently\n  tenants:    { ttl: 120, prefix: 'tenant' },    // 2 min \u2014 moderate churn\n  leases:     { ttl: 60,  prefix: 'lease' },     // 1 min \u2014 financial accuracy\n  workOrders: { ttl: 30,  prefix: 'wo' },        // 30s \u2014 real-time tracking\n  vacancies:  { ttl: 15,  prefix: 'vacancy' },   // 15s \u2014 leasing speed matters\n};\n// Webhook-driven invalidation: AppFolio events flush matching cache keys immediately\n```\n\n## Event Pipeline\n\n```typescript\nclass PropertyEventPipeline {\n  private queue = new Bull('appfolio-events', { redis: process.env.REDIS_URL });\n\n  async onWebhook(event: AppFolioEvent): Promise<void> {\n    await this.queue.add(event.type, event, { attempts: 3, backoff: { type: 'exponential', delay: 2000 } });\n  }\n\n  async processLeaseEvent(event: LeaseEvent): Promise<void> {\n    if (event.type === 'lease.signed') await this.updateVacancy(event.propertyId);\n    if (event.type === 'lease.terminated') await this.triggerMoveOutWorkflow(event);\n  }\n\n  async processWorkOrderEvent(event: WorkOrderEvent): Promise<void> {\n    if (event.status === 'completed') await this.reconcileVendorInvoice(event);\n  }\n}\n```\n\n## Data Model\n\n```typescript\ninterface Property { id: string; name: string; address: Address; units: Unit[]; region: string; }\ninterface Tenant   { id: string; name: string; email: string; leaseId: string; balance: number; }\ninterface Lease    { id: string; propertyId: string; unitId: string; tenantId: string; startDate: string; endDate: string; monthlyRent: number; status: 'active' | 'pending' | 'terminated'; }\ninterface WorkOrder { id: string; propertyId: string; unitId: string; category: 'plumbing' | 'electrical' | 'hvac' | 'general'; status: string; assignedVendor: string; }\n```\n\n## Scaling Considerations\n\n- Partition sync workers by property region to avoid cross-region API rate limits\n- Use read replicas for dashboard queries; write path goes through event pipeline\n- Batch tenant notifications (rent reminders, maintenance updates) via queue to avoid email rate limits\n- Cache vacancy data aggressively \u2014 leasing agents hit this endpoint 10x more than any other\n- Shard work order routing by property portfolio to enable independent scaling per management group\n\n## Error Handling\n\n| Component | Failure Mode | Recovery |\n|-----------|-------------|----------|\n| Property sync | AppFolio 429 rate limit | Exponential backoff with jitter, per-property circuit breaker |\n| Lease webhook | Duplicate event delivery | Idempotency key on lease ID + event timestamp |\n| Work order routing | Vendor API timeout | Queue retry with fallback to manual assignment |\n| Accounting sync | Balance mismatch | Reconciliation queue with human review flag |\n| Tenant portal | Cache miss storm | Stale-while-revalidate pattern, circuit breaker on API layer |\n\n## Resources\n\n- [AppFolio Stack APIs](https://www.appfolio.com/stack/partners/api)\n- [AppFolio Engineering Blog](https://engineering.appfolio.com)\n\n## Next Steps\n\nSee `appfolio-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "appfolio-reference-architecture",
-    "description": "Reference architecture for AppFolio property management integration.",
-    "Trigger": "appfolio architecture\".",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

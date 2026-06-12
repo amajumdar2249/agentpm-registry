@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000035255",
   "name": "transaction-deduplicator",
   "slug": "transaction-deduplicator-2",
   "description": "Detects and removes duplicate transactions across overlapping bank, credit-card, and brokerage statement imports using a stable composite key (account_id, date \u00b11d, amount_cents, description_normalized). Emits a list of new transactions to commit, a list of suppressed duplicates with their reasons, and a list of suspicious near-duplicates that need human review. Use when ingesting financial statements that may overlap prior drops, merging multiple export sources for the same account, or when user mentions duplicate transactions, deduping a transaction file, or reconciling overlapping statements.",
   "content": "\n# Transaction Deduplicator\n\n## Table of Contents\n- [Overview](#overview)\n- [Input contract](#input-contract)\n- [The dedupe key](#the-dedupe-key)\n- [Workflow](#workflow)\n- [Near-duplicate handling](#near-duplicate-handling)\n- [Output contract](#output-contract)\n- [Guardrails](#guardrails)\n\n## Overview\n\nStatement drops often overlap. A January statement covers December 15 \u2192 January 14; the December statement covers November 15 \u2192 December 14; the same December 15 transaction appears in both. This skill identifies those duplicates without losing legitimate same-day same-amount same-merchant repeat charges (e.g., two coffees in one day).\n\n## Input contract\n\nThe caller provides:\n\n- `incoming` \u2014 array of newly extracted transactions: `{date, post_date, account_id, amount_cents, description_raw, source}`.\n- `existing` \u2014 array of transactions already in the store with the same fields plus `id`.\n\n## The dedupe key\n\nA duplicate is identified by the tuple:\n\n```\n(account_id, abs(amount_cents), description_normalized, |date_a - date_b| <= 1 day)\n```\n\n- `description_normalized` uses the same normalization as the categorizer (uppercase, strip vendor codes, strip geo, collapse spaces, drop dates).\n- The 1-day window absorbs `date` vs `post_date` mismatches between two sources.\n- `abs(amount_cents)` allows a refund matched against the original purchase to NOT be considered a duplicate (different sign). The composite key uses signed amount.\n\nUse **signed** `amount_cents`. Refunds (opposite sign) are never duplicates of purchases.\n\n## Workflow\n\n```\nDedupe Progress:\n- [ ] Step 1: Index existing transactions by (account_id, signed_amount, normalized_desc)\n- [ ] Step 2: For each incoming, look up the index\n- [ ] Step 3: Filter index hits by date proximity (\u2264 1 day)\n- [ ] Step 4: If no hit, mark as new\n- [ ] Step 5: If exactly one hit, mark as duplicate of that id\n- [ ] Step 6: If multiple hits, run the multi-instance same-day rule\n- [ ] Step 7: Surface near-duplicates (different amount or desc) for review\n```\n\n### Step 1 \u2014 Index\n\nBuild `existing_by_key[(account_id, amount_cents, description_normalized)] = [tx, \u2026]`.\n\n### Step 2 \u2014 Lookup\n\nFor each incoming transaction, compute its key tuple and look up the bucket.\n\n### Step 3 \u2014 Date proximity filter\n\nFor each candidate in the bucket, keep only those with `|incoming.date \u2212 candidate.date| \u2264 1 day`. Use `min(date, post_date)` on each side if `post_date` exists.\n\n### Step 4 \u2014 No hit\n\nMark `decision: \"new\"`. The bookkeeper will append it to `transactions.json`.\n\n### Step 5 \u2014 Exactly one hit\n\nMark `decision: \"duplicate\"` and link `duplicate_of: <existing_id>`. Do not import.\n\n### Step 6 \u2014 Multiple hits (legitimate same-day repeats)\n\nWhen the existing store already has N transactions with the identical key on the same day, and the incoming batch contains M transactions with the same key on that day:\n\n- If `M \u2264 N` \u2192 all incoming considered duplicates of existing ones (1:1 pairing in date order).\n- If `M > N` \u2192 the first N incoming are duplicates; the remaining `M \u2212 N` are new transactions (legitimate same-day repeat charges, e.g., two coffees, gas-station pre-auth + final).\n\nThis rule preserves real repeat charges while still suppressing overlap-import duplicates.\n\n### Step 7 \u2014 Near-duplicate review\n\nA *near-duplicate* shares everything except amount or description and is within 1 day. These commonly arise when:\n- A pending charge ($45.00) finalizes at a slightly different amount ($45.83) \u2014 keep the final, drop the pending.\n- The merchant string changes mid-cycle (\"AMAZON.COM*ABC123\" \u2192 \"AMZN Mktp US\").\n\nEmit these to `review[]` with both records side-by-side and a suggested action: `keep_incoming_drop_existing | keep_existing_drop_incoming | keep_both | merge`.\n\n## Near-duplicate handling\n\nCompute a similarity score on near-misses:\n- Amount delta: 1.0 if equal, 0.9 if within $1 or 2%, 0.5 if within $5 or 10%, else 0.0.\n- Description Jaccard on token sets: 0.0\u20131.0.\n- Date proximity: 1.0 same day, 0.7 within 1 day, 0.4 within 3 days.\n\n`near_dup_score = 0.4*amount + 0.4*description + 0.2*date`.\n\nSurface for review when `0.7 \u2264 near_dup_score < 0.95`. Above `0.95` is treated as duplicate; below `0.7` is treated as independent.\n\n## Output contract\n\n```json\n{\n  \"new\": [\n    { \"id\": \"tx_20260115_017\", \"decision\": \"new\" }\n  ],\n  \"duplicates\": [\n    {\n      \"incoming_index\": 4,\n      \"decision\": \"duplicate\",\n      \"duplicate_of\": \"tx_20251220_003\",\n      \"reason\": \"exact key match within 1 day window\"\n    }\n  ],\n  \"review\": [\n    {\n      \"incoming_index\": 12,\n      \"matched_existing_id\": \"tx_20260108_005\",\n      \"near_dup_score\": 0.86,\n      \"diff\": {\n        \"amount_cents\": [-4500, -4583],\n        \"description_raw\": [\"AMAZON PENDING\", \"AMZN MKTP US*AB12CD\"]\n      },\n      \"suggested_action\": \"keep_incoming_drop_existing\",\n      \"rationale\": \"incoming is the finalized charge (post_date set, definite merchant code)\"\n    }\n  ],\n  \"summary\": {\n    \"incoming_total\": 142,\n    \"new_count\": 96,\n    \"duplicate_count\": 44,\n    \"review_count\": 2\n  }\n}\n```\n\n## Guardrails\n\n- **Sign matters.** Never collapse a refund and a purchase by absolute value. Use signed amount in the key.\n- **One-day window only.** Wider windows produce false positives across pay cycles.\n- **Same-account only.** Never dedupe across accounts. A $50 transfer out of checking and a $50 deposit into savings are two records, not one duplicate.\n- **Preserve raw description in review.** Show both `description_raw` strings to the human; do not show the normalized form.\n- **Idempotency.** Running the dedupe on the same input twice produces the same output. The skill never mutates `existing`.\n- **Audit.** For every suppressed duplicate, log `duplicate_of` so the user can trace why a transaction did not appear in the new import.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "transaction-deduplicator",
-    "description": "Detects and removes duplicate transactions across overlapping bank, credit-card, and brokerage statement imports using a stable composite key (account_id, date \u00b11d, amount_cents, description_normalized). Emits a list of new transactions to commit, a list of suppressed duplicates with their reasons, and a list of suspicious near-duplicates that need human review. Use when ingesting financial statements that may overlap prior drops, merging multiple export sources for the same account, or when user mentions duplicate transactions, deduping a transaction file, or reconciling overlapping statements."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

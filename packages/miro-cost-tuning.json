@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032625",
   "name": "miro-cost-tuning",
   "slug": "miro-cost-tuning",
   "description": "Optimize Miro API costs through credit monitoring, request reduction,",
   "content": "# Miro Cost Tuning\n\n## Overview\n\nMiro's API pricing is based on your plan tier (Free, Business, Enterprise), not per-API-call billing. However, the **credit-based rate limiting** system (100,000 credits/minute) effectively caps throughput. Cost optimization means minimizing API calls to stay within your plan's rate limits and reduce the need for higher-tier upgrades.\n\n## Miro Plan Comparison\n\n| Feature | Free | Business | Enterprise |\n|---------|------|----------|------------|\n| Price | $0/user | $12-20/user/mo | Custom |\n| Boards | 3 editable | Unlimited | Unlimited |\n| API access | Yes | Yes | Yes |\n| Rate limit | 100K credits/min | 100K credits/min | Higher (negotiable) |\n| OAuth scopes | All standard | All standard | All + enterprise scopes |\n| SCIM provisioning | No | No | Yes |\n| Audit logs API | No | No | Yes |\n| SSO/SAML | No | No | Yes |\n\n## Credit Usage Tracking\n\n```typescript\nclass MiroUsageTracker {\n  private minuteCredits = 0;\n  private dailyRequests = 0;\n  private minuteStart = Date.now();\n  private dailyStart = Date.now();\n\n  trackRequest(response: Response): void {\n    // Reset minute window\n    if (Date.now() - this.minuteStart > 60_000) {\n      this.minuteCredits = 0;\n      this.minuteStart = Date.now();\n    }\n\n    // Reset daily window\n    if (Date.now() - this.dailyStart > 86_400_000) {\n      this.dailyRequests = 0;\n      this.dailyStart = Date.now();\n    }\n\n    const limit = parseInt(response.headers.get('X-RateLimit-Limit') ?? '100000');\n    const remaining = parseInt(response.headers.get('X-RateLimit-Remaining') ?? '100000');\n    this.minuteCredits = limit - remaining;\n    this.dailyRequests++;\n  }\n\n  getReport(): UsageReport {\n    return {\n      currentMinuteCredits: this.minuteCredits,\n      creditUtilizationPercent: Math.round((this.minuteCredits / 100000) * 100),\n      dailyRequests: this.dailyRequests,\n      projectedMonthlyRequests: this.dailyRequests * 30,\n      recommendation: this.getRecommendation(),\n    };\n  }\n\n  private getRecommendation(): string {\n    if (this.minuteCredits > 80000) {\n      return 'CRITICAL: >80% credit usage. Reduce request rate or upgrade to Enterprise.';\n    }\n    if (this.minuteCredits > 50000) {\n      return 'WARNING: >50% credit usage. Consider caching and batching.';\n    }\n    return 'Healthy credit usage.';\n  }\n}\n```\n\n## Cost Reduction Strategies\n\n### Strategy 1: Reduce Read Requests with Caching\n\nThe biggest cost saver. Most Miro board reads return data that changes infrequently.\n\n```typescript\n// EXPENSIVE: Fetching board on every page load\napp.get('/dashboard', async (req, res) => {\n  const board = await miroFetch(`/v2/boards/${boardId}`);        // 1 credit per load\n  const items = await miroFetch(`/v2/boards/${boardId}/items`);  // 1 credit per load\n  res.render('dashboard', { board, items });\n});\n\n// OPTIMIZED: Cache board data for 2 minutes\napp.get('/dashboard', async (req, res) => {\n  const board = await getCachedBoard(boardId);    // Cache hit = 0 credits\n  const items = await getCachedItems(boardId);    // Cache hit = 0 credits\n  res.render('dashboard', { board, items });\n});\n\n// With webhook-driven invalidation, cache hits can be 95%+\n// That is a 20x reduction in API calls\n```\n\n### Strategy 2: Filter Items by Type\n\nDon't fetch all items if you only need sticky notes.\n\n```typescript\n// EXPENSIVE: Fetch all items, filter client-side\nconst allItems = await miroFetch(`/v2/boards/${boardId}/items?limit=50`);\nconst notes = allItems.data.filter(i => i.type === 'sticky_note');\n\n// OPTIMIZED: Server-side type filter\nconst notes = await miroFetch(`/v2/boards/${boardId}/items?type=sticky_note&limit=50`);\n// Fewer items returned = smaller response = faster\n```\n\n### Strategy 3: Batch Writes with Controlled Concurrency\n\n```typescript\n// EXPENSIVE: Sequential writes (slow + same credits)\nfor (const note of notes) {\n  await createStickyNote(boardId, note);  // 200ms * 50 = 10 seconds\n}\n\n// OPTIMIZED: Parallel with concurrency control (same credits, 5x faster)\nimport PQueue from 'p-queue';\nconst queue = new PQueue({ concurrency: 5 });\nfor (const note of notes) {\n  queue.add(() => createStickyNote(boardId, note));\n}\nawait queue.onIdle();  // ~2 seconds\n```\n\n### Strategy 4: Use Webhooks Instead of Polling\n\n```typescript\n// EXPENSIVE: Poll every 10 seconds (8,640 requests/day)\nsetInterval(async () => {\n  const items = await miroFetch(`/v2/boards/${boardId}/items`);\n  detectChanges(items);\n}, 10_000);\n\n// OPTIMIZED: Webhook subscription (0 polling requests)\n// Miro pushes changes to your endpoint in real-time\n// See miro-webhooks-events for setup\n```\n\n### Strategy 5: Smart Pagination Limits\n\n```typescript\n// WASTEFUL: Small page size = more round trips\nlet cursor;\ndo {\n  const page = await miroFetch(`/v2/boards/${boardId}/items?limit=10&cursor=${cursor ?? ''}`);\n  // 10 items per page = 10 requests for 100 items\n} while (cursor);\n\n// OPTIMIZED: Max page size\nlet cursor;\ndo {\n  const page = await miroFetch(`/v2/boards/${boardId}/items?limit=50&cursor=${cursor ?? ''}`);\n  // 50 items per page = 2 requests for 100 items\n} while (cursor);\n```\n\n## Usage Dashboard Query\n\nIf you track API calls in a database:\n\n```sql\nSELECT\n  DATE_TRUNC('hour', created_at) AS hour,\n  endpoint,\n  COUNT(*) AS requests,\n  AVG(duration_ms) AS avg_latency_ms,\n  COUNT(*) FILTER (WHERE status = 429) AS rate_limited\nFROM miro_api_logs\nWHERE created_at >= NOW() - INTERVAL '24 hours'\nGROUP BY 1, 2\nORDER BY requests DESC;\n```\n\n## Budget Alerts\n\n```typescript\n// Alert when approaching credit limit\nconst tracker = new MiroUsageTracker();\n\n// After each API call\ntracker.trackRequest(response);\n\nconst report = tracker.getReport();\nif (report.creditUtilizationPercent > 80) {\n  await sendSlackAlert({\n    channel: '#engineering-alerts',\n    text: `Miro API credit usage at ${report.creditUtilizationPercent}%. ${report.recommendation}`,\n  });\n}\n```\n\n## When to Upgrade to Enterprise\n\nConsider Enterprise if you need:\n\n- Higher rate limits (negotiated per account)\n- SCIM API for automated user provisioning\n- Audit logs API for compliance\n- Organization-level management endpoints\n- SSO/SAML integration APIs\n- Dedicated support for API issues\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Hitting 429 frequently | Too many requests | Implement caching + webhooks |\n| Credit spikes | Runaway polling loops | Audit all `setInterval` calls |\n| Unnecessary full-board fetches | No type filtering | Add `?type=` parameter |\n| Small page sizes | Low `limit` parameter | Use `limit=50` (maximum) |\n\n## Resources\n\n- [Miro Pricing](https://miro.com/pricing/)\n- [Rate Limiting](https://developers.miro.com/reference/rate-limiting)\n- [Miro Enterprise](https://miro.com/enterprise/)\n\n## Next Steps\n\nFor architecture patterns, see `miro-reference-architecture`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "miro-cost-tuning",
-    "description": "Optimize Miro API costs through credit monitoring, request reduction,",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

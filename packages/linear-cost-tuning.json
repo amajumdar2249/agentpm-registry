@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032499",
   "name": "linear-cost-tuning",
   "slug": "linear-cost-tuning",
   "description": "Optimize Linear API usage, reduce unnecessary calls, and maximize",
   "content": "# Linear Cost Tuning\n\n## Overview\n\nOptimize Linear API usage to stay within rate budgets and minimize infrastructure costs. Linear's API is free (no per-request billing), but rate limits (5,000 requests/hour, 250,000 complexity/hour) constrain throughput. Efficient patterns let you do more within these limits.\n\n## Cost Factors\n\n| Factor | Budget Impact | Optimization |\n|--------|--------------|-------------|\n| Request count | 5,000/hr limit | Batch operations, coalesce requests |\n| Query complexity | 250,000/hr limit | Flat queries, small page sizes |\n| Payload size | Bandwidth + latency | Select only needed fields |\n| Polling frequency | Wastes budget | Replace with webhooks |\n| Webhook volume | Processing costs | Filter by event type and team |\n\n## Instructions\n\n### Step 1: Audit Current Usage\n\n```typescript\nimport { LinearClient } from \"@linear/sdk\";\n\nclass UsageTracker {\n  private requests = 0;\n  private totalComplexity = 0;\n  private startTime = Date.now();\n\n  track(complexity: number) {\n    this.requests++;\n    this.totalComplexity += complexity;\n  }\n\n  report() {\n    const elapsedHours = (Date.now() - this.startTime) / 3600000;\n    return {\n      requests: this.requests,\n      requestsPerHour: Math.round(this.requests / elapsedHours),\n      totalComplexity: this.totalComplexity,\n      complexityPerHour: Math.round(this.totalComplexity / elapsedHours),\n      budgetUsed: {\n        requests: `${Math.round((this.requests / elapsedHours / 5000) * 100)}%`,\n        complexity: `${Math.round((this.totalComplexity / elapsedHours / 250000) * 100)}%`,\n      },\n    };\n  }\n}\n\nconst tracker = new UsageTracker();\n```\n\n### Step 2: Replace Polling with Webhooks\n\nThe single biggest optimization. A polling loop checking every minute uses 1,440 requests/day. A webhook uses zero.\n\n```typescript\n// BAD: Polling every 60 seconds (1,440 req/day, ~60 req/hr)\nsetInterval(async () => {\n  const issues = await client.issues({\n    first: 100,\n    filter: { updatedAt: { gte: lastCheck } },\n  });\n  await syncIssues(issues.nodes);\n  lastCheck = new Date().toISOString();\n}, 60000);\n\n// GOOD: Webhook receives updates in real-time (0 requests for monitoring)\napp.post(\"/webhooks/linear\", express.raw({ type: \"*/*\" }), (req, res) => {\n  // Verify signature, process event\n  const event = JSON.parse(req.body.toString());\n  if (event.type === \"Issue\") {\n    syncSingleIssue(event.data);\n  }\n  res.json({ ok: true });\n});\n```\n\n### Step 3: Minimize Query Complexity\n\n```typescript\n// BAD: ~12,500 pts \u2014 deeply nested with large page\n// issues(50) * (labels(50 default) * fields + comments(50) * user)\nconst expensive = `query {\n  issues(first: 50) {\n    nodes {\n      id title\n      assignee { name }\n      labels { nodes { name } }\n      comments(first: 10) { nodes { body user { name } } }\n    }\n  }\n}`;\n\n// GOOD: ~55 pts \u2014 flat fields only\nconst cheap = `query {\n  issues(first: 50) {\n    nodes { id identifier title priority estimate }\n  }\n}`;\n\n// Fetch relations separately only when needed\nconst issueDetail = `query($id: String!) {\n  issue(id: $id) {\n    id identifier title description priority\n    assignee { name email }\n    state { name type }\n    labels { nodes { name color } }\n  }\n}`;\n```\n\n### Step 4: Request Coalescing\n\nDeduplicate concurrent identical requests.\n\n```typescript\nconst inflight = new Map<string, Promise<any>>();\n\nasync function coalesce<T>(key: string, fn: () => Promise<T>): Promise<T> {\n  if (inflight.has(key)) return inflight.get(key)!;\n  const promise = fn().finally(() => inflight.delete(key));\n  inflight.set(key, promise);\n  return promise;\n}\n\n// 10 concurrent requests for same team = 1 actual API call\nasync function getTeam(teamKey: string) {\n  return coalesce(`team:${teamKey}`, async () => {\n    const result = await client.teams({ filter: { key: { eq: teamKey } } });\n    return result.nodes[0];\n  });\n}\n```\n\n### Step 5: Cache with Smart TTLs\n\n```typescript\nconst CACHE_TTLS = {\n  teams: 600,        // 10 min \u2014 teams almost never change\n  workflowStates: 1800, // 30 min \u2014 states rarely change\n  labels: 600,       // 10 min \u2014 labels rarely change\n  issues: 60,        // 1 min \u2014 issues change frequently\n  viewer: 3600,      // 1 hr \u2014 your identity doesn't change\n};\n\n// Combined with webhook invalidation, even short TTLs\n// dramatically reduce redundant requests\n```\n\n### Step 6: Filter Webhook Events\n\nSkip irrelevant events to reduce processing costs.\n\n```typescript\nasync function processEvent(event: any): Promise<void> {\n  // Skip bot/automation events to avoid loops\n  if (event.actor?.type === \"application\") return;\n\n  // Skip trivial field updates (e.g., sortOrder changes)\n  if (event.type === \"Issue\" && event.action === \"update\") {\n    const significantFields = [\"stateId\", \"assigneeId\", \"priority\", \"title\"];\n    const changedFields = Object.keys(event.updatedFrom ?? {});\n    if (!changedFields.some(f => significantFields.includes(f))) return;\n  }\n\n  // Skip specific teams if not relevant\n  const relevantTeamKeys = [\"ENG\", \"PRODUCT\"];\n  if (event.data?.team?.key && !relevantTeamKeys.includes(event.data.team.key)) return;\n\n  // Process significant event\n  await handleEvent(event);\n}\n```\n\n### Step 7: Incremental Sync Pattern\n\n```typescript\n// Instead of fetching ALL issues every sync:\n// Sort by updatedAt, stop when you reach already-synced data\n\nasync function incrementalSync(client: LinearClient, lastSyncTime: string) {\n  let cursor: string | undefined;\n  let synced = 0;\n\n  while (true) {\n    const issues = await client.issues({\n      first: 100,\n      after: cursor,\n      filter: { updatedAt: { gte: lastSyncTime } },\n      orderBy: \"updatedAt\",\n    });\n\n    for (const issue of issues.nodes) {\n      await upsertLocally(issue);\n      synced++;\n    }\n\n    if (!issues.pageInfo.hasNextPage) break;\n    cursor = issues.pageInfo.endCursor;\n  }\n\n  console.log(`Synced ${synced} issues since ${lastSyncTime}`);\n  return synced;\n}\n```\n\n## Optimization Checklist\n\n- [ ] Replace all polling with webhooks\n- [ ] Implement request caching (static data: 10-30 min TTL)\n- [ ] Add request coalescing for concurrent identical calls\n- [ ] Filter webhook events (skip bots, trivial updates, irrelevant teams)\n- [ ] Keep query complexity under 500 pts per query\n- [ ] Use `rawRequest()` for exact field selection\n- [ ] Sort by `updatedAt` for incremental sync\n- [ ] Batch mutations (20 per GraphQL request)\n- [ ] Cache teams/states/labels with webhook invalidation\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Rate limit hit frequently | Too many requests | Implement coalescing + caching |\n| Stale cache data | TTL too long | Use webhook-driven invalidation |\n| High complexity queries | Nested relations | Flatten with `rawRequest()`, fetch relations lazily |\n| Webhook processing overload | Unfiltered events | Add type/team/field filtering |\n\n## Resources\n\n- [Linear Rate Limiting](https://linear.app/developers/rate-limiting)\n- [Linear Best Practices](https://linear.app/developers/graphql)\n- [Webhooks](https://linear.app/developers/webhooks)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "linear-cost-tuning",
-    "description": "Optimize Linear API usage, reduce unnecessary calls, and maximize",
-    "Trigger": "linear cost\", \"reduce linear API calls\", \"linear efficiency\",",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

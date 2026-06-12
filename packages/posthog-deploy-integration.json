@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032938",
   "name": "posthog-deploy-integration",
   "slug": "posthog-deploy-integration",
   "description": "Deploy PostHog to Vercel, Docker (self-hosted), and Cloud Run.",
   "content": "# PostHog Deploy Integration\n\n## Overview\n\nDeploy PostHog analytics to production platforms. Covers Next.js with Vercel (reverse proxy, server-side capture, edge functions), self-hosted PostHog with Docker, and Google Cloud Run deployment patterns.\n\n## Prerequisites\n\n- PostHog project API key (`phc_...`)\n- PostHog personal API key (`phx_...`) for server features\n- Platform CLI installed (`vercel`, `docker`, or `gcloud`)\n\n## Instructions\n\n### Step 1: Next.js + Vercel Deployment\n\n```bash\nset -euo pipefail\n# Set environment variables in Vercel\nvercel env add NEXT_PUBLIC_POSTHOG_KEY production     # phc_... (public)\nvercel env add NEXT_PUBLIC_POSTHOG_HOST production    # /ingest (if using proxy)\nvercel env add POSTHOG_PERSONAL_API_KEY production    # phx_... (server-only)\nvercel env add POSTHOG_PROJECT_ID production          # Project ID number\n```\n\n```typescript\n// next.config.js \u2014 Reverse proxy to bypass ad blockers\nmodule.exports = {\n  async rewrites() {\n    return [\n      {\n        source: '/ingest/static/:path*',\n        destination: 'https://us-assets.i.posthog.com/static/:path*',\n      },\n      {\n        source: '/ingest/:path*',\n        destination: 'https://us.i.posthog.com/:path*',\n      },\n    ];\n  },\n};\n```\n\n```typescript\n// app/providers.tsx \u2014 Client-side PostHog with proxy\n'use client';\nimport posthog from 'posthog-js';\nimport { PostHogProvider } from 'posthog-js/react';\nimport { useEffect } from 'react';\n\nexport function PHProvider({ children }: { children: React.ReactNode }) {\n  useEffect(() => {\n    posthog.init(process.env.NEXT_PUBLIC_POSTHOG_KEY!, {\n      api_host: '/ingest', // Routes through your domain's reverse proxy\n      capture_pageview: false, // Handle manually in App Router\n      capture_pageleave: true,\n    });\n  }, []);\n\n  return <PostHogProvider client={posthog}>{children}</PostHogProvider>;\n}\n```\n\n### Step 2: Server-Side Capture in Vercel Edge Functions\n\n```typescript\n// app/api/track/route.ts \u2014 Server-side event capture\nimport { PostHog } from 'posthog-node';\nimport { NextResponse } from 'next/server';\n\nexport const runtime = 'edge';\n\nexport async function POST(request: Request) {\n  const body = await request.json();\n  const { userId, event, properties } = body;\n\n  const posthog = new PostHog(process.env.NEXT_PUBLIC_POSTHOG_KEY!, {\n    host: 'https://us.i.posthog.com',\n    flushAt: 1,       // Immediate flush in serverless\n    flushInterval: 0,\n  });\n\n  try {\n    posthog.capture({ distinctId: userId, event, properties });\n    await posthog.shutdown(); // CRITICAL: flush before function exits\n    return NextResponse.json({ status: 'ok' });\n  } catch (error) {\n    return NextResponse.json({ error: 'capture failed' }, { status: 500 });\n  }\n}\n```\n\n### Step 3: Self-Hosted PostHog (Docker)\n\n```bash\nset -euo pipefail\n# Deploy PostHog self-hosted (hobby tier)\ngit clone https://github.com/PostHog/posthog.git\ncd posthog\n\n# Configure environment\ncat > .env <<'EOF'\nSECRET_KEY=your-random-secret-key-here\nSITE_URL=https://posthog.yourcompany.com\nIS_BEHIND_PROXY=true\nEOF\n\n# Start PostHog\ndocker compose -f docker-compose.hobby.yml up -d\n\n# PostHog runs at http://localhost:8000\n# Complete setup wizard in browser\n\n# Health check\ncurl -s http://localhost:8000/_health | jq .\n```\n\n```typescript\n// Point SDKs to your self-hosted instance\nposthog.init('phc_your_key', {\n  api_host: 'https://posthog.yourcompany.com', // Your self-hosted URL\n});\n```\n\n### Step 4: Google Cloud Run Deployment\n\n```bash\nset -euo pipefail\n# Set secrets in GCP Secret Manager\necho -n \"phc_your_key\" | gcloud secrets create posthog-project-key --data-file=-\necho -n \"phx_your_key\" | gcloud secrets create posthog-personal-key --data-file=-\n\n# Deploy with PostHog secrets\ngcloud run deploy my-app \\\n  --image gcr.io/my-project/my-app:latest \\\n  --set-secrets \"NEXT_PUBLIC_POSTHOG_KEY=posthog-project-key:latest\" \\\n  --set-secrets \"POSTHOG_PERSONAL_API_KEY=posthog-personal-key:latest\" \\\n  --set-env-vars \"POSTHOG_HOST=https://us.i.posthog.com\" \\\n  --region us-central1 \\\n  --allow-unauthenticated\n```\n\n### Step 5: Deploy Annotation (Mark Deployments in PostHog)\n\n```bash\nset -euo pipefail\n# Create annotation on each deploy so you can correlate metric changes with releases\ncurl -X POST \"https://app.posthog.com/api/projects/$POSTHOG_PROJECT_ID/annotations/\" \\\n  -H \"Authorization: Bearer $POSTHOG_PERSONAL_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d \"{\n    \\\"content\\\": \\\"Deploy: $(git rev-parse --short HEAD) \u2014 $(git log -1 --pretty=%s)\\\",\n    \\\"date_marker\\\": \\\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\\\",\n    \\\"scope\\\": \\\"project\\\"\n  }\"\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Events not appearing | Wrong `api_host` | Use `us.i.posthog.com` (not `app.posthog.com`) |\n| Ad blocker blocks events | Direct PostHog requests | Set up reverse proxy via Next.js rewrites |\n| Edge function events lost | No `shutdown()` call | Always `await posthog.shutdown()` in serverless |\n| Self-hosted 502 | Under-provisioned | Increase Docker memory (min 4GB RAM) |\n| Cloud Run cold start lag | PostHog init in handler | Move init to module scope, only shutdown in handler |\n\n## Output\n\n- PostHog deployed to chosen platform with secrets configured\n- Reverse proxy enabled for ad blocker bypass (Vercel/Next.js)\n- Server-side event capture with proper shutdown hooks\n- Deployment annotations marking releases in PostHog timeline\n\n## Resources\n\n- [PostHog Next.js Integration](https://posthog.com/docs/libraries/next-js)\n- [PostHog Self-Hosting](https://posthog.com/docs/self-host)\n- [PostHog Vercel Integration](https://posthog.com/docs/libraries/vercel)\n- [PostHog Annotations API](https://posthog.com/docs/api/annotations)\n\n## Next Steps\n\nFor webhook handling, see `posthog-webhooks-events`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "posthog-deploy-integration",
-    "description": "Deploy PostHog to Vercel, Docker (self-hosted), and Cloud Run.",
-    "Trigger": "deploy posthog\", \"posthog Vercel\", \"posthog production deploy\",",
-    "allowed-tools": "Read, Write, Edit, Bash(vercel:*), Bash(fly:*), Bash(gcloud:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

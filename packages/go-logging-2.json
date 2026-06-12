@@ -1,15 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000026823",
   "name": "go-logging",
   "slug": "go-logging-2",
   "description": "Use when choosing a logging approach, configuring slog, writing structured log statements, or deciding log levels in Go. Also use when setting up production logging, adding request-scoped context to logs, or migrating from log to slog, even if the user doesn't explicitly mention logging. Does not cover error handling strategy (see go-error-handling).",
   "content": "\n# Go Logging\n\n## Core Principle\n\nLogs are for **operators**, not developers. Every log line should help someone\ndiagnose a production issue. If it doesn't serve that purpose, it's noise.\n\n---\n\n## Choosing a Logger\n\n> **Normative**: Use `log/slog` for new Go code.\n\n`slog` is structured, leveled, and in the standard library (Go 1.21+). It\ncovers the vast majority of production logging needs.\n\n```\nWhich logger?\n\u251c\u2500 New production code      \u2192 log/slog\n\u251c\u2500 Trivial CLI / one-off    \u2192 log (standard)\n\u2514\u2500 Measured perf bottleneck \u2192 zerolog or zap (benchmark first)\n```\n\nDo not introduce a third-party logging library unless profiling shows `slog`\nis a bottleneck in your hot path. When you do, keep the same structured\nkey-value style.\n\n> Read [references/LOGGING-PATTERNS.md](references/LOGGING-PATTERNS.md) when setting up slog handlers, configuring JSON/text output, or migrating from log.Printf to slog.\n\n---\n\n## Structured Logging\n\n> **Normative**: Always use key-value pairs. Never interpolate values into the message string.\n\nThe message is a **static description** of what happened. Dynamic data goes in\nkey-value attributes:\n\n```go\n// Good: static message, structured fields\nslog.Info(\"order placed\", \"order_id\", orderID, \"total\", total)\n\n// Bad: dynamic data baked into the message string\nslog.Info(fmt.Sprintf(\"order %d placed for $%.2f\", orderID, total))\n```\n\n### Key Naming\n\n> **Advisory**: Use `snake_case` for log attribute keys.\n\nKeys should be lowercase, underscore-separated, and consistent across the\ncodebase: `user_id`, `request_id`, `elapsed_ms`.\n\n### Typed Attributes\n\nFor performance-critical paths, use typed constructors to avoid allocations:\n\n```go\nslog.LogAttrs(ctx, slog.LevelInfo, \"request handled\",\n    slog.String(\"method\", r.Method),\n    slog.Int(\"status\", code),\n    slog.Duration(\"elapsed\", elapsed),\n)\n```\n\n> Read [references/LEVELS-AND-CONTEXT.md](references/LEVELS-AND-CONTEXT.md) when optimizing log performance or pre-checking with Enabled().\n\n---\n\n## Log Levels\n\n> **Advisory**: Follow these level semantics consistently.\n\n| Level | When to use | Production default |\n|-------|-------------|--------------------|\n| Debug | Developer-only diagnostics, tracing internal state | Disabled |\n| Info  | Notable lifecycle events: startup, shutdown, config loaded | Enabled |\n| Warn  | Unexpected but recoverable: deprecated feature used, retry succeeded | Enabled |\n| Error | Operation failed, requires operator attention | Enabled |\n\n**Rules of thumb**:\n- If nobody should act on it, it's not Error \u2014 use Warn or Info\n- If it's only useful with a debugger attached, it's Debug\n- `slog.Error` should always include an `\"err\"` attribute\n\n```go\nslog.Error(\"payment failed\", \"err\", err, \"order_id\", id)\nslog.Warn(\"retry succeeded\", \"attempt\", n, \"endpoint\", url)\nslog.Info(\"server started\", \"addr\", addr)\nslog.Debug(\"cache lookup\", \"key\", key, \"hit\", hit)\n```\n\n> Read [references/LEVELS-AND-CONTEXT.md](references/LEVELS-AND-CONTEXT.md) when choosing between Warn and Error or defining custom verbosity levels.\n\n---\n\n## Request-Scoped Logging\n\n> **Advisory**: Derive loggers from context to carry request-scoped fields.\n\nUse middleware to enrich a logger with request ID, user ID, or trace ID, then\npass the enriched logger downstream via context or as an explicit parameter:\n\n```go\nfunc middleware(next http.Handler) http.Handler {\n    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n        logger := slog.With(\"request_id\", requestID(r))\n        ctx := context.WithValue(r.Context(), loggerKey, logger)\n        next.ServeHTTP(w, r.WithContext(ctx))\n    })\n}\n```\n\nAll subsequent log calls in that request carry `request_id` automatically.\n\n> Read [references/LOGGING-PATTERNS.md](references/LOGGING-PATTERNS.md) when implementing logging middleware or passing loggers through context.\n\n---\n\n## Log or Return, Not Both\n\n> **Normative**: Handle each error exactly once \u2014 either log it or return it.\n\nLogging an error and then returning it causes duplicate noise as callers up the\nstack also handle the error.\n\n```go\n// Bad: logged here AND by every caller up the stack\nif err != nil {\n    slog.Error(\"query failed\", \"err\", err)\n    return fmt.Errorf(\"query: %w\", err)\n}\n\n// Good: wrap and return \u2014 let the caller decide\nif err != nil {\n    return fmt.Errorf(\"query: %w\", err)\n}\n```\n\n**Exception**: HTTP handlers and other top-of-stack boundaries may log detailed\nerrors server-side while returning a sanitized message to the client:\n\n```go\nif err != nil {\n    slog.Error(\"checkout failed\", \"err\", err, \"user_id\", uid)\n    http.Error(w, \"internal error\", http.StatusInternalServerError)\n    return\n}\n```\n\nSee [go-error-handling](../go-error-handling/SKILL.md) for the full\nhandle-once pattern and error wrapping guidance.\n\n---\n\n## What NOT to Log\n\n> **Normative**: Never log secrets, credentials, PII, or high-cardinality unbounded data.\n\n- Passwords, API keys, tokens, session IDs\n- Full credit card numbers, SSNs\n- Request/response bodies that may contain user data\n- Entire slices or maps of unbounded size\n\n> Read [references/LEVELS-AND-CONTEXT.md](references/LEVELS-AND-CONTEXT.md) when deciding what data is safe to include in log attributes.\n\n---\n\n## Quick Reference\n\n| Do | Don't |\n|----|-------|\n| `slog.Info(\"msg\", \"key\", val)` | `log.Printf(\"msg %v\", val)` |\n| Static message + structured fields | `fmt.Sprintf` in message |\n| `snake_case` keys | camelCase or inconsistent keys |\n| Log OR return errors | Log AND return the same error |\n| Derive logger from context | Create a new logger per call |\n| Use `slog.Error` with `\"err\"` attr | `slog.Info` for errors |\n| Pre-check `Enabled()` on hot paths | Always allocate log args |\n\n---\n\n## Related Skills\n\n- **Error handling**: See [go-error-handling](../go-error-handling/SKILL.md) when deciding whether to log or return an error, or for the handle-once pattern\n- **Context propagation**: See [go-context](../go-context/SKILL.md) when passing request-scoped values (including loggers) through context\n- **Performance**: See [go-performance](../go-performance/SKILL.md) when optimizing hot-path logging or reducing allocations in log calls\n- **Code review**: See [go-code-review](../go-code-review/SKILL.md) when reviewing logging practices in Go PRs\n\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "go-logging",
-    "description": "Use when choosing a logging approach, configuring slog, writing structured log statements, or deciding log levels in Go. Also use when setting up production logging, adding request-scoped context to logs, or migrating from log to slog, even if the user doesn't explicitly mention logging. Does not cover error handling strategy (see go-error-handling).",
-    "license": "Apache-2.0",
-    "compatibility": "slog requires Go 1.21+; slog/slogtest requires Go 1.22+",
-    "metadata": "",
-    "sources": "Google Style Guide, Uber Style Guide"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "Apache-2.0",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,28 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000026342",
   "name": "deps",
   "slug": "deps-2",
   "description": "Audit dependency risks and updates.",
   "content": "# Deps Skill\n\n> Quick Ref: `/deps audit` | `/deps update [--major|--minor|--patch]` | `/deps vuln` | `/deps license`\n\n**YOU MUST EXECUTE THIS WORKFLOW. Do not just describe it.**\n\n## Modes\n\n| Mode | Command | Purpose |\n|------|---------|---------|\n| **Audit** | `/deps audit` | Full dependency health check: vulnerabilities, outdated, licenses |\n| **Update** | `/deps update [--major\\|--minor\\|--patch]` | Update dependencies with test verification |\n| **Vuln** | `/deps vuln` | Focused vulnerability scan and remediation |\n| **License** | `/deps license` | License compliance audit |\n\nDefault (bare `/deps`): runs **audit** mode.\n\n---\n\n## Step 0: Detect Ecosystem\n\nScan the working directory for manifest files. Multiple ecosystems may coexist.\n\n| Manifest | Ecosystem | Lock File |\n|----------|-----------|-----------|\n| `go.mod` | Go | `go.sum` |\n| `package.json` | Node | `package-lock.json` / `yarn.lock` / `pnpm-lock.yaml` |\n| `pyproject.toml` / `requirements.txt` | Python | `requirements.txt` / `poetry.lock` |\n| `Cargo.toml` | Rust | `Cargo.lock` |\n| `Gemfile` | Ruby | `Gemfile.lock` |\n\n```bash\n# Detect all ecosystems present\nfor f in go.mod package.json pyproject.toml requirements.txt Cargo.toml Gemfile; do\n  [[ -f \"$f\" ]] && echo \"FOUND: $f\"\ndone\n```\n\nIf no manifest is found, stop and report: \"No supported dependency manifest detected.\"\n\n---\n\n## Step 1: Audit Current State\n\nRun the ecosystem-appropriate commands. Capture all output for classification.\n\n### Go\n\n```bash\ngo list -m -u all          # List all modules, flag available updates\ngovulncheck ./...           # Vulnerability scan against Go vuln DB\ngo mod tidy                 # Clean up unused deps (dry-run first)\n```\n\n### Node\n\n```bash\nnpm audit                   # Known vulnerabilities\nnpm outdated                # Available updates (current vs wanted vs latest)\nnpx license-checker-webpack-plugin --out /dev/stdout 2>/dev/null || npx license-checker --json\n```\n\n### Python\n\n```bash\npip-audit                   # Vulnerability scan (install: pip install pip-audit)\npip list --outdated         # Available updates\npip-licenses 2>/dev/null || echo \"pip-licenses not installed\"\n```\n\n### Rust\n\n```bash\ncargo audit                 # Vulnerability scan (install: cargo install cargo-audit)\ncargo outdated              # Available updates (install: cargo install cargo-outdated)\ncargo license 2>/dev/null || echo \"cargo-license not installed\"\n```\n\n### Ruby\n\n```bash\nbundle audit check          # Vulnerability scan (install: gem install bundler-audit)\nbundle outdated             # Available updates\n```\n\n---\n\n## Step 2: Classify Findings\n\nSort every finding into exactly one severity tier.\n\n| Severity | Criteria | Action |\n|----------|----------|--------|\n| **Critical** | Known CVE with active exploitation, CVSS >= 9.0 | Update immediately, block release |\n| **High** | Security advisory without known exploit, CVSS 7.0-8.9, major version behind with security implications | Update within current session |\n| **Medium** | Minor versions behind, deprecated packages, stale transitive deps | Schedule update, batch if possible |\n| **Low** | Patch-level updates, cosmetic version bumps, informational advisories | Update opportunistically |\n\nOutput a summary table:\n\n```\nSEVERITY   PACKAGE            CURRENT   AVAILABLE   REASON\nCritical   example-lib        1.2.3     1.2.8       CVE-2025-XXXXX (RCE)\nHigh       some-framework     3.1.0     4.2.0       Security advisory SA-2025-YYY\nMedium     helper-pkg         2.0.1     2.3.0       3 minor versions behind\nLow        util-lib           1.0.0     1.0.1       Patch release\n```\n\n---\n\n## Step 3: Update Strategy\n\nChoose strategy based on the update scope requested (or default to the classification).\n\nWhen the request is to update an entire library family or dependency surface, read [references/library-update-ratchet.md](references/library-update-ratchet.md) before changing manifests. It defines the one-package loop, rollback evidence, and release-note check.\n\n### Patch updates (`--patch` or Low severity)\n\n- Batch all patch updates together.\n- Run full test suite once after the batch.\n- Single commit: `chore(deps): batch patch updates`.\n\n### Minor updates (`--minor` or Medium severity)\n\n- Update one dependency at a time.\n- Run tests after each update.\n- Individual commits: `chore(deps): update <pkg> to <version>`.\n\n### Major updates (`--major` or High/Critical severity)\n\n- Research breaking changes first (check CHANGELOG, migration guide, release notes).\n- Update one dependency at a time.\n- Run full test suite after each.\n- Individual commits with body noting breaking changes:\n  ```\n  chore(deps): update <pkg> to <version>\n\n  Breaking: <brief description of what changed>\n  ```\n\n### Decision matrix\n\n| Flag | Patch | Minor | Major |\n|------|-------|-------|-------|\n| `--patch` | Yes | No | No |\n| `--minor` | Yes | Yes | No |\n| `--major` | Yes | Yes | Yes |\n| (default) | Yes | Yes | No |\n\n---\n\n## Step 4: Execute Updates (Update Mode Only)\n\nFor each dependency to update, follow this loop strictly:\n\n```\n1. Record current state (version, lock file hash)\n2. Update the dependency\n3. Run tests: `go test ./...` / `npm test` / `pytest` / `cargo test`\n4. If PASS:\n   - Stage changed manifest + lock file\n   - Commit: chore(deps): update <pkg> from <old> to <new>\n5. If FAIL:\n   - Revert: restore manifest + lock file to pre-update state\n   - Document the incompatibility in the report\n   - Continue to next dependency\n```\n\n### Ecosystem-specific update commands\n\n| Ecosystem | Patch/Minor | Major |\n|-----------|-------------|-------|\n| Go | `go get <pkg>@latest` | `go get <pkg>@v<major>` |\n| Node | `npm update <pkg>` | `npm install <pkg>@latest` |\n| Python | `pip install --upgrade <pkg>` | `pip install <pkg>~=<version>` |\n| Rust | `cargo update -p <pkg>` | Edit `Cargo.toml`, then `cargo update` |\n| Ruby | `bundle update <pkg>` | Edit `Gemfile`, then `bundle install` |\n\n---\n\n## Step 5: Output Report\n\nWrite the report to `.agents/deps/`. Create the directory if needed.\n\n```bash\nmkdir -p .agents/deps\n```\n\nFile name format: `YYYY-MM-DD-deps-<mode>.md`\n\n### Report template\n\n```markdown\n# Dependency Report - <mode> - <date>\n\n## Ecosystem: <detected>\n\n## Summary\n- Total dependencies: <N>\n- Outdated: <N>\n- Vulnerable: <N>\n- License issues: <N>\n\n## Findings\n\n### Critical\n<table or \"None\">\n\n### High\n<table or \"None\">\n\n### Medium\n<table or \"None\">\n\n### Low\n<table or \"None\">\n\n## Updates Applied\n<list of commits or \"Audit only - no updates applied\">\n\n## Failed Updates\n<list with reasons or \"None\">\n\n## License Compliance\n<summary or \"Not checked - use /deps license\">\n```\n\n---\n\n## License Compliance (License Mode)\n\n### Compatibility Matrix\n\n| License | Proprietary OK | Copyleft | Distribution Obligations |\n|---------|---------------|----------|--------------------------|\n| MIT | Yes | No | Include license text |\n| Apache-2.0 | Yes | No | Include license + NOTICE file |\n| BSD-2-Clause | Yes | No | Include license text |\n| BSD-3-Clause | Yes | No | Include license text, no endorsement |\n| ISC | Yes | No | Include license text |\n| MPL-2.0 | Yes (file-level) | Weak | Modified MPL files must stay MPL |\n| LGPL-2.1 | Conditional | Weak | Dynamic linking OK, static requires disclosure |\n| GPL-2.0 | **No** | **Strong** | Entire derivative work must be GPL |\n| GPL-3.0 | **No** | **Strong** | Entire derivative work must be GPL |\n| AGPL-3.0 | **No** | **Strong** | Network use triggers disclosure |\n| SSPL | **No** | **Strong** | Service provider must open-source entire stack |\n| Unlicense | Yes | No | No obligations |\n\n### Rules\n\n1. **Flag all copyleft licenses** (GPL, AGPL, SSPL) as **Critical** in proprietary projects.\n2. **Flag weak copyleft** (MPL, LGPL) as **Medium** -- review usage pattern.\n3. **Flag missing licenses** as **High** -- unknown license is treated as all-rights-reserved.\n4. **Flag license changes** between versions -- an update may change the license.\n\n### Detecting project type\n\n- If `LICENSE` contains GPL/AGPL: project is copyleft, all licenses are compatible.\n- If `LICENSE` contains MIT/Apache/BSD or is proprietary: flag copyleft dependencies.\n- If no `LICENSE` file exists: warn that project license is undefined.\n\n---\n\n## Error Handling\n\n| Situation | Action |\n|-----------|--------|\n| Tool not installed (`govulncheck`, `pip-audit`, etc.) | Report which tool is missing, provide install command, continue with available tools |\n| Network unavailable | Use cached vulnerability DB if available, note staleness |\n| Test suite does not exist | Warn loudly, skip test verification, note in report |\n| Manifest parse error | Report the error, skip that ecosystem |\n\n---\n\n## See Also\n\n- `skills/standards/SKILL.md` -- Language-specific conventions\n- `skills/security/SKILL.md` -- Broader security scanning\n- `skills/vibe/SKILL.md` -- Code quality validation\n- [references/library-update-ratchet.md](references/library-update-ratchet.md)\n\n## Reference Documents\n\n- [references/deps.feature](references/deps.feature) \u2014 Executable spec: scan manifests, audit vulns/outdated/licenses, vuln+license modes, multi-ecosystem, result.json (soc-qk4b)\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "deps",
-    "description": "Audit dependency risks and updates.",
-    "practices": "",
-    "hexagonal_role": "driven-adapter",
-    "consumes": "",
-    "produces": "",
-    "context_rel": "[]",
-    "skill_api_version": "1",
-    "context": "",
-    "window": "fork",
-    "intent": "",
-    "mode": "task",
-    "sections": "",
-    "exclude": "",
-    "intel_scope": "topic",
-    "metadata": "",
-    "tier": "execution",
-    "dependencies": "",
-    "output_contract": "stdout: dependency audit report"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

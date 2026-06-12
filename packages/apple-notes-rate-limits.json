@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031337",
   "name": "apple-notes-rate-limits",
   "slug": "apple-notes-rate-limits",
   "description": "Handle Apple Notes automation rate limits and iCloud sync throttling.",
   "content": "# Apple Notes Rate Limits\n\n## Overview\n\nApple Notes has no formal API rate limits like cloud services do. However, there are practical throughput limits imposed by three systems: the Apple Events IPC bridge (osascript to Notes.app), the iCloud sync daemon (`bird`/`cloudd`) that must process each write, and the Notes.app SQLite database that handles concurrent access. Exceeding these practical limits causes timeouts (-1712), sync lag, or data loss when writes outpace iCloud's upload buffer. This guide documents safe operation rates and provides throttling patterns.\n\n## Practical Rate Limits\n\n| Operation | Safe Rate | Bottleneck | Exceeding Limit |\n|-----------|----------|------------|-----------------|\n| Create note | 1/second | iCloud sync buffer | Sync lag; notes missing on other devices |\n| Read note (name/body) | 10/second | Apple Events IPC | -1712 timeout errors |\n| Search (`.whose()`) | 2/second | Notes.app indexer | UI freeze; timeout |\n| Move note between folders | 1/second | iCloud + local DB | Folder state inconsistency |\n| Delete note | 1/second | iCloud delete propagation | Deleted notes reappear |\n| Bulk list (all notes) | 1/10 seconds | Memory + IPC | Process killed by macOS |\n| Attachment operations | 1/5 seconds | File I/O + sync | Corrupt or missing attachments |\n\n## Throttled Operation Queue\n\n```typescript\n// src/rate-limit/throttle.ts\nimport { execSync } from \"child_process\";\n\ninterface ThrottleConfig {\n  minDelayMs: number;\n  maxRetries: number;\n  backoffMultiplier: number;\n}\n\nconst THROTTLE_CONFIGS: Record<string, ThrottleConfig> = {\n  read:   { minDelayMs: 100,  maxRetries: 3, backoffMultiplier: 2 },\n  write:  { minDelayMs: 1000, maxRetries: 5, backoffMultiplier: 2 },\n  delete: { minDelayMs: 1000, maxRetries: 3, backoffMultiplier: 3 },\n  search: { minDelayMs: 500,  maxRetries: 2, backoffMultiplier: 2 },\n};\n\nasync function throttledExec<T>(\n  operation: () => T,\n  type: keyof typeof THROTTLE_CONFIGS = \"write\"\n): Promise<T> {\n  const config = THROTTLE_CONFIGS[type];\n  let delay = config.minDelayMs;\n\n  for (let attempt = 0; attempt <= config.maxRetries; attempt++) {\n    try {\n      const result = operation();\n      await new Promise(r => setTimeout(r, config.minDelayMs));\n      return result;\n    } catch (e: any) {\n      if (attempt === config.maxRetries) throw e;\n      console.warn(`Retry ${attempt + 1}/${config.maxRetries} after ${delay}ms: ${e.message}`);\n      await new Promise(r => setTimeout(r, delay));\n      delay *= config.backoffMultiplier;\n    }\n  }\n  throw new Error(\"Unreachable\");\n}\n```\n\n## Batch Operations with Rate Limiting\n\n```bash\n#!/bin/bash\n# Batch create notes with throttling\nINPUT_FILE=\"$1\"  # JSON array of {title, body} objects\nDELAY=1  # seconds between creates\n\njq -c '.[]' \"$INPUT_FILE\" | while IFS= read -r note; do\n  title=$(echo \"$note\" | jq -r '.title')\n  body=$(echo \"$note\" | jq -r '.body')\n  osascript -l JavaScript -e \"\n    const Notes = Application('Notes');\n    const n = Notes.Note({name: '$title', body: '$body'});\n    Notes.defaultAccount.folders[0].notes.push(n);\n    n.name();\n  \" && echo \"Created: $title\" || echo \"FAILED: $title\"\n  sleep \"$DELAY\"\ndone\n```\n\n## iCloud Sync Monitoring During Bulk Operations\n\n```bash\n# Monitor iCloud sync backlog during batch operations\nwatch -n 5 'echo \"=== Sync Status ===\";\n  brctl status com.apple.Notes 2>/dev/null || echo \"brctl unavailable\";\n  echo \"\"; echo \"=== Note Count ===\";\n  osascript -l JavaScript -e \"Application(\\\"Notes\\\").defaultAccount.notes.length\" 2>/dev/null'\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| -1712 AppleEvent timeout | Operations sent faster than Notes can process | Increase delay between operations; use throttled queue |\n| Notes reappear after deletion | iCloud sync restored note before delete propagated | Wait 5s after delete; verify deletion on another device |\n| Duplicate notes created | Retry on timeout re-executed successful create | Track created note IDs; check before retry |\n| iCloud sync stops during bulk ops | Sync daemon overwhelmed | Pause operations for 30s; `killall bird` to restart sync |\n| UI becomes unresponsive | Too many Apple Events queued | Reduce concurrency; add `delay(2)` in JXA scripts |\n\n## Resources\n\n- [Mac Automation Scripting Guide](https://developer.apple.com/library/archive/documentation/LanguagesUtilities/Conceptual/MacAutomationScriptingGuide/)\n- [Apple Events Programming Guide](https://developer.apple.com/library/archive/documentation/Cocoa/Conceptual/ScriptableCocoaApplications/)\n- [iCloud Sync Architecture](https://support.apple.com/en-us/102651)\n\n## Next Steps\n\nFor performance optimization beyond throttling, see `apple-notes-performance-tuning`. For monitoring sync health during operations, see `apple-notes-observability`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "apple-notes-rate-limits",
-    "description": "Handle Apple Notes automation rate limits and iCloud sync throttling.",
-    "Trigger": "apple notes rate limit\".",
-    "allowed-tools": "Read, Write, Edit, Bash(osascript:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

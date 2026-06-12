@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032933",
   "name": "posthog-core-workflow-a",
   "slug": "posthog-core-workflow-a",
   "description": "Implement PostHog product analytics: event capture, user identification,",
   "content": "# PostHog Core Workflow A \u2014 Product Analytics\n\n## Overview\n\nPrimary PostHog workflow covering event capture, user identification, group analytics, and person properties. This is the foundation for all PostHog analytics: capturing what users do, linking events to identified users, and grouping users by company/team for B2B analytics.\n\n## Prerequisites\n\n- Completed `posthog-install-auth` setup\n- `posthog-js` (browser) and/or `posthog-node` (server) installed\n- Project API key (`phc_...`) configured\n\n## Instructions\n\n### Step 1: Define Event Taxonomy\n\n```typescript\n// src/analytics/events.ts\n// Define all events as typed constants for consistency\nexport const EVENTS = {\n  // User lifecycle\n  USER_SIGNED_UP: 'user_signed_up',\n  USER_LOGGED_IN: 'user_logged_in',\n  USER_ONBOARDING_COMPLETED: 'user_onboarding_completed',\n\n  // Core product actions\n  FEATURE_USED: 'feature_used',\n  ITEM_CREATED: 'item_created',\n  ITEM_UPDATED: 'item_updated',\n  ITEM_DELETED: 'item_deleted',\n  SEARCH_PERFORMED: 'search_performed',\n  EXPORT_COMPLETED: 'export_completed',\n\n  // Revenue events\n  SUBSCRIPTION_STARTED: 'subscription_started',\n  SUBSCRIPTION_UPGRADED: 'subscription_upgraded',\n  SUBSCRIPTION_CANCELED: 'subscription_canceled',\n  PAYMENT_COMPLETED: 'payment_completed',\n} as const;\n\n// Standard property schema for consistency across events\ninterface BaseProperties {\n  source?: 'web' | 'mobile' | 'api' | 'webhook';\n  plan_tier?: 'free' | 'pro' | 'enterprise';\n  duration_ms?: number;\n}\n```\n\n### Step 2: Capture Events (Browser)\n\n```typescript\nimport posthog from 'posthog-js';\nimport { EVENTS } from './events';\n\n// Custom event with properties\nposthog.capture(EVENTS.ITEM_CREATED, {\n  item_type: 'document',\n  source: 'web',\n  plan_tier: 'pro',\n});\n\n// Timed event (measure duration)\nconst start = performance.now();\nawait doExpensiveOperation();\nposthog.capture(EVENTS.EXPORT_COMPLETED, {\n  format: 'csv',\n  row_count: 1500,\n  duration_ms: Math.round(performance.now() - start),\n});\n\n// Pageview with custom properties (if capture_pageview: false)\nposthog.capture('$pageview', {\n  page_title: document.title,\n  referrer: document.referrer,\n});\n```\n\n### Step 3: Identify Users and Set Properties\n\n```typescript\n// After user logs in \u2014 links anonymous events to this user\nposthog.identify('user-456', {\n  // $set properties (persist, overwrite on change)\n  email: 'jane@acme.com',\n  name: 'Jane Smith',\n  plan: 'enterprise',\n  signup_date: '2025-06-15',\n});\n\n// Update properties later without re-identifying\nposthog.people.set({\n  last_active: new Date().toISOString(),\n  total_items: 42,\n});\n\n// Set properties only if not already set ($set_once)\nposthog.people.set_once({\n  first_seen: new Date().toISOString(),\n  original_referrer: document.referrer,\n});\n\n// Unset properties\nposthog.people.unset(['deprecated_field']);\n\n// Reset on logout (clears distinct_id, starts new anonymous session)\nposthog.reset();\n```\n\n### Step 4: Group Analytics (B2B Company Tracking)\n\n```typescript\n// Associate user with a company group\nposthog.group('company', 'company-789', {\n  name: 'Acme Corp',\n  industry: 'SaaS',\n  plan: 'enterprise',\n  employee_count: 150,\n  arr: 250000,\n});\n\n// Events now automatically include company context\nposthog.capture(EVENTS.FEATURE_USED, {\n  feature_name: 'bulk-export',\n});\n// This event is attributed to both user-456 AND company-789\n\n// Multiple group types\nposthog.group('team', 'team-alpha', { name: 'Alpha Team' });\n```\n\n### Step 5: Server-Side Event Capture (posthog-node)\n\n```typescript\nimport { PostHog } from 'posthog-node';\n\nconst posthog = new PostHog(process.env.NEXT_PUBLIC_POSTHOG_KEY!, {\n  host: 'https://us.i.posthog.com',\n});\n\n// Server-side capture (e.g., in API route or webhook handler)\nfunction trackServerEvent(userId: string, event: string, properties?: Record<string, any>) {\n  posthog.capture({\n    distinctId: userId,\n    event,\n    properties: {\n      ...properties,\n      source: 'api',\n    },\n  });\n}\n\n// Identify with server-side properties\nposthog.identify({\n  distinctId: 'user-456',\n  properties: {\n    subscription_status: 'active',\n    mrr: 99,\n  },\n});\n\n// Group identify from server\nposthog.groupIdentify({\n  groupType: 'company',\n  groupKey: 'company-789',\n  properties: {\n    plan: 'enterprise',\n    total_seats: 50,\n  },\n});\n\n// CRITICAL: Flush in serverless/edge functions\nawait posthog.flush();\n```\n\n### Step 6: Create Annotations for Context\n\n```bash\nset -euo pipefail\n# Mark a deployment or product change in PostHog\ncurl -X POST \"https://app.posthog.com/api/projects/$POSTHOG_PROJECT_ID/annotations/\" \\\n  -H \"Authorization: Bearer $POSTHOG_PERSONAL_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"content\": \"v2.5.0 deployed \u2014 new checkout flow\",\n    \"date_marker\": \"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\",\n    \"scope\": \"project\"\n  }'\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Events not appearing | `posthog.init` not called | Ensure init runs before any capture |\n| Anonymous/identified split | Different `distinct_id` across platforms | Use consistent user ID from your auth system |\n| Group data missing | `posthog.group()` not called | Call `group()` before capture for group attribution |\n| Server events lost | No `flush()` in serverless | Always call `await posthog.flush()` before response |\n| Properties not updating | Using `$set_once` for mutable data | Use `posthog.people.set()` for values that change |\n\n## Output\n\n- Typed event taxonomy for consistent tracking\n- Browser event capture with user identification\n- B2B group analytics linking users to companies\n- Server-side event capture with proper flushing\n- Annotations marking deployments and product changes\n\n## Resources\n\n- [Capture Events](https://posthog.com/docs/product-analytics/capture-events)\n- [Identifying Users](https://posthog.com/docs/product-analytics/identify)\n- [Group Analytics](https://posthog.com/docs/product-analytics/group-analytics)\n- [Annotations API](https://posthog.com/docs/api/annotations)\n\n## Next Steps\n\nFor feature flags and experiments, see `posthog-core-workflow-b`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "posthog-core-workflow-a",
-    "description": "Implement PostHog product analytics: event capture, user identification,",
-    "Trigger": "posthog analytics\", \"capture events\", \"track users posthog\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

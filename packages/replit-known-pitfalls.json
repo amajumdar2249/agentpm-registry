@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033047",
   "name": "replit-known-pitfalls",
   "slug": "replit-known-pitfalls",
   "description": "Avoid the top Replit anti-patterns: ephemeral filesystem, public secrets,",
   "content": "# Replit Known Pitfalls\n\n## Overview\n\nReal gotchas when building on Replit. Each pitfall includes what goes wrong, why, and the correct pattern. Based on common failures in Replit's ephemeral container model, Nix-based environment, and cloud hosting platform.\n\n## Pitfall Reference\n\n### 1. Writing to Local Filesystem for Persistence\n\n**What happens:** Data is lost when the container restarts, deploys, or sleeps.\n\n```python\n# BAD \u2014 files disappear on container restart\nwith open(\"user_data.json\", \"w\") as f:\n    json.dump(data, f)\n\n# GOOD \u2014 use Replit's persistent storage\nfrom replit import db\ndb[\"user_data\"] = data\n\n# For files, use Object Storage\nfrom replit.object_storage import Client\nstorage = Client()\nstorage.upload_from_text(\"user_data.json\", json.dumps(data))\n```\n\n**Rule:** Anything written to the filesystem is ephemeral. Use PostgreSQL, KV Database, or Object Storage for data that must survive restarts.\n\n---\n\n### 2. Hardcoding Secrets in Source Code\n\n**What happens:** Secrets are visible to anyone who views your Repl (public by default on free plans). Replit's Secret Scanner catches some cases but not all.\n\n```python\n# BAD \u2014 exposed in public Repl\nAPI_KEY = \"sk-live-abc123\"\nDATABASE_URL = \"postgresql://user:password@host/db\"\n\n# GOOD \u2014 use Replit Secrets (lock icon in sidebar)\nimport os\nAPI_KEY = os.environ[\"API_KEY\"]\nDATABASE_URL = os.environ[\"DATABASE_URL\"]\n```\n\n---\n\n### 3. Binding to localhost Instead of 0.0.0.0\n\n**What happens:** App starts but Webview is blank. Replit's proxy can't reach the app.\n\n```typescript\n// BAD \u2014 unreachable from Webview and deployments\napp.listen(3000, '127.0.0.1');\napp.listen(3000, 'localhost');\n\n// GOOD \u2014 accessible to Replit's proxy\napp.listen(3000, '0.0.0.0');\n\n// BEST \u2014 use PORT env var\nconst PORT = parseInt(process.env.PORT || '3000');\napp.listen(PORT, '0.0.0.0');\n```\n\n---\n\n### 4. Ignoring Nix System Dependencies\n\n**What happens:** Python packages with C extensions (Pillow, psycopg2, cryptography) fail to build with cryptic errors.\n\n```nix\n# BAD \u2014 missing system libraries\n{ pkgs }: {\n  deps = [ pkgs.python311 ];\n}\n\n# GOOD \u2014 include system libraries for native packages\n{ pkgs }: {\n  deps = [\n    pkgs.python311\n    pkgs.python311Packages.pip\n    pkgs.zlib          # Required for Pillow\n    pkgs.libjpeg       # Required for Pillow\n    pkgs.libffi        # Required for cffi/cryptography\n    pkgs.openssl       # Required for cryptography\n    pkgs.postgresql    # Required for psycopg2\n  ];\n}\n```\n\n**After editing `replit.nix`:** Exit and re-enter the Shell tab to reload.\n\n---\n\n### 5. Using Replit KV Database for Large Data\n\n**What happens:** Writes fail silently or throw errors after hitting the 50 MiB limit.\n\n```python\n# BAD \u2014 storing large blobs in KV (50 MiB limit, 5K keys)\ndb[\"images\"] = base64_encoded_images  # Hits limit quickly\ndb[\"full_dataset\"] = huge_json        # 5 MiB per value max\n\n# GOOD \u2014 use KV for metadata, PostgreSQL/Storage for data\ndb[\"image_count\"] = 42\ndb[\"last_upload\"] = \"2025-01-15\"\n\n# Large data in Object Storage\nstorage.upload_from_text(\"data/full_dataset.json\", json.dumps(data))\n\n# Structured data in PostgreSQL\npool.query(\"INSERT INTO images (url, metadata) VALUES ($1, $2)\", [url, meta])\n```\n\n**KV Limits:** 50 MiB total, 5,000 keys, 1 KB per key, 5 MiB per value.\n\n---\n\n### 6. Expecting Auth Headers in Development\n\n**What happens:** `X-Replit-User-Id` is always undefined in Workspace Webview.\n\n```typescript\n// BAD \u2014 breaks during development\napp.get('/api/me', (req, res) => {\n  const userId = req.headers['x-replit-user-id'] as string;\n  // userId is ALWAYS undefined in Workspace Webview\n  res.json({ userId }); // { userId: undefined }\n});\n\n// GOOD \u2014 provide dev fallback\napp.get('/api/me', (req, res) => {\n  let userId = req.headers['x-replit-user-id'] as string;\n\n  if (!userId && process.env.NODE_ENV !== 'production') {\n    userId = 'dev-user-123'; // Mock user for development\n  }\n\n  if (!userId) return res.status(401).json({ error: 'Login required' });\n  res.json({ userId });\n});\n```\n\n**Auth only works on:** deployed `.replit.app` URLs, `.replit.dev` preview URLs, and custom domains.\n\n---\n\n### 7. Using \"Always On\" Instead of Deployments\n\n**What happens:** Legacy \"Always On\" feature is more expensive and less reliable than modern Deployments.\n\n```markdown\nBAD (legacy):\n  Settings > Always On > Enable\n  - Keeps Repl running but uses more resources\n  - No build step, no rollbacks, no scaling\n\nGOOD (modern):\n  Deploy button > Autoscale or Reserved VM\n  - Built-in rollbacks\n  - Separate dev/prod databases\n  - Auto-scaling (Autoscale)\n  - Build step for optimization\n  - Custom domains with auto-SSL\n```\n\n---\n\n### 8. Forgetting to Close Database Connections\n\n**What happens:** Connection pool exhaustion. New requests fail with timeout errors.\n\n```python\n# BAD \u2014 creates a new connection per request\n@app.route('/api/data')\ndef get_data():\n    import psycopg2\n    conn = psycopg2.connect(os.environ[\"DATABASE_URL\"])\n    # ... never closed!\n\n# GOOD \u2014 use a connection pool\nfrom psycopg2.pool import SimpleConnectionPool\npool = SimpleConnectionPool(1, 10, os.environ[\"DATABASE_URL\"])\n\n@app.route('/api/data')\ndef get_data():\n    conn = pool.getconn()\n    try:\n        # ... use connection\n        pass\n    finally:\n        pool.putconn(conn)\n```\n\n```python\n# Also: close KV database on shutdown\nfrom replit import db\nimport atexit\n\natexit.register(db.close)  # Clean termination\n```\n\n---\n\n### 9. Not Handling SIGTERM\n\n**What happens:** Container stops mid-request. In-progress work is lost.\n\n```typescript\n// BAD \u2014 abrupt shutdown\n// (no signal handler \u2014 process killed immediately)\n\n// GOOD \u2014 graceful shutdown\nprocess.on('SIGTERM', async () => {\n  console.log('SIGTERM received, shutting down...');\n  server.close();           // Stop accepting new requests\n  await pool.end();         // Close database connections\n  await saveState();        // Persist in-memory state\n  process.exit(0);\n});\n```\n\n---\n\n### 10. Mixing npm and System Packages\n\n**What happens:** Confusion between Nix system packages and npm/pip language packages.\n\n```markdown\nNix (replit.nix) = system packages:\n  - Node.js runtime, Python runtime\n  - System libraries (zlib, openssl, libjpeg)\n  - CLI tools (postgresql client, git)\n\nnpm/pip = language packages:\n  - express, flask, react\n  - @replit/database, @replit/object-storage\n  - pg, psycopg2\n\nBoth are needed:\n  1. replit.nix: pkgs.nodejs-20_x (provides Node.js)\n  2. Shell: npm install express (provides Express)\n\nCommon mistake:\n  Expecting \"npm install\" to provide system libraries\n  \u2192 Need pkgs.openssl in replit.nix for crypto packages\n```\n\n## Quick Audit Script\n\n```bash\n#!/bin/bash\necho \"=== Replit Pitfall Audit ===\"\n\n# Check for hardcoded secrets\necho -n \"Secrets in code: \"\ngrep -rn \"sk[-_]\\(live\\|test\\)\" --include=\"*.py\" --include=\"*.ts\" --include=\"*.js\" . 2>/dev/null | grep -v node_modules | wc -l\n\n# Check port binding\necho -n \"Localhost binding: \"\ngrep -rn \"localhost\\|127\\.0\\.0\\.1\" --include=\"*.py\" --include=\"*.ts\" --include=\"*.js\" . 2>/dev/null | grep -v node_modules | grep -c \"listen\\|bind\"\n\n# Check filesystem writes\necho -n \"Filesystem writes: \"\ngrep -rn \"writeFileSync\\|open.*['\\\"]w['\\\"]\" --include=\"*.py\" --include=\"*.ts\" --include=\"*.js\" . 2>/dev/null | grep -v node_modules | grep -v \".replit\\|replit.nix\" | wc -l\n\n# Check for replit.nix\necho -n \"replit.nix: \"\n[ -f replit.nix ] && echo \"exists\" || echo \"MISSING\"\n\n# Check for SIGTERM handler\necho -n \"SIGTERM handler: \"\ngrep -rn \"SIGTERM\" --include=\"*.py\" --include=\"*.ts\" --include=\"*.js\" . 2>/dev/null | grep -v node_modules | wc -l\n```\n\n## Resources\n\n- [Replit Docs](https://docs.replit.com)\n- [Nix on Replit](https://docs.replit.com/programming-ide/nix-on-replit)\n- [Replit Database](https://docs.replit.com/cloud-services/storage-and-databases/replit-database)\n- [Replit Deployments](https://docs.replit.com/hosting/deployments)\n- [Secure Vibe Coding](https://blog.replit.com/16-ways-to-vibe-code-securely)\n\n## Next Steps\n\nFor production readiness, see `replit-prod-checklist`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "replit-known-pitfalls",
-    "description": "Avoid the top Replit anti-patterns: ephemeral filesystem, public secrets,",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

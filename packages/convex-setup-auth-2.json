@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000022783",
   "name": "convex-setup-auth",
   "slug": "convex-setup-auth-2",
   "description": "Sets up Convex authentication with user management, identity mapping, and access control. Use this skill when adding login or signup to a Convex app, configuring Convex Auth, Clerk, WorkOS AuthKit, Auth0, or custom JWT providers, wiring auth.config.ts, protecting queries and mutations with ctx.auth.getUserIdentity(), creating a users table with identity mapping, or setting up role-based access control, even if the user just says \"add auth\" or \"make it require login.",
   "content": "\n# Convex Authentication Setup\n\nImplement secure authentication in Convex with user management and access control.\n\n## When to Use\n\n- Setting up authentication for the first time\n- Implementing user management (users table, identity mapping)\n- Creating authentication helper functions\n- Setting up auth providers (Convex Auth, Clerk, WorkOS AuthKit, Auth0, custom JWT)\n\n## When Not to Use\n\n- Auth for a non-Convex backend\n- Pure OAuth/OIDC documentation without a Convex implementation\n- Debugging unrelated bugs that happen to surface near auth code\n- The auth provider is already fully configured and the user only needs a one-line fix\n\n## First Step: Choose the Auth Provider\n\nConvex supports multiple authentication approaches. Do not assume a provider.\n\nBefore writing setup code:\n\n1. Ask the user which auth solution they want, unless the repository already makes it obvious\n2. If the repo already uses a provider, continue with that provider unless the user wants to switch\n3. If the user has not chosen a provider and the repo does not make it obvious, ask before proceeding\n\nCommon options:\n\n- [Convex Auth](https://docs.convex.dev/auth/convex-auth) - good default when the user wants auth handled directly in Convex\n- [Clerk](https://docs.convex.dev/auth/clerk) - use when the app already uses Clerk or the user wants Clerk's hosted auth features\n- [WorkOS AuthKit](https://docs.convex.dev/auth/authkit/) - use when the app already uses WorkOS or the user wants AuthKit specifically\n- [Auth0](https://docs.convex.dev/auth/auth0) - use when the app already uses Auth0\n- Custom JWT provider - use when integrating an existing auth system not covered above\n\nLook for signals in the repo before asking:\n\n- Dependencies such as `@clerk/*`, `@workos-inc/*`, `@auth0/*`, or Convex Auth packages\n- Existing files such as `convex/auth.config.ts`, auth middleware, provider wrappers, or login components\n- Environment variables that clearly point at a provider\n\n## After Choosing a Provider\n\nRead the provider's official guide and the matching local reference file:\n\n- Convex Auth: [official docs](https://docs.convex.dev/auth/convex-auth), then `references/convex-auth.md`\n- Clerk: [official docs](https://docs.convex.dev/auth/clerk), then `references/clerk.md`\n- WorkOS AuthKit: [official docs](https://docs.convex.dev/auth/authkit/), then `references/workos-authkit.md`\n- Auth0: [official docs](https://docs.convex.dev/auth/auth0), then `references/auth0.md`\n\nThe local reference files contain the concrete workflow, expected files and env vars, gotchas, and validation checks.\n\nUse those sources for:\n\n- package installation\n- client provider wiring\n- environment variables\n- `convex/auth.config.ts` setup\n- login and logout UI patterns\n- framework-specific setup for React, Vite, or Next.js\n\nFor shared auth behavior, use the official Convex docs as the source of truth:\n\n- [Auth in Functions](https://docs.convex.dev/auth/functions-auth) for `ctx.auth.getUserIdentity()`\n- [Storing Users in the Convex Database](https://docs.convex.dev/auth/database-auth) for optional app-level user storage\n- [Authentication](https://docs.convex.dev/auth) for general auth and authorization guidance\n- [Convex Auth Authorization](https://labs.convex.dev/auth/authz) when the provider is Convex Auth\n\nPrefer official docs over recalled steps, because provider CLIs and Convex Auth internals change between versions. Inventing setup from memory risks outdated patterns.\nFor third-party providers, only add app-level user storage if the app actually needs user documents in Convex. Not every app needs a `users` table.\nFor Convex Auth, follow the Convex Auth docs and built-in auth tables rather than adding a parallel `users` table plus `storeUser` flow, because Convex Auth already manages user records internally.\nAfter running provider initialization commands, verify generated files and complete the post-init wiring steps the provider reference calls out. Initialization commands rarely finish the entire integration.\n\n## Core Pattern: Protecting Backend Functions\n\nThe most common auth task is checking identity in Convex functions.\n\n```ts\n// Bad: trusting a client-provided userId\nexport const getMyProfile = query({\n  args: { userId: v.id(\"users\") },\n  handler: async (ctx, args) => {\n    return await ctx.db.get(args.userId);\n  },\n});\n```\n\n```ts\n// Good: verifying identity server-side\nexport const getMyProfile = query({\n  args: {},\n  handler: async (ctx) => {\n    const identity = await ctx.auth.getUserIdentity();\n    if (!identity) throw new Error(\"Not authenticated\");\n\n    return await ctx.db\n      .query(\"users\")\n      .withIndex(\"by_tokenIdentifier\", (q) =>\n        q.eq(\"tokenIdentifier\", identity.tokenIdentifier)\n      )\n      .unique();\n  },\n});\n```\n\n## Workflow\n\n1. Determine the provider, either by asking the user or inferring from the repo\n2. Ask whether the user wants local-only setup or production-ready setup now\n3. Read the matching provider reference file\n4. Follow the official provider docs for current setup details\n5. Follow the official Convex docs for shared backend auth behavior, user storage, and authorization patterns\n6. Only add app-level user storage if the docs and app requirements call for it\n7. Add authorization checks for ownership, roles, or team access only where the app needs them\n8. Verify login state, protected queries, environment variables, and production configuration if requested\n\nIf the flow blocks on interactive provider or deployment setup, ask the user explicitly for the exact human step needed, then continue after they complete it.\nFor UI-facing auth flows, offer to validate the real sign-up or sign-in flow after setup is done.\nIf the environment has browser automation tools, you can use them.\nIf it does not, give the user a short manual validation checklist instead.\n\n## Reference Files\n\n### Provider References\n\n- `references/convex-auth.md`\n- `references/clerk.md`\n- `references/workos-authkit.md`\n- `references/auth0.md`\n\n## Checklist\n\n- [ ] Chosen the correct auth provider before writing setup code\n- [ ] Read the relevant provider reference file\n- [ ] Asked whether the user wants local-only setup or production-ready setup\n- [ ] Used the official provider docs for provider-specific wiring\n- [ ] Used the official Convex docs for shared auth behavior and authorization patterns\n- [ ] Only added app-level user storage if the app actually needs it\n- [ ] Did not invent a cross-provider `users` table or `storeUser` flow for Convex Auth\n- [ ] Added authentication checks in protected backend functions\n- [ ] Added authorization checks where the app actually needs them\n- [ ] Clear error messages (\"Not authenticated\", \"Unauthorized\")\n- [ ] Client auth provider configured for the chosen provider\n- [ ] If requested, production auth setup is covered too\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "convex-setup-auth",
-    "description": "Sets up Convex authentication with user management, identity mapping, and access control. Use this skill when adding login or signup to a Convex app, configuring Convex Auth, Clerk, WorkOS AuthKit, Auth0, or custom JWT providers, wiring auth.config.ts, protecting queries and mutations with ctx.auth.getUserIdentity(), creating a users table with identity mapping, or setting up role-based access control, even if the user just says \"add auth\" or \"make it require login."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

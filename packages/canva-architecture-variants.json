@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031416",
   "name": "canva-architecture-variants",
   "slug": "canva-architecture-variants",
   "description": "Choose and implement Canva Connect API architecture blueprints for different",
   "content": "# Canva Architecture Variants\n\n## Overview\n\nThree validated architecture patterns for Canva Connect API integrations. All use the REST API at `api.canva.com/rest/v1/*` with OAuth 2.0 PKCE tokens. The key architectural decision is how to handle token storage, async operations (exports, autofills), and rate limit management.\n\n## Variant A: Monolith (Simple)\n\n**Best for:** MVPs, small teams, < 100 Canva users\n\n```\nmy-app/\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 canva/\n\u2502   \u2502   \u251c\u2500\u2500 client.ts          # REST client with auto-refresh\n\u2502   \u2502   \u251c\u2500\u2500 auth.ts            # OAuth PKCE flow\n\u2502   \u2502   \u2514\u2500\u2500 types.ts\n\u2502   \u251c\u2500\u2500 routes/\n\u2502   \u2502   \u251c\u2500\u2500 auth.ts            # OAuth callback\n\u2502   \u2502   \u2514\u2500\u2500 designs.ts         # Design CRUD\n\u2502   \u251c\u2500\u2500 store/\n\u2502   \u2502   \u2514\u2500\u2500 tokens.ts          # SQLite/file token store\n\u2502   \u2514\u2500\u2500 index.ts\n```\n\n```typescript\n// Direct API calls in route handlers\napp.post('/api/designs', async (req, res) => {\n  const canva = getClientForUser(req.user.id);\n\n  const { design } = await canva.request('/designs', {\n    method: 'POST',\n    body: JSON.stringify({\n      design_type: { type: 'custom', width: 1080, height: 1080 },\n      title: req.body.title,\n    }),\n  });\n\n  res.json({ designId: design.id, editUrl: design.urls.edit_url });\n});\n```\n\n**Pros:** Fast to build, simple token management, easy to debug.\n**Cons:** Synchronous exports block requests, no job queue for autofills.\n\n---\n\n## Variant B: Service Layer (Moderate)\n\n**Best for:** Growing apps, 100-1,000 users, multiple Canva features\n\n```\nmy-app/\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 canva/\n\u2502   \u2502   \u251c\u2500\u2500 client.ts\n\u2502   \u2502   \u2514\u2500\u2500 auth.ts\n\u2502   \u251c\u2500\u2500 services/\n\u2502   \u2502   \u251c\u2500\u2500 design.service.ts   # Business logic + caching\n\u2502   \u2502   \u251c\u2500\u2500 export.service.ts   # Async export with polling\n\u2502   \u2502   \u251c\u2500\u2500 asset.service.ts    # Upload management\n\u2502   \u2502   \u2514\u2500\u2500 template.service.ts # Autofill orchestration\n\u2502   \u251c\u2500\u2500 queue/\n\u2502   \u2502   \u2514\u2500\u2500 export-worker.ts    # Background export processing\n\u2502   \u251c\u2500\u2500 routes/\n\u2502   \u2514\u2500\u2500 store/\n\u2502       \u2514\u2500\u2500 tokens.ts           # PostgreSQL encrypted tokens\n```\n\n```typescript\n// Service layer handles caching, retry, and async operations\nclass ExportService {\n  constructor(\n    private canva: CanvaClient,\n    private cache: Redis,\n    private queue: Bull.Queue\n  ) {}\n\n  async exportDesign(designId: string, format: object): Promise<string> {\n    // Check cache for recent export\n    const cached = await this.cache.get(`export:${designId}:${JSON.stringify(format)}`);\n    if (cached) return cached;\n\n    // Queue export job \u2014 don't block the request\n    const job = await this.queue.add('canva-export', { designId, format });\n    return job.id;\n  }\n}\n\n// Background worker polls Canva export API\nexportQueue.process('canva-export', async (job) => {\n  const { designId, format } = job.data;\n  const canva = await getServiceClient();\n\n  const { job: exportJob } = await canva.request('/exports', {\n    method: 'POST',\n    body: JSON.stringify({ design_id: designId, format }),\n  });\n\n  // Poll for completion\n  let result = exportJob;\n  while (result.status === 'in_progress') {\n    await new Promise(r => setTimeout(r, 2000));\n    const poll = await canva.request(`/exports/${result.id}`);\n    result = poll.job;\n  }\n\n  return result.status === 'success' ? result.urls : null;\n});\n```\n\n**Pros:** Non-blocking exports, caching, separation of concerns.\n**Cons:** More infrastructure (Redis, job queue), more complex deployment.\n\n---\n\n## Variant C: Microservice (Enterprise)\n\n**Best for:** 1,000+ users, multi-team, strict SLAs, Canva Enterprise with autofill\n\n```\ncanva-service/                # Dedicated microservice\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 api/\n\u2502   \u2502   \u2514\u2500\u2500 grpc/             # Internal gRPC API\n\u2502   \u251c\u2500\u2500 canva/\n\u2502   \u2502   \u251c\u2500\u2500 client.ts\n\u2502   \u2502   \u2514\u2500\u2500 auth.ts\n\u2502   \u251c\u2500\u2500 services/\n\u2502   \u251c\u2500\u2500 workers/\n\u2502   \u2502   \u251c\u2500\u2500 export.worker.ts\n\u2502   \u2502   \u251c\u2500\u2500 autofill.worker.ts\n\u2502   \u2502   \u2514\u2500\u2500 webhook.worker.ts\n\u2502   \u2514\u2500\u2500 store/\n\u2502       \u2514\u2500\u2500 tokens.ts         # Vault-backed token storage\n\u251c\u2500\u2500 k8s/\n\u2502   \u251c\u2500\u2500 deployment.yaml\n\u2502   \u251c\u2500\u2500 service.yaml\n\u2502   \u2514\u2500\u2500 hpa.yaml              # Scale based on queue depth\n```\n\n**Key differences:**\n\n- Dedicated service owns all Canva API interaction\n- gRPC for internal services, REST for external\n- Separate workers for exports, autofills, webhooks\n- Circuit breaker per operation type\n- Token storage in HashiCorp Vault or KMS\n- HPA scales based on export queue depth\n\n---\n\n## Decision Matrix\n\n| Factor | Monolith | Service Layer | Microservice |\n|--------|----------|---------------|--------------|\n| Users | < 100 | 100-1,000 | 1,000+ |\n| Team Size | 1-3 | 3-10 | 10+ |\n| Export Volume | < 100/day | 100-2,000/day | 2,000-5,000/day |\n| Canva Tier | Free/Pro | Pro/Teams | Enterprise |\n| Infrastructure | Single server | App + Redis + queue | Kubernetes |\n| Time to Build | 1-2 days | 1-2 weeks | 2-4 weeks |\n\n## Migration Path\n\n```\nMonolith \u2192 Service Layer:\n1. Extract canva/ to services/\n2. Add Redis for caching\n3. Add BullMQ for async exports\n4. Move token store to PostgreSQL\n\nService Layer \u2192 Microservice:\n1. Create canva-service repository\n2. Define gRPC contract\n3. Add per-operation workers\n4. Deploy to Kubernetes\n5. Migrate token store to Vault\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Over-engineering | Wrong variant | Start simpler, migrate when needed |\n| Export blocking requests | No job queue (Variant A) | Queue with BullMQ |\n| Token management complex | Multi-user | Use factory pattern per user |\n| Integration export quota | > 5,000/day | Contact Canva for increase |\n\n## Resources\n\n- [Canva Starter Kit](https://github.com/canva-sdks/canva-connect-api-starter-kit)\n- [Canva API Reference](https://www.canva.dev/docs/connect/api-reference/)\n- [Monolith First](https://martinfowler.com/bliki/MonolithFirst.html)\n\n## Next Steps\n\nFor common anti-patterns, see `canva-known-pitfalls`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "canva-architecture-variants",
-    "description": "Choose and implement Canva Connect API architecture blueprints for different",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

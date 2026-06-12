@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032892",
   "name": "perplexity-observability",
   "slug": "perplexity-observability",
   "description": "Set up monitoring for Perplexity Sonar API with latency, cost, citation",
   "content": "# Perplexity Observability\n\n## Overview\n\nMonitor Perplexity Sonar API performance, cost, and quality. Key signals unique to Perplexity: citation count per response (quality indicator), search latency variability (web search is non-deterministic), and per-model cost differences.\n\n## Key Metrics\n\n| Metric | sonar (typical) | sonar-pro (typical) | Alert Threshold |\n|--------|----------------|--------------------|--------------  |\n| Latency p50 | 1-2s | 3-5s | p95 > 15s |\n| Citations/response | 3-5 | 5-10 | 0 for 10min |\n| Error rate | <1% | <1% | >5% |\n| Cost/query | $0.005 | $0.02 | >$0.10 |\n\n## Prerequisites\n\n- Perplexity API integration running\n- Metrics backend (Prometheus, Datadog, or custom)\n- Alerting system configured\n\n## Instructions\n\n### Step 1: Instrument the Perplexity Client\n\n```typescript\nimport OpenAI from \"openai\";\n\ninterface SearchMetrics {\n  model: string;\n  latencyMs: number;\n  status: \"success\" | \"error\";\n  citationCount: number;\n  totalTokens: number;\n  cached: boolean;\n  errorCode?: number;\n}\n\nconst metrics: SearchMetrics[] = [];\n\nasync function instrumentedSearch(\n  client: OpenAI,\n  query: string,\n  model: string = \"sonar\",\n  cached: boolean = false\n): Promise<{ response: any; metrics: SearchMetrics }> {\n  const start = performance.now();\n  let searchMetrics: SearchMetrics;\n\n  try {\n    const response = await client.chat.completions.create({\n      model,\n      messages: [{ role: \"user\", content: query }],\n    });\n\n    searchMetrics = {\n      model,\n      latencyMs: performance.now() - start,\n      status: \"success\",\n      citationCount: (response as any).citations?.length || 0,\n      totalTokens: response.usage?.total_tokens || 0,\n      cached,\n    };\n\n    metrics.push(searchMetrics);\n    return { response, metrics: searchMetrics };\n  } catch (err: any) {\n    searchMetrics = {\n      model,\n      latencyMs: performance.now() - start,\n      status: \"error\",\n      citationCount: 0,\n      totalTokens: 0,\n      cached,\n      errorCode: err.status,\n    };\n\n    metrics.push(searchMetrics);\n    throw err;\n  }\n}\n```\n\n### Step 2: Prometheus Metrics Export\n\n```typescript\n// Export metrics in Prometheus format\nfunction prometheusMetrics(): string {\n  const lines: string[] = [];\n\n  // Latency histogram\n  lines.push(\"# HELP perplexity_latency_ms Search response latency\");\n  lines.push(\"# TYPE perplexity_latency_ms histogram\");\n\n  // Query counter\n  const byModel = metrics.reduce((acc, m) => {\n    const key = `${m.model}_${m.status}`;\n    acc[key] = (acc[key] || 0) + 1;\n    return acc;\n  }, {} as Record<string, number>);\n\n  for (const [key, count] of Object.entries(byModel)) {\n    const [model, status] = key.split(\"_\");\n    lines.push(`perplexity_queries_total{model=\"${model}\",status=\"${status}\"} ${count}`);\n  }\n\n  // Citation gauge\n  const recentCitations = metrics.slice(-100).filter((m) => m.status === \"success\");\n  const avgCitations = recentCitations.reduce((s, m) => s + m.citationCount, 0) / Math.max(recentCitations.length, 1);\n  lines.push(`perplexity_avg_citations ${avgCitations.toFixed(1)}`);\n\n  // Token counter\n  const totalTokens = metrics.reduce((s, m) => s + m.totalTokens, 0);\n  lines.push(`perplexity_tokens_total ${totalTokens}`);\n\n  return lines.join(\"\\n\");\n}\n```\n\n### Step 3: Citation Quality Scoring\n\n```typescript\nfunction evaluateCitationQuality(citations: string[]): {\n  total: number;\n  authoritative: number;\n  qualityScore: number;\n} {\n  const authoritativeTLDs = [\".gov\", \".edu\"];\n  const authoritativeDomains = [\"wikipedia.org\", \"arxiv.org\", \"nature.com\", \"science.org\"];\n\n  let authoritative = 0;\n  for (const url of citations) {\n    const isAuth = authoritativeTLDs.some((tld) => url.includes(tld)) ||\n                   authoritativeDomains.some((d) => url.includes(d));\n    if (isAuth) authoritative++;\n  }\n\n  return {\n    total: citations.length,\n    authoritative,\n    qualityScore: citations.length > 0 ? authoritative / citations.length : 0,\n  };\n}\n```\n\n### Step 4: Cost Tracking\n\n```typescript\nconst COST_PER_MILLION_TOKENS: Record<string, { input: number; output: number }> = {\n  \"sonar\":              { input: 1, output: 1 },\n  \"sonar-pro\":          { input: 3, output: 15 },\n  \"sonar-reasoning-pro\": { input: 3, output: 15 },\n  \"sonar-deep-research\": { input: 2, output: 8 },\n};\n\nfunction estimateCost(model: string, usage: { prompt_tokens: number; completion_tokens: number }): number {\n  const rates = COST_PER_MILLION_TOKENS[model] || COST_PER_MILLION_TOKENS[\"sonar\"];\n  return (usage.prompt_tokens * rates.input + usage.completion_tokens * rates.output) / 1_000_000;\n}\n```\n\n### Step 5: Alert Rules (Prometheus/Alertmanager)\n\n```yaml\ngroups:\n  - name: perplexity\n    rules:\n      - alert: PerplexityHighLatency\n        expr: histogram_quantile(0.95, rate(perplexity_latency_ms_bucket[5m])) > 15000\n        for: 5m\n        annotations:\n          summary: \"Perplexity P95 latency exceeds 15 seconds\"\n\n      - alert: PerplexityNoCitations\n        expr: perplexity_avg_citations == 0\n        for: 10m\n        annotations:\n          summary: \"Perplexity returning responses with zero citations\"\n\n      - alert: PerplexityHighErrorRate\n        expr: rate(perplexity_queries_total{status=\"error\"}[5m]) / rate(perplexity_queries_total[5m]) > 0.05\n        for: 5m\n        annotations:\n          summary: \"Perplexity API error rate exceeds 5%\"\n\n      - alert: PerplexityCostSpike\n        expr: increase(perplexity_tokens_total[1h]) > 1000000\n        annotations:\n          summary: \"Perplexity token usage spike (>1M tokens/hour)\"\n```\n\n## Dashboard Panels\n\nTrack these metrics on your dashboard:\n\n- Query latency by model (sonar vs sonar-pro histogram)\n- Citations per response distribution\n- Query volume over time (by model)\n- Cost per query trend\n- Error rate by status code (429 vs 500)\n- Cache hit rate\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| High latency on sonar-pro | Complex multi-source search | Expected; use sonar for simple queries |\n| Zero citations alert | Vague queries or API issue | Review query patterns |\n| Cost spike | Burst of sonar-pro queries | Check for runaway batch jobs |\n| Error rate elevated | Rate limiting or API issue | Check for 429s in error breakdown |\n\n## Output\n\n- Instrumented Perplexity client with latency/error/citation tracking\n- Prometheus metrics export endpoint\n- Citation quality scoring\n- Cost estimation per query\n- Alert rules for latency, errors, and cost\n\n## Resources\n\n- [Perplexity API Documentation](https://docs.perplexity.ai)\n- [Prometheus Documentation](https://prometheus.io/docs/)\n\n## Next Steps\n\nFor incident response, see `perplexity-incident-runbook`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "perplexity-observability",
-    "description": "Set up monitoring for Perplexity Sonar API with latency, cost, citation",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

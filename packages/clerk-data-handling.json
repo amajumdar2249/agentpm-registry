@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031548",
   "name": "clerk-data-handling",
   "slug": "clerk-data-handling",
   "description": "Handle user data, privacy, and GDPR compliance with Clerk.",
   "content": "# Clerk Data Handling\n\n## Overview\n\nManage user data, implement privacy features, and ensure GDPR/CCPA compliance using the Clerk Backend API. Covers data export, right to be forgotten, consent management, and audit logging.\n\n## Prerequisites\n\n- Clerk integration working\n- Understanding of GDPR/CCPA requirements\n- Database with user-related data linked by Clerk user IDs\n\n## Instructions\n\n### Step 1: User Data Export\n\n```typescript\n// app/api/privacy/export/route.ts\nimport { auth, clerkClient } from '@clerk/nextjs/server'\n\nexport async function GET() {\n  const { userId } = await auth()\n  if (!userId) return Response.json({ error: 'Unauthorized' }, { status: 401 })\n\n  const client = await clerkClient()\n  const clerkUser = await client.users.getUser(userId)\n\n  // Gather data from Clerk\n  const clerkData = {\n    id: clerkUser.id,\n    emails: clerkUser.emailAddresses.map((e) => e.emailAddress),\n    firstName: clerkUser.firstName,\n    lastName: clerkUser.lastName,\n    createdAt: clerkUser.createdAt,\n    lastSignInAt: clerkUser.lastSignInAt,\n    publicMetadata: clerkUser.publicMetadata,\n  }\n\n  // Gather data from your database\n  const appData = await db.user.findUnique({\n    where: { clerkId: userId },\n    include: { posts: true, comments: true, preferences: true },\n  })\n\n  return Response.json({\n    exportDate: new Date().toISOString(),\n    clerkProfile: clerkData,\n    applicationData: appData,\n  })\n}\n```\n\n### Step 2: User Deletion (Right to be Forgotten)\n\n```typescript\n// app/api/privacy/delete/route.ts\nimport { auth, clerkClient } from '@clerk/nextjs/server'\n\nexport async function DELETE() {\n  const { userId } = await auth()\n  if (!userId) return Response.json({ error: 'Unauthorized' }, { status: 401 })\n\n  const deletionLog: { step: string; status: string }[] = []\n\n  try {\n    // 1. Delete application data first\n    await db.comment.deleteMany({ where: { authorId: userId } })\n    deletionLog.push({ step: 'comments', status: 'deleted' })\n\n    await db.post.deleteMany({ where: { authorId: userId } })\n    deletionLog.push({ step: 'posts', status: 'deleted' })\n\n    await db.user.delete({ where: { clerkId: userId } })\n    deletionLog.push({ step: 'app_user', status: 'deleted' })\n\n    // 2. Delete from Clerk (this ends the session)\n    const client = await clerkClient()\n    await client.users.deleteUser(userId)\n    deletionLog.push({ step: 'clerk_user', status: 'deleted' })\n\n    // 3. Log deletion for compliance audit trail\n    await db.auditLog.create({\n      data: {\n        action: 'USER_DELETED',\n        subjectId: userId,\n        details: JSON.stringify(deletionLog),\n        timestamp: new Date(),\n      },\n    })\n\n    return Response.json({ deleted: true, log: deletionLog })\n  } catch (error) {\n    return Response.json({ error: 'Partial deletion', log: deletionLog }, { status: 500 })\n  }\n}\n```\n\n### Step 3: Consent Management with Metadata\n\n```typescript\n// lib/consent.ts\nimport { clerkClient } from '@clerk/nextjs/server'\n\ninterface ConsentRecord {\n  marketing: boolean\n  analytics: boolean\n  thirdParty: boolean\n  updatedAt: string\n}\n\nexport async function updateConsent(userId: string, consent: Partial<ConsentRecord>) {\n  const client = await clerkClient()\n  const user = await client.users.getUser(userId)\n  const existing = (user.publicMetadata.consent as ConsentRecord) || {}\n\n  const updated: ConsentRecord = {\n    ...existing,\n    ...consent,\n    updatedAt: new Date().toISOString(),\n  }\n\n  await client.users.updateUser(userId, {\n    publicMetadata: { ...user.publicMetadata, consent: updated },\n  })\n\n  return updated\n}\n\nexport async function getConsent(userId: string): Promise<ConsentRecord | null> {\n  const client = await clerkClient()\n  const user = await client.users.getUser(userId)\n  return (user.publicMetadata.consent as ConsentRecord) || null\n}\n```\n\n### Step 4: Consent UI Component\n\n```typescript\n'use client'\nimport { useUser } from '@clerk/nextjs'\nimport { useState } from 'react'\n\nexport function ConsentManager() {\n  const { user } = useUser()\n  const consent = (user?.publicMetadata as any)?.consent || {}\n  const [marketing, setMarketing] = useState(consent.marketing ?? false)\n  const [analytics, setAnalytics] = useState(consent.analytics ?? true)\n\n  const saveConsent = async () => {\n    await fetch('/api/privacy/consent', {\n      method: 'POST',\n      headers: { 'Content-Type': 'application/json' },\n      body: JSON.stringify({ marketing, analytics }),\n    })\n  }\n\n  return (\n    <div>\n      <h3>Privacy Preferences</h3>\n      <label>\n        <input type=\"checkbox\" checked={marketing} onChange={(e) => setMarketing(e.target.checked)} />\n        Marketing communications\n      </label>\n      <label>\n        <input type=\"checkbox\" checked={analytics} onChange={(e) => setAnalytics(e.target.checked)} />\n        Analytics tracking\n      </label>\n      <button onClick={saveConsent}>Save Preferences</button>\n    </div>\n  )\n}\n```\n\n### Step 5: Audit Logging via Webhooks\n\n```typescript\n// app/api/webhooks/clerk/route.ts (audit section)\nasync function logAuditEvent(evt: WebhookEvent) {\n  const auditEntry = {\n    eventType: evt.type,\n    userId: 'user_id' in evt.data ? evt.data.user_id : evt.data.id,\n    timestamp: new Date().toISOString(),\n    metadata: JSON.stringify(evt.data),\n  }\n\n  await db.auditLog.create({ data: auditEntry })\n\n  // Track compliance-relevant events\n  if (['user.deleted', 'user.updated'].includes(evt.type)) {\n    console.log(`[COMPLIANCE] ${evt.type} for user ${auditEntry.userId}`)\n  }\n}\n```\n\n## Output\n\n- Data export API returning Clerk profile + application data\n- User deletion cascade (app data, then Clerk, then audit log)\n- Consent management stored in Clerk publicMetadata\n- Privacy preferences UI component\n- Audit logging for compliance events\n\n## Error Handling\n\n| Scenario | Action |\n|----------|--------|\n| Partial deletion failure | Log completed steps, retry failed services, alert ops team |\n| Export timeout on large data | Queue export job, email user download link when ready |\n| Consent sync failure | Retry with exponential backoff, fall back to local storage |\n| Clerk API rate limit on bulk delete | Batch deletions with delays between requests |\n\n## Examples\n\n### Bulk User Data Cleanup Script\n\n```typescript\n// scripts/cleanup-orphaned-users.ts\nimport { createClerkClient } from '@clerk/backend'\n\nconst clerk = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY! })\n\nasync function cleanupOrphanedDbUsers() {\n  const dbUsers = await db.user.findMany({ select: { clerkId: true } })\n\n  for (const dbUser of dbUsers) {\n    try {\n      await clerk.users.getUser(dbUser.clerkId)\n    } catch (err: any) {\n      if (err.status === 404) {\n        console.log(`Orphaned user: ${dbUser.clerkId} \u2014 removing from DB`)\n        await db.user.delete({ where: { clerkId: dbUser.clerkId } })\n      }\n    }\n  }\n}\n```\n\n## Resources\n\n- [Clerk User API](https://clerk.com/docs/references/backend/user/get-user)\n- [Clerk Metadata](https://clerk.com/docs/users/metadata)\n- [GDPR Compliance Guide](https://gdpr.eu/checklist/)\n\n## Next Steps\n\nProceed to `clerk-enterprise-rbac` for enterprise SSO and RBAC.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clerk-data-handling",
-    "description": "Handle user data, privacy, and GDPR compliance with Clerk.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

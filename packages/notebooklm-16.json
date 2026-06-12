@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000042767",
   "name": "notebooklm",
   "slug": "notebooklm-16",
   "description": "NotebookLM CLI wrapper via `python3 {baseDir}/scripts/notebooklm.py` (backed by notebooklm-py). Use for auth, notebooks, chat, sources, notes, sharing, research, and artifact generation/download.",
   "content": "\n# NotebookLM CLI Wrapper (Python)\n\n## Required parameters\n- `python3` available.\n- `notebooklm-py` installed (CLI binary: `notebooklm`).\n- NotebookLM authenticated (`login`).\n\n## Quick start\n- Wrapper script: `scripts/notebooklm.py`.\n- Command form: `python3 {baseDir}/scripts/notebooklm.py <command> [args...]`.\n\n```bash\npython3 {baseDir}/scripts/notebooklm.py login\npython3 {baseDir}/scripts/notebooklm.py list\npython3 {baseDir}/scripts/notebooklm.py use <notebook_id>\npython3 {baseDir}/scripts/notebooklm.py status\npython3 {baseDir}/scripts/notebooklm.py ask \"Summarize the key takeaways\" --notebook <notebook_id>\n```\n\n## Output guidance\n- Prefer `--json` for machine-readable output where supported.\n- Long-running waits are handled by native commands like:\n  - `source wait`\n  - `artifact wait`\n  - `research wait`\n\n## \u26a1 Sub-Agent Delegation (Anti-Blocking)\n\n### Problem\nNotebookLM operations like `source wait`, `artifact wait`, `research wait`, `generate slide-deck`, and `source add-research` can take **minutes** to complete. Running them in the main session blocks the conversation.\n\n### Strategy\nFor any operation expected to take >30 seconds, **delegate to a sub-agent** via `sessions_spawn`:\n\n1. **Main session**: Acknowledge the user's request, then spawn a sub-agent with a clear task description.\n2. **Sub-agent**: Executes the long-running NotebookLM commands, waits for completion, and reports back.\n3. **Main session**: Remains responsive. The sub-agent auto-announces completion.\n\n### Which operations to delegate\n\n| Operation | Delegate? | Reason |\n|-----------|-----------|--------|\n| `login`, `status`, `list`, `use`, `clear` | \u274c No | Fast (<5s) |\n| `ask` (chat) | \u274c No | Usually fast (~10s) |\n| `source list`, `source get`, `note list` | \u274c No | Fast reads |\n| `source add` (URL/text) | \u26a0\ufe0f Maybe | Fast to submit, but `source wait` after is slow |\n| `source add-research` | \u2705 Yes | Deep research can take 2-5 min |\n| `source wait` | \u2705 Yes | Polling wait, unpredictable duration |\n| `generate slide-deck` + `artifact wait` | \u2705 Yes | Generation takes 1-5 min |\n| `research wait` | \u2705 Yes | Can take several minutes |\n| `download slide-deck` | \u26a0\ufe0f Maybe | Usually fast, but can be slow for large files |\n| Multi-step workflows (add sources \u2192 wait \u2192 generate \u2192 wait \u2192 download) | \u2705 Yes | Compound long tasks |\n\n### How to spawn\n\n```\nsessions_spawn:\n  task: |\n    You are a NotebookLM task runner. Execute the following NotebookLM operations\n    and report results when done.\n\n    Notebook ID: <notebook_id>\n    Commands to run (in order):\n    1. <command 1>\n    2. <command 2>\n    ...\n\n    Use the CLI wrapper: python3 ~/.openclaw/skills/notebooklm-Invoke/scripts/notebooklm.py\n    Prefer --json output where supported.\n    If any step fails, report the error and stop.\n    When complete, summarize what was accomplished and any output files created.\n  mode: run\n  label: notebooklm-<short-description>\n```\n\n### Example: Generate slide deck\n\n**User**: \"\u5e2e\u6211\u7528 notebook X \u751f\u6210\u4e00\u4e2a PPT\"\n\n**Main session response**:\n> \u597d\u7684\uff0c\u6211\u6d3e\u4e86\u4e00\u4e2a\u540e\u53f0\u4efb\u52a1\u53bb\u751f\u6210 PPT\uff0c\u5b8c\u6210\u540e\u4f1a\u901a\u77e5\u4f60 \u2727\n\n**Spawn**:\n```\nsessions_spawn:\n  task: |\n    NotebookLM task: Generate a slide deck from notebook.\n\n    Steps:\n    1. python3 ~/.openclaw/skills/notebooklm-Invoke/scripts/notebooklm.py generate slide-deck \"Create a comprehensive slide deck\" --notebook <id>\n    2. python3 ~/.openclaw/skills/notebooklm-Invoke/scripts/notebooklm.py artifact wait <artifact_id> --notebook <id> --timeout 600 --json\n    3. python3 ~/.openclaw/skills/notebooklm-Invoke/scripts/notebooklm.py download slide-deck ./output.pptx --notebook <id> --latest --format pptx\n\n    Report: artifact details, file path, any errors.\n  mode: run\n  label: notebooklm-slide-deck\n```\n\n### Example: Add research source\n\n**User**: \"\u5728 notebook Y \u91cc\u52a0\u4e00\u4e2a\u5173\u4e8e\u78b3\u8db3\u8ff9\u7684\u6df1\u5ea6\u7814\u7a76\"\n\n**Spawn**:\n```\nsessions_spawn:\n  task: |\n    NotebookLM task: Add deep research source.\n\n    Steps:\n    1. python3 ~/.openclaw/skills/notebooklm-Invoke/scripts/notebooklm.py source add-research \"\u78b3\u8db3\u8ff9\u6700\u65b0\u7814\u7a76\u8fdb\u5c55\" --mode deep --notebook <id>\n    2. python3 ~/.openclaw/skills/notebooklm-Invoke/scripts/notebooklm.py research wait --notebook <id> --timeout 600\n    3. python3 ~/.openclaw/skills/notebooklm-Invoke/scripts/notebooklm.py source list --notebook <id> --json\n\n    Report: research status, new sources added, any errors.\n  mode: run\n  label: notebooklm-research\n```\n\n### Guidelines\n\n- **Always tell the user** you're delegating to a background task before spawning.\n- **Use `mode: run`** (one-shot) \u2014 no need for persistent sessions.\n- **Use descriptive labels** like `notebooklm-slide-deck`, `notebooklm-research-carbon` for easy tracking.\n- **Include all context in the task** \u2014 the sub-agent has no conversation history.\n- **Error handling**: Instruct the sub-agent to report errors clearly so you can relay them.\n- **File paths**: Use absolute paths for output files so the main session can find them.\n- **Compound workflows**: Bundle related steps (add \u2192 wait \u2192 generate \u2192 wait \u2192 download) into a single sub-agent task rather than spawning multiple.\n\n## PPT generation policy\n- A single generated slide deck should target **at most 15 pages**.\n- If user requirements exceed 15 pages, split into multiple decks (e.g., Part 1/2/3) and generate separately.\n- After generation, provide downloadable **`.pptx`** output when possible:\n  - `download slide-deck ... --format pptx`\n\n## References\n- `README.md` (installation, requirements, troubleshooting)\n- `QUICKSTART_CN.md`\uff08\u4e2d\u6587\u5feb\u901f\u4e0a\u624b\uff09\n- `references/cli-commands.md`\n\n## Assets\n- None.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "notebooklm",
-    "description": "NotebookLM CLI wrapper via `python3 {baseDir}/scripts/notebooklm.py` (backed by notebooklm-py). Use for auth, notebooks, chat, sources, notes, sharing, research, and artifact generation/download."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

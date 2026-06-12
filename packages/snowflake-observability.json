@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033294",
   "name": "snowflake-observability",
   "slug": "snowflake-observability",
   "description": "Set up Snowflake observability using ACCOUNT_USAGE views, alerts, and",
   "content": "# Snowflake Observability\n\n## Overview\n\nSet up comprehensive observability for Snowflake using built-in ACCOUNT_USAGE views, Snowflake Alerts, and integration with external monitoring systems.\n\n## Prerequisites\n\n- Role with access to `SNOWFLAKE.ACCOUNT_USAGE` (ACCOUNTADMIN or granted)\n- Notification integration configured for alerts\n- Optional: Prometheus/Grafana or Datadog for external dashboards\n\n## Instructions\n\n### Step 1: Key Monitoring Queries\n\n```sql\n-- === QUERY PERFORMANCE ===\n-- Average query time by warehouse (last 7 days)\nSELECT warehouse_name,\n       COUNT(*) AS query_count,\n       ROUND(AVG(total_elapsed_time) / 1000, 1) AS avg_seconds,\n       ROUND(PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_elapsed_time) / 1000, 1) AS p95_seconds,\n       ROUND(PERCENTILE_CONT(0.99) WITHIN GROUP (ORDER BY total_elapsed_time) / 1000, 1) AS p99_seconds\nFROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY\nWHERE start_time >= DATEADD(days, -7, CURRENT_TIMESTAMP())\n  AND execution_status = 'SUCCESS'\n  AND query_type = 'SELECT'\nGROUP BY warehouse_name\nORDER BY avg_seconds DESC;\n\n-- === ERROR RATE ===\n-- Error rate by hour\nSELECT DATE_TRUNC('hour', start_time) AS hour,\n       COUNT_IF(execution_status = 'SUCCESS') AS success,\n       COUNT_IF(execution_status = 'FAIL') AS failures,\n       ROUND(COUNT_IF(execution_status = 'FAIL') * 100.0 /\n             NULLIF(COUNT(*), 0), 2) AS error_rate_pct\nFROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY\nWHERE start_time >= DATEADD(hours, -24, CURRENT_TIMESTAMP())\nGROUP BY hour\nORDER BY hour;\n\n-- === CREDIT CONSUMPTION ===\n-- Hourly credit usage\nSELECT DATE_TRUNC('hour', start_time) AS hour,\n       warehouse_name,\n       SUM(credits_used) AS credits\nFROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY\nWHERE start_time >= DATEADD(hours, -24, CURRENT_TIMESTAMP())\nGROUP BY hour, warehouse_name\nORDER BY hour DESC, credits DESC;\n\n-- === STORAGE GROWTH ===\n-- Daily storage trend\nSELECT usage_date,\n       ROUND(storage_bytes / 1e12, 3) AS storage_tb,\n       ROUND(stage_bytes / 1e12, 3) AS stage_tb,\n       ROUND(failsafe_bytes / 1e12, 3) AS failsafe_tb\nFROM SNOWFLAKE.ACCOUNT_USAGE.STORAGE_USAGE\nWHERE usage_date >= DATEADD(days, -30, CURRENT_DATE())\nORDER BY usage_date;\n```\n\n### Step 2: Built-in Snowflake Alerts\n\n```sql\n-- Alert: High error rate\nCREATE OR REPLACE ALERT high_error_rate_alert\n  WAREHOUSE = ANALYTICS_WH\n  SCHEDULE = '15 MINUTE'\n  IF (EXISTS (\n    SELECT 1\n    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY\n    WHERE start_time >= DATEADD(minutes, -15, CURRENT_TIMESTAMP())\n    GROUP BY ALL\n    HAVING COUNT_IF(execution_status = 'FAIL') * 100.0 / COUNT(*) > 5\n  ))\n  THEN\n    CALL SYSTEM$SEND_EMAIL(\n      'ops_notifications',\n      'oncall@company.com',\n      'Snowflake: Error rate > 5%',\n      'Query error rate exceeded 5% in the last 15 minutes.'\n    );\n\n-- Alert: Warehouse stuck running (no auto-suspend)\nCREATE OR REPLACE ALERT warehouse_running_alert\n  WAREHOUSE = ANALYTICS_WH\n  SCHEDULE = '60 MINUTE'\n  IF (EXISTS (\n    SELECT 1 FROM INFORMATION_SCHEMA.WAREHOUSES\n    WHERE state = 'STARTED'\n      AND DATEDIFF('hour', COALESCE(resumed_on, created_on), CURRENT_TIMESTAMP()) > 4\n  ))\n  THEN\n    CALL SYSTEM$SEND_EMAIL(\n      'ops_notifications',\n      'ops@company.com',\n      'Snowflake: Warehouse running > 4 hours',\n      'A warehouse has been running for over 4 hours. Check auto-suspend settings.'\n    );\n\n-- Alert: Task failures\nCREATE OR REPLACE ALERT task_failure_alert\n  WAREHOUSE = ANALYTICS_WH\n  SCHEDULE = '10 MINUTE'\n  IF (EXISTS (\n    SELECT 1\n    FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(\n      SCHEDULED_TIME_RANGE_START => DATEADD(minutes, -10, CURRENT_TIMESTAMP())\n    ))\n    WHERE state = 'FAILED'\n  ))\n  THEN\n    CALL SYSTEM$SEND_EMAIL(\n      'ops_notifications',\n      'oncall@company.com',\n      'Snowflake: Task Failure',\n      'One or more Snowflake tasks failed. Check TASK_HISTORY for details.'\n    );\n\n-- Resume all alerts\nALTER ALERT high_error_rate_alert RESUME;\nALTER ALERT warehouse_running_alert RESUME;\nALTER ALERT task_failure_alert RESUME;\n```\n\n### Step 3: Export Metrics to External Systems\n\n```typescript\n// src/snowflake/metrics-exporter.ts\n// Export Snowflake metrics to Prometheus/Datadog\n\ninterface SnowflakeMetrics {\n  queryCount: number;\n  errorRate: number;\n  avgLatencyMs: number;\n  p95LatencyMs: number;\n  creditsUsed: number;\n  activeWarehouses: number;\n}\n\nasync function collectSnowflakeMetrics(\n  conn: snowflake.Connection\n): Promise<SnowflakeMetrics> {\n  const [queryStats] = await query(conn, `\n    SELECT\n      COUNT(*) AS query_count,\n      COUNT_IF(execution_status = 'FAIL') * 100.0 / NULLIF(COUNT(*), 0) AS error_rate,\n      AVG(total_elapsed_time) AS avg_latency,\n      PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY total_elapsed_time) AS p95_latency\n    FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY\n    WHERE start_time >= DATEADD(minutes, -5, CURRENT_TIMESTAMP())\n  `).then(r => r.rows);\n\n  const [creditStats] = await query(conn, `\n    SELECT COALESCE(SUM(credits_used), 0) AS credits\n    FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY\n    WHERE start_time >= CURRENT_DATE()\n  `).then(r => r.rows);\n\n  const [whStats] = await query(conn, `\n    SELECT COUNT_IF(state = 'STARTED') AS active\n    FROM INFORMATION_SCHEMA.WAREHOUSES\n  `).then(r => r.rows);\n\n  return {\n    queryCount: queryStats.QUERY_COUNT,\n    errorRate: queryStats.ERROR_RATE,\n    avgLatencyMs: queryStats.AVG_LATENCY,\n    p95LatencyMs: queryStats.P95_LATENCY,\n    creditsUsed: creditStats.CREDITS,\n    activeWarehouses: whStats.ACTIVE,\n  };\n}\n\n// Prometheus exposition format\nfunction formatPrometheus(metrics: SnowflakeMetrics): string {\n  return [\n    `snowflake_queries_total ${metrics.queryCount}`,\n    `snowflake_error_rate_percent ${metrics.errorRate}`,\n    `snowflake_avg_latency_ms ${metrics.avgLatencyMs}`,\n    `snowflake_p95_latency_ms ${metrics.p95LatencyMs}`,\n    `snowflake_credits_used_today ${metrics.creditsUsed}`,\n    `snowflake_active_warehouses ${metrics.activeWarehouses}`,\n  ].join('\\n');\n}\n```\n\n### Step 4: Operational Dashboard Queries\n\n```sql\n-- Pipeline health dashboard\nSELECT\n  'Tasks' AS component,\n  COUNT_IF(state = 'started') AS running,\n  COUNT_IF(state = 'suspended') AS suspended,\n  (SELECT COUNT_IF(state = 'FAILED')\n   FROM TABLE(INFORMATION_SCHEMA.TASK_HISTORY(\n     SCHEDULED_TIME_RANGE_START => DATEADD(hours, -24, CURRENT_TIMESTAMP())\n   ))) AS failures_24h\nFROM INFORMATION_SCHEMA.TASKS\n\nUNION ALL\n\nSELECT 'Pipes',\n  COUNT_IF(is_autoingest_enabled = 'true'), 0,\n  0  -- Check PIPE_USAGE_HISTORY for errors\nFROM INFORMATION_SCHEMA.PIPES\n\nUNION ALL\n\nSELECT 'Streams',\n  COUNT_IF(stale = FALSE),\n  COUNT_IF(stale = TRUE), 0\nFROM INFORMATION_SCHEMA.STREAMS;\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| ACCOUNT_USAGE latency | Views have up to 45min lag | Use INFORMATION_SCHEMA for real-time data |\n| Alert not firing | Alert suspended | `ALTER ALERT x RESUME` |\n| Metrics gaps | Warehouse suspended | Only active warehouses report metrics |\n| Email not delivered | Notification integration misconfigured | Check `ALLOWED_RECIPIENTS` |\n\n## Resources\n\n- [Account Usage Views](https://docs.snowflake.com/en/sql-reference/account-usage)\n- [QUERY_HISTORY](https://docs.snowflake.com/en/sql-reference/account-usage/query_history)\n- [WAREHOUSE_METERING_HISTORY](https://docs.snowflake.com/en/sql-reference/account-usage/warehouse_metering_history)\n- [Snowflake Alerts](https://docs.snowflake.com/en/user-guide/alerts)\n\n## Next Steps\n\nFor incident response, see `snowflake-incident-runbook`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "snowflake-observability",
-    "description": "Set up Snowflake observability using ACCOUNT_USAGE views, alerts, and",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

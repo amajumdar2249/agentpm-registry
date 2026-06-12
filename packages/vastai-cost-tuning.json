@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033441",
   "name": "vastai-cost-tuning",
   "slug": "vastai-cost-tuning",
   "description": "Optimize Vast.ai GPU cloud costs through smart instance selection and",
   "content": "# Vast.ai Cost Tuning\n\n## Overview\n\nMinimize Vast.ai GPU cloud costs by choosing the right GPU for your workload, leveraging interruptible (spot) instances, eliminating idle compute, and implementing auto-destroy safeguards. Vast.ai pricing is dynamic and varies significantly: RTX 4090 ($0.15-0.30/hr), A100 80GB ($1.00-2.00/hr), H100 SXM ($2.50-4.00/hr).\n\n## Prerequisites\n\n- Vast.ai account with billing history\n- Understanding of your workload's GPU requirements\n- `vastai` CLI installed\n\n## Instructions\n\n### Step 1: GPU Selection by Cost-Efficiency\n\n```python\n# Compare cost-per-TFLOP across GPU types\nGPU_SPECS = {\n    \"RTX_4090\":  {\"fp16_tflops\": 82.6,  \"vram\": 24},\n    \"A100\":      {\"fp16_tflops\": 77.97, \"vram\": 80},\n    \"H100_SXM\":  {\"fp16_tflops\": 267,   \"vram\": 80},\n    \"RTX_3090\":  {\"fp16_tflops\": 35.6,  \"vram\": 24},\n    \"A6000\":     {\"fp16_tflops\": 38.7,  \"vram\": 48},\n}\n\ndef cost_per_tflop(gpu_name, dph):\n    specs = GPU_SPECS.get(gpu_name, {\"fp16_tflops\": 1})\n    return dph / specs[\"fp16_tflops\"]\n\n# Often RTX 4090 is the best value for inference\n# A100 is best for training large models needing >24GB VRAM\n# H100 is best only when wall-clock time justifies 10x price premium\n```\n\n### Step 2: Spot vs On-Demand Analysis\n\n```bash\n# Interruptible (spot) instances are 30-60% cheaper\nvastai search offers 'num_gpus=1 gpu_name=RTX_4090 rentable=true' \\\n  --order dph_total --limit 5\n# Compare interruptible vs on-demand pricing\n# Use interruptible for: batch inference, checkpointed training\n# Use on-demand for: final training epochs, production inference\n```\n\n### Step 3: Auto-Destroy Safeguards\n\n```python\nimport time, subprocess, json\n\ndef auto_destroy_after(instance_id, max_hours=4):\n    \"\"\"Destroy instance after max_hours to prevent cost overruns.\"\"\"\n    max_seconds = max_hours * 3600\n    time.sleep(max_seconds)\n    subprocess.run([\"vastai\", \"destroy\", \"instance\", str(instance_id)], check=True)\n    print(f\"Instance {instance_id} auto-destroyed after {max_hours}h\")\n\n# Run in background thread when provisioning\nimport threading\nwatchdog = threading.Thread(target=auto_destroy_after, args=(inst_id, 4), daemon=True)\nwatchdog.start()\n```\n\n### Step 4: Idle Instance Detection\n\n```bash\n#!/bin/bash\n# Find and destroy idle instances (GPU util < 10% for >10 min)\nvastai show instances --raw | python3 -c \"\nimport sys, json\nfor inst in json.load(sys.stdin):\n    if inst.get('actual_status') == 'running':\n        gpu_util = inst.get('gpu_util', 0)\n        if gpu_util < 10:\n            print(f'IDLE: Instance {inst[\\\"id\\\"]} GPU util={gpu_util}% '\n                  f'(\\${inst.get(\\\"dph_total\\\", 0):.3f}/hr)')\n\"\n```\n\n### Step 5: Cost Reporting\n\n```python\ndef daily_cost_report():\n    \"\"\"Calculate current daily burn rate from running instances.\"\"\"\n    result = subprocess.run(\n        [\"vastai\", \"show\", \"instances\", \"--raw\"],\n        capture_output=True, text=True)\n    instances = json.loads(result.stdout)\n\n    total_hourly = 0\n    for inst in instances:\n        if inst.get(\"actual_status\") == \"running\":\n            dph = inst.get(\"dph_total\", 0)\n            total_hourly += dph\n            print(f\"  {inst['id']}: {inst.get('gpu_name')} ${dph:.3f}/hr\")\n\n    print(f\"\\nTotal: ${total_hourly:.3f}/hr = ${total_hourly * 24:.2f}/day\")\n```\n\n## Cost Optimization Checklist\n\n- [ ] Always search with `--order dph_total` to find cheapest offers\n- [ ] Use interruptible instances for checkpointed workloads\n- [ ] Implement auto-destroy timeout on all instances\n- [ ] Monitor GPU utilization; destroy idle instances\n- [ ] Use RTX 4090 for workloads that fit in 24GB VRAM\n- [ ] Only use H100 when wall-clock time savings justify cost premium\n- [ ] Pre-install dependencies in Docker images (avoid paying for pip install)\n\n## Output\n\n- GPU cost-efficiency analysis by model\n- Spot vs on-demand comparison\n- Auto-destroy watchdog for cost protection\n- Idle instance detection script\n- Daily cost burn rate report\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Unexpected $50+ bill | Forgot to destroy instances | Implement auto-destroy watchdog |\n| GPU idle at $2/hr | Waiting for data download | Pre-stage data before provisioning GPU |\n| Spot preemption mid-job | Cheapest instance reclaimed | Checkpoint frequently; auto-recover |\n\n## Resources\n\n- [Vast.ai Pricing](https://vast.ai/)\n- [Search & Filter](https://docs.vast.ai/search-and-filter-gpu-offers)\n\n## Next Steps\n\nFor reference architecture, see `vastai-reference-architecture`.\n\n## Examples\n\n**Budget cap**: Set `dph_total<=0.25` in search queries and `auto_destroy_after(inst_id, 4)` to cap any single job at $1.00.\n\n**GPU comparison**: Run the same workload on RTX 4090 ($0.20/hr) vs A100 ($1.50/hr). If the A100 finishes in less than 1/7th the time, it's cheaper overall.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "vastai-cost-tuning",
-    "description": "Optimize Vast.ai GPU cloud costs through smart instance selection and",
-    "allowed-tools": "Read, Write, Edit, Bash(vastai:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

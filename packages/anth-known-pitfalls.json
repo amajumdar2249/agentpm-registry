@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031243",
   "name": "anth-known-pitfalls",
   "slug": "anth-known-pitfalls",
   "description": "Identify and avoid common Claude API anti-patterns and integration mistakes.",
   "content": "# Anthropic Known Pitfalls\n\n## Pitfall 1: Wrong Import / Class Name\n\n```python\n# WRONG \u2014 common mistake from OpenAI muscle memory\nfrom anthropic import AnthropicClient  # Does not exist\n\n# CORRECT\nimport anthropic\nclient = anthropic.Anthropic()\n```\n\n```typescript\n// WRONG\nimport { Anthropic } from '@anthropic-ai/sdk';\n\n// CORRECT\nimport Anthropic from '@anthropic-ai/sdk';  // Default export\n```\n\n## Pitfall 2: Forgetting max_tokens (Required)\n\n```python\n# WRONG \u2014 max_tokens is REQUIRED, unlike OpenAI\nmsg = client.messages.create(\n    model=\"claude-sonnet-4-20250514\",\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}]\n)  # Error: max_tokens is required\n\n# CORRECT\nmsg = client.messages.create(\n    model=\"claude-sonnet-4-20250514\",\n    max_tokens=1024,  # Always specify\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}]\n)\n```\n\n## Pitfall 3: System Prompt in Messages Array\n\n```python\n# WRONG \u2014 putting system message in messages array (OpenAI pattern)\nmessages = [\n    {\"role\": \"system\", \"content\": \"You are helpful.\"},  # Will cause error\n    {\"role\": \"user\", \"content\": \"Hello\"}\n]\n\n# CORRECT \u2014 use the system parameter\nmsg = client.messages.create(\n    model=\"claude-sonnet-4-20250514\",\n    max_tokens=1024,\n    system=\"You are helpful.\",  # Separate parameter\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}]\n)\n```\n\n## Pitfall 4: Accessing Response Wrong\n\n```python\n# WRONG \u2014 OpenAI response pattern\ntext = response.choices[0].message.content  # AttributeError\n\n# CORRECT \u2014 Anthropic response pattern\ntext = response.content[0].text  # content is array of blocks\n\n# SAFER \u2014 handle multiple content blocks\ntext_blocks = [b.text for b in response.content if b.type == \"text\"]\ntext = \"\\n\".join(text_blocks)\n```\n\n## Pitfall 5: Ignoring Stop Reason\n\n```python\n# WRONG \u2014 assuming response is always complete\ntext = msg.content[0].text  # Might be truncated!\n\n# CORRECT \u2014 check stop_reason\nif msg.stop_reason == \"max_tokens\":\n    print(\"WARNING: Response was truncated. Increase max_tokens.\")\nelif msg.stop_reason == \"tool_use\":\n    print(\"Claude wants to call a tool \u2014 process tool_use blocks\")\nelif msg.stop_reason == \"end_turn\":\n    print(\"Complete response\")\n```\n\n## Pitfall 6: Not Handling tool_use_id Properly\n\n```python\n# WRONG \u2014 fabricating tool_use_id\ntool_results = [{\"type\": \"tool_result\", \"tool_use_id\": \"some-id\", \"content\": \"...\"}]\n\n# CORRECT \u2014 use the exact ID from Claude's response\nfor block in response.content:\n    if block.type == \"tool_use\":\n        result = execute_tool(block.name, block.input)\n        tool_results.append({\n            \"type\": \"tool_result\",\n            \"tool_use_id\": block.id,  # Must match exactly\n            \"content\": result\n        })\n```\n\n## Pitfall 7: Hardcoding Model IDs Without Versioning\n\n```python\n# RISKY \u2014 model aliases may change behavior\nmodel = \"claude-3-5-sonnet\"  # Alias, might point to different version\n\n# BETTER \u2014 use dated version for reproducibility\nmodel = \"claude-sonnet-4-20250514\"  # Pinned version\n```\n\n## Pitfall 8: Not Using SDK Auto-Retry\n\n```python\n# UNNECESSARY \u2014 writing custom retry logic for 429/5xx\nfor attempt in range(3):\n    try:\n        msg = client.messages.create(...)\n        break\n    except Exception:\n        time.sleep(2 ** attempt)\n\n# BETTER \u2014 SDK handles this automatically\nclient = anthropic.Anthropic(max_retries=5)  # Built-in exponential backoff\nmsg = client.messages.create(...)  # Auto-retries 429 and 5xx\n```\n\n## Pitfall 9: Inflated max_tokens\n\n```python\n# WASTEFUL \u2014 setting max_tokens higher than needed\n# Doesn't cost more tokens, but increases latency\nmsg = client.messages.create(\n    model=\"claude-sonnet-4-20250514\",\n    max_tokens=200000,  # Way more than needed for a classification\n    messages=[{\"role\": \"user\", \"content\": \"Classify: positive or negative?\"}]\n)\n\n# BETTER \u2014 right-size for the task\nmsg = client.messages.create(\n    model=\"claude-haiku-4-20250514\",  # Use Haiku for classification\n    max_tokens=16,  # Only need one word\n    messages=[{\"role\": \"user\", \"content\": \"Classify: positive or negative?\"}]\n)\n```\n\n## Pitfall 10: No Cost Tracking\n\n```python\n# Every response includes usage data \u2014 track it\nmsg = client.messages.create(...)\ncost = (msg.usage.input_tokens * 3.0 + msg.usage.output_tokens * 15.0) / 1_000_000\n# Log cost per request to catch runaway spend early\n```\n\n## Quick Reference: Anthropic vs OpenAI Differences\n\n| Feature | OpenAI | Anthropic |\n|---------|--------|-----------|\n| `max_tokens` | Optional | **Required** |\n| System prompt | In messages array | `system` parameter |\n| Response text | `.choices[0].message.content` | `.content[0].text` |\n| Default import | Named export | Default export |\n| Auto-retry | No | Yes (configurable) |\n| Streaming | Yields chunks | SSE events |\n\n## Resources\n\n- [Messages API Reference](https://docs.anthropic.com/en/api/messages)\n- [Python SDK](https://github.com/anthropics/anthropic-sdk-python)\n- [TypeScript SDK](https://github.com/anthropics/anthropic-sdk-typescript)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "anth-known-pitfalls",
-    "description": "Identify and avoid common Claude API anti-patterns and integration mistakes.",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

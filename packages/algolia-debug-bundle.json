@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031193",
   "name": "algolia-debug-bundle",
   "slug": "algolia-debug-bundle",
   "description": "Collect Algolia debug evidence: index stats, API key ACLs, query logs,",
   "content": "# Algolia Debug Bundle\n\n## Overview\n\nCollect all necessary diagnostic information for Algolia support tickets or internal troubleshooting. Uses real Algolia API endpoints to gather index stats, key permissions, and query performance data.\n\n## Prerequisites\n\n- `ALGOLIA_APP_ID` and `ALGOLIA_ADMIN_KEY` environment variables set\n- `curl` and `jq` available\n- Permission to read API key ACLs and index settings\n\n## Instructions\n\n### Step 1: Create the Debug Bundle Script\n\n```bash\n#!/bin/bash\n# algolia-debug-bundle.sh\nset -euo pipefail\n\nAPP_ID=\"${ALGOLIA_APP_ID:?Set ALGOLIA_APP_ID}\"\nAPI_KEY=\"${ALGOLIA_ADMIN_KEY:?Set ALGOLIA_ADMIN_KEY}\"\nBUNDLE_DIR=\"algolia-debug-$(date +%Y%m%d-%H%M%S)\"\nBASE_URL=\"https://${APP_ID}-dsn.algolia.net\"\nHEADERS=(-H \"X-Algolia-Application-Id: ${APP_ID}\" -H \"X-Algolia-API-Key: ${API_KEY}\")\n\nmkdir -p \"$BUNDLE_DIR\"\n\necho \"=== Algolia Debug Bundle ===\" | tee \"$BUNDLE_DIR/summary.txt\"\necho \"Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" | tee -a \"$BUNDLE_DIR/summary.txt\"\necho \"App ID: $APP_ID\" | tee -a \"$BUNDLE_DIR/summary.txt\"\n\n# 1. List all indices with record counts\necho \"--- Indices ---\" >> \"$BUNDLE_DIR/summary.txt\"\ncurl -s \"${BASE_URL}/1/indexes\" \"${HEADERS[@]}\" \\\n  | jq '.items[] | {name, entries, dataSize, lastBuildTimeS}' \\\n  > \"$BUNDLE_DIR/indices.json\" 2>/dev/null\necho \"Indices saved\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# 2. Check API key permissions (redacted key)\necho \"--- API Key ACL ---\" >> \"$BUNDLE_DIR/summary.txt\"\ncurl -s \"${BASE_URL}/1/keys\" \"${HEADERS[@]}\" \\\n  | jq '.keys[] | {description, acl, indexes, maxQueriesPerIPPerHour, validity}' \\\n  > \"$BUNDLE_DIR/api-keys-acl.json\" 2>/dev/null\necho \"Key ACLs saved (keys redacted)\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# 3. Get recent query logs (last 1000)\necho \"--- Query Logs ---\" >> \"$BUNDLE_DIR/summary.txt\"\ncurl -s \"${BASE_URL}/1/logs?length=100&type=all\" \"${HEADERS[@]}\" \\\n  | jq '.logs[] | {timestamp, method, url, answer_code, processing_time_ms, query_nb_hits}' \\\n  > \"$BUNDLE_DIR/query-logs.json\" 2>/dev/null\necho \"Last 100 log entries saved\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# 4. Network connectivity test\necho \"--- Network Diagnostics ---\" >> \"$BUNDLE_DIR/summary.txt\"\nfor host in \"${APP_ID}-dsn.algolia.net\" \"${APP_ID}-1.algolianet.com\" \"${APP_ID}-2.algolianet.com\"; do\n  RESULT=$(curl -s -o /dev/null -w \"%{http_code},%{time_total}\" \"https://${host}/1/indexes\" \"${HEADERS[@]}\" 2>/dev/null || echo \"FAILED\")\n  echo \"  ${host}: ${RESULT}\" >> \"$BUNDLE_DIR/summary.txt\"\ndone\n\n# 5. SDK version\necho \"--- Environment ---\" >> \"$BUNDLE_DIR/summary.txt\"\nnode --version >> \"$BUNDLE_DIR/summary.txt\" 2>/dev/null || echo \"node: not found\" >> \"$BUNDLE_DIR/summary.txt\"\nnpm list algoliasearch 2>/dev/null >> \"$BUNDLE_DIR/summary.txt\" || echo \"algoliasearch: not installed\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# 6. Algolia service status\necho \"--- Algolia Status ---\" >> \"$BUNDLE_DIR/summary.txt\"\ncurl -s https://status.algolia.com/api/v2/status.json \\\n  | jq -r '.status.description' >> \"$BUNDLE_DIR/summary.txt\" 2>/dev/null\n\n# Package (API keys already excluded from raw responses)\ntar -czf \"${BUNDLE_DIR}.tar.gz\" \"$BUNDLE_DIR\"\nrm -rf \"$BUNDLE_DIR\"\necho \"\"\necho \"Bundle created: ${BUNDLE_DIR}.tar.gz\"\n```\n\n### Step 2: Programmatic Debug Data Collection\n\n```typescript\nimport { algoliasearch } from 'algoliasearch';\n\nasync function collectDebugInfo() {\n  const client = algoliasearch(\n    process.env.ALGOLIA_APP_ID!,\n    process.env.ALGOLIA_ADMIN_KEY!\n  );\n\n  const debug: Record<string, any> = {};\n\n  // Index list and stats\n  const { items } = await client.listIndices();\n  debug.indices = items.map(i => ({\n    name: i.name,\n    entries: i.entries,\n    dataSize: i.dataSize,\n    lastBuildTimeS: i.lastBuildTimeS,\n  }));\n\n  // Per-index settings for problematic index\n  const indexName = 'products'; // Target index\n  try {\n    debug.settings = await client.getSettings({ indexName });\n  } catch (e) {\n    debug.settings = `Failed: ${e}`;\n  }\n\n  // Recent logs\n  const { logs } = await client.getLogs({\n    indexName,\n    length: 50,\n    type: 'error',  // 'all' | 'query' | 'build' | 'error'\n  });\n  debug.recentErrors = logs.map(l => ({\n    timestamp: l.timestamp,\n    method: l.method,\n    answerCode: l.answer_code,\n    processingTimeMs: l.processing_time_ms,\n  }));\n\n  // API key used (check its ACL)\n  try {\n    const keyInfo = await client.getApiKey({\n      key: process.env.ALGOLIA_ADMIN_KEY!,\n    });\n    debug.currentKeyAcl = keyInfo.acl;\n  } catch (e) {\n    debug.currentKeyAcl = 'Unable to read key ACL';\n  }\n\n  return debug;\n}\n```\n\n## Sensitive Data Handling\n\n**ALWAYS REDACT before sharing:**\n\n- Full API keys (only share last 4 chars)\n- User PII in query logs\n- Internal hostnames or IPs\n\n**Safe to include:**\n\n- App ID (it's in every frontend bundle)\n- Error codes and status codes\n- Index names and record counts\n- SDK and Node.js versions\n- Processing times and latencies\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `getLogs` returns empty | Logs retention is 7 days (Grow) or 30 days (Premium) | Run sooner after incident |\n| `getApiKey` 403 | Non-admin key can only read its own info | Use Admin key |\n| curl returns `000` | DNS or firewall blocking | Check outbound HTTPS to `*.algolia.net` |\n| No `jq` available | Not installed | `apt install jq` or parse JSON differently |\n\n## Resources\n\n- [Algolia Logs API](https://www.algolia.com/doc/api-reference/api-methods/get-logs/)\n- [Algolia Status Page](https://status.algolia.com)\n- [Algolia Support](https://support.algolia.com)\n\n## Next Steps\n\nFor rate limit issues, see `algolia-rate-limits`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "algolia-debug-bundle",
-    "description": "Collect Algolia debug evidence: index stats, API key ACLs, query logs,",
-    "Trigger": "algolia debug\", \"algolia support bundle\", \"collect algolia logs\",",
-    "allowed-tools": "Read, Bash(curl:*), Bash(npm:*), Bash(tar:*), Bash(jq:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

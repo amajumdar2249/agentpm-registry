@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000025061",
   "name": "angular-signals",
   "slug": "angular-signals-2",
   "description": "Implement signal-based reactive state management in Angular v20+. Use for creating reactive state with signal(), derived state with computed(), dependent state with linkedSignal(), and side effects with effect(). Triggers on state management questions, converting from BehaviorSubject/Observable patterns to signals, or implementing reactive data flows.",
   "content": "\n# Angular Signals\n\nSignals are Angular's reactive primitive for state management. They provide synchronous, fine-grained reactivity.\n\n## Core Signal APIs\n\n### signal() - Writable State\n\n```typescript\nimport { signal } from '@angular/core';\n\n// Create writable signal\nconst count = signal(0);\n\n// Read value\nconsole.log(count()); // 0\n\n// Set new value\ncount.set(5);\n\n// Update based on current value\ncount.update(c => c + 1);\n\n// With explicit type\nconst user = signal<User | null>(null);\nuser.set({ id: 1, name: 'Alice' });\n```\n\n### computed() - Derived State\n\n```typescript\nimport { signal, computed } from '@angular/core';\n\nconst firstName = signal('John');\nconst lastName = signal('Doe');\n\n// Derived signal - automatically updates when dependencies change\nconst fullName = computed(() => `${firstName()} ${lastName()}`);\n\nconsole.log(fullName()); // \"John Doe\"\nfirstName.set('Jane');\nconsole.log(fullName()); // \"Jane Doe\"\n\n// Computed with complex logic\nconst items = signal<Item[]>([]);\nconst filter = signal('');\n\nconst filteredItems = computed(() => {\n  const query = filter().toLowerCase();\n  return items().filter(item => \n    item.name.toLowerCase().includes(query)\n  );\n});\n\nconst totalPrice = computed(() => \n  filteredItems().reduce((sum, item) => sum + item.price, 0)\n);\n```\n\n### linkedSignal() - Dependent State with Reset\n\n```typescript\nimport { signal, linkedSignal } from '@angular/core';\n\nconst options = signal(['A', 'B', 'C']);\n\n// Resets to first option when options change\nconst selected = linkedSignal(() => options()[0]);\n\nconsole.log(selected()); // \"A\"\nselected.set('B');       // User selects B\nconsole.log(selected()); // \"B\"\noptions.set(['X', 'Y']); // Options change\nconsole.log(selected()); // \"X\" - auto-reset to first\n\n// With previous value access\nconst items = signal<Item[]>([]);\n\nconst selectedItem = linkedSignal<Item[], Item | null>({\n  source: () => items(),\n  computation: (newItems, previous) => {\n    // Try to preserve selection if item still exists\n    const prevItem = previous?.value;\n    if (prevItem && newItems.some(i => i.id === prevItem.id)) {\n      return prevItem;\n    }\n    return newItems[0] ?? null;\n  },\n});\n```\n\n### effect() - Side Effects\n\n```typescript\nimport { signal, effect, inject, DestroyRef } from '@angular/core';\n\n@Component({...})\nexport class Search {\n  query = signal('');\n  \n  constructor() {\n    // Effect runs when query changes\n    effect(() => {\n      console.log('Search query:', this.query());\n    });\n    \n    // Effect with cleanup\n    effect((onCleanup) => {\n      const timer = setInterval(() => {\n        console.log('Current query:', this.query());\n      }, 1000);\n      \n      onCleanup(() => clearInterval(timer));\n    });\n  }\n}\n```\n\n**Effect rules:**\n- Run in injection context (constructor or with `runInInjectionContext`)\n- Automatically cleaned up when component destroys\n\n## Component State Pattern\n\n```typescript\n@Component({\n  selector: 'app-todo-list',\n  template: `\n    <input [value]=\"newTodo()\" (input)=\"newTodo.set($any($event.target).value)\" />\n    <button (click)=\"addTodo()\" [disabled]=\"!canAdd()\">Add</button>\n    \n    <ul>\n      @for (todo of filteredTodos(); track todo.id) {\n        <li [class.done]=\"todo.done\">\n          {{ todo.text }}\n          <button (click)=\"toggleTodo(todo.id)\">Toggle</button>\n        </li>\n      }\n    </ul>\n    \n    <p>{{ remaining() }} remaining</p>\n  `,\n})\nexport class TodoList {\n  // State\n  todos = signal<Todo[]>([]);\n  newTodo = signal('');\n  filter = signal<'all' | 'active' | 'done'>('all');\n  \n  // Derived state\n  canAdd = computed(() => this.newTodo().trim().length > 0);\n  \n  filteredTodos = computed(() => {\n    const todos = this.todos();\n    switch (this.filter()) {\n      case 'active': return todos.filter(t => !t.done);\n      case 'done': return todos.filter(t => t.done);\n      default: return todos;\n    }\n  });\n  \n  remaining = computed(() => \n    this.todos().filter(t => !t.done).length\n  );\n  \n  // Actions\n  addTodo() {\n    const text = this.newTodo().trim();\n    if (text) {\n      this.todos.update(todos => [\n        ...todos,\n        { id: crypto.randomUUID(), text, done: false }\n      ]);\n      this.newTodo.set('');\n    }\n  }\n  \n  toggleTodo(id: string) {\n    this.todos.update(todos =>\n      todos.map(t => t.id === id ? { ...t, done: !t.done } : t)\n    );\n  }\n}\n```\n\n## RxJS Interop\n\n### toSignal() - Observable to Signal\n\n```typescript\nimport { toSignal } from '@angular/core/rxjs-interop';\nimport { interval } from 'rxjs';\n\n@Component({...})\nexport class Timer {\n  private http = inject(HttpClient);\n  \n  // From observable - requires initial value or allowUndefined\n  counter = toSignal(interval(1000), { initialValue: 0 });\n  \n  // From HTTP - undefined until loaded\n  users = toSignal(this.http.get<User[]>('/api/users'));\n  \n  // With requireSync for synchronous observables (BehaviorSubject)\n  private user$ = new BehaviorSubject<User | null>(null);\n  currentUser = toSignal(this.user$, { requireSync: true });\n}\n```\n\n### toObservable() - Signal to Observable\n\n```typescript\nimport { toObservable } from '@angular/core/rxjs-interop';\nimport { switchMap, debounceTime } from 'rxjs';\n\n@Component({...})\nexport class Search {\n  query = signal('');\n  \n  private http = inject(HttpClient);\n  \n  // Convert signal to observable for RxJS operators\n  results = toSignal(\n    toObservable(this.query).pipe(\n      debounceTime(300),\n      switchMap(q => this.http.get<Result[]>(`/api/search?q=${q}`))\n    ),\n    { initialValue: [] }\n  );\n}\n```\n\n## Signal Equality\n\n```typescript\n// Custom equality function\nconst user = signal<User>(\n  { id: 1, name: 'Alice' },\n  { equal: (a, b) => a.id === b.id }\n);\n\n// Only triggers updates when ID changes\nuser.set({ id: 1, name: 'Alice Updated' }); // No update\nuser.set({ id: 2, name: 'Bob' }); // Triggers update\n```\n\n## Untracked Reads\n\n```typescript\nimport { untracked } from '@angular/core';\n\nconst a = signal(1);\nconst b = signal(2);\n\n// Only depends on 'a', not 'b'\nconst result = computed(() => {\n  const aVal = a();\n  const bVal = untracked(() => b());\n  return aVal + bVal;\n});\n```\n\n## Service State Pattern\n\n```typescript\n@Injectable({ providedIn: 'root' })\nexport class Auth {\n  // Private writable state\n  private _user = signal<User | null>(null);\n  private _loading = signal(false);\n  \n  // Public read-only signals\n  readonly user = this._user.asReadonly();\n  readonly loading = this._loading.asReadonly();\n  readonly isAuthenticated = computed(() => this._user() !== null);\n  \n  private http = inject(HttpClient);\n  \n  async login(credentials: Credentials): Promise<void> {\n    this._loading.set(true);\n    try {\n      const user = await firstValueFrom(\n        this.http.post<User>('/api/login', credentials)\n      );\n      this._user.set(user);\n    } finally {\n      this._loading.set(false);\n    }\n  }\n  \n  logout(): void {\n    this._user.set(null);\n  }\n}\n```\n\nFor advanced patterns including resource(), see [references/signal-patterns.md](references/signal-patterns.md).\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "angular-signals",
-    "description": "Implement signal-based reactive state management in Angular v20+. Use for creating reactive state with signal(), derived state with computed(), dependent state with linkedSignal(), and side effects with effect(). Triggers on state management questions, converting from BehaviorSubject/Observable patterns to signals, or implementing reactive data flows."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

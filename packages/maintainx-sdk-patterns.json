@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032599",
   "name": "maintainx-sdk-patterns",
   "slug": "maintainx-sdk-patterns",
   "description": "Learn MaintainX REST API patterns, pagination, filtering, and client",
   "content": "# MaintainX SDK Patterns\n\n## Overview\n\nProduction-grade patterns for building robust MaintainX API integrations with proper error handling, cursor-based pagination, retry logic, and type safety.\n\n## Prerequisites\n\n- Completed `maintainx-install-auth` setup\n- TypeScript/Node.js familiarity\n- Understanding of REST API principles\n\n## Instructions\n\n### Step 1: Type-Safe Client with Generics\n\n```typescript\n// src/maintainx/typed-client.ts\nimport axios, { AxiosInstance, AxiosRequestConfig, AxiosError } from 'axios';\n\ninterface PaginatedResponse<T> {\n  cursor: string | null;\n}\n\ninterface WorkOrder {\n  id: number;\n  title: string;\n  status: 'OPEN' | 'IN_PROGRESS' | 'ON_HOLD' | 'COMPLETED' | 'CLOSED';\n  priority: 'NONE' | 'LOW' | 'MEDIUM' | 'HIGH';\n  description?: string;\n  assignees: Array<{ type: 'USER' | 'TEAM'; id: number }>;\n  assetId?: number;\n  locationId?: number;\n  createdAt: string;\n  updatedAt: string;\n  completedAt?: string;\n  dueDate?: string;\n  categories: string[];\n}\n\ninterface Asset {\n  id: number;\n  name: string;\n  serialNumber?: string;\n  model?: string;\n  manufacturer?: string;\n  locationId?: number;\n  createdAt: string;\n}\n\ninterface WorkOrdersResponse extends PaginatedResponse<WorkOrder> {\n  workOrders: WorkOrder[];\n}\n\ninterface AssetsResponse extends PaginatedResponse<Asset> {\n  assets: Asset[];\n}\n\nexport class MaintainXClient {\n  private http: AxiosInstance;\n\n  constructor(apiKey?: string) {\n    const key = apiKey || process.env.MAINTAINX_API_KEY;\n    if (!key) throw new Error('MAINTAINX_API_KEY required');\n\n    this.http = axios.create({\n      baseURL: 'https://api.getmaintainx.com/v1',\n      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },\n      timeout: 30_000,\n    });\n  }\n\n  async getWorkOrders(params?: Record<string, any>): Promise<WorkOrdersResponse> {\n    const { data } = await this.http.get<WorkOrdersResponse>('/workorders', { params });\n    return data;\n  }\n\n  async getWorkOrder(id: number): Promise<WorkOrder> {\n    const { data } = await this.http.get<WorkOrder>(`/workorders/${id}`);\n    return data;\n  }\n\n  async createWorkOrder(input: Partial<WorkOrder>): Promise<WorkOrder> {\n    const { data } = await this.http.post<WorkOrder>('/workorders', input);\n    return data;\n  }\n\n  async updateWorkOrder(id: number, input: Partial<WorkOrder>): Promise<WorkOrder> {\n    const { data } = await this.http.patch<WorkOrder>(`/workorders/${id}`, input);\n    return data;\n  }\n\n  async getAssets(params?: Record<string, any>): Promise<AssetsResponse> {\n    const { data } = await this.http.get<AssetsResponse>('/assets', { params });\n    return data;\n  }\n\n  async request<T = any>(method: string, path: string, body?: any): Promise<T> {\n    const config: AxiosRequestConfig = { method, url: path, data: body };\n    const { data } = await this.http.request<T>(config);\n    return data;\n  }\n}\n```\n\n### Step 2: Cursor-Based Pagination\n\nMaintainX uses cursor-based pagination. The response includes a `cursor` field; pass it as a query parameter to get the next page.\n\n```typescript\nasync function paginate<T>(\n  fetcher: (cursor?: string) => Promise<{ cursor: string | null } & Record<string, T[]>>,\n  key: string,\n): Promise<T[]> {\n  const all: T[] = [];\n  let cursor: string | undefined;\n\n  do {\n    const response = await fetcher(cursor);\n    const items = (response as any)[key] as T[];\n    all.push(...items);\n    cursor = response.cursor ?? undefined;\n  } while (cursor);\n\n  return all;\n}\n\n// Usage\nconst allWorkOrders = await paginate(\n  (cursor) => client.getWorkOrders({ limit: 100, cursor, status: 'OPEN' }),\n  'workOrders',\n);\nconsole.log(`Total open work orders: ${allWorkOrders.length}`);\n\nconst allAssets = await paginate(\n  (cursor) => client.getAssets({ limit: 100, cursor }),\n  'assets',\n);\nconsole.log(`Total assets: ${allAssets.length}`);\n```\n\n### Step 3: Retry with Exponential Backoff\n\n```typescript\nasync function withRetry<T>(\n  fn: () => Promise<T>,\n  maxRetries = 3,\n  baseDelayMs = 1000,\n): Promise<T> {\n  for (let attempt = 0; attempt <= maxRetries; attempt++) {\n    try {\n      return await fn();\n    } catch (err: any) {\n      const status = err?.response?.status;\n      const isRetryable = status === 429 || (status >= 500 && status < 600);\n\n      if (!isRetryable || attempt === maxRetries) throw err;\n\n      // Honor Retry-After header if present\n      const retryAfter = err.response?.headers?.['retry-after'];\n      const delayMs = retryAfter\n        ? parseInt(retryAfter) * 1000\n        : baseDelayMs * Math.pow(2, attempt) + Math.random() * 500;\n\n      console.warn(`Retry ${attempt + 1}/${maxRetries} after ${delayMs}ms (HTTP ${status})`);\n      await new Promise((r) => setTimeout(r, delayMs));\n    }\n  }\n  throw new Error('Unreachable');\n}\n\n// Usage\nconst wo = await withRetry(() => client.getWorkOrder(12345));\n```\n\n### Step 4: Batch Operations\n\n```typescript\nimport PQueue from 'p-queue';\n\nconst queue = new PQueue({ concurrency: 5, interval: 1000, intervalCap: 10 });\n\nasync function batchCreateWorkOrders(items: Array<Partial<WorkOrder>>): Promise<WorkOrder[]> {\n  const results = await Promise.all(\n    items.map((item) =>\n      queue.add(() => withRetry(() => client.createWorkOrder(item)))\n    ),\n  );\n  return results as WorkOrder[];\n}\n\n// Create 50 PMs in controlled batches\nconst pms = Array.from({ length: 50 }, (_, i) => ({\n  title: `Weekly Inspection - Zone ${i + 1}`,\n  priority: 'LOW' as const,\n  categories: ['PREVENTIVE'],\n}));\n\nconst created = await batchCreateWorkOrders(pms);\nconsole.log(`Created ${created.length} preventive maintenance orders`);\n```\n\n### Step 5: Fluent Query Builder\n\n```typescript\nclass WorkOrderQuery {\n  private params: Record<string, any> = {};\n\n  status(s: WorkOrder['status']) { this.params.status = s; return this; }\n  priority(p: WorkOrder['priority']) { this.params.priority = p; return this; }\n  assignee(userId: number) { this.params.assigneeId = userId; return this; }\n  asset(assetId: number) { this.params.assetId = assetId; return this; }\n  location(locationId: number) { this.params.locationId = locationId; return this; }\n  createdAfter(date: string) { this.params.createdAtGte = date; return this; }\n  createdBefore(date: string) { this.params.createdAtLte = date; return this; }\n  limit(n: number) { this.params.limit = n; return this; }\n\n  async execute(client: MaintainXClient) {\n    return client.getWorkOrders(this.params);\n  }\n}\n\n// Usage\nconst results = await new WorkOrderQuery()\n  .status('OPEN')\n  .priority('HIGH')\n  .location(2345)\n  .createdAfter('2026-01-01T00:00:00Z')\n  .limit(25)\n  .execute(client);\n```\n\n## Output\n\n- Type-safe MaintainX client with full TypeScript interfaces\n- Cursor-based pagination utility that works across all list endpoints\n- Retry logic with exponential backoff and `Retry-After` header support\n- Rate-limited batch processor using `p-queue`\n- Fluent query builder for readable work order filters\n\n## Error Handling\n\n| Pattern | Use Case |\n|---------|----------|\n| `withRetry()` | Transient errors (429, 5xx) with exponential backoff |\n| `paginate()` | Collecting all items from cursor-based endpoints |\n| `PQueue` | Controlled concurrency to avoid rate limits |\n| `WorkOrderQuery` | Type-safe filtering to prevent invalid API calls |\n\n## Resources\n\n- [MaintainX API Reference](https://developer.maintainx.com/reference)\n- [p-queue](https://github.com/sindresorhus/p-queue) -- Promise queue with concurrency control\n\n## Next Steps\n\nFor core workflows, see `maintainx-core-workflow-a` (Work Orders) and `maintainx-core-workflow-b` (Assets).\n\n## Examples\n\n**Stream large datasets with async iterators**:\n\n```typescript\nasync function* streamWorkOrders(client: MaintainXClient, params?: Record<string, any>) {\n  let cursor: string | undefined;\n  do {\n    const response = await client.getWorkOrders({ ...params, limit: 100, cursor });\n    for (const wo of response.workOrders) {\n      yield wo;\n    }\n    cursor = response.cursor ?? undefined;\n  } while (cursor);\n}\n\nfor await (const wo of streamWorkOrders(client, { status: 'COMPLETED' })) {\n  console.log(`Processing completed WO #${wo.id}`);\n}\n```\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "maintainx-sdk-patterns",
-    "description": "Learn MaintainX REST API patterns, pagination, filtering, and client",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

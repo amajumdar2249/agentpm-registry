@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032793",
   "name": "openrouter-audit-logging",
   "slug": "openrouter-audit-logging",
   "description": "Implement audit logging for OpenRouter API calls. Use when building",
   "content": "# OpenRouter Audit Logging\n\n## Overview\n\nEvery OpenRouter API call returns a generation ID and metadata that enables comprehensive audit logging. The generation endpoint (`GET /api/v1/generation?id=`) provides exact cost, token counts, provider used, and latency -- data that the initial response doesn't always include. This skill covers structured logging, cost tracking, PII redaction, and compliance-ready audit trails.\n\n## Core: Generation Metadata Retrieval\n\n```python\nimport os, json, time, hashlib, logging\nfrom datetime import datetime, timezone\nfrom dataclasses import dataclass, asdict\nfrom typing import Optional\nimport requests\nfrom openai import OpenAI\n\nlog = logging.getLogger(\"openrouter.audit\")\n\n@dataclass\nclass AuditEntry:\n    timestamp: str\n    generation_id: str\n    model_requested: str\n    model_used: str          # Actual model served (may differ with fallbacks)\n    prompt_tokens: int\n    completion_tokens: int\n    total_cost: float\n    latency_ms: float\n    status: str              # \"success\" | \"error\" | \"timeout\"\n    user_id: str\n    prompt_hash: str         # SHA-256 of prompt (not raw content)\n    error_code: Optional[str] = None\n\nclient = OpenAI(\n    base_url=\"https://openrouter.ai/api/v1\",\n    api_key=os.environ[\"OPENROUTER_API_KEY\"],\n    default_headers={\n        \"HTTP-Referer\": \"https://my-app.com\",\n        \"X-Title\": \"my-app\",\n    },\n)\n\ndef audited_completion(\n    messages: list[dict],\n    model: str = \"anthropic/claude-3.5-sonnet\",\n    user_id: str = \"system\",\n    **kwargs,\n) -> tuple:\n    \"\"\"Make a completion request with full audit logging.\"\"\"\n    prompt_text = json.dumps(messages)\n    prompt_hash = hashlib.sha256(prompt_text.encode()).hexdigest()[:16]\n\n    start = time.monotonic()\n    status = \"success\"\n    error_code = None\n\n    try:\n        response = client.chat.completions.create(\n            model=model, messages=messages, **kwargs\n        )\n    except Exception as e:\n        status = \"error\"\n        error_code = type(e).__name__\n        raise\n    finally:\n        latency = (time.monotonic() - start) * 1000\n\n    # Fetch exact cost from generation endpoint\n    gen_data = {}\n    try:\n        gen = requests.get(\n            f\"https://openrouter.ai/api/v1/generation?id={response.id}\",\n            headers={\"Authorization\": f\"Bearer {os.environ['OPENROUTER_API_KEY']}\"},\n            timeout=5,\n        ).json()\n        gen_data = gen.get(\"data\", {})\n    except Exception:\n        log.warning(f\"Failed to fetch generation metadata for {response.id}\")\n\n    entry = AuditEntry(\n        timestamp=datetime.now(timezone.utc).isoformat(),\n        generation_id=response.id,\n        model_requested=model,\n        model_used=response.model,\n        prompt_tokens=response.usage.prompt_tokens,\n        completion_tokens=response.usage.completion_tokens,\n        total_cost=float(gen_data.get(\"total_cost\", 0)),\n        latency_ms=round(latency, 1),\n        status=status,\n        user_id=user_id,\n        prompt_hash=prompt_hash,\n        error_code=error_code,\n    )\n\n    log.info(json.dumps(asdict(entry)))\n    return response, entry\n```\n\n## Structured Log Storage\n\n```python\nimport sqlite3\n\ndef init_audit_db(db_path: str = \"openrouter_audit.db\"):\n    \"\"\"Create append-only audit table.\"\"\"\n    conn = sqlite3.connect(db_path)\n    conn.execute(\"\"\"\n        CREATE TABLE IF NOT EXISTS audit_log (\n            id INTEGER PRIMARY KEY AUTOINCREMENT,\n            timestamp TEXT NOT NULL,\n            generation_id TEXT UNIQUE NOT NULL,\n            model_requested TEXT NOT NULL,\n            model_used TEXT NOT NULL,\n            prompt_tokens INTEGER,\n            completion_tokens INTEGER,\n            total_cost REAL,\n            latency_ms REAL,\n            status TEXT NOT NULL,\n            user_id TEXT,\n            prompt_hash TEXT,\n            error_code TEXT\n        )\n    \"\"\")\n    conn.execute(\"CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(timestamp)\")\n    conn.execute(\"CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id)\")\n    conn.commit()\n    return conn\n\ndef write_audit(conn: sqlite3.Connection, entry: AuditEntry):\n    \"\"\"Write audit entry to SQLite (append-only).\"\"\"\n    conn.execute(\n        \"\"\"INSERT OR IGNORE INTO audit_log\n           (timestamp, generation_id, model_requested, model_used,\n            prompt_tokens, completion_tokens, total_cost, latency_ms,\n            status, user_id, prompt_hash, error_code)\n           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\"\"\",\n        (entry.timestamp, entry.generation_id, entry.model_requested,\n         entry.model_used, entry.prompt_tokens, entry.completion_tokens,\n         entry.total_cost, entry.latency_ms, entry.status, entry.user_id,\n         entry.prompt_hash, entry.error_code),\n    )\n    conn.commit()\n```\n\n## PII Redaction Before Logging\n\n```python\nimport re\n\nPII_PATTERNS = [\n    (r'\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Z|a-z]{2,}\\b', '[EMAIL]'),\n    (r'\\b\\d{3}[-.]?\\d{3}[-.]?\\d{4}\\b', '[PHONE]'),\n    (r'\\b\\d{3}-\\d{2}-\\d{4}\\b', '[SSN]'),\n    (r'\\bsk-or-v1-[a-zA-Z0-9]+\\b', '[API_KEY]'),\n    (r'\\b(?:\\d{4}[- ]?){3}\\d{4}\\b', '[CARD]'),\n]\n\ndef redact_pii(text: str) -> str:\n    \"\"\"Scrub PII from text before logging.\"\"\"\n    for pattern, replacement in PII_PATTERNS:\n        text = re.sub(pattern, replacement, text)\n    return text\n```\n\n## Audit Queries\n\n```sql\n-- Daily cost by model\nSELECT date(timestamp) as day, model_used,\n       COUNT(*) as requests, SUM(total_cost) as cost\nFROM audit_log GROUP BY day, model_used ORDER BY day DESC, cost DESC;\n\n-- Error rate by model (last 24h)\nSELECT model_requested, COUNT(*) as total,\n       SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as errors,\n       ROUND(100.0 * SUM(CASE WHEN status='error' THEN 1 ELSE 0 END) / COUNT(*), 1) as error_pct\nFROM audit_log WHERE timestamp > datetime('now', '-1 day')\nGROUP BY model_requested;\n\n-- Top spenders\nSELECT user_id, COUNT(*) as requests, SUM(total_cost) as total_cost\nFROM audit_log GROUP BY user_id ORDER BY total_cost DESC LIMIT 10;\n```\n\n## Error Handling\n\n| Error | Cause | Fix |\n|-------|-------|-----|\n| Generation endpoint 404 | Generation ID not found or too old | Fetch within 30 minutes of request |\n| Duplicate generation_id | Retry wrote same request twice | Use `INSERT OR IGNORE` |\n| Missing `total_cost` | Generation still processing | Retry fetch after 1-2 seconds |\n| Auth 401 on generation fetch | Wrong API key for that generation | Use same key that made the request |\n\n## Enterprise Considerations\n\n- Log to append-only storage (SQLite WAL mode, S3, or centralized logging) to prevent tampering\n- Hash prompts rather than logging raw content to satisfy data residency requirements\n- Set log retention policies (90 days for operational, 7 years for financial compliance)\n- Ship structured JSON logs to SIEM (Splunk, Datadog, ELK) for real-time alerting\n- Use `user_id` field to enable per-user cost attribution and abuse detection\n- Index `generation_id` for fast correlation with OpenRouter dashboard\n\n## References\n\n- [Examples](${CLAUDE_SKILL_DIR}/references/examples.md) | [Errors](${CLAUDE_SKILL_DIR}/references/errors.md)\n- [Generation API](https://openrouter.ai/docs/api/api-reference/generation-queries/query-a-generation) | [Auth/Key Info](https://openrouter.ai/docs/api/reference/authentication)\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "openrouter-audit-logging",
-    "description": "Implement audit logging for OpenRouter API calls. Use when building",
-    "compliance trails, debugging production issues, or tracking model usage. Triggers": "",
-    "allowed-tools": "Read, Write, Edit, Bash, Grep",
-    "version": "2.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032667",
   "name": "mistral-upgrade-migration",
   "slug": "mistral-upgrade-migration",
   "description": "Analyze, plan, and execute Mistral AI SDK upgrades with breaking change",
   "content": "# Mistral AI Upgrade & Migration\n\n## Current State\n\n!`npm list @mistralai/mistralai 2>/dev/null || echo 'not installed'`\n!`pip show mistralai 2>/dev/null | grep -E \"^(Name|Version)\" || echo 'not installed'`\n\n## Overview\n\nGuide for upgrading the Mistral AI SDK between major versions. The TypeScript SDK (`@mistralai/mistralai`) moved from CommonJS to ESM-only in v1.x, with significant API surface changes. This skill covers version detection, breaking change migration, automated code transforms, and rollback.\n\n## Prerequisites\n\n- Current Mistral AI SDK installed\n- Git for version control\n- Test suite available\n\n## Instructions\n\n### Step 1: Check Versions\n\n```bash\nset -euo pipefail\n# Current version\nnpm list @mistralai/mistralai 2>/dev/null\n\n# Latest available\nnpm view @mistralai/mistralai version\n\n# All versions\nnpm view @mistralai/mistralai versions --json | jq '.[-5:]'\n\n# Python\npip show mistralai 2>/dev/null | grep Version\n```\n\n### Step 2: Known Breaking Changes (v0.x to v1.x)\n\n| Change | v0.x (old) | v1.x (current) |\n|--------|-----------|----------------|\n| Module format | CommonJS + ESM | **ESM only** |\n| Import | `import MistralClient from '...'` | `import { Mistral } from '...'` |\n| Constructor | `new MistralClient(apiKey)` | `new Mistral({ apiKey })` |\n| Chat method | `client.chat(params)` | `client.chat.complete(params)` |\n| Streaming | `client.chatStream(params)` | `client.chat.stream(params)` |\n| Stream events | `for await (const chunk of stream)` | `for await (const event of stream)` access `.data` |\n| Embeddings | `client.embeddings(params)` | `client.embeddings.create(params)` |\n| Response types | Longer names | Shorter type names |\n| Enum values | String constants | Forward-compatible unions |\n\n### Step 3: Automated Migration Script\n\n```typescript\n// scripts/migrate-mistral-v1.ts\nimport { readFileSync, writeFileSync } from 'fs';\nimport { glob } from 'glob';\n\nconst TRANSFORMS = [\n  // Import statement\n  {\n    find: /import\\s+MistralClient\\s+from\\s+['\"]@mistralai\\/mistralai['\"]/g,\n    replace: \"import { Mistral } from '@mistralai/mistralai'\",\n  },\n  // Constructor\n  {\n    find: /new\\s+MistralClient\\((\\w+)\\)/g,\n    replace: 'new Mistral({ apiKey: $1 })',\n  },\n  // Chat method (careful: only top-level .chat(), not .chat.complete())\n  {\n    find: /\\.chat\\((?!\\.)/g,\n    replace: '.chat.complete(',\n  },\n  // Streaming\n  {\n    find: /\\.chatStream\\(/g,\n    replace: '.chat.stream(',\n  },\n  // Embeddings\n  {\n    find: /\\.embeddings\\((?!\\.)/g,\n    replace: '.embeddings.create(',\n  },\n];\n\nasync function migrate() {\n  const files = await glob('src/**/*.{ts,js}');\n  let totalChanges = 0;\n\n  for (const file of files) {\n    let content = readFileSync(file, 'utf-8');\n    let changes = 0;\n\n    for (const { find, replace } of TRANSFORMS) {\n      const newContent = content.replace(find, replace);\n      if (newContent !== content) {\n        changes++;\n        content = newContent;\n      }\n    }\n\n    if (changes > 0) {\n      writeFileSync(file, content);\n      console.log(`Migrated: ${file} (${changes} changes)`);\n      totalChanges += changes;\n    }\n  }\n\n  console.log(`\\nTotal: ${totalChanges} changes across ${files.length} files`);\n}\n\nmigrate();\n```\n\n### Step 4: Upgrade Procedure\n\n```bash\nset -euo pipefail\n# Create branch\ngit checkout -b upgrade/mistral-sdk-v1\n\n# Backup lock file\ncp package-lock.json package-lock.json.bak\n\n# Upgrade\nnpm install @mistralai/mistralai@latest\n\n# Ensure package.json has \"type\": \"module\"\nnode -e \"const p=require('./package.json'); if(p.type!=='module') console.warn('WARNING: Add \\\"type\\\": \\\"module\\\" to package.json for ESM')\"\n\n# Run migration script\nnpx tsx scripts/migrate-mistral-v1.ts\n\n# Verify\nnpm run typecheck\nnpm test\n```\n\n### Step 5: Model Name Updates\n\nModel names change over time. Update hardcoded references:\n\n```typescript\n// Model alias mapping \u2014 update when models deprecate\nconst MODEL_ALIASES: Record<string, string> = {\n  // Deprecated \u2192 Current\n  'mistral-tiny': 'mistral-small-latest',\n  'mistral-medium': 'mistral-small-latest', // Deprecated Q1 2025\n  'open-mistral-7b': 'mistral-small-latest',\n  'open-mixtral-8x7b': 'mistral-small-latest',\n\n  // Current (no change needed)\n  'mistral-small-latest': 'mistral-small-latest',\n  'mistral-large-latest': 'mistral-large-latest',\n  'codestral-latest': 'codestral-latest',\n  'mistral-embed': 'mistral-embed',\n};\n\nfunction resolveModel(model: string): string {\n  const resolved = MODEL_ALIASES[model];\n  if (resolved && resolved !== model) {\n    console.warn(`Model \"${model}\" is deprecated, using \"${resolved}\"`);\n  }\n  return resolved ?? model;\n}\n```\n\n### Step 6: Validation Tests\n\n```typescript\nimport { describe, it, expect } from 'vitest';\nimport { Mistral } from '@mistralai/mistralai';\n\ndescribe('SDK Upgrade Validation', () => {\n  it('should import Mistral correctly', () => {\n    expect(Mistral).toBeDefined();\n    expect(typeof Mistral).toBe('function');\n  });\n\n  it('should construct client', () => {\n    const client = new Mistral({ apiKey: 'test-key' });\n    expect(client.chat).toBeDefined();\n    expect(client.chat.complete).toBeDefined();\n    expect(client.chat.stream).toBeDefined();\n    expect(client.embeddings).toBeDefined();\n    expect(client.embeddings.create).toBeDefined();\n    expect(client.models).toBeDefined();\n    expect(client.models.list).toBeDefined();\n  });\n});\n```\n\n### Step 7: Rollback\n\n```bash\nset -euo pipefail\n# Quick rollback\nnpm install @mistralai/mistralai@0.5.0 --save-exact\ngit checkout -- src/  # Restore pre-migration code\nnpm test\n\n# Or just revert the branch\ngit checkout main\ngit branch -D upgrade/mistral-sdk-v1\n```\n\n## Error Handling\n\n| Error After Upgrade | Cause | Solution |\n|---------------------|-------|----------|\n| `ERR_REQUIRE_ESM` | Missing \"type\": \"module\" | Add to package.json |\n| `Mistral is not a constructor` | Old import style | Use `import { Mistral }` |\n| `.chat is not a function` | Old method call | Use `.chat.complete()` |\n| Type errors | Interface changes | Update types to match v1.x |\n| Test failures | Response shape changed | Update assertions and mocks |\n\n## Resources\n\n- [TypeScript SDK Releases](https://github.com/mistralai/client-ts/releases)\n- [Python SDK Releases](https://github.com/mistralai/client-python/releases)\n- [Changelog](https://docs.mistral.ai/getting-started/changelog/)\n- [Models Deprecation](https://docs.mistral.ai/getting-started/models/)\n\n## Output\n\n- Updated SDK to latest version\n- Automated code migration applied\n- Model name references updated\n- Test suite passing after upgrade\n- Rollback procedure documented\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "mistral-upgrade-migration",
-    "description": "Analyze, plan, and execute Mistral AI SDK upgrades with breaking change",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(git:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

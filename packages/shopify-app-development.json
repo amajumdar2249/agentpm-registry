@@ -1,20 +1,50 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000008336",
   "name": "shopify-app-development",
   "slug": "shopify-app-development",
   "description": "Build embedded Shopify apps using the Remix framework, App Bridge for UI integration, Polaris components, and OAuth authentication flow",
   "content": "\n# Shopify App Development\n\n## Overview\n\nBuild Shopify apps using the Shopify CLI 3.x Remix template, which handles OAuth token exchange, session storage, and App Bridge initialization automatically. Embedded apps run inside the Shopify Admin iframe and use Polaris for a native-feeling UI. The modern approach uses the Remix-based `@shopify/shopify-app-remix` package rather than the legacy Express template.\n\n## When to Use This Skill\n\n- When building a public or custom Shopify app that extends Admin functionality\n- When creating an embedded app that merchants install from the Shopify App Store\n- When implementing OAuth for the first time with session persistence across reinstalls\n- When needing to access the Admin API on behalf of authenticated merchants\n- When building merchant-facing tooling with Shopify's Polaris design system\n- When replacing an older Express/koa-based Shopify app with the modern Remix stack\n\n## Core Instructions\n\n1. **Scaffold the app with Shopify CLI**\n\n   ```bash\n   npm install -g @shopify/cli @shopify/theme\n   shopify app init my-shopify-app\n   # Choose: Remix template\n   cd my-shopify-app\n   shopify app dev\n   ```\n\n   This scaffolds a Remix app with OAuth, session storage (SQLite by default), and App Bridge already wired up. The dev command tunnels your local server via Cloudflare and installs the app on your Partner development store.\n\n2. **Understand the OAuth flow and session handling**\n\n   The scaffold uses `@shopify/shopify-app-remix` which handles the OAuth dance. In `app/shopify.server.ts`:\n\n   ```typescript\n   import \"@shopify/shopify-app-remix/adapters/node\";\n   import {\n     AppDistribution,\n     DeliveryMethod,\n     shopifyApp,\n     LATEST_API_VERSION,\n   } from \"@shopify/shopify-app-remix/server\";\n   import { PrismaSessionStorage } from \"@shopify/shopify-app-session-storage-prisma\";\n   import { PrismaClient } from \"@prisma/client\";\n\n   const prisma = new PrismaClient();\n\n   const shopify = shopifyApp({\n     apiKey: process.env.SHOPIFY_API_KEY,\n     apiSecretKey: process.env.SHOPIFY_API_SECRET || \"\",\n     apiVersion: LATEST_API_VERSION,\n     scopes: process.env.SCOPES?.split(\",\"),\n     appUrl: process.env.SHOPIFY_APP_URL || \"\",\n     authPathPrefix: \"/auth\",\n     sessionStorage: new PrismaSessionStorage(prisma),\n     distribution: AppDistribution.AppStore,\n     webhooks: {\n       APP_UNINSTALLED: {\n         deliveryMethod: DeliveryMethod.Http,\n         callbackUrl: \"/webhooks\",\n       },\n     },\n     hooks: {\n       afterAuth: async ({ session }) => {\n         shopify.registerWebhooks({ session });\n       },\n     },\n   });\n\n   export default shopify;\n   export const authenticate = shopify.authenticate;\n   ```\n\n3. **Protect routes and call the Admin API**\n\n   Any loader or action that needs Admin API access calls `authenticate.admin`:\n\n   ```typescript\n   // app/routes/app._index.tsx\n   import { json } from \"@remix-run/node\";\n   import { useLoaderData } from \"@remix-run/react\";\n   import { authenticate } from \"../shopify.server\";\n\n   export const loader = async ({ request }: LoaderFunctionArgs) => {\n     const { admin, session } = await authenticate.admin(request);\n\n     // GraphQL Admin API call\n     const response = await admin.graphql(`\n       query {\n         shop {\n           name\n           email\n           primaryDomain { url }\n         }\n       }\n     `);\n     const { data } = await response.json();\n     return json({ shop: data.shop });\n   };\n\n   export default function Index() {\n     const { shop } = useLoaderData<typeof loader>();\n     return <Page title={`Hello, ${shop.name}`} />;\n   }\n   ```\n\n4. **Build UI with Polaris components**\n\n   ```typescript\n   // app/routes/app.products.tsx\n   import {\n     Page,\n     Layout,\n     Card,\n     DataTable,\n     Button,\n     Banner,\n   } from \"@shopify/polaris\";\n   import { TitleBar, useAppBridge } from \"@shopify/app-bridge-react\";\n\n   export default function ProductsPage() {\n     const shopify = useAppBridge();\n\n     const handleSave = async () => {\n       // Use App Bridge Toast for notifications inside the iframe\n       shopify.toast.show(\"Products updated successfully\");\n     };\n\n     return (\n       <Page>\n         <TitleBar title=\"Products\" primaryAction={{ content: \"Save\", onAction: handleSave }} />\n         <Layout>\n           <Layout.Section>\n             <Card>\n               <DataTable\n                 columnContentTypes={[\"text\", \"numeric\", \"numeric\"]}\n                 headings={[\"Product\", \"Price\", \"Inventory\"]}\n                 rows={[[\"Widget A\", \"$19.99\", 42]]}\n               />\n             </Card>\n           </Layout.Section>\n         </Layout>\n       </Page>\n     );\n   }\n   ```\n\n5. **Configure scopes and handle app reinstallation**\n\n   Define required scopes in `shopify.app.toml`:\n\n   ```toml\n   name = \"my-shopify-app\"\n   client_id = \"your_api_key\"\n   application_url = \"https://your-app.fly.dev\"\n   embedded = true\n\n   [access_scopes]\n   scopes = \"read_products,write_products,read_orders\"\n\n   [webhooks]\n   api_version = \"2025-01\"\n\n   [[webhooks.subscriptions]]\n   topics = [\"app/uninstalled\"]\n   uri = \"/webhooks\"\n   ```\n\n   Handle the GDPR mandatory webhooks (`customers/data_request`, `customers/redact`, `shop/redact`) even if your app does not store personal data \u2014 Shopify requires these endpoints.\n\n6. **Deploy to production**\n\n   ```bash\n   shopify app deploy\n   # Deploys to Shopify (functions/extensions)\n   # Deploy the Remix server separately (Fly.io, Railway, Render)\n   fly launch\n   fly deploy\n   ```\n\n## Examples\n\n### Mutation via Admin GraphQL API\n\n```typescript\n// Create a product via the Admin API inside a Remix action\nexport const action = async ({ request }: ActionFunctionArgs) => {\n  const { admin } = await authenticate.admin(request);\n\n  const response = await admin.graphql(\n    `#graphql\n    mutation CreateProduct($input: ProductInput!) {\n      productCreate(input: $input) {\n        product {\n          id\n          title\n          handle\n        }\n        userErrors {\n          field\n          message\n        }\n      }\n    }`,\n    {\n      variables: {\n        input: {\n          title: \"New Product\",\n          vendor: \"My Store\",\n          productType: \"Widget\",\n          tags: [\"new\", \"featured\"],\n        },\n      },\n    }\n  );\n\n  const { data } = await response.json();\n  if (data.productCreate.userErrors.length > 0) {\n    return json({ errors: data.productCreate.userErrors }, { status: 422 });\n  }\n  return json({ product: data.productCreate.product });\n};\n```\n\n### App Bridge Resource Picker (v4)\n\n```typescript\nimport { useAppBridge } from \"@shopify/app-bridge-react\";\nimport { useState } from \"react\";\nimport { Button } from \"@shopify/polaris\";\n\nexport default function ProductSelector() {\n  const shopify = useAppBridge();\n  const [selected, setSelected] = useState<string[]>([]);\n\n  const handleSelectProducts = async () => {\n    const selection = await shopify.resourcePicker({\n      type: \"product\",\n      multiple: true,\n    });\n\n    if (selection) {\n      setSelected(selection.map((p) => p.id));\n    }\n  };\n\n  return (\n    <>\n      <Button onClick={handleSelectProducts}>Select Products</Button>\n      <p>Selected IDs: {selected.join(\", \")}</p>\n    </>\n  );\n}\n```\n\n## Best Practices\n\n- **Use the Remix CLI template** \u2014 it handles session storage, CSRF, OAuth token refresh, and frame-ancestor CSP headers automatically\n- **Store sessions in a persistent database** (Prisma + PostgreSQL in production) \u2014 the default SQLite storage is unsuitable for multi-instance deployments\n- **Scope creep hurts conversion** \u2014 only request the minimum scopes needed; merchants see the scope list during installation\n- **Use App Bridge for navigation and modals** \u2014 direct `window.location` navigation breaks the embedded iframe context\n- **Validate webhook HMAC signatures** \u2014 even for mandatory GDPR webhooks that you don't act on\n- **Test reinstall flows** \u2014 merchants who uninstall and reinstall must receive fresh OAuth tokens without stale session data\n- **Use `LATEST_API_VERSION` in development only** \u2014 pin to a specific version (e.g., `2025-01`) in production to avoid breaking changes\n- **Handle `payment_required` errors** \u2014 Apps on the App Store may encounter billing requirement errors if merchants exceed their plan\n\n## Common Pitfalls\n\n| Problem | Solution |\n|---------|----------|\n| \"Refused to display in frame\" CSP error | Ensure your Remix server returns `frame-ancestors https://*.myshopify.com https://admin.shopify.com` in Content-Security-Policy |\n| OAuth redirect loop after install | Check that your app URL in `shopify.app.toml` matches the URL your server is reachable at \u2014 mismatch causes infinite redirects |\n| Session not found on subsequent requests | Use a persistent session storage (Prisma/PostgreSQL); SQLite doesn't work across Fly.io or Render instances |\n| App Bridge `useAppBridge()` returns null | Wrap your Remix app root with `<AppProvider>` from `@shopify/shopify-app-remix/react` |\n| Webhooks registered but not firing | Webhooks registered during `afterAuth` may not persist after app update \u2014 call `shopify.registerWebhooks` in a separate route for verification |\n| \"Invalid HMAC\" on webhook endpoint | Ensure raw body is read before any JSON parsing middleware \u2014 use `getRawBody` before Express/Remix body parsing |\n\n## Related Skills\n\n- @shopify-admin-api\n- @shopify-webhooks\n- @shopify-checkout-extensions\n- @shopify-storefront-api\n- @oauth-implementation\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "shopify-app-development",
-    "description": "Build embedded Shopify apps using the Remix framework, App Bridge for UI integration, Polaris components, and OAuth authentication flow",
-    "category": "platform-shopify",
-    "risk": "safe",
-    "source": "curated",
-    "date_added": "2026-03-12",
-    "tags": "[shopify, app, oauth, app-bridge, polaris, remix, embedded-app, cli]",
-    "triggers": "[\"create shopify app\", \"build shopify app\", \"shopify embedded app\", \"shopify oauth\", \"shopify app bridge\", \"shopify polaris\"]",
-    "tools": "[claude-code, cursor, gemini-cli, copilot, codex-cli, kiro, opencode]",
-    "platforms": "[shopify]",
-    "difficulty": "advanced"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "platform-shopify",
+  "tags": [
+    "[shopify",
+    "app",
+    "oauth",
+    "app-bridge",
+    "polaris",
+    "remix",
+    "embedded-app",
+    "cli]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

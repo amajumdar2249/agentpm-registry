@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000010036",
   "name": "security-django",
   "slug": "security-django",
   "description": "|-",
   "content": "\n<overview>\n\nSecurity audit patterns for Django applications covering critical settings, security middleware, CSRF protection, and common vulnerabilities.\n\n</overview>\n\n<rules>\n\n## Critical Settings (settings.py)\n\n### SECRET_KEY\n```python\n# \u274c CRITICAL: Hardcoded or committed\nSECRET_KEY = 'django-insecure-abc123...'\nSECRET_KEY = 'my-super-secret-key'\n\n# \u2713 From environment\nimport os\nSECRET_KEY = os.environ['DJANGO_SECRET_KEY']\n\n# \u2713 Or use django-environ\nimport environ\nenv = environ.Env()\nSECRET_KEY = env('SECRET_KEY')\n```\n\n**Check:** Is SECRET_KEY in .env and .env is in .gitignore?\n\n### DEBUG\n```python\n# \u274c CRITICAL: Debug in production\nDEBUG = True  # Exposes full stack traces, settings, SQL queries\n\n# \u2713 Environment-controlled\nDEBUG = os.environ.get('DEBUG', 'False').lower() == 'true'\n```\n\n### ALLOWED_HOSTS\n```python\n# \u274c CRITICAL: Accept any host\nALLOWED_HOSTS = ['*']\n\n# \u274c HIGH: Empty in production (500 errors, but still bad)\nALLOWED_HOSTS = []\n\n# \u2713 Explicit hosts\nALLOWED_HOSTS = ['example.com', 'www.example.com']\n```\n\n## Security Middleware\n\n### Required Middleware\n```python\nMIDDLEWARE = [\n    'django.middleware.security.SecurityMiddleware',  # MUST be first!\n    # ...\n    'django.middleware.csrf.CsrfViewMiddleware',\n    'django.middleware.clickjacking.XFrameOptionsMiddleware',\n]\n```\n\n**Check:** Is SecurityMiddleware present and near the top?\n\n### Security Middleware Settings\n```python\n# \u2713 Enable these in production\nSECURE_BROWSER_XSS_FILTER = True  # Deprecated but harmless\nSECURE_CONTENT_TYPE_NOSNIFF = True\nSECURE_HSTS_SECONDS = 31536000  # 1 year\nSECURE_HSTS_INCLUDE_SUBDOMAINS = True\nSECURE_HSTS_PRELOAD = True\nSECURE_SSL_REDIRECT = True  # Force HTTPS\nSESSION_COOKIE_SECURE = True\nCSRF_COOKIE_SECURE = True\n```\n\n</rules>\n\n<vulnerabilities>\n\n## CSRF Protection\n\n### Disabled CSRF (Critical)\n```python\n# \u274c CRITICAL: Globally disabled\nMIDDLEWARE = [\n    # 'django.middleware.csrf.CsrfViewMiddleware',  # Commented out!\n]\n\n# \u274c HIGH: Decorator abuse\n@csrf_exempt\ndef payment_webhook(request):  # MAY be OK for webhooks with other auth\n    ...\n\n@csrf_exempt\ndef update_profile(request):  # MUST NOT do this!\n    ...\n```\n\n**Audit:** Search for `@csrf_exempt` - each needs justification.\n\n### CSRF Trusted Origins (Django 4.0+)\n```python\n# \u274c Too permissive\nCSRF_TRUSTED_ORIGINS = ['https://*']\n\n# \u2713 Explicit\nCSRF_TRUSTED_ORIGINS = ['https://example.com', 'https://admin.example.com']\n```\n\n## Common Vulnerabilities\n\n### SQL Injection\n```python\n# \u274c Raw SQL with string formatting\nUser.objects.raw(f\"SELECT * FROM users WHERE id = {user_id}\")\ncursor.execute(f\"DELETE FROM logs WHERE date < '{date}'\")\n\n# \u2713 Parameterized\nUser.objects.raw(\"SELECT * FROM users WHERE id = %s\", [user_id])\ncursor.execute(\"DELETE FROM logs WHERE date < %s\", [date])\n\n# \u2713 ORM (safe by default)\nUser.objects.filter(id=user_id)\n```\n\n### Command Injection\n```python\n# \u274c User input in subprocess\nimport subprocess\nsubprocess.run(f\"convert {user_filename} output.png\", shell=True)\nos.system(f\"process {user_input}\")\n\n# \u2713 Use arrays, avoid shell=True\nsubprocess.run([\"convert\", user_filename, \"output.png\"])\n```\n\n### Path Traversal\n```python\n# \u274c User-controlled path\ndef download(request, filename):\n    return FileResponse(open(f'uploads/{filename}', 'rb'))\n\n# \u2713 Validate path\nimport os\ndef download(request, filename):\n    safe_name = os.path.basename(filename)\n    filepath = os.path.join(settings.UPLOAD_DIR, safe_name)\n    if not filepath.startswith(settings.UPLOAD_DIR):\n        raise Http404()\n    return FileResponse(open(filepath, 'rb'))\n```\n\n### IDOR (Insecure Direct Object Reference)\n```python\n# \u274c No ownership check\nclass DocumentView(View):\n    def get(self, request, doc_id):\n        doc = Document.objects.get(id=doc_id)\n        return JsonResponse(doc.to_dict())\n\n# \u2713 Check ownership\nclass DocumentView(LoginRequiredMixin, View):\n    def get(self, request, doc_id):\n        doc = Document.objects.get(id=doc_id, owner=request.user)\n        return JsonResponse(doc.to_dict())\n```\n\n### Auth Decorators Missing\n```python\n# \u274c No auth required\ndef admin_dashboard(request):\n    return render(request, 'admin/dashboard.html', {'users': User.objects.all()})\n\n# \u2713 Auth required\n@login_required\n@user_passes_test(lambda u: u.is_staff)\ndef admin_dashboard(request):\n    ...\n```\n\n## Django REST Framework\n\n```python\n# Check DRF settings\nREST_FRAMEWORK = {\n    'DEFAULT_AUTHENTICATION_CLASSES': [\n        # \u274c SessionAuth without CSRF = vulnerable\n        'rest_framework.authentication.SessionAuthentication',\n    ],\n    'DEFAULT_PERMISSION_CLASSES': [\n        # \u274c Allow any by default\n        'rest_framework.permissions.AllowAny',\n        # \u2713 Require auth by default\n        'rest_framework.permissions.IsAuthenticated',\n    ],\n}\n```\n\n</vulnerabilities>\n\n<commands>\n\n## Quick Audit Commands\n\n```bash\n# Check critical settings\nrg \"(SECRET_KEY|DEBUG|ALLOWED_HOSTS)\" settings*.py\n\n# Find csrf_exempt usage\nrg \"@csrf_exempt\" . -g \"*.py\"\n\n# Django deployment checklist (high signal)\npython manage.py check --deploy\n\n# Find raw SQL\nrg \"\\.raw\\(|cursor\\.execute\\(\" . -g \"*.py\" -A 1\n\n# Find subprocess/os.system\nrg \"(subprocess\\.|os\\.system|os\\.popen)\" . -g \"*.py\"\n\n# Check for missing login_required\nrg \"^def \" views.py | head -20  # Then check which have decorators\n\n# Find shell=True\nrg \"shell\\s*=\\s*True\" . -g \"*.py\"\n```\n\n</commands>\n\n<checklist>\n\n## Hardening Checklist\n\n- [ ] SECRET_KEY from environment, not hardcoded\n- [ ] DEBUG = False in production\n- [ ] ALLOWED_HOSTS explicitly set (no wildcards)\n- [ ] SecurityMiddleware enabled and configured\n- [ ] CSRF middleware enabled\n- [ ] SECURE_SSL_REDIRECT = True\n- [ ] SESSION_COOKIE_SECURE = True\n- [ ] CSRF_COOKIE_SECURE = True\n- [ ] No @csrf_exempt without justification\n- [ ] All views have appropriate auth decorators\n- [ ] No raw SQL with string formatting\n- [ ] DRF has IsAuthenticated as default permission\n\n</checklist>\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "security-django",
-    "description": "|-",
-    "Examples": "",
-    "- user": "Audit Django REST framework config\" \u2192 check default permissions and auth"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

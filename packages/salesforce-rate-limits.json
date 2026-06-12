@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033134",
   "name": "salesforce-rate-limits",
   "slug": "salesforce-rate-limits",
   "description": "Implement Salesforce API limit management, backoff, and quota monitoring.",
   "content": "# Salesforce Rate Limits\n\n## Overview\n\nHandle Salesforce API limits gracefully. Salesforce uses a 24-hour rolling limit (not per-minute), plus concurrent request limits and Bulk API quotas.\n\n## Prerequisites\n\n- jsforce connection configured\n- Understanding of your org's edition and license count\n- Access to Setup > Company Information\n\n## Instructions\n\n### Step 1: Understand Salesforce API Limits\n\n| Limit Type | Calculation | Example (Enterprise, 50 users) |\n|-----------|-------------|-------------------------------|\n| Daily API Requests | Base + (per-user * licenses) | 100,000 + (1,000 * 50) = 150,000 |\n| Concurrent API (long-running) | 25 per org | 25 |\n| Bulk API 2.0 Ingest Jobs | 15,000/day | 15,000 |\n| Bulk API 2.0 Query Jobs | 15,000/day | 15,000 |\n| Composite Subrequests | 25 per call | 25 |\n| SOQL Query Row Limit | 50,000 per query | 50,000 |\n| sObject Collections | 200 records per call | 200 |\n\n**Key difference from most SaaS APIs:** Salesforce limits are per-org, not per-user or per-key. All integrations sharing the same org share the same pool.\n\n### Step 2: Monitor Remaining Quota\n\n```typescript\nimport { getConnection } from './salesforce/connection';\n\nasync function checkApiLimits(): Promise<{\n  used: number;\n  remaining: number;\n  max: number;\n  percentUsed: number;\n}> {\n  const conn = await getConnection();\n  const limits = await conn.request('/services/data/v59.0/limits/');\n\n  const daily = limits.DailyApiRequests;\n  const used = daily.Max - daily.Remaining;\n  const percentUsed = (used / daily.Max) * 100;\n\n  return {\n    used,\n    remaining: daily.Remaining,\n    max: daily.Max,\n    percentUsed: Math.round(percentUsed * 10) / 10,\n  };\n}\n\n// Also available in every REST API response header:\n// Sforce-Limit-Info: api-usage=135/150000\n```\n\n### Step 3: Implement Backoff for REQUEST_LIMIT_EXCEEDED\n\n```typescript\nasync function withSalesforceRetry<T>(\n  operation: () => Promise<T>,\n  config = { maxRetries: 5, baseDelayMs: 2000, maxDelayMs: 60000 }\n): Promise<T> {\n  for (let attempt = 0; attempt <= config.maxRetries; attempt++) {\n    try {\n      return await operation();\n    } catch (error: any) {\n      const errorCode = error.errorCode || error.name;\n\n      // Only retry on transient/limit errors\n      const retryable = [\n        'REQUEST_LIMIT_EXCEEDED',\n        'SERVER_UNAVAILABLE',\n        'UNABLE_TO_LOCK_ROW',\n      ];\n\n      if (attempt === config.maxRetries || !retryable.includes(errorCode)) {\n        throw error;\n      }\n\n      // Exponential backoff with jitter\n      const exponentialDelay = config.baseDelayMs * Math.pow(2, attempt);\n      const jitter = Math.random() * 1000;\n      const delay = Math.min(exponentialDelay + jitter, config.maxDelayMs);\n\n      console.warn(`${errorCode}: retry ${attempt + 1}/${config.maxRetries} in ${Math.round(delay)}ms`);\n      await new Promise(r => setTimeout(r, delay));\n    }\n  }\n  throw new Error('Unreachable');\n}\n```\n\n### Step 4: Pre-Flight Limit Check\n\n```typescript\nclass SalesforceQuotaGuard {\n  private warningThreshold = 0.8; // Warn at 80%\n  private blockThreshold = 0.95;  // Block at 95%\n\n  async canMakeRequest(estimatedCalls: number = 1): Promise<{\n    allowed: boolean;\n    remaining: number;\n    reason?: string;\n  }> {\n    const { remaining, max, percentUsed } = await checkApiLimits();\n\n    if (remaining < estimatedCalls) {\n      return {\n        allowed: false,\n        remaining,\n        reason: `Only ${remaining} API calls remain (need ${estimatedCalls})`,\n      };\n    }\n\n    if (percentUsed / 100 >= this.blockThreshold) {\n      return {\n        allowed: false,\n        remaining,\n        reason: `API usage at ${percentUsed}% \u2014 blocking to preserve quota`,\n      };\n    }\n\n    if (percentUsed / 100 >= this.warningThreshold) {\n      console.warn(`API usage at ${percentUsed}% (${remaining} remaining)`);\n    }\n\n    return { allowed: true, remaining };\n  }\n}\n```\n\n### Step 5: Reduce API Call Count\n\n```typescript\n// STRATEGY 1: Use sObject Collections (1 call = 200 records)\n// Instead of 200 individual creates...\nconst records = contacts.map(c => ({ FirstName: c.first, LastName: c.last, Email: c.email }));\nawait conn.sobject('Contact').create(records); // 1 API call, not 200\n\n// STRATEGY 2: Use Composite API (1 call = 25 operations)\n// See salesforce-core-workflow-b\n\n// STRATEGY 3: Use Bulk API for 10K+ records (1 job = unlimited records)\n// Bulk API has its own separate limit pool\n\n// STRATEGY 4: Cache describe calls \u2014 metadata rarely changes\nconst describeCache = new Map<string, any>();\nasync function cachedDescribe(sObjectType: string) {\n  if (!describeCache.has(sObjectType)) {\n    describeCache.set(sObjectType, await conn.sobject(sObjectType).describe());\n  }\n  return describeCache.get(sObjectType);\n}\n\n// STRATEGY 5: Use queryMore for pagination (doesn't count as extra API call)\nlet result = await conn.query('SELECT Id, Name FROM Contact');\nwhile (!result.done) {\n  result = await conn.queryMore(result.nextRecordsUrl!);\n  // Process result.records\n}\n```\n\n## Output\n\n- API limit monitoring with threshold alerts\n- Automatic retry with exponential backoff for limit errors\n- Pre-flight quota checks before batch operations\n- Strategies to reduce API call consumption\n\n## Error Handling\n\n| Error Code | HTTP Status | Meaning | Action |\n|-----------|-------------|---------|--------|\n| `REQUEST_LIMIT_EXCEEDED` | 403 | Daily API limit exceeded | Wait for 24hr window to reset |\n| `CONCURRENT_LIMIT_EXCEEDED` | 403 | Too many concurrent requests | Queue and throttle |\n| `SERVER_UNAVAILABLE` | 503 | Salesforce temporarily down | Retry with backoff |\n| `UNABLE_TO_LOCK_ROW` | 409-equivalent | Record contention | Retry with backoff |\n\n## Resources\n\n- [API Request Limits](https://developer.salesforce.com/docs/atlas.en-us.salesforce_app_limits_cheatsheet.meta/salesforce_app_limits_cheatsheet/salesforce_app_limits_platform_api.htm)\n- [Limits REST Resource](https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/resources_limits.htm)\n- [Apex Governor Limits](https://developer.salesforce.com/docs/atlas.en-us.apexcode.meta/apexcode/apex_gov_limits.htm)\n\n## Next Steps\n\nFor security configuration, see `salesforce-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "salesforce-rate-limits",
-    "description": "Implement Salesforce API limit management, backoff, and quota monitoring.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

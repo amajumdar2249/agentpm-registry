@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000020798",
   "name": "autonomous-ci",
   "slug": "autonomous-ci-2",
   "description": "Ensures Claude verifies both local tests AND remote CI before claiming completion. Use BEFORE any completion claims, commits, or pull requests. Mandatory verification with evidence.",
   "content": "\n# Autonomous CI Verification\n\n## Overview\n\n**Never claim success without CI verification.** This skill ensures Claude automatically verifies both local tests\nAND remote CI before declaring work complete.\n\n**Core Principle:** Evidence before claims. Always.\n\n## When to Use This Skill\n\nThis skill is **MANDATORY** before:\n\n- ANY completion claims\n- ANY expressions of satisfaction (\"Done!\", \"Fixed!\", \"Working now!\")\n- Committing code\n- Creating pull requests\n- Moving to next task\n- Responding \"should work\" or similar phrases\n\n## The Verification Protocol\n\n```text\nBEFORE claiming any completion:\n\n1. RUN LOCAL VERIFICATION\n   \u2514\u2500> Execute project-specific test command\n   \u2514\u2500> Check exit code\n   \u2514\u2500> If fails: Fix and repeat\n\n2. COMMIT AND PUSH\n   \u2514\u2500> Only if local tests pass\n   \u2514\u2500> Push to remote repository\n\n3. MONITOR CI (BLOCKING)\n   \u2514\u2500> Find workflow run for commit\n   \u2514\u2500> WAIT for completion (do not proceed)\n   \u2514\u2500> Check all workflows in .github/workflows/\n\n4. IF CI FAILS\n   \u2514\u2500> Download failure logs\n   \u2514\u2500> Analyze root cause\n   \u2514\u2500> Fix the issue\n   \u2514\u2500> REPEAT from step 1\n\n5. ONLY WHEN ALL CI PASSES\n   \u2514\u2500> Report success with evidence\n```\n\n## Available Tools\n\nThis skill uses scripts from the plugin directory:\n\n### Local Verification\n\nThe plugin provides a generic test runner that auto-detects your project type:\n\n```bash\n# For .NET projects\ndotnet test --configuration Release\n\n# For Node.js projects\nnpm test\n\n# For Python projects\npytest\n\n# For Go projects\ngo test ./...\n```\n\nClaude will automatically detect your project type and run the appropriate command.\n\n### CI Monitoring\n\nAfter pushing, Claude will use GitHub CLI to monitor CI:\n\n```bash\n# Find and watch workflow run\ngh run list --limit 1 --commit <sha>\ngh run watch <run-id>\n\n# Check final status\ngh run view <run-id> --json conclusion\n```\n\n## Red Flags - STOP Immediately\n\nIf Claude catches itself thinking or about to say:\n\n- \u274c \"Should work now\"\n- \u274c \"Tests pass locally, we're done\"\n- \u274c \"I'll push and assume it works\"\n- \u274c \"Let me commit this and move on\"\n- \u274c \"The change is small, CI will pass\"\n- \u274c \"Pushed! \u2705\" (without waiting for CI)\n\n**STOP.** Run the verification protocol instead.\n\n## The Workflow\n\n### Step 1: Local Verification\n\n```bash\n# ALWAYS verify locally first\n# For .NET:\ndotnet build --configuration Release\ndotnet test --no-build --configuration Release\n\n# For Node.js:\nnpm run build\nnpm test\n\n# For Python:\npytest\n\n# ONLY proceed if exit code = 0\n```\n\n### Step 2: Commit and Push\n\n```bash\n# Only after local tests pass\ngit add .\ngit commit -m \"Fix: issue description\"\ngit push\n```\n\n### Step 3: Monitor CI (Blocking)\n\n```bash\n# Get commit SHA\nCOMMIT_SHA=$(git rev-parse HEAD)\n\n# Find workflow run\nRUN_ID=$(gh run list --commit \"$COMMIT_SHA\" --limit 1 --json databaseId -q '.[0].databaseId')\n\n# Watch workflow (BLOCKS until complete)\ngh run watch \"$RUN_ID\"\n\n# Check conclusion\nCONCLUSION=$(gh run view \"$RUN_ID\" --json conclusion -q .conclusion)\n\nif [ \"$CONCLUSION\" = \"success\" ]; then\n  echo \"\u2705 CI passed\"\nelse\n  echo \"\u274c CI failed - analyzing logs\"\n  gh run view \"$RUN_ID\" --log-failed\nfi\n```\n\n### Step 4: Handle Failures\n\nWhen CI fails:\n\n1. Download failure logs: `gh run view <run-id> --log-failed`\n2. Analyze root cause\n3. Fix the issue\n4. **REPEAT from step 1** (run local tests again)\n\n## Common Rationalizations (All Wrong)\n\n| Excuse | Reality |\n| ------ | ------- |\n| \"Tests passed locally\" | CI environment may differ |\n| \"It's a small change\" | Small changes break CI too |\n| \"I'm confident\" | Confidence \u2260 verification |\n| \"CI takes too long\" | Waiting is mandatory |\n| \"I'll check later\" | No. Check now. |\n| \"Just this once\" | No exceptions. Ever. |\n\n## Project-Specific Examples\n\n### .NET Multi-Framework Projects\n\n```bash\n# Local verification\ndotnet test --configuration Release\n\n# This runs ALL target frameworks\n# Example: net8.0, net9.0, net10.0\n```\n\n### Multi-Workflow Projects\n\nFor projects with multiple CI workflows (tests.yml, lint.yml, build.yml):\n\n```bash\n# Monitor ALL workflows\ngh run list --commit <sha> --json databaseId,name,conclusion\n\n# All must pass:\n# \u2705 tests.yml: success\n# \u2705 lint.yml: success\n# \u2705 build.yml: success\n```\n\n### Projects with Test Results Upload\n\nSome projects upload test results to services like Codecov:\n\n```bash\n# Wait for primary workflow\ngh run watch <run-id>\n\n# Verify uploads completed\n# Check workflow logs for \"Upload complete\" messages\n```\n\n## Success Criteria\n\nClaude may ONLY claim completion when:\n\n1. \u2705 Local tests passed (verified by running them)\n2. \u2705 Code committed and pushed\n3. \u2705 CI workflow(s) found and monitored\n4. \u2705 ALL CI checks passed with status \"success\"\n5. \u2705 Claude has URLs/logs as evidence\n\n## Reporting Success\n\nWhen all checks pass, report with evidence:\n\n```text\n\u2705 Verification Complete\n\nLocal Tests: 159/159 passed\nCI Status: All checks passed\n\nWorkflows:\n  - tests.yml: \u2705 success\n    https://github.com/user/repo/actions/runs/12345\n  - lint.yml: \u2705 success\n    https://github.com/user/repo/actions/runs/12346\n\nCommit: abc123def\nTimestamp: 2025-11-21 15:30:45\n\nWork is verified complete.\n```\n\n## Why This Matters\n\nFrom painful experience:\n\n- \"Should work\" \u2192 CI fails \u2192 wasted time\n- Skipping verification \u2192 broken main branch\n- False completion \u2192 lost trust\n- Claiming success without evidence \u2192 dishonesty\n\n## Requirements\n\n- **GitHub CLI** (`gh`) installed and authenticated\n- **Git** repository with GitHub Actions\n- Project with test suite\n\n## The Bottom Line\n\n**No shortcuts. No exceptions. No rationalizations.**\n\n1. Run local tests\n2. Push code\n3. Wait for CI (blocking)\n4. Fix failures and repeat\n5. Only claim completion when CI passes\n\nThis is non-negotiable.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "autonomous-ci",
-    "description": "Ensures Claude verifies both local tests AND remote CI before claiming completion. Use BEFORE any completion claims, commits, or pull requests. Mandatory verification with evidence."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

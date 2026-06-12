@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000001665",
   "name": "database-migration",
   "slug": "database-migration",
   "description": "Guide for creating idempotent Supabase database migrations with RLS policies and workspace isolation",
   "content": "\n# Database Migration Skill\n## Creating Idempotent Supabase Migrations\n\n**When to Use**: Adding tables, modifying schemas, creating RLS policies, adding functions\n\n---\n\n## Process\n\n### 1. Check Existing Schema\n**ALWAYS** check before creating:\n```bash\n# Read schema reference\ncat docs/guides/schema-reference.md\n\n# Or check existing migrations\nls supabase/migrations/\n```\n\n### 2. Create Migration File\n\n**Location**: `supabase/migrations/YYYYMMDDHHMMSS_description.sql`\n\n**Naming**: Use timestamp + descriptive name\n```\n20251230120000_add_agent_registry_table.sql\n```\n\n### 3. Write Idempotent SQL\n\n**Pattern**: Use `IF NOT EXISTS` and `CREATE OR REPLACE`\n\n```sql\n-- Tables\nCREATE TABLE IF NOT EXISTS agent_registry (\n  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n  agent_id TEXT NOT NULL,\n  version TEXT NOT NULL,\n  capabilities JSONB NOT NULL DEFAULT '[]'::jsonb,\n  created_at TIMESTAMPTZ DEFAULT NOW(),\n\n  UNIQUE(workspace_id, agent_id)\n);\n\n-- Indexes\nCREATE INDEX IF NOT EXISTS idx_agent_registry_workspace\n  ON agent_registry(workspace_id);\n\nCREATE INDEX IF NOT EXISTS idx_agent_registry_agent\n  ON agent_registry(agent_id, workspace_id);\n\n-- RLS\nALTER TABLE agent_registry ENABLE ROW LEVEL SECURITY;\n\nDROP POLICY IF EXISTS \"Users can view their workspace agents\" ON agent_registry;\nCREATE POLICY \"Users can view their workspace agents\" ON agent_registry\n  FOR SELECT USING (\n    workspace_id IN (\n      SELECT w.id FROM workspaces w\n      INNER JOIN user_organizations uo ON uo.org_id = w.org_id\n      WHERE uo.user_id = auth.uid()\n    )\n  );\n\nDROP POLICY IF EXISTS \"System can manage agents\" ON agent_registry;\nCREATE POLICY \"System can manage agents\" ON agent_registry\n  FOR ALL USING (true) WITH CHECK (true);\n\n-- Functions\nCREATE OR REPLACE FUNCTION get_agent_count(p_workspace_id UUID)\nRETURNS INTEGER AS $$\nBEGIN\n  RETURN (SELECT COUNT(*) FROM agent_registry WHERE workspace_id = p_workspace_id);\nEND;\n$$ LANGUAGE plpgsql STABLE;\n\n-- Comments\nCOMMENT ON TABLE agent_registry IS 'Registry of all active agents per workspace';\n```\n\n### 4. RLS Policy Pattern\n\n**ALWAYS use**: `user_organizations` + `workspaces` join (NOT workspace_members)\n\n```sql\n-- Correct pattern\nworkspace_id IN (\n  SELECT w.id FROM workspaces w\n  INNER JOIN user_organizations uo ON uo.org_id = w.org_id\n  WHERE uo.user_id = auth.uid()\n)\n\n-- For admin/owner only\nworkspace_id IN (\n  SELECT w.id FROM workspaces w\n  INNER JOIN user_organizations uo ON uo.org_id = w.org_id\n  WHERE uo.user_id = auth.uid() AND uo.role IN ('admin', 'owner')\n)\n```\n\n### 5. Apply Migration\n\n**Method**: Supabase Dashboard \u2192 SQL Editor\n\n**Steps**:\n1. Copy migration SQL\n2. Paste into SQL Editor\n3. Click \"Run\"\n4. Verify success\n\n**Alternative**: Use WORKING_MIGRATIONS.sql pattern for combined migrations\n\n---\n\n## Examples\n\n### Example 1: Simple Table\n\n```sql\nCREATE TABLE IF NOT EXISTS my_table (\n  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n  name TEXT NOT NULL,\n  data JSONB,\n  created_at TIMESTAMPTZ DEFAULT NOW()\n);\n\nCREATE INDEX IF NOT EXISTS idx_my_table_workspace ON my_table(workspace_id);\n\nALTER TABLE my_table ENABLE ROW LEVEL SECURITY;\n\nDROP POLICY IF EXISTS \"workspace_isolation\" ON my_table;\nCREATE POLICY \"workspace_isolation\" ON my_table\n  FOR ALL USING (\n    workspace_id IN (\n      SELECT w.id FROM workspaces w\n      INNER JOIN user_organizations uo ON uo.org_id = w.org_id\n      WHERE uo.user_id = auth.uid()\n    )\n  );\n```\n\n### Example 2: ENUM Type\n\n```sql\nDO $$ BEGIN\n  CREATE TYPE agent_status AS ENUM ('active', 'paused', 'disabled');\nEXCEPTION WHEN duplicate_object THEN NULL;\nEND $$;\n```\n\n### Example 3: Trigger\n\n```sql\nCREATE OR REPLACE FUNCTION update_updated_at()\nRETURNS TRIGGER AS $$\nBEGIN\n  NEW.updated_at = NOW();\n  RETURN NEW;\nEND;\n$$ LANGUAGE plpgsql;\n\nDROP TRIGGER IF EXISTS trigger_update_updated_at ON my_table;\nCREATE TRIGGER trigger_update_updated_at\n  BEFORE UPDATE ON my_table\n  FOR EACH ROW\n  EXECUTE FUNCTION update_updated_at();\n```\n\n---\n\n## Common Patterns\n\n### Workspace Isolation (MANDATORY)\n\n```sql\nCREATE TABLE table_name (\n  ...\n  workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n  ...\n);\n\n-- Always add index on workspace_id\nCREATE INDEX IF NOT EXISTS idx_table_workspace ON table_name(workspace_id);\n\n-- Always add RLS\nALTER TABLE table_name ENABLE ROW LEVEL SECURITY;\n```\n\n### Constraints\n\n```sql\n-- Check constraints\nCONSTRAINT valid_status CHECK (status IN ('active', 'inactive')),\nCONSTRAINT valid_score CHECK (score >= 0 AND score <= 100),\nCONSTRAINT valid_email CHECK (email ~* '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$')\n```\n\n### Foreign Keys\n\n```sql\n-- With cascade delete\nworkspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,\n\n-- With set null\ncreated_by UUID REFERENCES auth.users(id) ON DELETE SET NULL,\n\n-- With restrict (prevents delete if referenced)\norg_id UUID NOT NULL REFERENCES organizations(id) ON DELETE RESTRICT\n```\n\n---\n\n## Checklist\n\nBefore applying migration:\n\n- [ ] Checked schema-reference.md for conflicts\n- [ ] Used `IF NOT EXISTS` on tables\n- [ ] Used `CREATE OR REPLACE` on functions\n- [ ] Added workspace_id column (if multi-tenant table)\n- [ ] Created index on workspace_id\n- [ ] Enabled RLS\n- [ ] Added RLS policies (user + system)\n- [ ] Used correct RLS pattern (user_organizations join)\n- [ ] Added constraints where appropriate\n- [ ] Added comments for documentation\n- [ ] Tested SQL syntax locally\n\n---\n\n## Troubleshooting\n\n**Error**: \"relation workspace_members does not exist\"\n**Fix**: Use `user_organizations` + `workspaces` join (see RLS pattern above)\n\n**Error**: \"already exists\"\n**Fix**: Use `IF NOT EXISTS` or `CREATE OR REPLACE`\n\n**Error**: \"permission denied\"\n**Fix**: Use service role key in Supabase Dashboard, not anon key\n\n---\n\n**Standard**: Idempotent, workspace-isolated, RLS-secured, well-documented\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "database-migration",
-    "description": "Guide for creating idempotent Supabase database migrations with RLS policies and workspace isolation"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

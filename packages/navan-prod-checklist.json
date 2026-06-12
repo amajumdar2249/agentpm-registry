@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032688",
   "name": "navan-prod-checklist",
   "slug": "navan-prod-checklist",
   "description": "Use when validating production readiness for a Navan API integration\\",
   "content": "# Navan Production Checklist\n\n## Overview\n\nGated production readiness verification for Navan REST API integrations. Navan has no SDK and no sandbox \u2014 production is the only environment, making this checklist critical.\n\n## Prerequisites\n\n- Navan admin access (Admin > Travel admin > Settings)\n- OAuth credentials stored in a secret manager (credentials are viewable only once)\n- SSO identity provider configured (Okta, Azure AD, or Google Workspace)\n- `curl` and `jq` for verification commands\n\n## Instructions\n\n### Domain 1 \u2014 Credential Security\n\n- [ ] **Secret storage**: OAuth `client_id` and `client_secret` stored in a secret manager (AWS Secrets Manager, GCP Secret Manager, HashiCorp Vault) \u2014 never in environment variables, config files, or source control\n- [ ] **Rotation plan documented**: Schedule for rotating credentials (recommend 90-day cycle)\n- [ ] **Zero-downtime rotation tested**: Dual-credential swap procedure validated\n\n```bash\n# Verify current credentials work\ncurl -s -X POST \"https://api.navan.com/ta-auth/oauth/token\" \\\n  -H \"Content-Type: application/x-www-form-urlencoded\" \\\n  -d \"grant_type=client_credentials&client_id=$NAVAN_CLIENT_ID&client_secret=$NAVAN_CLIENT_SECRET\" \\\n  | jq '{authenticated: (.access_token != null), error: .error}'\n```\n\n**Rotation procedure:**\n\n1. Generate new credentials in Admin > Integrations (old ones remain valid)\n2. Deploy new credentials to secret manager\n3. Update application configuration to reference new secret version\n4. Verify new credentials with `/ta-auth/oauth/token`\n5. Revoke old credentials in Admin > Integrations\n6. Confirm old credentials return HTTP 401\n\n### Domain 2 \u2014 Error Handling and Alerting\n\n- [ ] **All HTTP error codes handled**: 400, 401, 403, 404, 429, 500, 502, 503\n- [ ] **Retry logic with exponential backoff**: For 429 and 5xx responses\n- [ ] **Alert thresholds configured**: Error rate > 5% over 5 minutes triggers alert\n- [ ] **Dead letter queue**: Failed API requests stored for retry or manual review\n\n```bash\n# Health check endpoint pattern\nhealth_check() {\n  RESPONSE=$(curl -s -w \"%{http_code}\" -o /tmp/navan-health.json \\\n    -X POST \"https://api.navan.com/ta-auth/oauth/token\" \\\n    -H \"Content-Type: application/x-www-form-urlencoded\" \\\n    -d \"grant_type=client_credentials&client_id=$NAVAN_CLIENT_ID&client_secret=$NAVAN_CLIENT_SECRET\")\n\n  if [ \"$RESPONSE\" = \"200\" ]; then\n    echo '{\"status\":\"healthy\",\"navan_api\":\"reachable\"}'\n  elif [ \"$RESPONSE\" = \"429\" ]; then\n    echo '{\"status\":\"degraded\",\"reason\":\"rate_limited\"}'\n  else\n    echo \"{\\\"status\\\":\\\"unhealthy\\\",\\\"http_code\\\":\\\"$RESPONSE\\\"}\"\n  fi\n}\n```\n\n### Domain 3 \u2014 Rate Limiting\n\n- [ ] **Client-side rate limiter**: Token bucket or sliding window before API calls\n- [ ] **429 response handling**: Parse `Retry-After` header and honor wait time\n- [ ] **Request queuing**: Burst requests queued rather than dropped\n- [ ] **Rate limit monitoring**: Dashboard showing API call volume and 429 frequency\n\n### Domain 4 \u2014 Data Pipeline\n\n- [ ] **BOOKING table sync**: Weekly full refresh configured (Fivetran, Airbyte, or custom)\n- [ ] **TRANSACTION table sync**: Incremental sync with deduplication by transaction UUID\n- [ ] **Data backup strategy**: Export snapshots stored in cloud storage with retention policy\n- [ ] **Reconciliation checks**: Automated comparison between Navan data and ERP records\n\n### Domain 5 \u2014 SSO and User Provisioning\n\n- [ ] **SAML SSO verified**: Login flow tested end-to-end through identity provider\n\n```bash\n# Verify users are synced via API\nTOKEN=$(curl -s -X POST \"https://api.navan.com/ta-auth/oauth/token\" \\\n  -H \"Content-Type: application/x-www-form-urlencoded\" \\\n  -d \"grant_type=client_credentials&client_id=$NAVAN_CLIENT_ID&client_secret=$NAVAN_CLIENT_SECRET\" \\\n  | jq -r '.access_token')\n\ncurl -s -H \"Authorization: Bearer $TOKEN\" \\\n  \"https://api.navan.com/v1/users\" \\\n  | jq '{total_users: (.data | length), sample: .data[0] | {id, email, status}}'\n```\n\n- [ ] **SCIM provisioning active**: User create/update/deactivate syncing from IdP\n- [ ] **Deprovisioning tested**: Terminated employees removed from Navan within 24 hours\n- [ ] **Role mapping documented**: IdP groups mapped to Navan roles (traveler, approver, admin)\n\n### Domain 6 \u2014 Compliance and Audit\n\n- [ ] **API access logging**: All Navan API calls logged with timestamp, endpoint, response code, and user context\n- [ ] **Audit trail retention**: Logs retained per your compliance requirements (SOC 2: 1 year minimum)\n- [ ] **Data classification**: Navan data (PII, payment info) classified and handled per PCI DSS L1\n- [ ] **Compliance certifications verified**: Confirm Navan's SOC 1/2 Type II, ISO 27001, PCI DSS L1, GDPR status at [navan.com/security](https://navan.com/security)\n\n## Output\n\nA completed checklist with:\n\n- Pass/fail status for each domain\n- Verification command output proving each check\n- Identified gaps with remediation plan and owner\n- Sign-off from security and operations leads\n\n## Error Handling\n\n| Check Failure | Impact | Remediation |\n|---------------|--------|-------------|\n| Credentials in plaintext | Critical \u2014 security breach risk | Move to secret manager immediately |\n| No retry logic on 429 | High \u2014 cascading failures under load | Implement exponential backoff |\n| SCIM not configured | Medium \u2014 manual user management overhead | Enable SCIM in IdP and Navan admin |\n| No audit logging | High \u2014 compliance violation | Add structured logging to API client |\n\n## Examples\n\nRun a quick pre-launch validation:\n\n```bash\n# Rapid smoke test \u2014 auth + user count + timing\necho \"=== Navan Production Smoke Test ===\"\ncurl -s -w \"Auth: %{http_code} (%{time_total}s)\\n\" -o /tmp/navan-auth.json \\\n  -X POST \"https://api.navan.com/ta-auth/oauth/token\" \\\n  -H \"Content-Type: application/x-www-form-urlencoded\" \\\n  -d \"grant_type=client_credentials&client_id=$NAVAN_CLIENT_ID&client_secret=$NAVAN_CLIENT_SECRET\"\n\nTOKEN=$(jq -r '.access_token' /tmp/navan-auth.json)\ncurl -s -w \"Users: %{http_code} (%{time_total}s)\\n\" -o /tmp/navan-users.json \\\n  -H \"Authorization: Bearer $TOKEN\" \\\n  \"https://api.navan.com/v1/users\"\necho \"User count: $(jq '.data | length' /tmp/navan-users.json)\"\n```\n\n## Resources\n\n- [Navan Security](https://navan.com/security) \u2014 SOC 2, ISO 27001, PCI DSS certifications\n- [Navan Integrations](https://navan.com/integrations) \u2014 Connector catalog and setup guides\n- [Navan Help Center](https://app.navan.com/app/helpcenter) \u2014 Admin documentation\n\n## Next Steps\n\n- Use `navan-upgrade-migration` for ongoing API change management\n- Use `navan-observability` for monitoring stack setup\n- Use `navan-incident-runbook` if production issues arise post-launch\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "navan-prod-checklist",
-    "description": "Use when validating production readiness for a Navan API integration\\",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Bash(jq:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033495",
   "name": "vercel-enterprise-rbac",
   "slug": "vercel-enterprise-rbac",
   "description": "Configure Vercel enterprise RBAC, access groups, SSO integration, and",
   "content": "# Vercel Enterprise RBAC\n\n## Overview\n\nConfigure Vercel's role-based access control (RBAC) with team roles, project-level access groups, SSO/SAML integration, and audit logging. Covers the two access control planes: team-level (who can deploy) and application-level (who can access deployed content).\n\n## Prerequisites\n\n- Vercel Pro or Enterprise plan\n- Identity Provider (IdP) with SAML 2.0 support (for SSO)\n- Understanding of your organization's access requirements\n\n## Instructions\n\n### Step 1: Understand Vercel's Role Model\n\n**Team-Level Roles:**\n\n| Role | Deploy Prod | Manage Projects | Manage Billing | Manage Members |\n|------|-------------|-----------------|----------------|----------------|\n| Owner | Yes | Yes | Yes | Yes |\n| Member | Yes | Yes | No | No |\n| Developer | Preview only | Limited | No | No |\n| Viewer | No | Read-only | No | No |\n| Security (Enterprise) | No | Security settings | No | No |\n\n**Extended Permissions (Enterprise):**\nLayer on top of base roles for granular control:\n\n- Deploy to production\n- Manage environment variables\n- Manage domains\n- Access runtime logs\n- Manage integrations\n\n### Step 2: Configure Team Members via API\n\n```bash\n# Invite a team member\ncurl -X POST \"https://api.vercel.com/v1/teams/team_xxx/members\" \\\n  -H \"Authorization: Bearer $VERCEL_TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"email\": \"developer@company.com\",\n    \"role\": \"DEVELOPER\"\n  }'\n\n# List team members\ncurl -s -H \"Authorization: Bearer $VERCEL_TOKEN\" \\\n  \"https://api.vercel.com/v2/teams/team_xxx/members\" \\\n  | jq '.members[] | {name: .name, email: .email, role: .role}'\n\n# Update a member's role\ncurl -X PATCH \"https://api.vercel.com/v1/teams/team_xxx/members/user_xxx\" \\\n  -H \"Authorization: Bearer $VERCEL_TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"role\": \"MEMBER\"}'\n\n# Remove a team member\ncurl -X DELETE \"https://api.vercel.com/v1/teams/team_xxx/members/user_xxx\" \\\n  -H \"Authorization: Bearer $VERCEL_TOKEN\"\n```\n\n### Step 3: Access Groups (Project-Level Permissions)\n\nAccess Groups assign teams of people to specific projects with specific roles:\n\n1. Go to **Team Settings > Access Groups**\n2. Create a group (e.g., \"Frontend Team\", \"Backend Team\")\n3. Add members to the group\n4. Assign the group to specific projects with a role\n\n```\nExample Access Group Setup:\n\u251c\u2500\u2500 Frontend Team \u2192 [project-web, project-docs] \u2192 Member role\n\u251c\u2500\u2500 Backend Team \u2192 [project-api, project-worker] \u2192 Member role\n\u251c\u2500\u2500 DevOps Team \u2192 [all projects] \u2192 Member role\n\u2514\u2500\u2500 QA Team \u2192 [all projects] \u2192 Viewer role\n```\n\n### Step 4: SSO / SAML Configuration\n\nIn the Vercel dashboard: **Team Settings > Authentication > SAML Single Sign-On**\n\n1. Enable SAML SSO\n2. Configure your IdP (Okta, Azure AD, Google Workspace):\n   - ACS URL: `https://vercel.com/api/auth/saml/acs`\n   - Entity ID: `https://vercel.com`\n   - Name ID format: `emailAddress`\n3. Enter IdP metadata URL or upload certificate\n4. Map SAML attributes to Vercel fields\n\n```\nSAML Attribute Mapping:\n\u251c\u2500\u2500 email \u2192 user email (required)\n\u251c\u2500\u2500 firstName \u2192 display name\n\u251c\u2500\u2500 lastName \u2192 display name\n\u2514\u2500\u2500 groups \u2192 Vercel team roles (optional)\n```\n\n**Enforce SSO for all team members:**\nOnce enabled, toggle \"Require SAML for login\" \u2014 all members must authenticate through SSO.\n\n### Step 5: Application-Level Auth with Middleware\n\n```typescript\n// middleware.ts \u2014 enforce auth on deployed application routes\nimport { NextRequest, NextResponse } from 'next/server';\nimport { verifyJWT } from '@/lib/auth';\n\nconst ROLE_ROUTES: Record<string, string[]> = {\n  '/admin': ['admin'],\n  '/dashboard': ['admin', 'member'],\n  '/api/admin': ['admin'],\n};\n\nexport async function middleware(request: NextRequest) {\n  const { pathname } = request.nextUrl;\n\n  // Check if route requires auth\n  const requiredRoles = Object.entries(ROLE_ROUTES)\n    .find(([prefix]) => pathname.startsWith(prefix));\n\n  if (!requiredRoles) return NextResponse.next();\n\n  const token = request.cookies.get('session')?.value;\n  if (!token) {\n    return pathname.startsWith('/api')\n      ? NextResponse.json({ error: 'Unauthorized' }, { status: 401 })\n      : NextResponse.redirect(new URL('/login', request.url));\n  }\n\n  const payload = await verifyJWT(token);\n  if (!payload || !requiredRoles[1].includes(payload.role)) {\n    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });\n  }\n\n  // Pass user info to API routes via headers\n  const response = NextResponse.next();\n  response.headers.set('x-user-id', payload.sub);\n  response.headers.set('x-user-role', payload.role);\n  return response;\n}\n\nexport const config = {\n  matcher: ['/admin/:path*', '/dashboard/:path*', '/api/admin/:path*'],\n};\n```\n\n### Step 6: Audit Logging\n\nVercel Enterprise includes audit logs in **Team Settings > Audit Log**.\n\nEvents tracked:\n\n- Team member added/removed/role changed\n- Project created/deleted\n- Deployment to production\n- Environment variable created/updated/deleted\n- Domain added/removed\n- Integration installed/uninstalled\n- SSO configuration changes\n\n```bash\n# Export audit logs via API (Enterprise)\ncurl -s -H \"Authorization: Bearer $VERCEL_TOKEN\" \\\n  \"https://api.vercel.com/v1/teams/team_xxx/audit-log?limit=100\" \\\n  | jq '.events[] | {action: .action, user: .user.email, createdAt: .createdAt, resource: .resource}'\n```\n\n## RBAC Checklist\n\n| Check | Status |\n|-------|--------|\n| Team roles assigned per least privilege | Required |\n| Production deploy restricted to Member+ | Required |\n| Access Groups configured per project | Recommended |\n| SSO/SAML enforced for all members | Enterprise |\n| Audit logging exported to SIEM | Enterprise |\n| Application-level auth in middleware | Required |\n| Off-boarding removes Vercel access via IdP | Required |\n\n## Output\n\n- Team roles configured with least-privilege access\n- Access Groups scoping members to specific projects\n- SSO/SAML enforced for all team authentication\n- Application-level RBAC in Edge Middleware\n- Audit logs exported for compliance\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Member can't deploy to prod | Developer role (preview only) | Change to Member or Owner role |\n| SSO login fails | IdP metadata URL expired | Update SAML configuration |\n| Access Group not applied | Member not in group | Add member to the Access Group |\n| Audit log missing events | Free/Pro plan limitation | Upgrade to Enterprise for audit logs |\n| Off-boarded user still has access | SSO not enforced | Enable \"Require SAML for login\" |\n\n## Resources\n\n- [Vercel RBAC](https://vercel.com/docs/rbac)\n- [Access Roles](https://vercel.com/docs/rbac/access-roles)\n- [Access Groups](https://vercel.com/docs/rbac/access-groups)\n- [Extended Permissions](https://vercel.com/docs/rbac/access-roles/extended-permissions)\n- [Managing Team Members](https://vercel.com/docs/rbac/managing-team-members)\n\n## Next Steps\n\nFor migration strategies, see `vercel-migration-deep-dive`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "vercel-enterprise-rbac",
-    "description": "Configure Vercel enterprise RBAC, access groups, SSO integration, and",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

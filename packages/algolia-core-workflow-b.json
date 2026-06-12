@@ -1,19 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031190",
   "name": "algolia-core-workflow-b",
   "slug": "algolia-core-workflow-b",
   "description": "Implement Algolia indexing pipeline: data sync, partial updates, synonyms,",
   "content": "# Algolia Core Workflow B \u2014 Indexing & Data Sync\n\n## Overview\n\nKeep your Algolia index synchronized with your source database. Covers full reindex, incremental updates, partial updates, synonyms, and query rules.\n\n## Prerequisites\n\n- Completed `algolia-install-auth` setup\n- Familiarity with `algolia-core-workflow-a` (search)\n- Source database or API with change tracking (timestamps, events)\n\n## Instructions\n\n### Step 1: Full Reindex with replaceAllObjects\n\n```typescript\nimport { algoliasearch } from 'algoliasearch';\n\nconst client = algoliasearch(process.env.ALGOLIA_APP_ID!, process.env.ALGOLIA_ADMIN_KEY!);\n\n// replaceAllObjects atomically swaps index content\n// Internally: creates temp index \u2192 indexes all records \u2192 moves temp to target\n// Search continues on old data until swap is complete \u2014 zero downtime\nasync function fullReindex(records: Record<string, any>[]) {\n  const { taskID } = await client.replaceAllObjects({\n    indexName: 'products',\n    objects: records,\n    batchSize: 1000,  // Records per batch (default 1000)\n  });\n  await client.waitForTask({ indexName: 'products', taskID });\n  console.log(`Full reindex complete: ${records.length} records`);\n}\n```\n\n### Step 2: Incremental Updates with partialUpdateObject\n\n```typescript\n// Only update changed fields \u2014 much faster than full saveObjects\nasync function updateProductPrice(objectID: string, newPrice: number) {\n  await client.partialUpdateObject({\n    indexName: 'products',\n    objectID,\n    attributesToUpdate: {\n      price: newPrice,\n      updated_at: new Date().toISOString(),\n    },\n    createIfNotExists: false,  // Don't create if missing\n  });\n}\n\n// Batch partial updates\nasync function syncPriceChanges(changes: { id: string; price: number }[]) {\n  const { taskID } = await client.partialUpdateObjects({\n    indexName: 'products',\n    objects: changes.map(c => ({\n      objectID: c.id,\n      price: c.price,\n      updated_at: new Date().toISOString(),\n    })),\n    createIfNotExists: false,\n  });\n  await client.waitForTask({ indexName: 'products', taskID });\n}\n```\n\n### Step 3: Manage Synonyms\n\n```typescript\n// Synonyms help users find products with different terminology\nawait client.saveSynonyms({\n  indexName: 'products',\n  synonymHit: [\n    // Two-way synonym: any of these terms match each other\n    {\n      objectID: 'syn-1',\n      type: 'synonym',\n      synonyms: ['laptop', 'notebook', 'portable computer'],\n    },\n    // One-way synonym: \"phone\" also searches for \"smartphone\" but not reverse\n    {\n      objectID: 'syn-2',\n      type: 'oneWaySynonym',\n      input: 'phone',\n      synonyms: ['smartphone', 'mobile phone', 'cell phone'],\n    },\n    // Alt correction: minor typos/variations\n    {\n      objectID: 'syn-3',\n      type: 'altCorrection1',\n      word: 'color',\n      corrections: ['colour'],\n    },\n    // Placeholder: replace pattern with alternatives\n    {\n      objectID: 'syn-4',\n      type: 'placeholder',\n      placeholder: '<size>',\n      replacements: ['small', 'medium', 'large', 'XL'],\n    },\n  ],\n  forwardToReplicas: true,\n  replaceExistingSynonyms: false,  // true = wipe existing first\n});\n```\n\n### Step 4: Configure Query Rules\n\n```typescript\n// Rules let you pin, hide, boost, or filter results for specific queries\nawait client.saveRule({\n  indexName: 'products',\n  objectID: 'rule-sale-banner',\n  rule: {\n    conditions: [{\n      anchoring: 'contains',\n      pattern: 'sale',\n    }],\n    consequence: {\n      // Pin a specific record to position 1\n      promote: [{ objectID: 'promo-banner-sale', position: 0 }],\n\n      // Add automatic filter\n      params: {\n        filters: 'on_sale = true',\n      },\n    },\n    description: 'When user searches \"sale\", filter to sale items and pin banner',\n    enabled: true,\n  },\n});\n\n// Hide a product from search results\nawait client.saveRule({\n  indexName: 'products',\n  objectID: 'rule-hide-discontinued',\n  rule: {\n    conditions: [{ anchoring: 'is', pattern: '' }],  // Matches all queries\n    consequence: {\n      hide: [{ objectID: 'discontinued-product-123' }],\n    },\n    description: 'Hide discontinued product from all searches',\n    enabled: true,\n  },\n});\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `Record is too big (limit: 10KB)` | Object exceeds free-tier limit | Strip unnecessary fields; paid plans allow 100KB |\n| `Synonym already exists` | Duplicate objectID | Use `replaceExistingSynonyms: true` or unique IDs |\n| `Invalid rule condition` | Wrong `anchoring` value | Use `is`, `startsWith`, `endsWith`, or `contains` |\n| Partial update creates new record | `createIfNotExists` default is `true` | Set `createIfNotExists: false` |\n\n## Examples\n\n### Database Change Listener \u2192 Algolia Sync\n\n```typescript\n// Listen for DB changes and push to Algolia\nimport { getClient } from './algolia/client';\n\nasync function onDatabaseChange(event: { type: string; record: any }) {\n  const client = getClient();\n  const idx = 'products';\n\n  switch (event.type) {\n    case 'INSERT':\n    case 'UPDATE':\n      await client.saveObject({ indexName: idx, body: event.record });\n      break;\n    case 'DELETE':\n      await client.deleteObject({ indexName: idx, objectID: event.record.id });\n      break;\n  }\n}\n```\n\n### Search for Synonyms\n\n```typescript\n// List all synonyms matching a query\nconst { hits } = await client.searchSynonyms({\n  indexName: 'products',\n  searchSynonymsParams: { query: 'phone', type: 'synonym' },\n});\nconsole.log(`Found ${hits.length} synonym sets matching \"phone\"`);\n```\n\n## Resources\n\n- [Indexing Guide](https://www.algolia.com/doc/guides/sending-and-managing-data/send-and-update-your-data/)\n- [Synonyms Guide](https://www.algolia.com/doc/guides/managing-results/optimize-search-results/adding-synonyms/)\n- [Rules Guide](https://www.algolia.com/doc/guides/managing-results/rules/rules-overview/)\n- [replaceAllObjects Reference](https://www.algolia.com/doc/api-reference/api-methods/replace-all-objects/)\n\n## Next Steps\n\nFor common errors, see `algolia-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "algolia-core-workflow-b",
-    "description": "Implement Algolia indexing pipeline: data sync, partial updates, synonyms,",
-    "The secondary money-path workflow": "keep your index in sync with source data.",
-    "Trigger": "algolia indexing\", \"sync data to algolia\", \"algolia synonyms\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

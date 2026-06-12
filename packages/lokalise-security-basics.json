@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032558",
   "name": "lokalise-security-basics",
   "slug": "lokalise-security-basics",
   "description": "Apply Lokalise security best practices for API tokens and access control.",
   "content": "# Lokalise Security Basics\n\n## Overview\n\nSecurity practices for Lokalise integrations: API token management with scoped permissions, translation content sanitization, CI/CD secret handling, webhook secret verification, and audit logging. Lokalise handles translation strings that may contain user-facing content, interpolation variables, and occasionally PII embedded in keys or values.\n\n## Prerequisites\n\n- Lokalise API token provisioned (admin token for audit, scoped tokens for operations)\n- Understanding of Lokalise token permission model (read-only vs read-write)\n- Secret management infrastructure (GitHub Secrets, AWS Secrets Manager, GCP Secret Manager, or Vault)\n\n## Instructions\n\n### Step 1: Token Scope Management\n\nLokalise API tokens are either read-only or read-write. Create separate tokens per use case to enforce least privilege.\n\n```typescript\nimport { LokaliseApi } from \"@lokalise/node-api\";\n\n// Token strategy: separate tokens per context\nconst TOKENS = {\n  // CI download pipeline \u2014 read-only token\n  ciDownload: process.env.LOKALISE_READ_TOKEN,\n  // CI upload pipeline \u2014 read-write token\n  ciUpload: process.env.LOKALISE_WRITE_TOKEN,\n  // Admin operations (contributor management, webhooks) \u2014 admin token\n  admin: process.env.LOKALISE_ADMIN_TOKEN,\n} as const;\n\nfunction getClient(scope: keyof typeof TOKENS): LokaliseApi {\n  const token = TOKENS[scope];\n  if (!token) {\n    throw new Error(\n      `LOKALISE_${scope.toUpperCase()}_TOKEN not set. ` +\n      `Generate at https://app.lokalise.com/profile#apitokens`\n    );\n  }\n  return new LokaliseApi({ apiKey: token, enableCompression: true });\n}\n\n// Download translations \u2014 uses read-only token\nconst readClient = getClient(\"ciDownload\");\nconst bundle = await readClient.files().download(projectId, {\n  format: \"json\",\n  original_filenames: false,\n  bundle_structure: \"%LANG_ISO%.json\",\n});\n```\n\n### Step 2: Validate Translation Content\n\nTranslation strings may contain interpolation variables, HTML, or user-generated content. Validate before rendering.\n\n```typescript\ninterface ValidationIssue {\n  key: string;\n  severity: \"critical\" | \"warning\";\n  message: string;\n}\n\nfunction validateTranslation(key: string, value: string): ValidationIssue[] {\n  const issues: ValidationIssue[] = [];\n\n  // XSS: Check for script injection in translations\n  if (/<script|javascript:|on\\w+=/i.test(value)) {\n    issues.push({ key, severity: \"critical\", message: \"Potential XSS payload\" });\n  }\n\n  // Credential leak: Check for secrets in translation values\n  if (/(api_key|password|secret|token)\\s*[:=]/i.test(value)) {\n    issues.push({ key, severity: \"critical\", message: \"Possible credential in value\" });\n  }\n\n  // Placeholder integrity: Ensure ICU/i18next placeholders are well-formed\n  const placeholders = value.match(/\\{[^}]+\\}|\\{\\{[^}]+\\}\\}/g) ?? [];\n  for (const p of placeholders) {\n    if (/[<>'\"]/.test(p)) {\n      issues.push({ key, severity: \"warning\", message: `Suspicious placeholder: ${p}` });\n    }\n  }\n\n  return issues;\n}\n\n// Validate all translations after download\nimport { readFileSync } from \"fs\";\n\nfunction auditTranslationFile(filePath: string): ValidationIssue[] {\n  const data: Record<string, string> = JSON.parse(\n    readFileSync(filePath, \"utf-8\")\n  );\n  return Object.entries(data).flatMap(([key, value]) =>\n    validateTranslation(key, value)\n  );\n}\n\nconst issues = auditTranslationFile(\"./src/locales/de.json\");\nconst critical = issues.filter((i) => i.severity === \"critical\");\nif (critical.length > 0) {\n  console.error(\"CRITICAL security issues found in translations:\");\n  critical.forEach((i) => console.error(`  ${i.key}: ${i.message}`));\n  process.exit(1);\n}\n```\n\n### Step 3: Webhook Secret Verification\n\nLokalise sends a random alphanumeric secret in the `X-Secret` header. Always verify it.\n\n```typescript\nimport express from \"express\";\n\nconst WEBHOOK_SECRET = process.env.LOKALISE_WEBHOOK_SECRET!;\n\nfunction verifyWebhookSecret(\n  req: express.Request,\n  res: express.Response,\n  next: express.NextFunction\n): void {\n  const secret = req.headers[\"x-secret\"] as string | undefined;\n\n  if (!secret || secret !== WEBHOOK_SECRET) {\n    console.error(\"Webhook secret verification failed\", {\n      ip: req.ip,\n      path: req.path,\n      hasSecret: !!secret,\n    });\n    res.status(401).json({ error: \"Invalid webhook secret\" });\n    return;\n  }\n  next();\n}\n```\n\n### Step 4: CI/CD Token Security\n\n```yaml\n# GitHub Actions: use repository secrets, never hardcode tokens\nname: Sync Translations\non:\n  push:\n    branches: [main]\n    paths: ['src/locales/en.json']\n\njobs:\n  sync:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n\n      - name: Pull translations\n        env:\n          LOKALISE_API_TOKEN: ${{ secrets.LOKALISE_READ_TOKEN }}\n          LOKALISE_PROJECT_ID: ${{ vars.LOKALISE_PROJECT_ID }}\n        run: |\n          # Token is masked in logs by GitHub Actions\n          lokalise2 file download \\\n            --token \"$LOKALISE_API_TOKEN\" \\\n            --project-id \"$LOKALISE_PROJECT_ID\" \\\n            --format json \\\n            --original-filenames=false \\\n            --bundle-structure \"%LANG_ISO%.json\" \\\n            --unzip-to ./src/locales/\n```\n\n### Step 5: Scan for Hardcoded Tokens\n\n```bash\n#!/bin/bash\n# scripts/scan-secrets.sh \u2014 Run in CI or as pre-commit hook\nset -euo pipefail\n\necho \"=== Lokalise Token Security Scan ===\"\n\n# Check for hardcoded tokens in source files\nHARDCODED=$(grep -rn \"X-Api-Token\\|apiKey.*['\\\"][a-f0-9]\\{32,\\}\" \\\n  --include=\"*.ts\" --include=\"*.js\" --include=\"*.json\" --include=\"*.yml\" \\\n  src/ .github/ 2>/dev/null \\\n  | grep -v node_modules \\\n  | grep -v \"process.env\\|secrets\\.\\|vars\\.\\|\\${{\" || true)\n\nif [[ -n \"$HARDCODED\" ]]; then\n  echo \"FAIL: Potential hardcoded token found:\"\n  echo \"$HARDCODED\"\n  exit 1\nfi\n\n# Verify .env files are gitignored\nif ! grep -q \"\\.env\" .gitignore 2>/dev/null; then\n  echo \"WARN: .env not in .gitignore \u2014 add it immediately\"\nfi\n\n# Check git history for leaked tokens\nHISTORY_LEAK=$(git log --all -p --diff-filter=A -- '*.env' '*.env.*' 2>/dev/null \\\n  | grep -i \"LOKALISE_API_TOKEN=\" | head -3 || true)\n\nif [[ -n \"$HISTORY_LEAK\" ]]; then\n  echo \"CRITICAL: Token found in git history. Rotate immediately.\"\n  echo \"  Use 'git filter-repo' to remove, then rotate the token.\"\n  exit 1\nfi\n\necho \"PASS: No hardcoded tokens detected\"\n```\n\n### Step 6: Audit Translation Changes\n\n```typescript\ninterface TranslationAuditEntry {\n  timestamp: string;\n  projectId: string;\n  key: string;\n  locale: string;\n  userId: string;\n  action: \"create\" | \"update\" | \"delete\";\n  // Never log actual content \u2014 may contain PII\n  oldLength: number;\n  newLength: number;\n}\n\nfunction logTranslationChange(entry: TranslationAuditEntry): void {\n  // Ship to your logging backend (Datadog, CloudWatch, etc.)\n  console.log(JSON.stringify({\n    level: \"info\",\n    event: \"translation_change\",\n    ...entry,\n  }));\n}\n```\n\n## Output\n\n- Scoped token configuration with separate read/write/admin tokens\n- Translation content validator catching XSS, credential leaks, and malformed placeholders\n- Webhook secret verification middleware for Express\n- CI/CD workflow using repository secrets with masked output\n- Pre-commit/CI scan script for hardcoded tokens\n- Audit logging for translation changes (PII-safe)\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Token leaked in CI logs | Token in command output | Use env variables; GitHub Actions auto-masks secrets |\n| XSS via translations | Unsanitized translation rendered as HTML | Validate with `validateTranslation()` before use |\n| Overprivileged access | Using admin token for read-only operations | Create scoped tokens per use case |\n| Unauthorized changes | No audit trail | Register webhook for `project.translation.updated` events |\n| Token in git history | Committed .env file | Rotate token immediately, use `git filter-repo` to scrub |\n\n## Resources\n\n- [Lokalise API Authentication](https://developers.lokalise.com/reference/api-authentication)\n- [Lokalise Security](https://lokalise.com/security)\n- [Webhook Events Reference](https://developers.lokalise.com/docs/webhook-events)\n- [OWASP Secrets Management](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html)\n\n## Next Steps\n\nFor enterprise-level access control with SSO and contributor groups, see `lokalise-enterprise-rbac`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "lokalise-security-basics",
-    "description": "Apply Lokalise security best practices for API tokens and access control.",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Bash(jq:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

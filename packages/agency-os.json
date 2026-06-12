@@ -1,18 +1,48 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000030625",
   "name": "agency-os",
   "slug": "agency-os",
   "description": "|",
   "content": "\n# agency-os\n\nNotion-as-source-of-truth dispatch board. One Tasks database, one Hub page, one\npage per Corpus, one page each for General Guidance and Resources. The skill\nmutates Notion via the Notion MCP (`mcp__*__notion-*` tools); only\n`references/notion-pointers.json` is committed to git.\n\n**Skill name decision:** the skill is named `agency-os` (matching the repo). All\ncommands are `/agency-os <cmd>`. This is the single plugin entry point; there\nis no `agency-os/notion` sub-namespace. If you embed this plugin alongside\nothers, prefix commands with `agency-os` to avoid collisions.\n\n## Overview\n\nagency-os turns a single Notion database into a multi-status dispatch board for\nAI work. The model is intentionally narrow:\n\n- **One Tasks database** is the source of truth for status, priority, model\n  selection, and ownership. No parallel kanban tools.\n- **One Hub page** holds the General Guidance, Resources, and Corpus pointers\n  that every task consults.\n- **Tasks flow through five statuses**: Suggestion \u2192 Discussion \u2192 To-Do \u2192\n  In Progress \u2192 Done. The dedup gate at each transition prevents accidental\n  re-execution.\n- **`run`** fans approved To-Do rows out to parallel agents. Each task carries\n  its own model selection (Haiku for cheap fan-out, Sonnet for default,\n  Opus for hard reasoning) and respects declared dependencies.\n\nThe skill is **stateless on disk** \u2014 the only committed artifact is\n`references/notion-pointers.json` (database/page IDs). All runtime state lives\nin Notion.\n\nFor the full architecture (status flow, sync protocol, workspace structure,\npointer/cache format), see [`references/architecture.md`](references/architecture.md).\n\n## Prerequisites\n\n- **Notion MCP server installed**:\n  `npx -y @notionhq/notion-mcp-server` (declare in `.mcp.json`)\n- **Notion integration token** (`NOTION_TOKEN`) with read+write access to your\n  workspace. Add `.env` to `.gitignore` \u2014 never commit the token.\n- **A Notion Tasks database** with the columns the skill expects (see\n  `references/architecture.md` \u00a7 \"Workspace structure\" for the schema). The\n  `/agency-os init` command can scaffold this for you.\n- **Python 3** for the optional `scripts/query-tasks.py` helper.\n\nFirst-time setup:\n\n```bash\nccpi install agency-os\n# then in Claude Code:\n/agency-os init --harness=basic --haiku=cost-tier --sonnet=default --opus=hard-reasoning\n```\n\n## Instructions\n\nThe skill is a CLI surface over Notion. Three usage patterns:\n\n1. **Direct command invocation** \u2014 `/agency-os <cmd> [args]`. See\n   [`references/commands.md`](references/commands.md) for the full reference\n   of 19 commands (`init`, `scaffold`, `suggest`, `discuss`, `log`,\n   `add-subtask`, `approve`, `start`, `refresh`, `run`, `done`, `kill`,\n   `next`, `status`, `list`, `show`, `update`, `move`, plus `launch` alias).\n\n2. **Natural-language driving** \u2014 the skill translates conversational chat into\n   the corresponding command. Examples in\n   [`references/natural-language.md`](references/natural-language.md).\n\n3. **Batch execution** \u2014 `/agency-os run [--go]` fans the entire To-Do queue\n   out to parallel agents with per-task model selection. See `## Examples`\n   below for the canonical flow.\n\nStatus flow is enforced \u2014 you cannot skip a stage. Every command performs a\nsync preflight to ensure your local view of Notion is current (see\n`references/architecture.md` \u00a7 \"Sync \u2014 preflight on every command\").\n\nWhen drafting any user-facing copy (READMEs, blog posts, launch surfaces),\napply the positioning brief at\n[`references/positioning.md`](references/positioning.md) before writing.\n\n## Output\n\nEvery command returns to chat with:\n\n- **Verdict line** \u2014 `\u2705 <action>` or `\u26a0\ufe0f <reason>` (one line, scannable)\n- **Affected task IDs and titles** \u2014 every task touched, with its new status\n- **Next-action hint** \u2014 what command the operator would typically run next\n\nBatch `run` additionally emits:\n\n- A per-task pass/fail table\n- Total model spend estimate (Haiku/Sonnet/Opus call counts)\n- Outstanding-dependency callouts for tasks that couldn't start\n\n## Error Handling\n\nThe skill fails closed on five well-defined cases (full details in\n`references/architecture.md` \u00a7 \"Status flow \u2014 the dedup gate\"):\n\n| Condition | Behavior |\n|---|---|\n| Notion API auth fails | Halt, print \"NOTION_TOKEN missing or invalid\", exit 1 |\n| Database/page ID drift (pointers stale) | Halt, print \"Run `/agency-os refresh`\", exit 1 |\n| Status-flow violation (e.g. `approve` on a Suggestion) | Halt with the required prerequisite step quoted |\n| Dependency cycle detected during `run` | Halt, list the cycle, exit 1 |\n| Task missing required model selection | Halt, print \"Run `/agency-os update <id> --model <tier>`\" |\n\nThe skill never silently corrects state in Notion \u2014 every fix is an explicit\ncommand the operator must run.\n\n## Examples\n\nCapture a chat insight as a Suggestion:\n\n```text\nUser: add a suggestion: refactor the auth flow to use the new token cache\nSkill: \u2192 /agency-os suggest \"refactor the auth flow to use the new token cache\"\n       \u2705 Created Suggestion #t-2026-05-23-001 in corpus \"platform\"\n       Next: /agency-os discuss t-2026-05-23-001\n```\n\nApprove and run a batch:\n\n```text\nUser: approve t-2026-05-23-{001..003} then run the queue\nSkill: \u2705 Approved 3 tasks \u2192 To-Do\n       /agency-os run --go\n       \u2192 fanning to 3 parallel agents...\n       \u2705 Done: 2 | \u26a0\ufe0f Blocked on deps: 1 | Total spend: ~$0.04\n```\n\nMore examples and the full command catalog are in\n[`references/commands.md`](references/commands.md).\n\n## Resources\n\n- **Plugin source**: <https://github.com/ratamaha-git/agency-os>\n- **Launch post**: <https://automatelab.tech/agency-os-launch/>\n- **`references/architecture.md`** \u2014 status flow, sync protocol, workspace schema\n- **`references/commands.md`** \u2014 full CLI reference (19 commands)\n- **`references/natural-language.md`** \u2014 chat-to-command translation table\n- **`references/positioning.md`** \u2014 canonical brief for user-facing copy\n- **`references/general-guidance.md`** \u2014 shared operating principles applied to every task\n- **`references/notion-pointers.json`** \u2014 pointer file scaffold (database/page IDs)\n- **`references/task-page-template.md`** \u2014 Notion page template for new tasks\n- **`references/corpus-template.md`** \u2014 Notion page template for a Corpus\n- **`references/config-template.json`** \u2014 default per-task model routing\n- **`scripts/query-tasks.py`** \u2014 optional Python helper for offline introspection\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "agency-os",
-    "description": "|",
-    "natural-language variants (\"add a suggestion": "\u2026\", \"let's discuss X\",",
-    "allowed-tools": "Read, Write, Edit, Bash(python3:*), Bash(npx:*), Glob, Grep",
-    "version": "0.1.8",
-    "author": "ratamaha-git <ratamaha@automatelab.tech>",
-    "license": "MIT",
-    "compatibility": "Designed for Claude Code; requires the Notion MCP server (@notionhq/notion-mcp-server) and a Notion workspace with a Tasks database",
-    "tags": "[ai-agency, notion, orchestration, mcp, dispatch, parallel-execution]"
+  "author": "ratamaha-git <ratamaha@automatelab.tech>",
+  "version": "0.1.8",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "[ai-agency",
+    "notion",
+    "orchestration",
+    "mcp",
+    "dispatch",
+    "parallel-execution]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

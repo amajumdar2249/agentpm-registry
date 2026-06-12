@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000034796",
   "name": "eda-research",
   "slug": "eda-research-2",
   "description": "Component research and procurement. Search JLC for components, analyze datasheets, compare options, and document selections with rationale.",
   "content": "\n# EDA Research Skill\n\nSource and select components for electronics projects.\n\n## Auto-Activation Triggers\n\nThis skill activates when:\n- User asks to \"find a component\", \"search for\", \"source\"\n- User asks about component specifications or comparisons\n- User mentions LCSC, datasheets, or part numbers\n- User asks \"what MCU/regulator/sensor should I use\"\n- Project has `design-constraints.json` but missing component selections\n\n## Context Requirements\n\n**Requires:**\n- `docs/design-constraints.json` (or prompt user for requirements)\n- `docs/project-spec.md` (optional, for context)\n\n**Produces:**\n- `docs/component-selections.md` - Human-readable selection log\n- `docs/bom-draft.json` - Machine-readable BOM\n- `datasheets/*.pdf` - Downloaded datasheets for selected components\n\n## Workflow\n\n### 1. Load Context\nRead existing project constraints:\n```\n@docs/design-constraints.json\n@docs/project-spec.md\n@docs/component-selections.md (if exists)\n```\n\nIf constraints missing, ask user for minimum requirements:\n- What does this component need to do?\n- Key specifications (voltage, current, package)?\n- Budget constraints?\n\n### 2. Understand Requirements\nFor the target component role, identify:\n- Critical specifications (must-have)\n- Preferred specifications (nice-to-have)\n- Package preferences (SMD size, through-hole)\n- Any specific brands or series to consider/avoid\n\n### 2.5 Check Architecture Constraints\nBefore searching, review `design-constraints.json` for:\n- **Power topology:** LDO vs buck decision already made in architect phase\n- **Thermal budget:** Max watts for this role (check `thermal.hotComponents`)\n- **DFM targets:** Assembly method affects package choice\n- **Board layers:** May affect component density\n\nFor power components, see `reference/REGULATOR-SELECTION.md` for selection criteria.\nFor passives, see `reference/PASSIVE-SELECTION.md` and `reference/DECOUPLING-STRATEGY.md`.\n\n### 3. Research Options\nUse web search to understand:\n- Common solutions for this application\n- Recommended parts from reference designs\n- Known issues or considerations\n- Alternative approaches\n\n### 4. Search JLC\nUse `mcp__jlc__component_search` to find candidates:\n- Search with specific parameters\n- Filter by stock availability\n- Note pricing at target quantity\n- Check for \"Basic\" parts (lower assembly fee at JLCPCB)\n\n### 5. Analyze Candidates\nFor top 3-5 options:\n- Download/fetch datasheets\n- Extract key specifications\n- Check application circuits\n- Note layout requirements\n- Identify any gotchas\n\n### 5.5 Validate Against Constraints\nBefore presenting options, verify each candidate:\n\n**Thermal validation:**\n```\nP_dissipation = (calculated from datasheet)\nThermal budget = (from design-constraints.json)\n\u2713 P_dissipation < Thermal budget\n```\n\n**Assembly compatibility:**\n- Hand assembly \u2192 0603/0805 minimum, no fine-pitch\n- Reflow \u2192 0402+ OK\n- Turnkey \u2192 Check JLCPCB availability\n\n**Architecture compliance:**\n- Meets LDO/buck decision from architect phase\n- Noise specs OK for rail type (analog vs digital)\n- Efficiency acceptable for battery applications\n\nFlag any candidates that fail validation with specific concerns.\n\n### 6. Present Comparison\nCreate a comparison table:\n\n| Part | MPN | Key Specs | Price | Stock | Pros | Cons |\n|------|-----|-----------|-------|-------|------|------|\n| ... | ... | ... | ... | ... | ... | ... |\n\nInclude recommendation with rationale.\n\n### 7. Confirm Selection\n- Get user confirmation\n- Document selection with rationale\n- Update constraint file\n- Save datasheet\n\n### 8. Validate Symbol (After library_fetch)\n\nWhen fetching online components with `mcp__jlc__library_fetch`, **analyze the returned `validation_data`**:\n\n**Quick checks:**\n| Check | Expected | Action if Failed |\n|-------|----------|------------------|\n| `pin_pad_count_match` | `true` | Check for exposed pads (EP) |\n| `has_power_pins` | `true` (for ICs) | Review pin types |\n| `has_ground_pins` | `true` (for ICs) | Review pin names |\n\n**Common issues:**\n- **QFN/BGA packages** often have exposed thermal pads (EP) not included in symbol\n- **Pin electrical types** may be incorrect (power pins marked as passive)\n- **Pin names** may not match datasheet\n\n**Fixing with library_fix:**\n\nUse `mcp__jlc__library_fix` to regenerate symbol with corrections:\n\n```\nmcp__jlc__library_fix lcsc_id=\"C#####\" corrections='{\n  \"pins\": [\n    { \"action\": \"add\", \"number\": \"EP\", \"name\": \"GND\", \"type\": \"passive\" },\n    { \"action\": \"modify\", \"number\": \"1\", \"set_type\": \"power_in\" }\n  ]\n}'\n```\n\n**Correction actions:**\n- `add` - Add missing pin (number, name, type required)\n- `modify` - Rename and/or change electrical type\n- `swap` - Swap positions of two pins\n- `remove` - Remove incorrect pin\n\n## Output Format\n\n### component-selections.md Entry\n\n```markdown\n### [Role]: [Part Name] ([LCSC Number])\n\n**Selected:** [Date]\n**MPN:** [Manufacturer Part Number]\n**Manufacturer:** [Name]\n**Price:** $X.XX @ [quantity]\n\n**Specifications:**\n- Key spec 1: value\n- Key spec 2: value\n\n**Rationale:**\n[Why this part was chosen over alternatives]\n\n**Alternatives Considered:**\n- [Part 2] - rejected because [reason]\n- [Part 3] - rejected because [reason]\n\n**Design Notes:**\n- [Any layout or application notes from datasheet]\n\n**Datasheet:** `datasheets/[filename].pdf`\n```\n\n### bom-draft.json Entry\n\n```json\n{\n  \"role\": \"regulator-3v3\",\n  \"lcsc\": \"C6186\",\n  \"mpn\": \"AMS1117-3.3\",\n  \"manufacturer\": \"AMS\",\n  \"description\": \"3.3V 1A LDO Regulator\",\n  \"value\": \"3.3V\",\n  \"footprint\": \"SOT-223\",\n  \"quantity\": 1,\n  \"unitPrice\": 0.04,\n  \"extendedPrice\": 0.04,\n  \"category\": \"power\",\n  \"basic\": true\n}\n```\n\n## Component Role Categories\n\nSee `reference/COMPONENT-CATEGORIES.md` for detailed role definitions.\n\nCommon roles:\n- `mcu` - Main microcontroller\n- `regulator-Xv` - Voltage regulators\n- `crystal` - Oscillators/crystals\n- `connector-*` - Various connectors\n- `esd-*` - ESD protection\n- `decoupling-*` - Bypass/bulk capacitors\n- `led-*` - Indicator LEDs\n- `sensor-*` - Various sensors\n\n## Guidelines\n\n- Prefer JLCPCB \"Basic\" parts when suitable (lower assembly cost)\n- Check stock levels - avoid parts with < 100 in stock\n- Consider package size vs hand soldering capability\n- Note lead times for non-stock items\n- Always document why a part was chosen\n- Download datasheets for all selected components\n- **Identify 1-2 alternatives** for critical components (see `reference/COMPONENT-ALTERNATIVES.md`)\n- **Validate thermal** before confirming power components\n- **Check architecture decisions** from design-constraints.json before selecting\n\n## Reference Documents\n\n| Document | Use For |\n|----------|---------|\n| `REGULATOR-SELECTION.md` | LDO vs Buck selection criteria |\n| `DECOUPLING-STRATEGY.md` | Capacitor values for ICs |\n| `PASSIVE-SELECTION.md` | Resistor/capacitor fundamentals |\n| `COMPONENT-ALTERNATIVES.md` | Finding equivalent parts |\n| `DATASHEET-ANALYSIS.md` | Extracting key specs |\n| `COMPONENT-CATEGORIES.md` | Role naming conventions |\n| `JLC-SEARCH-TIPS.md` | Search strategies |\n\n## Next Steps\n\nAfter component selection is complete:\n1. Run `/eda-source` for remaining components\n2. When all components selected, run `/eda-schematic`\n3. Update `design-constraints.json` stage to \"schematic\"\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "eda-research",
-    "description": "Component research and procurement. Search JLC for components, analyze datasheets, compare options, and document selections with rationale.",
-    "allowed-tools": "Read, Write, WebFetch, WebSearch, Glob, mcp__jlc__*"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

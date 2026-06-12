@@ -1,19 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009511",
   "name": "bio-workflows-metagenomics-pipeline",
   "slug": "bio-workflows-metagenomics-pipeline",
   "description": "End-to-end metagenomics workflow from FASTQ to taxonomic and functional profiles. Covers Kraken2 classification, Bracken abundance estimation, and HUMAnN functional profiling. Use when profiling metagenomic samples.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: Bowtie2 2.5.3+, Bracken 2.9+, HUMAnN 3.8+, Kraken2 2.1+, MetaPhlAn 4.1+, fastp 0.23+, matplotlib 3.8+, pandas 2.2+, seaborn 0.13+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Metagenomics Pipeline\n\n**\"Analyze my metagenomic samples from FASTQ to taxonomic and functional profiles\"** \u2192 Orchestrate host depletion, Kraken2/Bracken taxonomic classification, MetaPhlAn profiling, HUMAnN3 functional analysis, and AMR gene detection.\n\nComplete workflow from metagenomic FASTQ to taxonomic and functional profiles.\n\n## Workflow Overview\n\n```\nFASTQ files\n    |\n    v\n[1. QC & Host Removal] --> fastp + Bowtie2\n    |\n    v\n[2. Taxonomic Classification]\n    |\n    +---> Kraken2 + Bracken (fast, database-dependent)\n    |\n    +---> MetaPhlAn (marker-based, standardized)\n    |\n    v\n[3. Functional Profiling] --> HUMAnN\n    |\n    v\nTaxonomic profiles + Pathway abundances\n```\n\n## Primary Path: Kraken2 + Bracken + HUMAnN\n\n### Step 1: Quality Control and Host Removal\n\n```bash\n# QC with fastp\nfor sample in sample1 sample2 sample3; do\n    fastp -i ${sample}_R1.fastq.gz -I ${sample}_R2.fastq.gz \\\n        -o trimmed/${sample}_R1.fq.gz -O trimmed/${sample}_R2.fq.gz \\\n        --detect_adapter_for_pe \\\n        --qualified_quality_phred 20 \\\n        --length_required 50 \\\n        --html qc/${sample}_fastp.html\ndone\n\n# Remove host reads (human example)\nfor sample in sample1 sample2 sample3; do\n    bowtie2 -p 8 -x human_index \\\n        -1 trimmed/${sample}_R1.fq.gz \\\n        -2 trimmed/${sample}_R2.fq.gz \\\n        --un-conc-gz host_removed/${sample}_R%.fq.gz \\\n        > /dev/null 2> qc/${sample}_host_removal.log\ndone\n```\n\n### Step 2A: Kraken2 Classification\n\n```bash\n# Classify reads\nfor sample in sample1 sample2 sample3; do\n    kraken2 --db kraken2_db \\\n        --threads 8 \\\n        --paired \\\n        --report kraken/${sample}.report \\\n        --output kraken/${sample}.output \\\n        host_removed/${sample}_R1.fq.gz \\\n        host_removed/${sample}_R2.fq.gz\ndone\n```\n\n### Step 2B: Bracken Abundance Estimation\n\n```bash\n# Estimate species abundance\nfor sample in sample1 sample2 sample3; do\n    bracken -d kraken2_db \\\n        -i kraken/${sample}.report \\\n        -o bracken/${sample}.species.txt \\\n        -r 150 \\\n        -l S \\\n        -t 10\ndone\n\n# Combine samples into abundance matrix\ncombine_bracken_outputs.py \\\n    --files bracken/*.species.txt \\\n    -o bracken/combined_species.txt\n```\n\n### Step 2C: Alternative - MetaPhlAn Profiling\n\n```bash\n# Profile with MetaPhlAn 4\nfor sample in sample1 sample2 sample3; do\n    metaphlan host_removed/${sample}_R1.fq.gz,host_removed/${sample}_R2.fq.gz \\\n        --bowtie2out metaphlan/${sample}.bowtie2.bz2 \\\n        --input_type fastq \\\n        --nproc 8 \\\n        -o metaphlan/${sample}_profile.txt\ndone\n\n# Merge profiles\nmerge_metaphlan_tables.py metaphlan/*_profile.txt > metaphlan/merged_abundance.txt\n```\n\n### Step 3: Functional Profiling with HUMAnN\n\n```bash\n# Run HUMAnN\nfor sample in sample1 sample2 sample3; do\n    # Concatenate paired reads\n    cat host_removed/${sample}_R1.fq.gz host_removed/${sample}_R2.fq.gz > \\\n        host_removed/${sample}_concat.fq.gz\n\n    humann --input host_removed/${sample}_concat.fq.gz \\\n        --output humann/${sample} \\\n        --threads 8 \\\n        --metaphlan-options \"--bowtie2db metaphlan_db\"\ndone\n\n# Normalize and join tables\nhumann_renorm_table --input humann/sample1/sample1_pathabundance.tsv \\\n    --output humann/sample1/sample1_pathabundance_cpm.tsv \\\n    --units cpm\n\nhumann_join_tables --input humann \\\n    --output humann/merged_pathabundance.tsv \\\n    --file_name pathabundance\n```\n\n### Visualization\n\n```python\nimport pandas as pd\nimport matplotlib.pyplot as plt\nimport seaborn as sns\n\n# Load Bracken species table\nspecies = pd.read_csv('bracken/combined_species.txt', sep='\\t', index_col=0)\n\n# Top 20 species heatmap\ntop20 = species.sum(axis=1).nlargest(20).index\nplt.figure(figsize=(12, 8))\nsns.heatmap(species.loc[top20], cmap='viridis', annot=False)\nplt.title('Top 20 Species Abundance')\nplt.tight_layout()\nplt.savefig('top20_species_heatmap.pdf')\n\n# Stacked bar plot\nspecies_norm = species.div(species.sum()) * 100\ntop10 = species_norm.sum(axis=1).nlargest(10).index\nother = species_norm.loc[~species_norm.index.isin(top10)].sum()\n\nplot_data = species_norm.loc[top10].T\nplot_data['Other'] = other\nplot_data.plot(kind='bar', stacked=True, figsize=(10, 6))\nplt.ylabel('Relative Abundance (%)')\nplt.legend(bbox_to_anchor=(1.05, 1))\nplt.tight_layout()\nplt.savefig('species_barplot.pdf')\n```\n\n## Parameter Recommendations\n\n| Step | Parameter | Value |\n|------|-----------|-------|\n| fastp | --length_required | 50 (metagenomic reads) |\n| Kraken2 | --confidence | 0.0 (default) or 0.1 |\n| Bracken | -r | Read length (e.g., 150) |\n| Bracken | -l | S (species) or G (genus) |\n| Bracken | -t | 10 (min reads threshold) |\n| MetaPhlAn | --min_cu_len | 2000 (default) |\n| HUMAnN | --threads | 8+ |\n\n## Troubleshooting\n\n| Issue | Likely Cause | Solution |\n|-------|--------------|----------|\n| Low classification rate | Database mismatch, novel organisms | Try different database, check sample type |\n| High unclassified | Novel microbes, host contamination | Remove host, use larger database |\n| High host reads | Incomplete host removal | Use multiple host reference genomes |\n| HUMAnN slow | Large files | Increase threads, pre-filter reads |\n\n## Complete Pipeline Script\n\n```bash\n#!/bin/bash\nset -e\n\nTHREADS=8\nKRAKEN_DB=\"kraken2_standard_db\"\nHOST_INDEX=\"human_bt2_index\"\nSAMPLES=\"sample1 sample2 sample3\"\nOUTDIR=\"metagenomics_results\"\n\nmkdir -p ${OUTDIR}/{trimmed,host_removed,kraken,bracken,metaphlan,humann,qc}\n\n# Step 1: QC\necho \"=== QC ===\"\nfor sample in $SAMPLES; do\n    fastp -i ${sample}_R1.fastq.gz -I ${sample}_R2.fastq.gz \\\n        -o ${OUTDIR}/trimmed/${sample}_R1.fq.gz \\\n        -O ${OUTDIR}/trimmed/${sample}_R2.fq.gz \\\n        --length_required 50 \\\n        --html ${OUTDIR}/qc/${sample}_fastp.html -w ${THREADS}\ndone\n\n# Host removal\necho \"=== Host Removal ===\"\nfor sample in $SAMPLES; do\n    bowtie2 -p ${THREADS} -x ${HOST_INDEX} \\\n        -1 ${OUTDIR}/trimmed/${sample}_R1.fq.gz \\\n        -2 ${OUTDIR}/trimmed/${sample}_R2.fq.gz \\\n        --un-conc-gz ${OUTDIR}/host_removed/${sample}_R%.fq.gz \\\n        > /dev/null 2> ${OUTDIR}/qc/${sample}_host.log\ndone\n\n# Step 2: Kraken2\necho \"=== Kraken2 ===\"\nfor sample in $SAMPLES; do\n    kraken2 --db ${KRAKEN_DB} --threads ${THREADS} --paired \\\n        --report ${OUTDIR}/kraken/${sample}.report \\\n        --output ${OUTDIR}/kraken/${sample}.output \\\n        ${OUTDIR}/host_removed/${sample}_R1.fq.gz \\\n        ${OUTDIR}/host_removed/${sample}_R2.fq.gz\ndone\n\n# Bracken\necho \"=== Bracken ===\"\nfor sample in $SAMPLES; do\n    bracken -d ${KRAKEN_DB} \\\n        -i ${OUTDIR}/kraken/${sample}.report \\\n        -o ${OUTDIR}/bracken/${sample}.species.txt \\\n        -r 150 -l S -t 10\ndone\n\necho \"=== Pipeline Complete ===\"\necho \"Kraken reports: ${OUTDIR}/kraken/\"\necho \"Bracken abundances: ${OUTDIR}/bracken/\"\n```\n\n## Related Skills\n\n- database-access/sra-data - Pull metagenomic FASTQ from SRA / ENA (16S amplicon or shotgun)\n- database-access/ncbi-datasets-cli - Bulk-pull reference genomes for read mapping\n- database-access/remote-homology - DIAMOND --ultra-sensitive for predicted-ORF annotation\n- metagenomics/kraken-classification - Kraken2 details\n- metagenomics/metaphlan-profiling - MetaPhlAn parameters\n- metagenomics/abundance-estimation - Bracken options\n- metagenomics/functional-profiling - HUMAnN workflow\n- metagenomics/metagenome-visualization - Plotting functions\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-workflows-metagenomics-pipeline",
-    "description": "End-to-end metagenomics workflow from FASTQ to taxonomic and functional profiles. Covers Kraken2 classification, Bracken abundance estimation, and HUMAnN functional profiling. Use when profiling metagenomic samples.",
-    "tool_type": "cli",
-    "primary_tool": "Kraken2",
-    "workflow": "true",
-    "depends_on": "",
-    "qc_checkpoints": "",
-    "- after_qc": "Q30 >80%, host reads removed",
-    "- after_classification": "Classification rate >60%, known taxa dominant",
-    "- after_functional": "Pathway coverage reasonable, unmapped <50%"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

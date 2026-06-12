@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032355",
   "name": "juicebox-reference-architecture",
   "slug": "juicebox-reference-architecture",
   "description": "Implement Juicebox reference architecture.",
   "content": "# Juicebox Reference Architecture\n\n## Overview\n\nProduction architecture for AI-powered candidate analysis integrations with Juicebox. Designed for recruiting teams needing automated dataset ingestion from job descriptions, intelligent candidate scoring and ranking, result caching for repeated searches, and seamless export to ATS platforms like Greenhouse and Lever. Key design drivers: search result freshness, candidate deduplication across sources, outreach sequencing, and analysis pipeline throughput for high-volume hiring.\n\n## Architecture Diagram\n\n```\nRecruiter Dashboard \u2500\u2500\u2192 Search Service \u2500\u2500\u2192 Cache (Redis) \u2500\u2500\u2192 Juicebox API\n                             \u2193                                /search\n                        Queue (Bull) \u2500\u2500\u2192 Analysis Worker      /profiles\n                             \u2193                                /outreach\n                        ATS Export Service \u2500\u2500\u2192 Greenhouse/Lever\n                             \u2193\n                        Webhook Handler \u2190\u2500\u2500 Juicebox Events\n```\n\n## Service Layer\n\n```typescript\nclass CandidateSearchService {\n  constructor(private juicebox: JuiceboxClient, private cache: CacheLayer) {}\n\n  async findAndRank(criteria: SearchCriteria): Promise<RankedCandidate[]> {\n    const cacheKey = `search:${this.hashCriteria(criteria)}`;\n    const cached = await this.cache.get(cacheKey);\n    if (cached) return cached;\n    const results = await this.juicebox.search(criteria);\n    const ranked = results.profiles.map(p => ({ ...p, score: this.scoreCandidate(p, criteria) }))\n      .sort((a, b) => b.score - a.score);\n    await this.cache.set(cacheKey, ranked, CACHE_CONFIG.searchResults.ttl);\n    return ranked;\n  }\n\n  async exportToATS(candidates: string[], jobId: string, ats: 'greenhouse' | 'lever'): Promise<ExportResult> {\n    const deduped = await this.deduplicateAgainstATS(candidates, jobId, ats);\n    return this.juicebox.export({ profiles: deduped, destination: ats, job_id: jobId });\n  }\n}\n```\n\n## Caching Strategy\n\n```typescript\nconst CACHE_CONFIG = {\n  searchResults: { ttl: 1800, prefix: 'search' },   // 30 min \u2014 candidate pools shift slowly\n  profiles:      { ttl: 3600, prefix: 'profile' },   // 1 hr \u2014 profile data stable short-term\n  analysisRuns:  { ttl: 7200, prefix: 'analysis' },   // 2 hr \u2014 analysis results are expensive to recompute\n  atsState:      { ttl: 300,  prefix: 'ats' },        // 5 min \u2014 ATS pipeline freshness for dedup\n  outreach:      { ttl: 60,   prefix: 'outreach' },   // 1 min \u2014 sequence status changes frequently\n};\n// New search invalidates matching cached results; ATS export clears ats cache for that job\n```\n\n## Event Pipeline\n\n```typescript\nclass RecruitingPipeline {\n  private queue = new Bull('juicebox-events', { redis: process.env.REDIS_URL });\n\n  async onSearchComplete(searchId: string, results: RankedCandidate[]): Promise<void> {\n    await this.queue.add('analyze', { searchId, candidateIds: results.map(r => r.id) },\n      { attempts: 3, backoff: { type: 'exponential', delay: 2000 } });\n  }\n\n  async processOutreachEvent(event: OutreachEvent): Promise<void> {\n    if (event.type === 'reply_received') await this.flagForRecruiterReview(event);\n    if (event.type === 'bounced') await this.markInvalid(event.candidateId);\n    await this.syncStatusToATS(event);\n  }\n}\n```\n\n## Data Model\n\n```typescript\ninterface SearchCriteria   { role: string; skills: string[]; location?: string; experienceYears?: number; companySize?: string; }\ninterface RankedCandidate  { id: string; name: string; title: string; company: string; score: number; skills: string[]; profileUrl: string; }\ninterface OutreachSequence { id: string; candidateId: string; jobId: string; steps: OutreachStep[]; status: 'active' | 'replied' | 'bounced' | 'opted-out'; }\ninterface ExportResult     { exported: number; duplicatesSkipped: number; atsJobId: string; }\n```\n\n## Scaling Considerations\n\n- Parallelize search requests across role categories \u2014 Juicebox API supports concurrent queries\n- Cache analysis results aggressively \u2014 AI scoring is the most expensive operation per candidate\n- Batch ATS exports by job requisition to minimize Greenhouse/Lever API round-trips\n- Deduplicate candidates across searches before outreach to avoid double-contacting\n- Rate-limit outreach sequencing to maintain sender reputation and deliverability\n\n## Error Handling\n\n| Component | Failure Mode | Recovery |\n|-----------|-------------|----------|\n| Candidate search | Juicebox API timeout | Retry with reduced result count, serve cached results if available |\n| Analysis pipeline | Scoring model latency spike | Queue with timeout, return unscored results with flag |\n| ATS export | Greenhouse rate limit | Batch retry with exponential backoff, notify recruiter on persistent failure |\n| Outreach sequence | Email bounce | Mark candidate invalid, remove from active sequences, update ATS |\n| Webhook handler | Duplicate event delivery | Idempotency key on event ID + candidate ID |\n\n## Resources\n\n- [Juicebox AI](https://juicebox.ai)\n- [Juicebox Integrations](https://juicebox.ai/integrations)\n\n## Next Steps\n\nSee `juicebox-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "juicebox-reference-architecture",
-    "description": "Implement Juicebox reference architecture.",
-    "Trigger": "juicebox architecture\", \"recruiting platform design\".",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

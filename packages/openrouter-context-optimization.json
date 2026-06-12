@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032797",
   "name": "openrouter-context-optimization",
   "slug": "openrouter-context-optimization",
   "description": "Optimize context window usage for OpenRouter models to reduce cost and",
   "content": "# OpenRouter Context Optimization\n\n## Overview\n\nOpenRouter models have varying context windows (4K to 1M+ tokens). Since pricing is per-token, stuffing unnecessary context wastes money and can degrade output quality. This skill covers context window lookup, token estimation, conversation trimming, chunking strategies, and Anthropic prompt caching for large contexts.\n\n## Query Context Limits\n\n```bash\n# Check context window for specific models\ncurl -s https://openrouter.ai/api/v1/models | jq '[.data[] | select(\n  .id == \"anthropic/claude-3.5-sonnet\" or\n  .id == \"openai/gpt-4o\" or\n  .id == \"google/gemini-2.0-flash-001\" or\n  .id == \"meta-llama/llama-3.1-70b-instruct\"\n) | {id, context_length, prompt_per_M: ((.pricing.prompt|tonumber)*1000000)}]'\n```\n\n## Context-Aware Model Selection\n\n```python\nimport os, requests\nfrom openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"https://openrouter.ai/api/v1\",\n    api_key=os.environ[\"OPENROUTER_API_KEY\"],\n    default_headers={\"HTTP-Referer\": \"https://my-app.com\", \"X-Title\": \"my-app\"},\n)\n\n# Cache model metadata at startup\nMODELS = {m[\"id\"]: m for m in requests.get(\"https://openrouter.ai/api/v1/models\").json()[\"data\"]}\n\ndef estimate_tokens(text: str) -> int:\n    \"\"\"Rough estimate: 1 token ~ 4 characters for English text.\"\"\"\n    return len(text) // 4\n\ndef select_model_for_context(messages: list, preferred: str = \"anthropic/claude-3.5-sonnet\") -> str:\n    \"\"\"Pick a model that fits the context, falling back to larger windows.\"\"\"\n    estimated_tokens = sum(len(m.get(\"content\", \"\")) for m in messages) // 4\n\n    FALLBACK_CHAIN = [\n        (\"openai/gpt-4o-mini\", 128_000),\n        (\"anthropic/claude-3.5-sonnet\", 200_000),\n        (\"google/gemini-2.0-flash-001\", 1_000_000),\n    ]\n\n    # Try preferred model first\n    preferred_ctx = MODELS.get(preferred, {}).get(\"context_length\", 0)\n    if estimated_tokens < preferred_ctx * 0.8:  # 80% safety margin\n        return preferred\n\n    for model_id, ctx in FALLBACK_CHAIN:\n        if estimated_tokens < ctx * 0.8:\n            return model_id\n\n    raise ValueError(f\"Content too large ({estimated_tokens} est. tokens)\")\n```\n\n## Conversation Trimming\n\n```python\ndef trim_conversation(\n    messages: list[dict],\n    max_tokens: int = 100_000,\n    keep_system: bool = True,\n    keep_last_n: int = 4,\n) -> list[dict]:\n    \"\"\"Trim conversation history to fit context window.\n\n    Strategy: Keep system prompt + last N messages.\n    If still too large, reduce to last 2 messages.\n    \"\"\"\n    system = [m for m in messages if m[\"role\"] == \"system\"] if keep_system else []\n    non_system = [m for m in messages if m[\"role\"] != \"system\"]\n\n    kept = non_system[-keep_last_n:]\n    trimmed = non_system[:-keep_last_n] if len(non_system) > keep_last_n else []\n\n    total_est = sum(estimate_tokens(m.get(\"content\", \"\")) for m in system + kept)\n    if total_est > max_tokens and keep_last_n > 2:\n        kept = non_system[-2:]\n\n    result = system + kept\n    if trimmed:\n        summary_note = {\n            \"role\": \"system\",\n            \"content\": f\"[Previous {len(trimmed)} messages trimmed for context limits]\",\n        }\n        result = system + [summary_note] + kept\n\n    return result\n```\n\n## Chunking for Large Documents\n\n```python\ndef chunk_and_process(document: str, question: str, model: str = \"openai/gpt-4o-mini\",\n                      chunk_size: int = 8000, overlap: int = 500) -> str:\n    \"\"\"Process a large document in overlapping chunks, then synthesize.\"\"\"\n    chunks = []\n    start = 0\n    while start < len(document):\n        chunks.append(document[start:start + chunk_size])\n        start += chunk_size - overlap\n\n    results = []\n    for i, chunk in enumerate(chunks):\n        response = client.chat.completions.create(\n            model=model,\n            messages=[\n                {\"role\": \"system\", \"content\": f\"Analyzing chunk {i+1}/{len(chunks)}.\"},\n                {\"role\": \"user\", \"content\": f\"Document:\\n{chunk}\\n\\nQuestion: {question}\"},\n            ],\n            max_tokens=1024, temperature=0,\n        )\n        results.append(response.choices[0].message.content)\n\n    # Synthesize\n    synthesis = client.chat.completions.create(\n        model=model,\n        messages=[\n            {\"role\": \"system\", \"content\": \"Synthesize these partial analyses.\"},\n            {\"role\": \"user\", \"content\": f\"Question: {question}\\n\\nResults:\\n\" + \"\\n---\\n\".join(results)},\n        ],\n        max_tokens=2048, temperature=0,\n    )\n    return synthesis.choices[0].message.content\n```\n\n## Prompt Caching for Repeated Context\n\n```python\n# Anthropic models support prompt caching -- mark large static blocks\n# Subsequent requests with same cached block cost 90% less for input tokens\nresponse = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet\",\n    messages=[\n        {\n            \"role\": \"system\",\n            \"content\": [\n                {\n                    \"type\": \"text\",\n                    \"text\": large_reference_document,  # 50K+ tokens\n                    \"cache_control\": {\"type\": \"ephemeral\"},\n                }\n            ],\n        },\n        {\"role\": \"user\", \"content\": \"Summarize section 3.\"},\n    ],\n    max_tokens=1024,\n)\n# First request: cache_creation_input_tokens at 1.25x rate\n# Subsequent: cache_read_input_tokens at 0.1x rate (90% savings)\n```\n\n## Error Handling\n\n| Error | Cause | Fix |\n|-------|-------|-----|\n| 400 `context_length_exceeded` | Input + max_tokens > model limit | Trim messages or use larger-context model |\n| 400 `max_tokens too large` | max_tokens alone exceeds limit | Reduce max_tokens |\n| Slow responses | Very large context | Use streaming; consider chunking |\n| Degraded quality | Too much irrelevant context | Trim to relevant content only |\n\n## Enterprise Considerations\n\n- Query `/api/v1/models` at startup to cache context limits -- don't hardcode (they change)\n- Use `max_tokens` on every request to prevent runaway completion costs on large contexts\n- Implement conversation trimming as middleware so all calls respect limits\n- Use Anthropic prompt caching for RAG contexts that repeat across requests (90% input savings)\n- Route large-context tasks to cost-effective models (Gemini Flash for 1M context at low cost)\n- Monitor `prompt_tokens` in responses to detect context bloat before it hits limits\n\n## References\n\n- [Examples](${CLAUDE_SKILL_DIR}/references/examples.md) | [Errors](${CLAUDE_SKILL_DIR}/references/errors.md)\n- [Prompt Caching](https://openrouter.ai/docs/features/prompt-caching) | [Models API](https://openrouter.ai/docs/api/api-reference/models/get-models)\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "openrouter-context-optimization",
-    "description": "Optimize context window usage for OpenRouter models to reduce cost and",
-    "building RAG systems. Triggers": "openrouter context'', ''context window'', ''openrouter",
-    "allowed-tools": "Read, Write, Edit, Bash, Grep",
-    "version": "2.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

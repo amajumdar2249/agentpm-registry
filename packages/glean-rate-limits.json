@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032130",
   "name": "glean-rate-limits",
   "slug": "glean-rate-limits",
   "description": "Glean Indexing API: ~100 requests/min per token.",
   "content": "# Glean Rate Limits\n\n## Overview\n\nGlean's APIs split into two tiers: the Indexing API for pushing documents into the search corpus, and the Client API for executing searches. The Indexing API handles bulk document ingestion at approximately 100 requests per minute, while search queries are capped at 60 per minute per token. Organizations indexing large knowledge bases (100K+ documents from Confluence, Notion, or internal wikis) must implement careful batching to avoid 429 responses that can stall multi-hour ingestion pipelines.\n\n## Rate Limit Reference\n\n| Endpoint | Limit | Window | Scope |\n|----------|-------|--------|-------|\n| Indexing - single document | 100 req | 1 minute | Per API token |\n| Indexing - bulk (100 docs/req) | 20 req | 1 minute | Per API token |\n| Search queries | 60 req | 1 minute | Per API token |\n| People search | 30 req | 1 minute | Per API token |\n| Entity extraction | 40 req | 1 minute | Per API token |\n\n## Rate Limiter Implementation\n\n```typescript\nclass GleanRateLimiter {\n  private tokens: number;\n  private lastRefill: number;\n  private readonly max: number;\n  private readonly refillRate: number;\n  private queue: Array<{ resolve: () => void }> = [];\n\n  constructor(maxPerMinute: number) {\n    this.max = maxPerMinute;\n    this.tokens = maxPerMinute;\n    this.lastRefill = Date.now();\n    this.refillRate = maxPerMinute / 60_000;\n  }\n\n  async acquire(): Promise<void> {\n    this.refill();\n    if (this.tokens >= 1) { this.tokens -= 1; return; }\n    return new Promise(resolve => this.queue.push({ resolve }));\n  }\n\n  private refill() {\n    const now = Date.now();\n    this.tokens = Math.min(this.max, this.tokens + (now - this.lastRefill) * this.refillRate);\n    this.lastRefill = now;\n    while (this.tokens >= 1 && this.queue.length) {\n      this.tokens -= 1;\n      this.queue.shift()!.resolve();\n    }\n  }\n}\n\nconst indexLimiter = new GleanRateLimiter(18);  // buffer under 20 bulk/min\nconst searchLimiter = new GleanRateLimiter(50);\n```\n\n## Retry Strategy\n\n```typescript\nasync function gleanRetry<T>(\n  limiter: GleanRateLimiter, fn: () => Promise<Response>, maxRetries = 4\n): Promise<T> {\n  for (let attempt = 0; attempt <= maxRetries; attempt++) {\n    await limiter.acquire();\n    const res = await fn();\n    if (res.ok) return res.json();\n    if (res.status === 429) {\n      const retryAfter = parseInt(res.headers.get(\"Retry-After\") || \"30\", 10);\n      const jitter = Math.random() * 5000;\n      await new Promise(r => setTimeout(r, retryAfter * 1000 + jitter));\n      continue;\n    }\n    if (res.status >= 500 && attempt < maxRetries) {\n      await new Promise(r => setTimeout(r, Math.pow(2, attempt) * 2000));\n      continue;\n    }\n    throw new Error(`Glean API ${res.status}: ${await res.text()}`);\n  }\n  throw new Error(\"Max retries exceeded\");\n}\n```\n\n## Batch Processing\n\n```typescript\nasync function bulkIndexDocuments(docs: any[], batchSize = 100) {\n  const results: any[] = [];\n  for (let i = 0; i < docs.length; i += batchSize) {\n    const batch = docs.slice(i, i + batchSize);\n    const result = await gleanRetry(indexLimiter, () =>\n      fetch(`${GLEAN_BASE}/api/index/v1/bulkindexdocuments`, {\n        method: \"POST\", headers,\n        body: JSON.stringify({ uploadId: `batch-${i}`, documents: batch }),\n      })\n    );\n    results.push(result);\n    if (i + batchSize < docs.length) await new Promise(r => setTimeout(r, 4000));\n  }\n  return results;\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Fix |\n|-------|-------|-----|\n| 429 on bulk index | Exceeded 20 bulk req/min | Space batches 4s apart, use Retry-After |\n| 413 Payload Too Large | Batch > 100 docs or > 10MB | Split into smaller batches |\n| Search 429 | Monitoring dashboard polling too fast | Cache search results for 30s |\n| Partial index failure | Some docs rejected in bulk | Check response `failedDocuments` array, retry those |\n| 401 token expired | Rotating API credentials | Refresh token before long ingestion runs |\n\n## Resources\n\n- [Glean Developer Portal](https://developers.glean.com/)\n- [Indexing API](https://developers.glean.com/api-info/indexing/getting-started/overview)\n- [Search API](https://developers.glean.com/api/client-api/search/overview)\n\n## Next Steps\n\nSee `glean-performance-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "glean-rate-limits",
-    "description": "Glean Indexing API: ~100 requests/min per token.",
-    "Trigger": "glean rate limits\", \"rate-limits\".",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

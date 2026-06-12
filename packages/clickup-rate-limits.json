@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031609",
   "name": "clickup-rate-limits",
   "slug": "clickup-rate-limits",
   "description": "Handle ClickUp API rate limits with backoff, queuing, and header monitoring.",
   "content": "# ClickUp Rate Limits\n\n## Overview\n\nClickUp enforces per-token, per-minute rate limits that vary by Workspace plan. When exceeded, the API returns HTTP 429 with rate limit headers.\n\n## Rate Limit Tiers\n\n| Workspace Plan | Requests/Min/Token | Burst Support |\n|----------------|-------------------|---------------|\n| Free Forever | 100 | No |\n| Unlimited | 100 | No |\n| Business | 100 | No |\n| Business Plus | 1,000 | Yes |\n| Enterprise | 10,000 | Yes |\n\n## Rate Limit Headers\n\nEvery ClickUp API response includes these headers:\n\n| Header | Description | Example |\n|--------|-------------|---------|\n| `X-RateLimit-Limit` | Max requests in window | `100` |\n| `X-RateLimit-Remaining` | Requests left in window | `95` |\n| `X-RateLimit-Reset` | Unix timestamp when limit resets | `1695000060` |\n\n## Exponential Backoff with Jitter\n\n```typescript\nasync function clickupRequestWithRetry<T>(\n  path: string,\n  options: RequestInit = {},\n  config = { maxRetries: 5, baseDelayMs: 1000, maxDelayMs: 60000 }\n): Promise<T> {\n  for (let attempt = 0; attempt <= config.maxRetries; attempt++) {\n    const response = await fetch(`https://api.clickup.com/api/v2${path}`, {\n      ...options,\n      headers: {\n        'Authorization': process.env.CLICKUP_API_TOKEN!,\n        'Content-Type': 'application/json',\n        ...options.headers,\n      },\n    });\n\n    if (response.ok) return response.json();\n\n    if (response.status === 429) {\n      // Use server-provided reset time when available\n      const resetTimestamp = response.headers.get('X-RateLimit-Reset');\n      let waitMs: number;\n\n      if (resetTimestamp) {\n        waitMs = Math.max(0, parseInt(resetTimestamp) * 1000 - Date.now()) + 1000;\n      } else {\n        // Exponential backoff with jitter\n        const exponential = config.baseDelayMs * Math.pow(2, attempt);\n        const jitter = Math.random() * 1000;\n        waitMs = Math.min(exponential + jitter, config.maxDelayMs);\n      }\n\n      console.warn(`Rate limited. Waiting ${(waitMs / 1000).toFixed(1)}s (attempt ${attempt + 1})`);\n      await new Promise(r => setTimeout(r, waitMs));\n      continue;\n    }\n\n    // Non-retryable errors\n    if (response.status < 500 && response.status !== 429) {\n      const error = await response.json().catch(() => ({}));\n      throw new Error(`ClickUp ${response.status}: ${error.err ?? 'Unknown error'}`);\n    }\n\n    // Server errors: retry with backoff\n    if (attempt < config.maxRetries) {\n      const delay = config.baseDelayMs * Math.pow(2, attempt);\n      await new Promise(r => setTimeout(r, delay));\n    }\n  }\n\n  throw new Error(`ClickUp API: max retries exceeded for ${path}`);\n}\n```\n\n## Rate Limit Monitor\n\n```typescript\nclass ClickUpRateLimitMonitor {\n  private remaining = 100;\n  private limit = 100;\n  private resetAt = 0;\n\n  updateFromResponse(response: Response): void {\n    const remaining = response.headers.get('X-RateLimit-Remaining');\n    const limit = response.headers.get('X-RateLimit-Limit');\n    const reset = response.headers.get('X-RateLimit-Reset');\n\n    if (remaining) this.remaining = parseInt(remaining);\n    if (limit) this.limit = parseInt(limit);\n    if (reset) this.resetAt = parseInt(reset) * 1000;\n  }\n\n  shouldThrottle(): boolean {\n    return this.remaining < 10 && Date.now() < this.resetAt;\n  }\n\n  getWaitMs(): number {\n    return Math.max(0, this.resetAt - Date.now());\n  }\n\n  getUsagePercent(): number {\n    return ((this.limit - this.remaining) / this.limit) * 100;\n  }\n}\n```\n\n## Queue-Based Rate Limiting\n\n```typescript\nimport PQueue from 'p-queue';\n\n// Stay under 100 req/min for Free/Unlimited/Business\nconst clickupQueue = new PQueue({\n  concurrency: 5,        // Max parallel requests\n  interval: 1000,        // Per second window\n  intervalCap: 1,         // 1 request per second = 60/min (safe margin)\n});\n\nasync function queuedClickUpRequest<T>(path: string, options?: RequestInit): Promise<T> {\n  return clickupQueue.add(() => clickupRequestWithRetry(path, options));\n}\n\n// Bulk operations stay within limits automatically\nconst taskIds = ['abc', 'def', 'ghi', 'jkl'];\nconst tasks = await Promise.all(\n  taskIds.map(id => queuedClickUpRequest(`/task/${id}`))\n);\n```\n\n## Pre-Flight Throttling\n\n```typescript\n// Check headers before sending burst of requests\nasync function preFlightCheck(): Promise<{ safe: boolean; waitMs: number }> {\n  const response = await fetch('https://api.clickup.com/api/v2/user', {\n    headers: { 'Authorization': process.env.CLICKUP_API_TOKEN! },\n  });\n\n  const remaining = parseInt(response.headers.get('X-RateLimit-Remaining') || '100');\n  const reset = parseInt(response.headers.get('X-RateLimit-Reset') || '0') * 1000;\n\n  if (remaining < 10) {\n    return { safe: false, waitMs: Math.max(0, reset - Date.now()) };\n  }\n  return { safe: true, waitMs: 0 };\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Constant 429s | Exceeding plan limit | Upgrade plan or add request queuing |\n| Thundering herd | All retries fire at same time | Add random jitter to backoff |\n| Missing reset header | Older API version | Fall back to exponential backoff |\n| Burst rejected | Too many concurrent | Reduce `concurrency` in queue |\n\n## Resources\n\n- [ClickUp Rate Limits](https://developer.clickup.com/docs/rate-limits)\n- [p-queue Library](https://github.com/sindresorhus/p-queue)\n\n## Next Steps\n\nFor security configuration, see `clickup-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clickup-rate-limits",
-    "description": "Handle ClickUp API rate limits with backoff, queuing, and header monitoring.",
-    "Trigger": "clickup rate limit\", \"clickup 429\", \"clickup throttling\",",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

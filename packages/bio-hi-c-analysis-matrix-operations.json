@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009272",
   "name": "bio-hi-c-analysis-matrix-operations",
   "slug": "bio-hi-c-analysis-matrix-operations",
   "description": "Balance, normalize, and transform Hi-C contact matrices using cooler and cooltools. Apply iterative correction (ICE), compute expected values, and generate observed/expected matrices. Use when normalizing or transforming Hi-C matrices.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: cooler 0.9+, cooltools 0.6+, numpy 1.26+, pandas 2.2+, scipy 1.12+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Hi-C Matrix Operations\n\n**\"Normalize my Hi-C contact matrix\"** \u2192 Apply iterative correction (ICE/KR balancing), compute distance-decay expected values, and generate observed/expected ratio matrices.\n- Python: `cooler.balance_cooler(clr)`, `cooltools.expected_cis(clr)`\n\nBalance, normalize, and transform contact matrices.\n\n## Required Imports\n\n```python\nimport cooler\nimport cooltools\nimport numpy as np\nimport pandas as pd\n```\n\n## Matrix Balancing (ICE)\n\n```python\n# Balance a cooler file (iterative correction)\ncooler.balance_cooler('matrix.cool', store=True, cis_only=True)\n\n# The balanced weights are stored in the 'weight' column\nclr = cooler.Cooler('matrix.cool')\nweights = clr.bins()['weight'][:]\nprint(f'Balanced weights range: {weights.min():.4f} - {weights.max():.4f}')\n```\n\n## Balance with CLI\n\n```bash\n# Balance using cooler CLI\ncooler balance matrix.cool --cis-only --force\n\n# Check balance status\ncooler info matrix.cool | grep \"weight\"\n```\n\n## Access Balanced vs Raw Matrix\n\n```python\nclr = cooler.Cooler('matrix.cool')\n\n# Balanced (normalized) matrix\nbalanced = clr.matrix(balance=True).fetch('chr1')\n\n# Raw (count) matrix\nraw = clr.matrix(balance=False).fetch('chr1')\n\nprint(f'Raw sum: {raw.sum():.0f}')\nprint(f'Balanced sum: {np.nansum(balanced):.4f}')\n```\n\n## Compute Expected Values\n\n```python\nimport cooltools\n\nclr = cooler.Cooler('matrix.cool')\n\n# Compute expected (average by distance)\nexpected = cooltools.expected_cis(clr, ignore_diags=2)\nprint(expected.head())\n# Columns: region1, region2, dist, n_valid, count.sum, balanced.sum, balanced.avg\n```\n\n## Observed/Expected Matrix\n\n**Goal:** Remove the distance-dependent decay from a contact matrix so that enriched interactions (loops, compartments) stand out above the background.\n\n**Approach:** Compute the average contact frequency at each genomic distance (expected), then divide each observed pixel by its distance-matched expected value to produce an O/E ratio matrix.\n\n```python\nimport cooltools\n\nclr = cooler.Cooler('matrix.cool')\n\n# Compute expected\nexpected = cooltools.expected_cis(clr, ignore_diags=2)\n\n# Get O/E matrix for a region\ndef get_oe_matrix(clr, region, expected_df):\n    matrix = clr.matrix(balance=True).fetch(region)\n    n = matrix.shape[0]\n\n    # Get expected values for this chromosome\n    chrom = region.split(':')[0]\n    exp_chr = expected_df[expected_df['region1'] == chrom]\n    exp_values = exp_chr.set_index('dist')['balanced.avg']\n\n    # Create expected matrix\n    expected_matrix = np.zeros_like(matrix)\n    for i in range(n):\n        for j in range(n):\n            dist = abs(i - j)\n            if dist in exp_values.index:\n                expected_matrix[i, j] = exp_values[dist]\n\n    # Compute O/E\n    oe = matrix / expected_matrix\n    oe[expected_matrix == 0] = np.nan\n\n    return oe\n\noe_matrix = get_oe_matrix(clr, 'chr1', expected)\n```\n\n## Using cooltools for O/E\n\n```python\nimport cooltools\n\nclr = cooler.Cooler('matrix.cool')\n\n# Compute expected\nexpected = cooltools.expected_cis(clr, ignore_diags=2)\n\n# Get O/E normalized matrix\n# cooltools provides this through the snipping module\nfrom cooltools.lib import snip\n\n# For a specific region pair\nregion1 = ('chr1', 50000000, 60000000)\nregion2 = ('chr1', 50000000, 60000000)\n\n# Snippet\nsnippet = snip.snip_pileup(\n    clr.matrix(balance=True),\n    region1,\n    region2,\n    exp_func=None,  # Add expected function for O/E\n)\n```\n\n## Log Transform\n\n```python\n# Log2 transform of O/E matrix\nlog_oe = np.log2(oe_matrix)\nlog_oe[np.isinf(log_oe)] = np.nan\n\nprint(f'Log2(O/E) range: {np.nanmin(log_oe):.2f} to {np.nanmax(log_oe):.2f}')\n```\n\n## Distance Decay Normalization\n\n```python\ndef distance_normalize(matrix, decay_func=None):\n    '''Normalize by expected distance decay'''\n    n = matrix.shape[0]\n    normalized = np.zeros_like(matrix)\n\n    for diag in range(n):\n        diag_values = np.diag(matrix, diag)\n        expected = np.nanmean(diag_values) if decay_func is None else decay_func(diag)\n        if expected > 0:\n            for i in range(n - diag):\n                normalized[i, i + diag] = matrix[i, i + diag] / expected\n                normalized[i + diag, i] = matrix[i + diag, i] / expected\n\n    return normalized\n```\n\n## Aggregate Multiple Replicates\n\n```python\n# Sum matrices from multiple replicates\nfiles = ['rep1.cool', 'rep2.cool', 'rep3.cool']\nmatrices = []\n\nfor f in files:\n    clr = cooler.Cooler(f)\n    m = clr.matrix(balance=False).fetch('chr1')\n    matrices.append(m)\n\n# Sum raw matrices\nsummed = np.sum(matrices, axis=0)\n\n# Then balance the summed result\n```\n\n## Smooth Matrix\n\n```python\nfrom scipy.ndimage import uniform_filter\n\n# Apply smoothing\nsmoothed = uniform_filter(matrix, size=3, mode='constant')\n\n# Gaussian smoothing\nfrom scipy.ndimage import gaussian_filter\nsmoothed_gauss = gaussian_filter(matrix, sigma=1)\n```\n\n## Downsample/Coarsen Matrix\n\n```python\ndef coarsen_matrix(matrix, factor):\n    '''Coarsen matrix by summing bins'''\n    n = matrix.shape[0]\n    new_n = n // factor\n    coarse = np.zeros((new_n, new_n))\n\n    for i in range(new_n):\n        for j in range(new_n):\n            coarse[i, j] = np.nansum(matrix[\n                i*factor:(i+1)*factor,\n                j*factor:(j+1)*factor\n            ])\n\n    return coarse\n\ncoarse_matrix = coarsen_matrix(matrix, factor=10)\n```\n\n## Correlation Matrix\n\n```python\n# Compute correlation matrix (for compartment analysis)\nfrom scipy.stats import pearsonr\n\ndef correlation_matrix(matrix):\n    '''Compute Pearson correlation between rows'''\n    n = matrix.shape[0]\n    corr = np.zeros((n, n))\n\n    # Remove rows with all NaN\n    valid_rows = ~np.all(np.isnan(matrix), axis=1)\n    valid_matrix = matrix[valid_rows][:, valid_rows]\n\n    for i in range(valid_matrix.shape[0]):\n        for j in range(valid_matrix.shape[0]):\n            mask = ~(np.isnan(valid_matrix[i]) | np.isnan(valid_matrix[j]))\n            if mask.sum() > 2:\n                corr[i, j], _ = pearsonr(valid_matrix[i, mask], valid_matrix[j, mask])\n\n    return corr\n\ncorr = correlation_matrix(oe_matrix)\n```\n\n## Save Modified Matrix\n\n```python\n# Save matrix as numpy array\nnp.save('processed_matrix.npy', oe_matrix)\n\n# Create new cooler with modified values\n# (More complex, usually work with existing files)\n```\n\n## Related Skills\n\n- hic-data-io - Load and access cooler files\n- compartment-analysis - Use O/E matrices for compartments\n- hic-visualization - Visualize processed matrices\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-hi-c-analysis-matrix-operations",
-    "description": "Balance, normalize, and transform Hi-C contact matrices using cooler and cooltools. Apply iterative correction (ICE), compute expected values, and generate observed/expected matrices. Use when normalizing or transforming Hi-C matrices.",
-    "tool_type": "python",
-    "primary_tool": "cooltools"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

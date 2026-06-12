@@ -1,16 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000034861",
   "name": "launchdarkly-flag-cleanup",
   "slug": "launchdarkly-flag-cleanup-2",
   "description": "Safely remove a feature flag from code while preserving production behavior. Use when the user wants to remove a flag from code, delete flag references, or create a PR that hardcodes the winning variation after a rollout is complete.",
   "content": "\n# LaunchDarkly Flag Cleanup\n\nYou're using a skill that will guide you through safely removing a feature flag from a codebase while preserving production behavior. Your job is to explore the codebase to understand how the flag is used, query LaunchDarkly to determine the correct forward value, remove the flag code cleanly, and verify the result.\n\nIf you haven't already identified which flag to clean up, use the [flag discovery skill](../launchdarkly-flag-discovery/SKILL.md) first to audit the landscape and find candidates.\n\n## Prerequisites\n\nThis skill requires the remotely hosted LaunchDarkly MCP server to be configured in your environment.\n\n**Required MCP tools:**\n- `check-removal-readiness`: detailed safety check (orchestrates flag config, cross-env status, dependencies, code references, and expiring targets in parallel)\n- `get-flag`: fetch flag configuration for a specific environment\n\n**Optional MCP tools:**\n- `archive-flag`: archive the flag in LaunchDarkly after code removal\n- `delete-flag`: permanently delete the flag (irreversible, prefer archive)\n\n## Core Principles\n\n1. **Safety First**: Always preserve current production behavior.\n2. **LaunchDarkly as Source of Truth**: Never guess the forward value. Query the actual configuration.\n3. **Follow Conventions**: Respect existing code style and structure.\n4. **Minimal Change**: Only remove flag-related code. No unrelated refactors.\n\n## Workflow\n\n### Step 1: Explore the Codebase\n\nBefore touching LaunchDarkly or removing code, understand how this flag is used in the codebase.\n\n1. **Find all references to the flag key.** Search for the flag key string (e.g., `new-checkout-flow`) across the codebase. Check for:\n   - Direct SDK evaluation calls (`variation()`, `boolVariation()`, `useFlags()`, etc.)\n   - Constants/enums that reference the key\n   - Wrapper/service patterns that abstract the SDK\n   - Configuration files, tests, and documentation\n   - See [SDK Patterns](references/sdk-patterns.md) for the full list of patterns by language\n\n2. **Understand the branching.** For each reference, identify:\n   - What code runs when the flag is `true` (or variation A)?\n   - What code runs when the flag is `false` (or variation B)?\n   - Are there side effects, early returns, or nested conditions?\n\n3. **Note the scope.** How many files, components, or modules does this flag touch? A flag used in one `if` block is simpler than one threaded through multiple layers.\n\n### Step 2: Run the Removal Readiness Check\n\nUse `check-removal-readiness` to get a detailed safety assessment. This single tool call orchestrates multiple checks in parallel:\n- Flag configuration and targeting state\n- Cross-environment status\n- Dependent flags (prerequisites)\n- Expiring targets\n- Code reference statistics\n\nThe tool returns a readiness verdict:\n\n**`safe`**: No blockers or warnings. Proceed with removal.\n\n**`caution`**: No hard blockers but warnings exist (e.g., code references in other repos, expiring targets scheduled, flag marked as permanent). Present warnings and let the user decide.\n\n**`blocked`**: Hard blockers prevent safe removal (e.g., dependent flags, actively receiving requests, targeting is on with active rules). Present blockers: the user must resolve them first.\n\n### Step 3: Determine the Forward Value\n\nUse `get-flag` to fetch the flag configuration in each critical environment. The **forward value** is the variation that replaces the flag in code.\n\n| Scenario | Forward Value |\n|----------|---------------|\n| All critical envs ON, same fallthrough, no rules/targets | Use `fallthrough.variation` |\n| All critical envs OFF, same offVariation | Use `offVariation` |\n| Critical envs differ in ON/OFF state | **NOT SAFE**: stop and inform the user |\n| Critical envs serve different variations | **NOT SAFE**: stop and inform the user |\n\n### Step 4: Present the Cleanup Plan\n\nBefore modifying any code, present a summary to the user and wait for confirmation:\n\n1. **The forward value** \u2014 which variation will be hardcoded and why (based on the flag's current state).\n2. **All code references found** \u2014 file paths and line numbers from Step 1.\n3. **Planned changes** \u2014 for each reference, describe what will be removed and what will be kept.\n4. **Readiness verdict** \u2014 the result from `check-removal-readiness` (safe, caution, or blocked) and any warnings.\n5. **LaunchDarkly action** \u2014 confirm the flag will be archived after code changes are complete.\n\n**Do not proceed with code changes until the user explicitly confirms.**\n\n### Step 5: Remove the Flag from Code\n\nNow execute the removal using what you learned in Step 1.\n\n1. **Replace flag evaluations with the forward value.**\n   - Preserve the code branch matching the forward value\n   - Remove the dead branch entirely\n   - If the flag value was assigned to a variable, replace the variable with the literal value or inline it\n\n2. **Clean up dead code.**\n   - Remove imports, constants, and type definitions that only existed for the flag\n   - Remove functions, components, or files that only existed for the dead branch\n   - Check for orphaned exports, hooks, helpers, styles, and test files\n   - If the repo uses an unused-export tool (Knip, ts-prune, lint rules), run it and remove any flag-related orphans\n\n3. **Don't over-clean.**\n   - Only remove code directly related to the flag\n   - Don't refactor, optimize, or \"improve\" surrounding code\n   - Don't change formatting or style of untouched code\n\n**Example transformation (boolean flag, forward value = `true`):**\n\n```typescript\n// Before\nconst showNewCheckout = await ldClient.variation('new-checkout-flow', user, false);\nif (showNewCheckout) {\n  return renderNewCheckout();\n} else {\n  return renderOldCheckout();\n}\n\n// After\nreturn renderNewCheckout();\n```\n\n### Step 6: Create Pull Request\n\nUse the template in [references/pr-template.md](references/pr-template.md) for a structured PR description. The PR should clearly communicate:\n- What flag was removed and why\n- What the forward value is and why it's correct\n- The readiness assessment results (from `check-removal-readiness`)\n- What code was removed and what behavior is preserved\n- Whether other repos still reference this flag\n\n### Step 7: Verify\n\nBefore considering the job done:\n\n1. **Code compiles and lints.** Run the project's build and lint steps.\n2. **Tests pass.** If the flag was used in tests, the tests should be updated to reflect the hardcoded behavior.\n3. **No remaining references.** Search the codebase one more time for the flag key to make sure nothing was missed.\n4. **PR is complete.** The description covers the readiness assessment, forward value rationale, and any cross-repo coordination needed.\n\n## Edge Cases\n\n| Situation | Action |\n|-----------|--------|\n| Flag not found in LaunchDarkly | Inform user, check for typos in the key |\n| Flag already archived | Ask if code cleanup is still needed (flag is gone from LD but code may still reference it) |\n| Multiple SDK patterns in codebase | Search all patterns: `variation()`, `boolVariation()`, `variationDetail()`, `allFlags()`, `useFlags()`, plus any wrappers |\n| Dynamic flag keys (`flag-${id}`) | Warn that automated removal may be incomplete: manual review required |\n| Different default values in code vs LD | Flag as inconsistency in the PR description |\n| Orphaned exports/files remain after removal | Run unused-export checks and remove dead files |\n\n## What NOT to Do\n\n- Don't change code unrelated to flag cleanup.\n- Don't refactor or optimize beyond flag removal.\n- Don't remove flags still being actively rolled out.\n- Don't guess the forward value: always query LaunchDarkly.\n\n## After Cleanup\n\nOnce the PR is merged and deployed:\n1. **Archive the flag in LaunchDarkly** using `archive-flag`. Archival is reversible; deletion is not. Always archive first.\n2. **Notify other teams** if `check-removal-readiness` reported code references in other repositories.\n3. **If the flag had targeting changes pending,** they can be ignored: the flag is being removed.\n\n## References\n\n- [PR Template](references/pr-template.md): Structured PR description for flag removal\n- [SDK Patterns](references/sdk-patterns.md): Flag evaluation patterns by language/framework\n- [Flag Discovery](../launchdarkly-flag-discovery/SKILL.md): Find cleanup candidates before using this skill\n- [Flag Targeting](../launchdarkly-flag-targeting/SKILL.md): If you need to change targeting instead of removing\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "launchdarkly-flag-cleanup",
-    "description": "Safely remove a feature flag from code while preserving production behavior. Use when the user wants to remove a flag from code, delete flag references, or create a PR that hardcodes the winning variation after a rollout is complete.",
-    "license": "Apache-2.0",
-    "compatibility": "Requires the remotely hosted LaunchDarkly MCP server",
-    "metadata": "",
-    "author": "launchdarkly",
-    "version": "1.0.0-experimental"
+  "author": "launchdarkly",
+  "version": "1.0.0-experimental",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "Apache-2.0",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032646",
   "name": "mistral-common-errors",
   "slug": "mistral-common-errors",
   "description": "Diagnose and fix Mistral AI common errors and exceptions.",
   "content": "# Mistral AI Common Errors\n\n## Overview\n\nQuick reference for diagnosing and fixing Mistral AI API errors. Covers HTTP status codes, SDK-specific issues, streaming failures, and tool calling problems with real solutions.\n\n## Prerequisites\n\n- Mistral AI SDK installed\n- `MISTRAL_API_KEY` configured\n- Access to application logs\n\n## Instructions\n\n### Step 1: Quick Diagnostic\n\n```bash\nset -euo pipefail\n# Test API connectivity and auth\ncurl -s -w \"\\nHTTP Status: %{http_code}\\n\" \\\n  -H \"Authorization: Bearer ${MISTRAL_API_KEY}\" \\\n  https://api.mistral.ai/v1/models | jq '.data[].id' 2>/dev/null || echo \"FAILED\"\n\n# Check env\necho \"Key set: ${MISTRAL_API_KEY:+yes}\"\necho \"Key length: ${#MISTRAL_API_KEY}\"\n```\n\n### Step 2: Error Reference\n\n---\n\n#### 401 Unauthorized\n\n```\nError: Authentication failed. Invalid API key.\n```\n\n**Causes:** Key missing, expired, revoked, or wrong workspace.\n\n**Fix:**\n\n```typescript\nconst apiKey = process.env.MISTRAL_API_KEY;\nif (!apiKey) throw new Error('MISTRAL_API_KEY is not set');\n\n// Test the key\nconst client = new Mistral({ apiKey });\ntry {\n  await client.models.list();\n} catch (e: any) {\n  if (e.status === 401) {\n    console.error('API key invalid \u2014 regenerate at console.mistral.ai');\n  }\n}\n```\n\n**Verify manually:**\n\n```bash\nset -euo pipefail\ncurl -H \"Authorization: Bearer ${MISTRAL_API_KEY}\" https://api.mistral.ai/v1/models\n```\n\n---\n\n#### 429 Too Many Requests\n\n```\nError: Rate limit exceeded. Retry-After: 60\n```\n\n**Causes:** Exceeded RPM (requests/min) or TPM (tokens/min) for your tier.\n\n**Fix:**\n\n```typescript\nasync function withBackoff<T>(fn: () => Promise<T>, maxRetries = 5): Promise<T> {\n  for (let i = 0; i <= maxRetries; i++) {\n    try {\n      return await fn();\n    } catch (error: any) {\n      if (error.status !== 429 || i === maxRetries) throw error;\n      const wait = Math.min(2 ** i * 1000, 60_000);\n      console.warn(`Rate limited, retrying in ${wait}ms...`);\n      await new Promise(r => setTimeout(r, wait));\n    }\n  }\n  throw new Error('Max retries exceeded');\n}\n```\n\n**Check your limits:** Visit [console.mistral.ai/limits](https://admin.mistral.ai/plateforme/limits) for workspace RPM/TPM caps.\n\n---\n\n#### 400 Bad Request \u2014 Invalid Model\n\n```\n{\"message\": \"Unknown model: mistral-ultra\"}\n```\n\n**Fix:** Use valid model IDs:\n\n```typescript\nconst VALID_MODELS = [\n  'mistral-large-latest',\n  'mistral-small-latest',\n  'codestral-latest',\n  'pixtral-large-latest',\n  'mistral-embed',\n  'mistral-moderation-latest',\n] as const;\n```\n\n**List available models dynamically:**\n\n```bash\nset -euo pipefail\ncurl -H \"Authorization: Bearer ${MISTRAL_API_KEY}\" \\\n  https://api.mistral.ai/v1/models | jq -r '.data[].id' | sort\n```\n\n---\n\n#### 400 Bad Request \u2014 Invalid Messages\n\n```\n{\"message\": \"messages must be a non-empty array\"}\n```\n\n**Fix:** Validate message structure before sending:\n\n```typescript\nfunction validateMessages(messages: any[]): void {\n  if (!messages?.length) throw new Error('Messages array empty');\n  const validRoles = ['system', 'user', 'assistant', 'tool'];\n  for (const msg of messages) {\n    if (!validRoles.includes(msg.role)) {\n      throw new Error(`Invalid role: \"${msg.role}\"`);\n    }\n    if (!msg.content && !msg.toolCalls) {\n      throw new Error(`Message with role \"${msg.role}\" has no content`);\n    }\n  }\n}\n```\n\n---\n\n#### 400 Bad Request \u2014 Tool Call Errors\n\n```\n{\"message\": \"tool_call_id is required for tool messages\"}\n```\n\n**Fix:** Every tool result must include the matching `toolCallId`:\n\n```typescript\n// After receiving tool_calls from the model\nfor (const call of response.choices[0].message.toolCalls) {\n  const result = await executeFunction(call.function.name, call.function.arguments);\n  messages.push({\n    role: 'tool',\n    name: call.function.name,\n    content: JSON.stringify(result),\n    toolCallId: call.id,  // REQUIRED \u2014 must match call.id\n  });\n}\n```\n\n---\n\n#### 413 / Context Length Exceeded\n\n```\nError: Maximum context length exceeded\n```\n\n**Fix:** Trim conversation history, keeping system message:\n\n```typescript\nfunction trimToFit(messages: any[], maxChars = 100_000): any[] {\n  const system = messages.find(m => m.role === 'system');\n  const rest = messages.filter(m => m.role !== 'system');\n  const kept: any[] = system ? [system] : [];\n  let chars = system?.content?.length ?? 0;\n\n  // Keep most recent messages that fit\n  for (let i = rest.length - 1; i >= 0; i--) {\n    const msgChars = JSON.stringify(rest[i]).length;\n    if (chars + msgChars > maxChars) break;\n    chars += msgChars;\n    kept.splice(system ? 1 : 0, 0, rest[i]);\n  }\n  return kept;\n}\n```\n\n---\n\n#### 500/503 Server Error\n\n```\nError: Internal server error\n```\n\n**Causes:** Mistral service issue (temporary).\n\n**Fix:**\n\n```typescript\nclass CircuitBreaker {\n  private failures = 0;\n  private lastFailure = 0;\n  private readonly threshold = 5;\n  private readonly resetMs = 60_000;\n\n  async call<T>(fn: () => Promise<T>): Promise<T> {\n    if (this.failures >= this.threshold) {\n      if (Date.now() - this.lastFailure < this.resetMs) {\n        throw new Error('Circuit breaker open \u2014 Mistral service unavailable');\n      }\n      this.failures = 0; // Reset after timeout\n    }\n    try {\n      const result = await fn();\n      this.failures = 0;\n      return result;\n    } catch (error: any) {\n      if (error.status >= 500) {\n        this.failures++;\n        this.lastFailure = Date.now();\n      }\n      throw error;\n    }\n  }\n}\n```\n\n---\n\n#### ERR_REQUIRE_ESM (Node.js)\n\n```\nError [ERR_REQUIRE_ESM]: require() of ES Module not supported\n```\n\n**Cause:** `@mistralai/mistralai` is ESM-only since v1.x.\n\n**Fix:** Either use `import` syntax (recommended) or dynamic import:\n\n```typescript\n// Option 1: Convert to ESM\n// package.json: \"type\": \"module\"\nimport { Mistral } from '@mistralai/mistralai';\n\n// Option 2: Dynamic import in CJS\nconst { Mistral } = await import('@mistralai/mistralai');\n```\n\n---\n\n#### Network Timeout\n\n```\nError: Request timeout after 30000ms\n```\n\n**Fix:**\n\n```typescript\nconst client = new Mistral({\n  apiKey: process.env.MISTRAL_API_KEY,\n  timeoutMs: 60_000, // Increase for long completions\n});\n\n// For streaming, the timeout applies to initial connection\n// Individual chunks have no timeout\n```\n\n## Escalation Path\n\n1. Collect evidence with `mistral-debug-bundle`\n2. Check [status.mistral.ai](https://status.mistral.ai/)\n3. Contact support via [Discord](https://discord.gg/mistralai) or console.mistral.ai\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `401` | Auth failure | Regenerate key at console.mistral.ai |\n| `429` | Rate limit | Backoff + check tier limits |\n| `400` | Bad params | Validate model, messages, tools |\n| `413` | Context overflow | Trim conversation history |\n| `5xx` | Service error | Retry with circuit breaker |\n| `ERR_REQUIRE_ESM` | CJS import | Use ESM `import` syntax |\n\n## Resources\n\n- [Mistral API Reference](https://docs.mistral.ai/api/)\n- [Rate Limits & Tiers](https://docs.mistral.ai/deployment/ai-studio/tier/)\n- [Status Page](https://status.mistral.ai/)\n- [Discord Community](https://discord.gg/mistralai)\n\n## Next Steps\n\nFor comprehensive debugging, see `mistral-debug-bundle`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "mistral-common-errors",
-    "description": "Diagnose and fix Mistral AI common errors and exceptions.",
-    "allowed-tools": "Read, Grep, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

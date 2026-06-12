@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031759",
   "name": "databricks-rate-limits",
   "slug": "databricks-rate-limits",
   "description": "Implement Databricks API rate limiting, backoff, and idempotency patterns.",
   "content": "# Databricks Rate Limits\n\n## Overview\n\nHandle Databricks API rate limits with exponential backoff, token-bucket queuing, and idempotent job submissions. The API returns HTTP 429 with a `Retry-After` header when limits are exceeded. The SDK has built-in retries for transient errors, but custom logic is needed for bulk operations.\n\n## Prerequisites\n\n- `databricks-sdk` installed\n- Understanding of async patterns for batch operations\n\n## Instructions\n\n### Step 1: Understand Rate Limit Tiers\n\nDatabricks enforces per-endpoint, per-workspace rate limits.\n\n| API Category | Approx. Limit | Notes |\n|-------------|---------------|-------|\n| Jobs API (create/run) | ~10 req/sec | Per workspace |\n| Jobs API (list/get) | ~30 req/sec | Read endpoints more generous |\n| Clusters API | ~10 req/sec | Create/start are expensive |\n| DBFS / Files API | ~10 req/sec | Uploads have 1MB/5MB size limits |\n| SQL Statement API | ~10 concurrent | Concurrent execution limit |\n| Unity Catalog | ~100 req/min | Permission checks add up fast |\n| Model Serving | Varies | ITPM/OTPM/QPH limits per endpoint |\n\n```python\nfrom databricks.sdk.errors import TooManyRequests, ResourceConflict\n\nw = WorkspaceClient()\ntry:\n    w.jobs.run_now(job_id=123)\nexcept TooManyRequests as e:\n    print(f\"Rate limited. Retry after: {e.retry_after_secs}s\")\nexcept ResourceConflict as e:\n    print(f\"Conflict (409): {e.message}\")  # Job already running\n```\n\n### Step 2: Exponential Backoff with Jitter\n\n```python\nimport time\nimport random\nfrom functools import wraps\nfrom databricks.sdk.errors import TooManyRequests, TemporarilyUnavailable\n\ndef retry_with_backoff(max_retries=5, base_delay=1.0, max_delay=60.0):\n    \"\"\"Decorator for Databricks API calls with exponential backoff + jitter.\"\"\"\n    def decorator(func):\n        @wraps(func)\n        def wrapper(*args, **kwargs):\n            for attempt in range(max_retries):\n                try:\n                    return func(*args, **kwargs)\n                except TooManyRequests as e:\n                    if attempt == max_retries - 1:\n                        raise\n                    delay = min(base_delay * (2 ** attempt), max_delay)\n                    jitter = random.uniform(0, delay * 0.5)\n                    wait = e.retry_after_secs or (delay + jitter)\n                    print(f\"429 (attempt {attempt + 1}/{max_retries}), waiting {wait:.1f}s\")\n                    time.sleep(wait)\n                except TemporarilyUnavailable:\n                    if attempt == max_retries - 1:\n                        raise\n                    delay = min(base_delay * (2 ** attempt), max_delay)\n                    print(f\"503 (attempt {attempt + 1}/{max_retries}), waiting {delay:.1f}s\")\n                    time.sleep(delay)\n            return func(*args, **kwargs)\n        return wrapper\n    return decorator\n\n@retry_with_backoff(max_retries=5)\ndef get_job_status(w, job_id):\n    return w.jobs.get(job_id)\n```\n\n### Step 3: Token-Bucket Rate Limiter for Bulk Operations\n\nPrevent bursts when iterating over hundreds of resources.\n\n```python\nimport threading\nimport time\n\nclass RateLimiter:\n    \"\"\"Token-bucket rate limiter for Databricks API calls.\"\"\"\n\n    def __init__(self, requests_per_second: float = 8.0):\n        self._interval = 1.0 / requests_per_second\n        self._lock = threading.Lock()\n        self._last_request = 0.0\n\n    def acquire(self):\n        \"\"\"Block until the next request slot is available.\"\"\"\n        with self._lock:\n            now = time.monotonic()\n            wait = self._last_request + self._interval - now\n            if wait > 0:\n                time.sleep(wait)\n            self._last_request = time.monotonic()\n\n# Usage: enumerate jobs without hitting limits\nlimiter = RateLimiter(requests_per_second=8)\n\ndef list_all_job_runs(w, job_ids: list[int]) -> dict:\n    results = {}\n    for job_id in job_ids:\n        limiter.acquire()\n        runs = list(w.jobs.list_runs(job_id=job_id, limit=5))\n        results[job_id] = runs\n    return results\n```\n\n### Step 4: Concurrent Batch Processing with Throttle\n\n```python\nfrom concurrent.futures import ThreadPoolExecutor, as_completed\n\ndef batch_run_jobs(w, job_ids: list[int], max_concurrent: int = 5) -> dict:\n    \"\"\"Run multiple jobs with concurrency throttling.\"\"\"\n    results = {}\n\n    def run_one(job_id):\n        limiter.acquire()\n        try:\n            run = w.jobs.run_now(job_id=job_id)\n            return job_id, {\"run_id\": run.run_id, \"status\": \"submitted\"}\n        except TooManyRequests:\n            time.sleep(5)\n            run = w.jobs.run_now(job_id=job_id)\n            return job_id, {\"run_id\": run.run_id, \"status\": \"submitted_after_retry\"}\n        except ResourceConflict:\n            return job_id, {\"status\": \"already_running\"}\n\n    with ThreadPoolExecutor(max_workers=max_concurrent) as executor:\n        futures = {executor.submit(run_one, jid): jid for jid in job_ids}\n        for future in as_completed(futures):\n            job_id, result = future.result()\n            results[job_id] = result\n\n    return results\n```\n\n### Step 5: Idempotent Job Submissions\n\nPrevent duplicate runs when retrying failed submissions using `idempotency_token`.\n\n```python\nimport hashlib\nfrom datetime import datetime\n\ndef submit_idempotent(w, job_id: int, params: dict | None = None) -> int:\n    \"\"\"Submit a job run with idempotency \u2014 safe to retry.\"\"\"\n    # Deterministic token: same job + date + params = same token\n    token_input = f\"{job_id}-{datetime.utcnow().strftime('%Y-%m-%d')}-{sorted(params.items()) if params else ''}\"\n    idempotency_token = hashlib.sha256(token_input.encode()).hexdigest()[:32]\n\n    run = w.jobs.run_now(\n        job_id=job_id,\n        idempotency_token=idempotency_token,\n        notebook_params=params or {},\n    )\n    return run.run_id\n\n# Calling twice with same inputs on the same day returns the same run_id\nrun1 = submit_idempotent(w, 456, params={\"date\": \"2025-03-01\"})\nrun2 = submit_idempotent(w, 456, params={\"date\": \"2025-03-01\"})\nassert run1 == run2  # No duplicate run created\n```\n\n## Output\n\n- Retry-safe API calls handling 429 and 503 with exponential backoff\n- Token-bucket rate limiter for bulk resource enumeration\n- Thread-pool batch runner with configurable concurrency\n- Idempotent job submissions preventing duplicate runs\n\n## Error Handling\n\n| Error | HTTP | Solution |\n|-------|------|----------|\n| `TooManyRequests` | 429 | Use `Retry-After` header, fall back to exponential backoff |\n| `TemporarilyUnavailable` | 503 | Retry with 5-10s delay; check [status.databricks.com](https://status.databricks.com) |\n| `ResourceConflict` | 409 | Job already running \u2014 check `list_runs()` before submitting |\n| `TimeoutError` | - | Increase SDK timeout: `WorkspaceClient(timeout=120)` |\n| Sustained rate limiting | 429 | Reduce concurrency, spread load across time windows |\n\n## Examples\n\n### Monitor Rate Limit Headers (Raw HTTP)\n\n```python\nimport requests\n\nresp = requests.get(\n    f\"{w.config.host}/api/2.1/jobs/list\",\n    headers={\"Authorization\": f\"Bearer {w.config.token}\"},\n)\nprint(f\"Status: {resp.status_code}\")\nprint(f\"Retry-After: {resp.headers.get('Retry-After', 'N/A')}\")\n```\n\n### Bulk Cluster Cleanup with Rate Limiting\n\n```python\nlimiter = RateLimiter(requests_per_second=5)\nterminated = 0\nfor cluster in w.clusters.list():\n    if cluster.state.value == \"TERMINATED\" and cluster.cluster_name.startswith(\"dev-\"):\n        limiter.acquire()\n        w.clusters.permanent_delete(cluster_id=cluster.cluster_id)\n        terminated += 1\nprint(f\"Cleaned up {terminated} dev clusters\")\n```\n\n## Resources\n\n- [Resource Limits](https://docs.databricks.com/aws/en/resources/limits)\n- [Model Serving Limits](https://docs.databricks.com/aws/en/machine-learning/model-serving/model-serving-limits)\n- [Status Page](https://status.databricks.com)\n\n## Next Steps\n\nFor security configuration, see `databricks-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "databricks-rate-limits",
-    "description": "Implement Databricks API rate limiting, backoff, and idempotency patterns.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

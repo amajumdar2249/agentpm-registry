@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032650",
   "name": "mistral-data-handling",
   "slug": "mistral-data-handling",
   "description": "Implement Mistral AI PII handling, data retention, and GDPR/CCPA compliance",
   "content": "# Mistral Data Handling\n\n## Overview\n\nManage data flows through Mistral AI APIs with PII redaction, audit logging, fine-tuning dataset sanitization, and conversation retention policies. Mistral's data policy: API requests on La Plateforme are **not** used for training by default. Self-deployed models give full data sovereignty.\n\n## Prerequisites\n\n- Mistral API key configured\n- Understanding of data classification (PII, PHI, PCI)\n- Logging infrastructure for audit trails\n\n## Instructions\n\n### Step 1: PII Redaction Before API Calls\n\n```typescript\ninterface RedactionRule {\n  pattern: RegExp;\n  replacement: string;\n  type: string;\n}\n\nconst PII_RULES: RedactionRule[] = [\n  { pattern: /\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b/gi, replacement: '[EMAIL]', type: 'email' },\n  { pattern: /\\b\\d{3}[-.]?\\d{3}[-.]?\\d{4}\\b/g, replacement: '[PHONE]', type: 'phone' },\n  { pattern: /\\b\\d{3}-\\d{2}-\\d{4}\\b/g, replacement: '[SSN]', type: 'ssn' },\n  { pattern: /\\b\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}[\\s-]?\\d{4}\\b/g, replacement: '[CARD]', type: 'credit_card' },\n  { pattern: /\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b/g, replacement: '[IP]', type: 'ip_address' },\n];\n\nfunction redactPII(text: string): { cleaned: string; redactions: string[] } {\n  const redactions: string[] = [];\n  let cleaned = text;\n\n  for (const rule of PII_RULES) {\n    const matches = cleaned.match(rule.pattern);\n    if (matches) {\n      redactions.push(...matches.map(m => `${rule.type}: ${m.slice(0, 4)}***`));\n      cleaned = cleaned.replace(rule.pattern, rule.replacement);\n    }\n  }\n  return { cleaned, redactions };\n}\n```\n\n### Step 2: Safe Mistral API Wrapper\n\n```typescript\nimport { Mistral } from '@mistralai/mistralai';\n\nconst client = new Mistral({ apiKey: process.env.MISTRAL_API_KEY });\n\nasync function safeChatCompletion(\n  messages: Array<{ role: string; content: string }>,\n  options: { redactPII?: boolean; model?: string; auditLog?: boolean } = {},\n) {\n  const processed = messages.map(msg => {\n    if (options.redactPII !== false) {\n      const { cleaned, redactions } = redactPII(msg.content);\n      if (redactions.length > 0 && options.auditLog) {\n        console.warn(`Redacted ${redactions.length} PII items from ${msg.role} message`);\n      }\n      return { ...msg, content: cleaned };\n    }\n    return msg;\n  });\n\n  const response = await client.chat.complete({\n    model: options.model ?? 'mistral-small-latest',\n    messages: processed,\n  });\n\n  // Optionally redact PII in output too\n  const output = response.choices?.[0]?.message?.content ?? '';\n  if (options.redactPII !== false) {\n    const { cleaned } = redactPII(output);\n    if (response.choices?.[0]?.message) {\n      response.choices[0].message.content = cleaned;\n    }\n  }\n\n  return response;\n}\n```\n\n### Step 3: Fine-Tuning Dataset Sanitization\n\nMistral fine-tuning requires JSONL files. Sanitize before uploading:\n\n```typescript\nimport { createReadStream, createWriteStream } from 'fs';\nimport { createInterface } from 'readline';\n\nasync function sanitizeTrainingData(inputPath: string, outputPath: string) {\n  const rl = createInterface({ input: createReadStream(inputPath) });\n  const out = createWriteStream(outputPath);\n  let lines = 0, redacted = 0;\n\n  for await (const line of rl) {\n    const record = JSON.parse(line);\n    const sanitized = record.messages.map((msg: any) => {\n      const { cleaned, redactions } = redactPII(msg.content);\n      if (redactions.length > 0) redacted++;\n      return { ...msg, content: cleaned };\n    });\n\n    out.write(JSON.stringify({ messages: sanitized }) + '\\n');\n    lines++;\n  }\n\n  out.end();\n  console.log(`Processed ${lines} training examples, redacted PII in ${redacted}`);\n  return { lines, redacted };\n}\n```\n\n### Step 4: Conversation History with TTL\n\n```typescript\nclass ConversationStore {\n  private store = new Map<string, { messages: any[]; createdAt: number }>();\n  private maxAgeMins: number;\n  private maxMessages: number;\n\n  constructor(maxAgeMins = 60, maxMessages = 100) {\n    this.maxAgeMins = maxAgeMins;\n    this.maxMessages = maxMessages;\n  }\n\n  get(sessionId: string): any[] {\n    const entry = this.store.get(sessionId);\n    if (!entry) return [];\n\n    // Auto-expire\n    if (Date.now() - entry.createdAt > this.maxAgeMins * 60_000) {\n      this.store.delete(sessionId);\n      return [];\n    }\n\n    return entry.messages;\n  }\n\n  append(sessionId: string, message: any): void {\n    const entry = this.store.get(sessionId) ?? { messages: [], createdAt: Date.now() };\n    entry.messages.push(message);\n\n    // Cap message count\n    if (entry.messages.length > this.maxMessages) {\n      const system = entry.messages[0]?.role === 'system' ? [entry.messages[0]] : [];\n      entry.messages = [...system, ...entry.messages.slice(-this.maxMessages)];\n    }\n\n    this.store.set(sessionId, entry);\n  }\n\n  destroy(sessionId: string): void {\n    this.store.delete(sessionId);\n  }\n\n  // GDPR right-to-erasure\n  eraseUser(userId: string): number {\n    let count = 0;\n    for (const [key] of this.store) {\n      if (key.startsWith(userId)) {\n        this.store.delete(key);\n        count++;\n      }\n    }\n    return count;\n  }\n}\n```\n\n### Step 5: Audit Logging\n\n```typescript\ninterface AuditEntry {\n  timestamp: string;\n  sessionId: string;\n  model: string;\n  inputChars: number;\n  outputChars: number;\n  piiRedacted: number;\n  tokensUsed: { prompt: number; completion: number };\n}\n\nfunction logAudit(entry: AuditEntry): void {\n  // Log metadata only \u2014 never log actual message content\n  console.log(JSON.stringify({\n    ...entry,\n    // Intentionally exclude message content for compliance\n  }));\n}\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| PII leak to API | Regex missed pattern | Add domain-specific rules (e.g., patient IDs) |\n| Fine-tune rejected | Unsanitized data in JSONL | Run sanitization before `client.files.upload()` |\n| Conversation too long | No retention policy | Set max age and message count limits |\n| GDPR request | Right to erasure | Implement `eraseUser()` across all stores |\n\n## Examples\n\n### Safe Embedding Generation\n\n```typescript\nasync function safeEmbed(texts: string[]) {\n  const cleaned = texts.map(t => redactPII(t).cleaned);\n  return client.embeddings.create({\n    model: 'mistral-embed',\n    inputs: cleaned,\n  });\n}\n```\n\n### Batch API with PII Redaction\n\n```python\nimport json\n\ndef sanitize_batch_file(input_path: str, output_path: str):\n    \"\"\"Sanitize a Mistral batch JSONL file before submission.\"\"\"\n    with open(input_path) as f_in, open(output_path, \"w\") as f_out:\n        for line in f_in:\n            record = json.loads(line)\n            for msg in record[\"body\"][\"messages\"]:\n                msg[\"content\"] = redact_pii(msg[\"content\"])\n            f_out.write(json.dumps(record) + \"\\n\")\n```\n\n## Resources\n\n- [Mistral Data Policy](https://docs.mistral.ai/deployment/ai-studio/)\n- [Fine-Tuning Guide](https://docs.mistral.ai/capabilities/finetuning/)\n- [Batch Inference](https://docs.mistral.ai/capabilities/batch/)\n- [GDPR Compliance](https://mistral.ai/privacy/)\n\n## Output\n\n- PII redaction layer for all API calls\n- Safe chat wrapper with audit logging\n- Fine-tuning dataset sanitization pipeline\n- Conversation store with TTL and GDPR erasure\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "mistral-data-handling",
-    "description": "Implement Mistral AI PII handling, data retention, and GDPR/CCPA compliance",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

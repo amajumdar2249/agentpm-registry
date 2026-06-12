@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000040815",
   "name": "makefile-best-practices",
   "slug": "makefile-best-practices-2",
   "description": "Best practices for creating self-documenting Makefiles with auto-generated help. Use when creating or modifying Makefiles to ensure they follow conventions for discoverability and maintainability.",
   "content": "\nWhen creating or modifying Makefiles, follow these principles to ensure they are self-documenting and user-friendly.\n\n## 1. Default Target Must Be `help`\n\nAlways set `help` as the default target so users can discover available commands:\n\n```makefile\n.DEFAULT_GOAL := help\n```\n\nThis ensures running `make` without arguments shows available targets instead of executing an arbitrary first target.\n\n## 2. Self-Documenting Help Target\n\nThe `help` target should automatically build itself from comments in the Makefile. Use the `##` comment pattern:\n\n```makefile\ntarget-name: ## Description of what this target does\n\t@command here\n\nhelp: ## Show this help\n\t@awk 'BEGIN {FS = \":.*##\"; printf \"\\nUsage:\\n  make \\033[36m<target>\\033[0m\\n\"} /^[a-zA-Z_-]+:.*?##/ { printf \"  \\033[36m%-15s\\033[0m %s\\n\", $$1, $$2 } /^##@/ { printf \"\\n\\033[1m%s\\033[0m\\n\", substr($$0, 5) } ' $(MAKEFILE_LIST)\n```\n\n### Pattern Explanation\n\n- `target: ## Description` - The `##` marks the description for that target\n- `##@ Section` - Creates optional section headers in the help output\n- The `awk` command parses these patterns and formats the output\n\n### Benefits\n\n- Documentation stays with the code\n- Adding new targets automatically updates help\n- No manual maintenance of help text\n- Consistent format across all Makefiles\n\n## Audit Mode\n\nWhen asked to audit a Makefile, check for the following issues and report findings:\n\n### Required\n- [ ] `.DEFAULT_GOAL := help` is set\n- [ ] `help` target exists\n- [ ] `help` target uses the self-documenting awk pattern\n- [ ] All targets have `## Description` comments\n\n### Warnings\n- [ ] Targets without descriptions (missing `##`)\n- [ ] Missing `.PHONY` declarations for non-file targets\n- [ ] `help` target is not using `$(MAKEFILE_LIST)` (won't work with includes)\n\n### Report Format\n\n```\nMakefile Audit: <path>\n\nPASS: .DEFAULT_GOAL set to help\nPASS: help target exists\nFAIL: 3 targets missing ## descriptions: build, test, deploy\nWARN: Missing .PHONY for: build, test, clean\n\nSummary: 2 passed, 1 failed, 1 warning\n```\n\nProvide specific line numbers and suggested fixes for each issue found.\n\n## 3. Install/Uninstall Pattern for Scripts and Binaries\n\nFor one-off shell scripts or binaries that should be available in `~/bin`, use this symlink pattern:\n\n### Variables\n\n```makefile\nSCRIPT_NAME := my-script.sh\nINSTALL_DIR := $(HOME)/bin\nINSTALL_PATH := $(INSTALL_DIR)/$(SCRIPT_NAME)\nSOURCE_PATH := $(CURDIR)/$(SCRIPT_NAME)\n```\n\n### Install Target\n\n```makefile\ninstall: ## Install symlink to ~/bin\n\t@mkdir -p $(INSTALL_DIR)\n\t@if [ -L \"$(INSTALL_PATH)\" ]; then \\\n\t\techo \"Removing existing symlink...\"; \\\n\t\trm -f \"$(INSTALL_PATH)\"; \\\n\telif [ -e \"$(INSTALL_PATH)\" ]; then \\\n\t\techo \"Error: $(INSTALL_PATH) exists and is not a symlink\"; \\\n\t\texit 1; \\\n\tfi\n\t@ln -s \"$(SOURCE_PATH)\" \"$(INSTALL_PATH)\"\n\t@echo \"Installed: $(INSTALL_PATH) -> $(SOURCE_PATH)\"\n```\n\n### Uninstall Target\n\n```makefile\nuninstall: ## Remove symlink from ~/bin\n\t@if [ -L \"$(INSTALL_PATH)\" ]; then \\\n\t\trm -f \"$(INSTALL_PATH)\"; \\\n\t\techo \"Removed: $(INSTALL_PATH)\"; \\\n\telif [ -e \"$(INSTALL_PATH)\" ]; then \\\n\t\techo \"Error: $(INSTALL_PATH) exists but is not a symlink (not removing)\"; \\\n\t\texit 1; \\\n\telse \\\n\t\techo \"Nothing to remove: $(INSTALL_PATH) does not exist\"; \\\n\tfi\n```\n\n### Check Target (Optional)\n\n```makefile\ncheck: ## Check installation status\n\t@echo \"Source: $(SOURCE_PATH)\"\n\t@if [ -L \"$(INSTALL_PATH)\" ]; then \\\n\t\techo \"Status: Installed (symlink)\"; \\\n\t\techo \"Target: $$(readlink \"$(INSTALL_PATH)\")\"; \\\n\telif [ -e \"$(INSTALL_PATH)\" ]; then \\\n\t\techo \"Status: Exists but NOT a symlink\"; \\\n\telse \\\n\t\techo \"Status: Not installed\"; \\\n\tfi\n```\n\n### Key Principles\n\n1. **Always use symlinks** - Never copy files; symlinks ensure updates are automatic\n2. **Safe removal** - Only remove if it's a symlink to prevent accidental deletion\n3. **Idempotent install** - Running install multiple times should work\n4. **Fail on conflicts** - If a non-symlink file exists, error rather than overwrite\n5. **Create ~/bin if needed** - `mkdir -p` ensures the directory exists\n\n### For Sourced Scripts\n\nIf the script needs to be sourced (not executed), add post-install instructions:\n\n```makefile\ninstall: ## Install symlink to ~/bin\n\t@mkdir -p $(INSTALL_DIR)\n\t# ... symlink creation ...\n\t@echo \"\"\n\t@echo \"Add to your shell config:\"\n\t@echo \"  source ~/bin/$(SCRIPT_NAME)\"\n```\n\n### Complete Example\n\n```makefile\n# my-tool Makefile\n\nSCRIPT_NAME := my-tool.sh\nINSTALL_DIR := $(HOME)/bin\nINSTALL_PATH := $(INSTALL_DIR)/$(SCRIPT_NAME)\nSOURCE_PATH := $(CURDIR)/$(SCRIPT_NAME)\n\n.PHONY: help install uninstall check lint test all clean\n\n.DEFAULT_GOAL := help\n\n##@ General\n\nhelp: ## Show this help message\n\t@awk 'BEGIN {FS = \":.*##\"; printf \"\\nUsage:\\n  make \\033[36m<target>\\033[0m\\n\"} /^[a-zA-Z_-]+:.*?##/ { printf \"  \\033[36m%-15s\\033[0m %s\\n\", $$1, $$2 } /^##@/ { printf \"\\n\\033[1m%s\\033[0m\\n\", substr($$0, 5) } ' $(MAKEFILE_LIST)\n\n##@ Installation\n\ninstall: ## Install symlink to ~/bin\n\t@mkdir -p $(INSTALL_DIR)\n\t@if [ -L \"$(INSTALL_PATH)\" ]; then \\\n\t\techo \"Removing existing symlink...\"; \\\n\t\trm -f \"$(INSTALL_PATH)\"; \\\n\telif [ -e \"$(INSTALL_PATH)\" ]; then \\\n\t\techo \"Error: $(INSTALL_PATH) exists and is not a symlink\"; \\\n\t\texit 1; \\\n\tfi\n\t@ln -s \"$(SOURCE_PATH)\" \"$(INSTALL_PATH)\"\n\t@echo \"Installed: $(INSTALL_PATH) -> $(SOURCE_PATH)\"\n\nuninstall: ## Remove symlink from ~/bin\n\t@if [ -L \"$(INSTALL_PATH)\" ]; then \\\n\t\trm -f \"$(INSTALL_PATH)\"; \\\n\t\techo \"Removed: $(INSTALL_PATH)\"; \\\n\telif [ -e \"$(INSTALL_PATH)\" ]; then \\\n\t\techo \"Error: $(INSTALL_PATH) exists but is not a symlink (not removing)\"; \\\n\t\texit 1; \\\n\telse \\\n\t\techo \"Nothing to remove: $(INSTALL_PATH) does not exist\"; \\\n\tfi\n\ncheck: ## Check installation status\n\t@echo \"Source: $(SOURCE_PATH)\"\n\t@if [ -L \"$(INSTALL_PATH)\" ]; then \\\n\t\techo \"Status: Installed (symlink)\"; \\\n\t\techo \"Target: $$(readlink \"$(INSTALL_PATH)\")\"; \\\n\telif [ -e \"$(INSTALL_PATH)\" ]; then \\\n\t\techo \"Status: Exists but NOT a symlink\"; \\\n\telse \\\n\t\techo \"Status: Not installed\"; \\\n\tfi\n\n##@ Development\n\nlint: ## Run shellcheck on scripts\n\tshellcheck $(SCRIPT_NAME)\n\ntest: ## Run tests\n\t./test.sh\n\n# Stubs to satisfy checkmake minphony rule\nall: help\nclean: uninstall\n```\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "makefile-best-practices",
-    "description": "Best practices for creating self-documenting Makefiles with auto-generated help. Use when creating or modifying Makefiles to ensure they follow conventions for discoverability and maintainability.",
-    "license": "MIT"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

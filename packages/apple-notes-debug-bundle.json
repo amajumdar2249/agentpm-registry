@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031325",
   "name": "apple-notes-debug-bundle",
   "slug": "apple-notes-debug-bundle",
   "description": "Collect Apple Notes automation debug evidence for troubleshooting.",
   "content": "# Apple Notes Debug Bundle\n\n## Overview\n\nThis debug bundle collects diagnostic information from Apple Notes automation integrations\nfor troubleshooting AppleScript and JXA (JavaScript for Automation) workflows. It captures\nmacOS version compatibility, Notes.app account configuration, folder and note counts,\nTCC (Transparency, Consent, and Control) permission status, and Shortcuts automation\nentitlements. The resulting tarball helps diagnose permission denials, sandbox restrictions,\niCloud sync failures, and scripting bridge errors that commonly block Notes automation.\n\n## Prerequisites\n\n- macOS 12+ with Notes.app configured\n- `osascript`, `tar` available (built into macOS)\n- Terminal granted Automation permission for Notes.app in System Preferences > Privacy & Security\n\n## Debug Collection Script\n\n```bash\n#!/bin/bash\nset -euo pipefail\nBUNDLE=\"debug-apple-notes-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE\"\n\n# Environment check\necho \"=== Environment ===\" > \"$BUNDLE/environment.txt\"\necho \"macOS: $(sw_vers -productVersion 2>/dev/null || echo 'not macOS')\" >> \"$BUNDLE/environment.txt\"\necho \"Notes.app running: $(pgrep -x Notes > /dev/null && echo Yes || echo No)\" >> \"$BUNDLE/environment.txt\"\necho \"Shell: $SHELL ($TERM)\" >> \"$BUNDLE/environment.txt\"\necho \"Timestamp: $(date -u)\" >> \"$BUNDLE/environment.txt\"\n\n# Automation permissions (TCC database)\necho \"=== TCC Permissions ===\" > \"$BUNDLE/tcc-status.txt\"\nsqlite3 ~/Library/Application\\ Support/com.apple.TCC/TCC.db \\\n  \"SELECT client, auth_value, auth_reason FROM access WHERE service='kTCCServiceAppleEvents'\" \\\n  >> \"$BUNDLE/tcc-status.txt\" 2>/dev/null || echo \"Cannot read TCC database (SIP may block)\" >> \"$BUNDLE/tcc-status.txt\"\n\n# Account enumeration via JXA\necho \"=== Accounts ===\" > \"$BUNDLE/accounts.txt\"\nosascript -l JavaScript -e '\n  const app = Application(\"Notes\");\n  const accts = app.accounts();\n  accts.forEach(a => {\n    const notes = a.notes().length;\n    const folders = a.folders().length;\n    ObjC.import(\"stdlib\"); // ensure stdio\n    $.system(`echo \"${a.name()}: ${notes} notes, ${folders} folders\" >> /dev/stdout`);\n  });\n' >> \"$BUNDLE/accounts.txt\" 2>&1 || echo \"JXA account query failed\" >> \"$BUNDLE/accounts.txt\"\n\n# Note count and folder structure\necho \"=== Folder Structure ===\" > \"$BUNDLE/folders.txt\"\nosascript -l JavaScript -e '\n  const app = Application(\"Notes\");\n  app.defaultAccount.folders().forEach(f => {\n    $.system(`echo \"  ${f.name()}: ${f.notes().length} notes\" >> /dev/stdout`);\n  });\n' >> \"$BUNDLE/folders.txt\" 2>&1 || echo \"Folder query failed\" >> \"$BUNDLE/folders.txt\"\n\n# Shortcuts integration check\necho \"=== Shortcuts ===\" > \"$BUNDLE/shortcuts.txt\"\nshortcuts list 2>/dev/null | grep -i note >> \"$BUNDLE/shortcuts.txt\" || echo \"No note-related Shortcuts found\" >> \"$BUNDLE/shortcuts.txt\"\n\n# iCloud sync status\necho \"=== iCloud Sync ===\" > \"$BUNDLE/icloud-sync.txt\"\nbrctl status com.apple.Notes 2>/dev/null >> \"$BUNDLE/icloud-sync.txt\" || echo \"brctl not available or Notes not using iCloud Drive\" >> \"$BUNDLE/icloud-sync.txt\"\nls -la ~/Library/Group\\ Containers/group.com.apple.notes/ >> \"$BUNDLE/icloud-sync.txt\" 2>/dev/null || echo \"Notes container not found\" >> \"$BUNDLE/icloud-sync.txt\"\n\n# Recent console errors\necho \"=== Recent Errors ===\" > \"$BUNDLE/console-errors.txt\"\nlog show --predicate 'subsystem == \"com.apple.notes\"' --last 30m --style compact 2>/dev/null \\\n  | tail -50 >> \"$BUNDLE/console-errors.txt\" || echo \"Cannot read system log\" >> \"$BUNDLE/console-errors.txt\"\n\ntar -czf \"$BUNDLE.tar.gz\" \"$BUNDLE\" && rm -rf \"$BUNDLE\"\necho \"Bundle: $BUNDLE.tar.gz\"\n```\n\n## Analyzing the Bundle\n\n```bash\ntar -xzf debug-apple-notes-*.tar.gz\ncat debug-apple-notes-*/environment.txt     # Confirm macOS version\ncat debug-apple-notes-*/tcc-status.txt      # Check automation permissions\ncat debug-apple-notes-*/accounts.txt        # Verify note counts per account\ncat debug-apple-notes-*/console-errors.txt  # Look for sandbox or sync errors\n```\n\n## Common Issues\n\n| Symptom | Check in Bundle | Fix |\n|---------|----------------|-----|\n| `-1743` error (not permitted) | `tcc-status.txt` shows no entry for Terminal | Grant Automation permission: System Settings > Privacy > Automation > Terminal > Notes |\n| JXA returns empty arrays | `accounts.txt` shows 0 notes | Notes.app must be open at least once; launch Notes and wait for iCloud sync |\n| `execution error: Notes got an error: AppleEvent timed out` | `console-errors.txt` shows timeout | Notes.app is busy syncing; wait for iCloud sync to finish, then retry |\n| Folder query fails on shared accounts | `folders.txt` shows error on non-default account | Specify account explicitly: `app.accounts.byName(\"iCloud\")` |\n| Shortcuts integration returns empty | `shortcuts.txt` shows no matches | Create a Notes shortcut manually in Shortcuts.app, then re-run |\n| `brctl` reports conflict | `icloud-sync.txt` shows conflict state | Open Notes.app, resolve duplicate notes, then force sync via iCloud preferences |\n\n## Automated Health Check\n\n```typescript\nimport { execSync } from \"child_process\";\n\nfunction checkAppleNotesHealth(): {\n  status: string;\n  macosVersion: string;\n  notesRunning: boolean;\n  accountCount: number;\n  tccGranted: boolean;\n} {\n  const macosVersion = execSync(\"sw_vers -productVersion\").toString().trim();\n  const notesRunning = execSync(\"pgrep -x Notes || true\").toString().trim() !== \"\";\n  let accountCount = 0;\n  try {\n    const raw = execSync(\n      'osascript -l JavaScript -e \\'Application(\"Notes\").accounts().length\\''\n    ).toString().trim();\n    accountCount = parseInt(raw, 10);\n  } catch { /* Notes not accessible */ }\n  const tccGranted = accountCount > 0;\n  return {\n    status: tccGranted && notesRunning ? \"healthy\" : \"degraded\",\n    macosVersion,\n    notesRunning,\n    accountCount,\n    tccGranted,\n  };\n}\n```\n\n## Resources\n\n- [Mac Automation Scripting Guide](https://developer.apple.com/library/archive/documentation/LanguagesUtilities/Conceptual/MacAutomationScriptingGuide/)\n- [JXA Cookbook](https://github.com/JXA-Cookbook/JXA-Cookbook)\n- [Apple Developer \u2014 NSAppleScript](https://developer.apple.com/documentation/foundation/nsapplescript)\n\n## Next Steps\n\nSee `apple-notes-rate-limits`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "apple-notes-debug-bundle",
-    "description": "Collect Apple Notes automation debug evidence for troubleshooting.",
-    "Trigger": "apple notes debug\".",
-    "allowed-tools": "Read, Write, Edit, Bash(osascript:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

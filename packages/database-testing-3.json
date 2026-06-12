@@ -1,26 +1,49 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000017769",
   "name": "database-testing",
   "slug": "database-testing-3",
   "description": "Database schema validation, data integrity testing, migration testing, transaction isolation, and query performance. Use when testing data persistence, ensuring referential integrity, or validating database migrations.",
   "content": "\n# Database Testing\n\n<default_to_action>\nWhen testing database operations:\n1. VALIDATE schema (tables, columns, constraints exist as expected)\n2. TEST data integrity (unique, foreign key, check constraints)\n3. VERIFY migrations (forward works, rollback works, data preserved)\n4. CHECK transaction isolation (ACID properties, concurrent access)\n5. MEASURE query performance (indexes used, execution time)\n\n**Quick DB Testing Checklist:**\n- Schema matches specification\n- Unique constraints prevent duplicates\n- Foreign keys prevent orphaned records\n- Migrations are reversible\n- Transactions roll back on error\n\n**Critical Success Factors:**\n- Database bugs cause data loss/corruption (catastrophic)\n- Test migrations in staging before production\n- Transaction tests catch concurrency bugs\n</default_to_action>\n\n## Quick Reference Card\n\n### When to Use\n- New table/schema creation\n- Migration development\n- Data integrity validation\n- Query performance optimization\n\n### Database Test Types\n| Type | Focus | When |\n|------|-------|------|\n| **Schema** | Structure correct | Table creation |\n| **Integrity** | Constraints work | Data operations |\n| **Migration** | Up/down work | Schema changes |\n| **Transaction** | ACID properties | Concurrent access |\n| **Performance** | Query speed | Optimization |\n\n---\n\n## Schema Testing\n\n```javascript\ntest('users table has correct schema', async () => {\n  const schema = await db.raw(`\n    SELECT column_name, data_type, is_nullable\n    FROM information_schema.columns\n    WHERE table_name = 'users'\n  `);\n\n  expect(schema).toContainEqual({\n    column_name: 'id',\n    data_type: 'integer',\n    is_nullable: 'NO'\n  });\n\n  expect(schema).toContainEqual({\n    column_name: 'email',\n    data_type: 'character varying',\n    is_nullable: 'NO'\n  });\n});\n```\n\n---\n\n## Data Integrity Testing\n\n```javascript\ntest('email must be unique', async () => {\n  await db.users.create({ email: 'test@example.com' });\n\n  await expect(\n    db.users.create({ email: 'test@example.com' })\n  ).rejects.toThrow('unique constraint violation');\n});\n\ntest('foreign key prevents orphaned records', async () => {\n  const user = await db.users.create({ email: 'test@example.com' });\n  await db.orders.create({ userId: user.id, total: 100 });\n\n  await expect(\n    db.users.delete({ id: user.id })\n  ).rejects.toThrow('foreign key constraint');\n});\n```\n\n---\n\n## Migration Testing\n\n```javascript\ntest('migration is reversible', async () => {\n  await migrate('add-users-table');\n\n  // Table exists after migration\n  const tables = await db.raw(`SELECT table_name FROM information_schema.tables`);\n  expect(tables.map(t => t.table_name)).toContain('users');\n\n  await rollback('add-users-table');\n\n  // Table gone after rollback\n  const tablesAfter = await db.raw(`SELECT table_name FROM information_schema.tables`);\n  expect(tablesAfter.map(t => t.table_name)).not.toContain('users');\n});\n\ntest('migration preserves existing data', async () => {\n  await db.users.create({ email: 'test@example.com' });\n\n  await migrate('add-age-column');\n\n  const user = await db.users.findOne({ email: 'test@example.com' });\n  expect(user).toBeDefined();\n  expect(user.age).toBeNull(); // New column, null default\n});\n```\n\n---\n\n## Transaction Testing\n\n```javascript\ntest('transaction rolls back on error', async () => {\n  const initialCount = await db.users.count();\n\n  try {\n    await db.transaction(async (trx) => {\n      await trx('users').insert({ email: 'user1@example.com' });\n      await trx('users').insert({ email: 'user2@example.com' });\n      throw new Error('Rollback test');\n    });\n  } catch (error) { /* Expected */ }\n\n  expect(await db.users.count()).toBe(initialCount);\n});\n\ntest('concurrent transactions isolated', async () => {\n  const user = await db.users.create({ balance: 100 });\n\n  // Two concurrent withdrawals (race condition test)\n  await Promise.all([\n    db.transaction(async (trx) => {\n      const current = await trx('users').where({ id: user.id }).first();\n      await trx('users').update({ balance: current.balance - 50 });\n    }),\n    db.transaction(async (trx) => {\n      const current = await trx('users').where({ id: user.id }).first();\n      await trx('users').update({ balance: current.balance - 50 });\n    })\n  ]);\n\n  const final = await db.users.findOne({ id: user.id });\n  expect(final.balance).toBe(0); // Proper isolation\n});\n```\n\n---\n\n## Agent-Driven Database Testing\n\n```typescript\n// Generate test data with integrity\nawait Task(\"Generate Test Data\", {\n  schema: 'ecommerce',\n  tables: ['users', 'products', 'orders'],\n  count: { users: 1000, products: 500, orders: 5000 },\n  preserveReferentialIntegrity: true\n}, \"qe-test-data-architect\");\n\n// Test migration safety\nawait Task(\"Migration Test\", {\n  migration: 'add-payment-status-column',\n  tests: ['forward', 'rollback', 'data-preservation'],\n  environment: 'staging'\n}, \"qe-test-executor\");\n```\n\n---\n\n## Agent Coordination Hints\n\n### Memory Namespace\n```\naqe/database-testing/\n\u251c\u2500\u2500 schema-snapshots/*   - Current schema state\n\u251c\u2500\u2500 migrations/*         - Migration test results\n\u251c\u2500\u2500 integrity/*          - Constraint validation\n\u2514\u2500\u2500 performance/*        - Query benchmarks\n```\n\n### Fleet Coordination\n```typescript\nconst dbFleet = await FleetManager.coordinate({\n  strategy: 'database-testing',\n  agents: [\n    'qe-test-data-architect',  // Generate test data\n    'qe-test-executor',        // Run DB tests\n    'qe-performance-tester'    // Query performance\n  ],\n  topology: 'sequential'\n});\n```\n\n---\n\n## Related Skills\n- [test-data-management](../test-data-management/) - Generate test data\n- [performance-testing](../performance-testing/) - Query performance\n- [compliance-testing](../compliance-testing/) - Data protection\n\n---\n\n## Remember\n\n**Test migrations before production:** Forward works, rollback works, data preserved, performance acceptable. Never deploy untested migrations.\n\n**With Agents:** `qe-test-data-architect` generates realistic test data with referential integrity. `qe-test-executor` validates migrations automatically in CI/CD.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "database-testing",
-    "description": "Database schema validation, data integrity testing, migration testing, transaction isolation, and query performance. Use when testing data persistence, ensuring referential integrity, or validating database migrations.",
-    "category": "specialized-testing",
-    "priority": "high",
-    "tokenEstimate": "900",
-    "agents": "[qe-test-data-architect, qe-test-executor, qe-performance-tester]",
-    "implementation_status": "optimized",
-    "optimization_version": "1.0",
-    "last_optimized": "2025-12-02",
-    "dependencies": "[]",
-    "quick_reference_card": "true",
-    "tags": "[database, schema, migration, transactions, integrity, sql, performance]",
-    "trust_tier": "3",
-    "validation": "",
-    "schema_path": "schemas/output.json",
-    "validator_path": "scripts/validate-config.json",
-    "eval_path": "evals/database-testing.yaml"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "specialized-testing",
+  "tags": [
+    "[database",
+    "schema",
+    "migration",
+    "transactions",
+    "integrity",
+    "sql",
+    "performance]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

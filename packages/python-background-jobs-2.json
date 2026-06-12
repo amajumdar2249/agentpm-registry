@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000044138",
   "name": "python-background-jobs",
   "slug": "python-background-jobs-2",
   "description": "Python background job patterns including task queues, workers, and event-driven architecture. Use when implementing async task processing, job queues, long-running operations, or decoupling work from request/response cycles.",
   "content": "\n# Python Background Jobs & Task Queues\n\nDecouple long-running or unreliable work from request/response cycles. Return immediately to the user while background workers handle the heavy lifting asynchronously.\n\n## When to Use This Skill\n\n- Processing tasks that take longer than a few seconds\n- Sending emails, notifications, or webhooks\n- Generating reports or exporting data\n- Processing uploads or media transformations\n- Integrating with unreliable external services\n- Building event-driven architectures\n\n## Core Concepts\n\n### 1. Task Queue Pattern\n\nAPI accepts request, enqueues a job, returns immediately with a job ID. Workers process jobs asynchronously.\n\n### 2. Idempotency\n\nTasks may be retried on failure. Design for safe re-execution.\n\n### 3. Job State Machine\n\nJobs transition through states: pending \u2192 running \u2192 succeeded/failed.\n\n### 4. At-Least-Once Delivery\n\nMost queues guarantee at-least-once delivery. Your code must handle duplicates.\n\n## Quick Start\n\nThis skill uses Celery for examples, a widely adopted task queue. Alternatives like RQ, Dramatiq, and cloud-native solutions (AWS SQS, GCP Tasks) are equally valid choices.\n\n```python\nfrom celery import Celery\n\napp = Celery(\"tasks\", broker=\"redis://localhost:6379\")\n\n@app.task\ndef send_email(to: str, subject: str, body: str) -> None:\n    # This runs in a background worker\n    email_client.send(to, subject, body)\n\n# In your API handler\nsend_email.delay(\"user@example.com\", \"Welcome!\", \"Thanks for signing up\")\n```\n\n## Fundamental Patterns\n\n### Pattern 1: Return Job ID Immediately\n\nFor operations exceeding a few seconds, return a job ID and process asynchronously.\n\n```python\nfrom uuid import uuid4\nfrom dataclasses import dataclass\nfrom enum import Enum\nfrom datetime import datetime\n\nclass JobStatus(Enum):\n    PENDING = \"pending\"\n    RUNNING = \"running\"\n    SUCCEEDED = \"succeeded\"\n    FAILED = \"failed\"\n\n@dataclass\nclass Job:\n    id: str\n    status: JobStatus\n    created_at: datetime\n    started_at: datetime | None = None\n    completed_at: datetime | None = None\n    result: dict | None = None\n    error: str | None = None\n\n# API endpoint\nasync def start_export(request: ExportRequest) -> JobResponse:\n    \"\"\"Start export job and return job ID.\"\"\"\n    job_id = str(uuid4())\n\n    # Persist job record\n    await jobs_repo.create(Job(\n        id=job_id,\n        status=JobStatus.PENDING,\n        created_at=datetime.utcnow(),\n    ))\n\n    # Enqueue task for background processing\n    await task_queue.enqueue(\n        \"export_data\",\n        job_id=job_id,\n        params=request.model_dump(),\n    )\n\n    # Return immediately with job ID\n    return JobResponse(\n        job_id=job_id,\n        status=\"pending\",\n        poll_url=f\"/jobs/{job_id}\",\n    )\n```\n\n### Pattern 2: Celery Task Configuration\n\nConfigure Celery tasks with proper retry and timeout settings.\n\n```python\nfrom celery import Celery\n\napp = Celery(\"tasks\", broker=\"redis://localhost:6379\")\n\n# Global configuration\napp.conf.update(\n    task_time_limit=3600,          # Hard limit: 1 hour\n    task_soft_time_limit=3000,      # Soft limit: 50 minutes\n    task_acks_late=True,            # Acknowledge after completion\n    task_reject_on_worker_lost=True,\n    worker_prefetch_multiplier=1,   # Don't prefetch too many tasks\n)\n\n@app.task(\n    bind=True,\n    max_retries=3,\n    default_retry_delay=60,\n    autoretry_for=(ConnectionError, TimeoutError),\n)\ndef process_payment(self, payment_id: str) -> dict:\n    \"\"\"Process payment with automatic retry on transient errors.\"\"\"\n    try:\n        result = payment_gateway.charge(payment_id)\n        return {\"status\": \"success\", \"transaction_id\": result.id}\n    except PaymentDeclinedError as e:\n        # Don't retry permanent failures\n        return {\"status\": \"declined\", \"reason\": str(e)}\n    except TransientError as e:\n        # Retry with exponential backoff\n        raise self.retry(exc=e, countdown=2 ** self.request.retries * 60)\n```\n\n### Pattern 3: Make Tasks Idempotent\n\nWorkers may retry on crash or timeout. Design for safe re-execution.\n\n```python\n@app.task(bind=True)\ndef process_order(self, order_id: str) -> None:\n    \"\"\"Process order idempotently.\"\"\"\n    order = orders_repo.get(order_id)\n\n    # Already processed? Return early\n    if order.status == OrderStatus.COMPLETED:\n        logger.info(\"Order already processed\", order_id=order_id)\n        return\n\n    # Already in progress? Check if we should continue\n    if order.status == OrderStatus.PROCESSING:\n        # Use idempotency key to avoid double-charging\n        pass\n\n    # Process with idempotency key\n    result = payment_provider.charge(\n        amount=order.total,\n        idempotency_key=f\"order-{order_id}\",  # Critical!\n    )\n\n    orders_repo.update(order_id, status=OrderStatus.COMPLETED)\n```\n\n**Idempotency Strategies:**\n\n1. **Check-before-write**: Verify state before action\n2. **Idempotency keys**: Use unique tokens with external services\n3. **Upsert patterns**: `INSERT ... ON CONFLICT UPDATE`\n4. **Deduplication window**: Track processed IDs for N hours\n\n### Pattern 4: Job State Management\n\nPersist job state transitions for visibility and debugging.\n\n```python\nclass JobRepository:\n    \"\"\"Repository for managing job state.\"\"\"\n\n    async def create(self, job: Job) -> Job:\n        \"\"\"Create new job record.\"\"\"\n        await self._db.execute(\n            \"\"\"INSERT INTO jobs (id, status, created_at)\n               VALUES ($1, $2, $3)\"\"\",\n            job.id, job.status.value, job.created_at,\n        )\n        return job\n\n    async def update_status(\n        self,\n        job_id: str,\n        status: JobStatus,\n        **fields,\n    ) -> None:\n        \"\"\"Update job status with timestamp.\"\"\"\n        updates = {\"status\": status.value, **fields}\n\n        if status == JobStatus.RUNNING:\n            updates[\"started_at\"] = datetime.utcnow()\n        elif status in (JobStatus.SUCCEEDED, JobStatus.FAILED):\n            updates[\"completed_at\"] = datetime.utcnow()\n\n        await self._db.execute(\n            \"UPDATE jobs SET status = $1, ... WHERE id = $2\",\n            updates, job_id,\n        )\n\n        logger.info(\n            \"Job status updated\",\n            job_id=job_id,\n            status=status.value,\n        )\n```\n\n## Detailed worked examples and patterns\n\nDetailed sections (starting with `## Advanced Patterns`) live in `references/details.md`. Read that file when the navigation summary above is insufficient.\n\n## Best Practices Summary\n\n1. **Return immediately** - Don't block requests for long operations\n2. **Persist job state** - Enable status polling and debugging\n3. **Make tasks idempotent** - Safe to retry on any failure\n4. **Use idempotency keys** - For external service calls\n5. **Set timeouts** - Both soft and hard limits\n6. **Implement DLQ** - Capture permanently failed tasks\n7. **Log transitions** - Track job state changes\n8. **Retry appropriately** - Exponential backoff for transient errors\n9. **Don't retry permanent failures** - Validation errors, invalid credentials\n10. **Monitor queue depth** - Alert on backlog growth\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "python-background-jobs",
-    "description": "Python background job patterns including task queues, workers, and event-driven architecture. Use when implementing async task processing, job queues, long-running operations, or decoupling work from request/response cycles."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032330",
   "name": "intercom-rate-limits",
   "slug": "intercom-rate-limits",
   "description": "Handle Intercom API rate limits with backoff, queuing, and header monitoring.",
   "content": "# Intercom Rate Limits\n\n## Overview\n\nIntercom enforces rate limits per app and per workspace. Handle 429 errors gracefully with exponential backoff, queue-based throttling, and proactive header monitoring.\n\n## Rate Limit Tiers\n\n| Scope | Limit | Notes |\n|-------|-------|-------|\n| Private app | 10,000 req/min | Per app |\n| Public app (OAuth) | 10,000 req/min | Per app |\n| Workspace total | 25,000 req/min | Across all apps |\n| Search endpoints | 1,000 req/min | `/contacts/search`, `/conversations/search` |\n| Scroll endpoints | 100 req/min | Bulk data export |\n\n## Rate Limit Headers\n\nEvery response includes these headers:\n\n```\nX-RateLimit-Limit: 10000        # Max requests per window\nX-RateLimit-Remaining: 9847     # Remaining requests\nX-RateLimit-Reset: 1711100060   # Unix timestamp when window resets\n```\n\n## Instructions\n\n### Step 1: Exponential Backoff with Header Awareness\n\n```typescript\nimport { IntercomClient, IntercomError } from \"intercom-client\";\n\nasync function withRateLimitRetry<T>(\n  operation: () => Promise<T>,\n  config = { maxRetries: 5, baseDelayMs: 1000, maxDelayMs: 60000 }\n): Promise<T> {\n  for (let attempt = 0; attempt <= config.maxRetries; attempt++) {\n    try {\n      return await operation();\n    } catch (err) {\n      if (!(err instanceof IntercomError)) throw err;\n      if (err.statusCode !== 429 && (err.statusCode ?? 0) < 500) throw err;\n      if (attempt === config.maxRetries) throw err;\n\n      let delayMs: number;\n\n      if (err.statusCode === 429) {\n        // Use X-RateLimit-Reset header for precise wait time\n        const resetTimestamp = err.headers?.[\"x-ratelimit-reset\"];\n        if (resetTimestamp) {\n          delayMs = Math.max(\n            (parseInt(resetTimestamp) * 1000) - Date.now() + 1000,\n            1000\n          );\n        } else {\n          delayMs = config.baseDelayMs * Math.pow(2, attempt);\n        }\n      } else {\n        // Server errors: exponential backoff with jitter\n        delayMs = config.baseDelayMs * Math.pow(2, attempt) + Math.random() * 500;\n      }\n\n      delayMs = Math.min(delayMs, config.maxDelayMs);\n      console.warn(`[Intercom] ${err.statusCode} - Retry ${attempt + 1}/${config.maxRetries} in ${delayMs}ms`);\n      await new Promise(r => setTimeout(r, delayMs));\n    }\n  }\n  throw new Error(\"Unreachable\");\n}\n```\n\n### Step 2: Proactive Rate Limit Monitor\n\n```typescript\nclass IntercomRateLimitMonitor {\n  private remaining = 10000;\n  private limit = 10000;\n  private resetAt = 0;\n\n  updateFromHeaders(headers: Record<string, string>): void {\n    if (headers[\"x-ratelimit-remaining\"]) {\n      this.remaining = parseInt(headers[\"x-ratelimit-remaining\"]);\n    }\n    if (headers[\"x-ratelimit-limit\"]) {\n      this.limit = parseInt(headers[\"x-ratelimit-limit\"]);\n    }\n    if (headers[\"x-ratelimit-reset\"]) {\n      this.resetAt = parseInt(headers[\"x-ratelimit-reset\"]) * 1000;\n    }\n  }\n\n  get usagePercent(): number {\n    return ((this.limit - this.remaining) / this.limit) * 100;\n  }\n\n  shouldThrottle(threshold = 90): boolean {\n    return this.usagePercent > threshold && Date.now() < this.resetAt;\n  }\n\n  msUntilReset(): number {\n    return Math.max(0, this.resetAt - Date.now());\n  }\n\n  async waitIfNeeded(threshold = 90): Promise<void> {\n    if (this.shouldThrottle(threshold)) {\n      const waitMs = this.msUntilReset() + 1000;\n      console.warn(`[Intercom] ${this.usagePercent.toFixed(0)}% rate used, waiting ${waitMs}ms`);\n      await new Promise(r => setTimeout(r, waitMs));\n    }\n  }\n}\n```\n\n### Step 3: Queue-Based Request Throttling\n\n```typescript\nimport PQueue from \"p-queue\";\n\n// Limit to 150 requests/second (well under 10,000/min)\nconst intercomQueue = new PQueue({\n  concurrency: 10,\n  interval: 1000,\n  intervalCap: 150,\n});\n\nasync function queuedRequest<T>(operation: () => Promise<T>): Promise<T> {\n  return intercomQueue.add(() => withRateLimitRetry(operation));\n}\n\n// Usage - all requests automatically throttled\nconst contacts = await Promise.all(\n  userIds.map(id =>\n    queuedRequest(() => client.contacts.find({ contactId: id }))\n  )\n);\n```\n\n### Step 4: Batch Operations to Reduce Request Count\n\n```typescript\n// Instead of N individual contact lookups, use search\nasync function findContactsByEmails(\n  client: IntercomClient,\n  emails: string[]\n): Promise<Map<string, any>> {\n  const results = new Map();\n\n  // Search supports up to 50 results per page\n  // Use OR queries to batch lookups\n  for (let i = 0; i < emails.length; i += 10) {\n    const batch = emails.slice(i, i + 10);\n    const searchResult = await queuedRequest(() =>\n      client.contacts.search({\n        query: {\n          operator: \"OR\",\n          value: batch.map(email => ({\n            field: \"email\",\n            operator: \"=\",\n            value: email,\n          })),\n        },\n      })\n    );\n\n    for (const contact of searchResult.data) {\n      results.set(contact.email, contact);\n    }\n  }\n\n  return results;\n}\n```\n\n### Step 5: Rate Limit Dashboard Metrics\n\n```typescript\n// Track rate limit usage for monitoring\nfunction logRateLimitMetrics(monitor: IntercomRateLimitMonitor): void {\n  console.log(JSON.stringify({\n    metric: \"intercom.rate_limit\",\n    remaining: monitor[\"remaining\"],\n    usage_percent: monitor.usagePercent,\n    ms_until_reset: monitor.msUntilReset(),\n    timestamp: new Date().toISOString(),\n  }));\n}\n```\n\n## Error Handling\n\n| Scenario | Strategy | Implementation |\n|----------|----------|----------------|\n| 429 with reset header | Wait until reset | Parse `X-RateLimit-Reset` |\n| 429 without headers | Exponential backoff | 1s, 2s, 4s, 8s, 16s |\n| Approaching limit (>90%) | Proactive throttle | Check remaining before request |\n| Bulk operations | Queue-based | `p-queue` with `intervalCap` |\n| Multiple apps hitting workspace limit | Coordinate | Shared rate limit monitor |\n\n## Resources\n\n- [Rate Limiting](https://developers.intercom.com/docs/references/rest-api/errors/rate-limiting)\n- [Pagination](https://developers.intercom.com/docs/build-an-integration/learn-more/rest-apis/pagination)\n- [p-queue](https://github.com/sindresorhus/p-queue)\n\n## Next Steps\n\nFor security configuration, see `intercom-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "intercom-rate-limits",
-    "description": "Handle Intercom API rate limits with backoff, queuing, and header monitoring.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

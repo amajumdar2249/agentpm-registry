@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032025",
   "name": "flexport-sdk-patterns",
   "slug": "flexport-sdk-patterns",
   "description": "Apply production-ready Flexport API patterns for TypeScript and Python.",
   "content": "# Flexport SDK Patterns\n\n## Overview\n\nProduction-ready patterns for the Flexport REST API v2. Since Flexport has no official npm/pip SDK, you build typed HTTP clients. Key patterns: singleton client, paginated iteration, retry wrapper, and Zod response validation.\n\n## Instructions\n\n### Pattern 1: Singleton Client with Auto-Retry\n\n```typescript\n// src/flexport/client.ts\nimport { z } from 'zod';\n\nclass FlexportClient {\n  private static instance: FlexportClient | null = null;\n  private base = 'https://api.flexport.com';\n  private headers: Record<string, string>;\n\n  private constructor(apiKey: string) {\n    this.headers = {\n      'Authorization': `Bearer ${apiKey}`,\n      'Flexport-Version': '2',\n      'Content-Type': 'application/json',\n    };\n  }\n\n  static getInstance(): FlexportClient {\n    if (!this.instance) {\n      const key = process.env.FLEXPORT_API_KEY;\n      if (!key) throw new Error('Missing FLEXPORT_API_KEY');\n      this.instance = new FlexportClient(key);\n    }\n    return this.instance;\n  }\n\n  async request<T>(path: string, options: RequestInit = {}): Promise<T> {\n    const res = await fetch(`${this.base}${path}`, { ...options, headers: { ...this.headers, ...options.headers } });\n    if (res.status === 429) {\n      const retryAfter = parseInt(res.headers.get('Retry-After') || '60');\n      await new Promise(r => setTimeout(r, retryAfter * 1000));\n      return this.request(path, options);  // Retry once\n    }\n    if (!res.ok) {\n      const body = await res.text();\n      throw new FlexportAPIError(res.status, body, path);\n    }\n    return res.json();\n  }\n}\n\nclass FlexportAPIError extends Error {\n  constructor(public status: number, public body: string, public path: string) {\n    super(`Flexport ${status} on ${path}: ${body}`);\n    this.name = 'FlexportAPIError';\n  }\n}\n```\n\n### Pattern 2: Paginated Iterator\n\n```typescript\n// Iterate all pages of a Flexport list endpoint\nasync function* paginate<T>(path: string, perPage = 25): AsyncGenerator<T> {\n  const client = FlexportClient.getInstance();\n  let page = 1;\n  while (true) {\n    const separator = path.includes('?') ? '&' : '?';\n    const res = await client.request<{ data: { records: T[]; total_count: number } }>(\n      `${path}${separator}page=${page}&per=${perPage}`\n    );\n    for (const record of res.data.records) yield record;\n    if (res.data.records.length < perPage) break;\n    page++;\n  }\n}\n\n// Usage: iterate all shipments\nfor await (const shipment of paginate<Shipment>('/shipments')) {\n  console.log(shipment.id, shipment.status);\n}\n```\n\n### Pattern 3: Zod Response Validation\n\n```typescript\nconst ShipmentSchema = z.object({\n  id: z.string(),\n  status: z.enum(['booked', 'in_transit', 'arrived', 'delivered']),\n  freight_type: z.enum(['ocean', 'air', 'trucking']),\n  origin_port: z.object({ code: z.string(), name: z.string() }),\n  destination_port: z.object({ code: z.string(), name: z.string() }),\n  cargo_ready_date: z.string(),\n  estimated_arrival_date: z.string().nullable(),\n});\n\ntype Shipment = z.infer<typeof ShipmentSchema>;\n\nasync function getShipment(id: string): Promise<Shipment> {\n  const client = FlexportClient.getInstance();\n  const res = await client.request<{ data: unknown }>(`/shipments/${id}`);\n  return ShipmentSchema.parse(res.data);  // Throws ZodError on mismatch\n}\n```\n\n### Pattern 4: Python Typed Client\n\n```python\nimport os, requests\nfrom dataclasses import dataclass\nfrom typing import Iterator\n\n@dataclass\nclass Shipment:\n    id: str\n    status: str\n    freight_type: str\n\nclass FlexportClient:\n    BASE = 'https://api.flexport.com'\n\n    def __init__(self):\n        self.session = requests.Session()\n        self.session.headers.update({\n            'Authorization': f'Bearer {os.environ[\"FLEXPORT_API_KEY\"]}',\n            'Flexport-Version': '2',\n        })\n\n    def list_shipments(self, per: int = 25) -> Iterator[Shipment]:\n        page = 1\n        while True:\n            r = self.session.get(f'{self.BASE}/shipments', params={'page': page, 'per': per})\n            r.raise_for_status()\n            records = r.json()['data']['records']\n            for rec in records:\n                yield Shipment(id=rec['id'], status=rec['status'], freight_type=rec['freight_type'])\n            if len(records) < per:\n                break\n            page += 1\n```\n\n## Error Handling\n\n| Pattern | Use Case | Benefit |\n|---------|----------|---------|\n| Singleton | All API calls | One instance, consistent config |\n| Paginator | List endpoints | No data loss from pagination |\n| Zod validation | Response parsing | Catches API contract changes early |\n| Error class | All failures | Structured error data for logging |\n\n## Resources\n\n- [Flexport API Reference](https://apidocs.flexport.com/)\n- [Zod Documentation](https://zod.dev/)\n\n## Next Steps\n\nApply patterns in `flexport-core-workflow-a` for real-world usage.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "flexport-sdk-patterns",
-    "description": "Apply production-ready Flexport API patterns for TypeScript and Python.",
-    "Trigger": "flexport SDK patterns\", \"flexport best practices\", \"flexport client wrapper\".",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

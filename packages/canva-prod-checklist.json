@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031437",
   "name": "canva-prod-checklist",
   "slug": "canva-prod-checklist",
   "description": "Execute Canva Connect API production deployment checklist and go-live",
   "content": "# Canva Production Checklist\n\n## Overview\n\nComplete checklist for deploying Canva Connect API integrations to production, covering OAuth configuration, security, error handling, monitoring, and Canva's integration review process.\n\n## Pre-Deployment\n\n### OAuth & Security\n\n- [ ] Client ID and secret stored in secret manager (not env files)\n- [ ] Redirect URIs use HTTPS and match production domains\n- [ ] Only required OAuth scopes requested (least privilege)\n- [ ] Access tokens stored encrypted at rest\n- [ ] Refresh token rotation handled (single-use tokens)\n- [ ] Token revocation implemented for user disconnect\n- [ ] No client secrets in frontend code\n\n### API Integration\n\n- [ ] All API calls use `api.canva.com/rest/v1/*` endpoints\n- [ ] Rate limits respected with exponential backoff (see `canva-rate-limits`)\n- [ ] Export polling implemented with timeout (don't poll forever)\n- [ ] 429 responses handled with `Retry-After` header\n- [ ] 401 responses trigger automatic token refresh\n- [ ] Error responses parsed and logged (without tokens)\n- [ ] Blank designs auto-delete warning handled (7-day window)\n- [ ] Export download URLs consumed within 24-hour window\n\n### Webhook Security\n\n- [ ] Webhook endpoint uses HTTPS\n- [ ] JWK signature verification implemented (see `canva-webhooks-events`)\n- [ ] Webhook handler returns 200 immediately\n- [ ] Heavy processing done asynchronously\n- [ ] Idempotency keys prevent duplicate processing\n\n### Data Handling\n\n- [ ] No access tokens in log output\n- [ ] User design metadata treated as sensitive\n- [ ] Temporary URLs (thumbnails, exports) not cached beyond expiry\n- [ ] Thumbnail URLs expire in 15 minutes \u2014 refresh as needed\n- [ ] Edit/view URLs expire in 30 days \u2014 regenerate via API\n\n## Production Readiness Verification\n\n```bash\n#!/bin/bash\n# canva-prod-verify.sh\n\necho \"=== Canva Production Readiness ===\"\n\n# 1. Verify API connectivity from production\nHTTP_CODE=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"Authorization: Bearer $CANVA_ACCESS_TOKEN\" \\\n  \"https://api.canva.com/rest/v1/users/me\")\necho \"[$([ $HTTP_CODE = 200 ] && echo 'PASS' || echo 'FAIL')] API connectivity: HTTP $HTTP_CODE\"\n\n# 2. Test design creation\nDESIGN=$(curl -s -X POST \"https://api.canva.com/rest/v1/designs\" \\\n  -H \"Authorization: Bearer $CANVA_ACCESS_TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"design_type\":{\"type\":\"custom\",\"width\":100,\"height\":100},\"title\":\"Prod Test\"}')\nDESIGN_ID=$(echo \"$DESIGN\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['design']['id'])\" 2>/dev/null)\necho \"[$([ -n \"$DESIGN_ID\" ] && echo 'PASS' || echo 'FAIL')] Design creation: $DESIGN_ID\"\n\n# 3. Test export\nif [ -n \"$DESIGN_ID\" ]; then\n  EXPORT=$(curl -s -X POST \"https://api.canva.com/rest/v1/exports\" \\\n    -H \"Authorization: Bearer $CANVA_ACCESS_TOKEN\" \\\n    -H \"Content-Type: application/json\" \\\n    -d \"{\\\"design_id\\\":\\\"$DESIGN_ID\\\",\\\"format\\\":{\\\"type\\\":\\\"png\\\"}}\")\n  EXPORT_ID=$(echo \"$EXPORT\" | python3 -c \"import sys,json; print(json.load(sys.stdin)['job']['id'])\" 2>/dev/null)\n  echo \"[$([ -n \"$EXPORT_ID\" ] && echo 'PASS' || echo 'FAIL')] Export job: $EXPORT_ID\"\nfi\n\necho \"\"\necho \"=== Done ===\"\n```\n\n## Canva Integration Review\n\nFor **public integrations** (available to all Canva users), you must pass Canva's review:\n\n1. Submit your integration for review in the Canva developer portal\n2. Canva reviews security, OAuth implementation, and UX\n3. Preview features (e.g., webhooks) are **not allowed** in public integrations\n4. Fix any issues and resubmit\n\n**Private integrations** (your organization only) do not require review.\n\n## Health Check Endpoint\n\n```typescript\napp.get('/health', async (req, res) => {\n  const start = Date.now();\n  let canvaStatus = 'unknown';\n\n  try {\n    const me = await fetch('https://api.canva.com/rest/v1/users/me', {\n      headers: { 'Authorization': `Bearer ${getServiceToken()}` },\n      signal: AbortSignal.timeout(5000),\n    });\n    canvaStatus = me.ok ? 'healthy' : `error:${me.status}`;\n  } catch {\n    canvaStatus = 'unreachable';\n  }\n\n  res.json({\n    status: canvaStatus === 'healthy' ? 'healthy' : 'degraded',\n    services: { canva: { status: canvaStatus, latencyMs: Date.now() - start } },\n    timestamp: new Date().toISOString(),\n  });\n});\n```\n\n## Monitoring Alerts\n\n| Alert | Condition | Severity |\n|-------|-----------|----------|\n| Auth failures | 401 errors > 0 | P1 |\n| Rate limited | 429 errors > 5/min | P2 |\n| Export failures | `license_required` or `internal_failure` | P3 |\n| API unreachable | Connection timeout | P1 |\n| Token refresh fails | Refresh returns error | P1 |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Token refresh loop | Revoked refresh token | Re-authorize user |\n| Export stuck `in_progress` | Backend delay | Timeout after 120s, retry |\n| Webhook URL rejected | HTTP not HTTPS | Use HTTPS endpoint |\n| Review rejection | Using preview features | Remove preview-only features |\n\n## Resources\n\n- [Canva Connect Quickstart](https://www.canva.dev/docs/connect/quickstart/)\n- [Creating Integrations](https://www.canva.dev/docs/connect/creating-integrations/)\n- [Canva Changelog](https://www.canva.dev/docs/connect/changelog/)\n\n## Next Steps\n\nFor version upgrades, see `canva-upgrade-migration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "canva-prod-checklist",
-    "description": "Execute Canva Connect API production deployment checklist and go-live",
-    "allowed-tools": "Read, Bash(kubectl:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

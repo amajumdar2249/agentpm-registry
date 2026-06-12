@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000008136",
   "name": "beat-sync-video-editing",
   "slug": "beat-sync-video-editing",
   "description": "This skill should be used when the user asks to \"edit a video to music\", \"create a beat-synced edit\", \"make a montage\", \"sync cuts to beats\", \"cut a video to the beat\", \"make a music video edit\", \"edit clips to a song\", \"build FFmpeg filters for video editing\", or mentions combining video clips with audio tracks using timed cuts. Provides knowledge of the EditPlan format, FFmpeg filter_complex construction, and beat-sync editing workflows.",
   "content": "\n# Beat-Sync Video Editing\n\n## Purpose\n\nProvide domain expertise for creating beat-synced video edits: taking a source video and an audio track, selecting clips from the video that align with the music's rhythm, and rendering the final output with FFmpeg.\n\n## Core Concept: The EditPlan\n\nEvery edit starts as an EditPlan \u2014 a JSON structure that describes which video clips to use and where in the audio to place them:\n\n```json\n{\n  \"audio_start\": \"00:13\",\n  \"audio_duration\": 6.5,\n  \"clips\": [\n    { \"video_start\": \"00:08\", \"duration\": 2.0, \"description\": \"Opening shot\" },\n    { \"video_start\": \"00:45\", \"duration\": 1.5, \"description\": \"Action moment\" },\n    { \"video_start\": \"01:22\", \"duration\": 3.0, \"description\": \"Build-up\" }\n  ],\n  \"reasoning\": \"Matches rising intensity with beat drops\"\n}\n```\n\n**Timestamp format:** `audio_start` and `video_start` use MM:SS strings (e.g. `\"01:15\"` for 1 minute 15 seconds). `audio_duration` and clip `duration` use numbers in seconds.\n\n**Critical constraints:**\n- `audio_start` must be valid MM:SS format, non-negative\n- `audio_duration` must be positive (seconds)\n- Every clip must have valid MM:SS `video_start` and positive `duration` (seconds)\n- Sum of all clip durations must equal `audio_duration` (within 0.5s tolerance)\n- Clip order is intentional \u2014 not necessarily chronological. Non-linear ordering creates dynamic edits.\n\n## Workflow: From Files to Final Video\n\n### Step 1: Generate EditPlan via Gemini\n\nRun the Gemini script to analyze video + audio and produce a plan:\n\n```bash\n# Fresh upload (default: files kept 48h for reuse, ECLIPTIC_FILES printed on stderr):\nbash ${CLAUDE_PLUGIN_ROOT}/scripts/gemini-edit-plan.sh \\\n  --video <video_path> \\\n  --audio <audio_path> \\\n  --prompt \"<user's edit description>\"\n\n# Reuse previously uploaded files (skips upload, much faster):\nbash ${CLAUDE_PLUGIN_ROOT}/scripts/gemini-edit-plan.sh \\\n  --video-uri <uri> --video-mime <mime> \\\n  --audio-uri <uri> --audio-mime <mime> \\\n  --prompt \"<different description>\"\n\n# One-shot mode (delete files immediately after use):\nbash ${CLAUDE_PLUGIN_ROOT}/scripts/gemini-edit-plan.sh \\\n  --video <video_path> \\\n  --audio <audio_path> \\\n  --prompt \"<description>\" --cleanup\n```\n\n- Outputs EditPlan JSON to stdout, progress to stderr\n- Requires `GEMINI_API_KEY`, `curl`, and `jq`\n- Gemini watches the video and listens to the audio simultaneously\n\n**File lifecycle.** The script keeps uploaded files by default so subsequent runs can reuse them without re-uploading. Gemini enforces a 48-hour TTL \u2014 after that, URIs go stale and must be re-uploaded. Each run emits an `ECLIPTIC_FILES` JSON line on stderr containing `video_name`, `audio_name`, URIs, and MIME types \u2014 capture this to iterate with `--video-uri` / `--audio-uri`. The script also prints the exact `cleanup-gemini-files.sh` command at the end of every run so deletion is explicit and copy-pasteable. To flip the default to one-shot deletion, pass `--cleanup` or export `ECLIPTIC_CLEANUP=1` in the environment. `--no-cleanup` is accepted as a no-op alias for the default.\n\n**Model selection.** The script defaults to `gemini-3-flash-preview`. To use a different model, export `GEMINI_MODEL` before invocation:\n\n```bash\nexport GEMINI_MODEL=gemini-3.1-pro-preview   # stronger reasoning, slower\n# or\nexport GEMINI_MODEL=gemini-2.5-flash         # stable (non-preview) fallback\n```\n\nThe model name is passed straight into the request URL, so any Gemini model that supports video + audio input and structured JSON output will work.\n\n### Step 2: Validate the Plan\n\n```bash\necho '<plan_json>' | bash ${CLAUDE_PLUGIN_ROOT}/scripts/validate-plan.sh\n```\n\n- Outputs `{\"valid\": true, \"errors\": []}` or `{\"valid\": false, \"errors\": [...]}`\n- Exit code 0 = valid, 1 = invalid\n\n### Step 3: Build FFmpeg Filters\n\n```bash\necho '<plan_json>' | bash ${CLAUDE_PLUGIN_ROOT}/scripts/build-filter.sh\n```\n\n- Outputs `{\"videoFilter\": \"...\", \"audioFilter\": \"...\", \"fullFilter\": \"...\"}`\n- The `fullFilter` field is what goes into FFmpeg's `-filter_complex` argument\n\n### Step 4: Render with FFmpeg\n\n```bash\nffmpeg -y -i \"<video_path>\" -i \"<audio_path>\" \\\n  -filter_complex \"<fullFilter>\" \\\n  -map \"[outv]\" -map \"[outa]\" \\\n  -c:v libx264 -preset fast -crf 23 \\\n  -c:a aac -shortest \\\n  \"<output_path>\"\n```\n\n## FFmpeg Filter Anatomy\n\nFor a 3-clip edit, the `fullFilter` looks like:\n\n```\n[0:v]trim=start=8.000:duration=2.000,setpts=PTS-STARTPTS[v0];\n[0:v]trim=start=45.000:duration=1.500,setpts=PTS-STARTPTS[v1];\n[0:v]trim=start=22.000:duration=3.000,setpts=PTS-STARTPTS[v2];\n[v0][v1][v2]concat=n=3:v=1:a=0[outv];\n[1:a]atrim=start=13.000:duration=6.500,asetpts=PTS-STARTPTS[outa]\n```\n\n- `[0:v]` = first input (video), `[1:a]` = second input (audio)\n- `trim` extracts a segment, `setpts=PTS-STARTPTS` resets timestamps\n- `concat` joins all video segments in order\n- `atrim` extracts the audio section\n\nFor the full FFmpeg filter reference, see `${CLAUDE_SKILL_DIR}/references/ffmpeg-filters.md`.\n\n## Troubleshooting\n\n**Duration mismatch error**: Clip durations don't sum to `audio_duration`. Fix by adjusting the last clip's duration to absorb the difference, or re-run Gemini with a stricter prompt.\n\n**FFmpeg \"Error\" in stderr**: FFmpeg writes progress and warnings to stderr. Only treat it as a real error if the output file wasn't created. Check for actual error patterns like `No such file`, `Invalid data`, or `Conversion failed`.\n\n**Gemini returns poor clips**: Add specificity to the prompt. Instead of \"make an edit\", say \"make a fast 30-second action edit, cut every 1-2 seconds on the beat drops, start from the chorus\".\n\n## Additional Resources\n\n### Reference Files\n\n- **`${CLAUDE_SKILL_DIR}/references/ffmpeg-filters.md`** \u2014 Detailed FFmpeg filter_complex syntax, encoding options, common flags\n- **`${CLAUDE_SKILL_DIR}/references/edit-plan-schema.md`** \u2014 Full EditPlan JSON schema, validation rules, edge cases\n\n### Scripts\n\n- **`${CLAUDE_PLUGIN_ROOT}/scripts/gemini-edit-plan.sh`** \u2014 Upload to Gemini via REST API, get EditPlan (supports `--no-cleanup` and file reuse)\n- **`${CLAUDE_PLUGIN_ROOT}/scripts/validate-plan.sh`** \u2014 Validate EditPlan JSON\n- **`${CLAUDE_PLUGIN_ROOT}/scripts/build-filter.sh`** \u2014 Convert EditPlan to FFmpeg filters\n- **`${CLAUDE_PLUGIN_ROOT}/scripts/cleanup-gemini-files.sh`** \u2014 Delete uploaded files from Gemini when done iterating\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "beat-sync-video-editing",
-    "description": "This skill should be used when the user asks to \"edit a video to music\", \"create a beat-synced edit\", \"make a montage\", \"sync cuts to beats\", \"cut a video to the beat\", \"make a music video edit\", \"edit clips to a song\", \"build FFmpeg filters for video editing\", or mentions combining video clips with audio tracks using timed cuts. Provides knowledge of the EditPlan format, FFmpeg filter_complex construction, and beat-sync editing workflows."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

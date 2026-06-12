@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000007914",
   "name": "pulumi-neo",
   "slug": "pulumi-neo",
   "description": "Manages cloud infrastructure through natural language conversations with Pulumi Neo, an AI agent for platform engineers. Enables infrastructure analysis, resource provisioning, stack deployment, and configuration management via conversational AI. Use when creating Neo tasks, requesting infrastructure analysis, automating cloud deployments, managing infrastructure as code (IaC), provisioning AWS/Azure/GCP resources, managing infrastructure through natural language prompts, reviewing PRs with Neo, handling Neo approval workflows, or checking Neo task status and events. Also use when the user mentions \"Pulumi Neo\", \"Neo task\", \"Neo agent\", or wants AI-assisted infrastructure management.",
   "content": "\n# Pulumi Neo Skill\n\n## Prerequisites\n\n- **Pulumi Cloud account** with Neo access\n- **PULUMI_ACCESS_TOKEN** environment variable set with your Personal Access Token\n- **Organization**: Required for all Neo API calls\n\n## Detecting Organization\n\n```bash\n# Get current Pulumi organization from CLI\npulumi org get-default\n\n# If no default org or using self-managed backend, ask user for organization name\n```\n\nIf `pulumi org get-default` returns an error or shows a non-cloud backend, prompt the user for their Pulumi Cloud organization name.\n\n## Quick Start\n\n**IMPORTANT:** Always use `--no-poll` in Claude Code to prevent blocking.\n\n**Preferred: Python Script**\n```bash\npython <skill-base-directory>/scripts/neo_task.py --org <org> --message \"Your message\" --no-poll\n```\n\n**Alternative: Direct API**\n```bash\nexport PULUMI_ACCESS_TOKEN=<your-token>\nTIMESTAMP=$(date -u +\"%Y-%m-%dT%H:%M:%SZ\")\ncurl -s -X POST \"https://api.pulumi.com/api/preview/agents/<org>/tasks\" \\\n  -H \"Authorization: token $PULUMI_ACCESS_TOKEN\" \\\n  -H \"Accept: application/vnd.pulumi+8\" \\\n  -H \"Content-Type: application/json\" \\\n  -d \"{\\\"message\\\":{\\\"type\\\":\\\"user_message\\\",\\\"content\\\":\\\"How many stacks do I have?\\\",\\\"timestamp\\\":\\\"$TIMESTAMP\\\",\\\"entity_diff\\\":{\\\"add\\\":[],\\\"remove\\\":[]}}}\"\n```\n\nFetch events: `curl -s \"https://api.pulumi.com/api/preview/agents/<org>/tasks/<task-id>/events\" -H \"Authorization: token $PULUMI_ACCESS_TOKEN\" -H \"Accept: application/vnd.pulumi+8\" | jq '.events[-1].eventBody.content'`\n\n**MCP Tools** (if Pulumi MCP server is installed): `mcp__pulumi__neo-bridge`, `mcp__pulumi__neo-get-tasks`, `mcp__pulumi__neo-continue-task`\n\n## Using the Python Script\n\nThe script handles Neo task creation, polling, and management:\n\n```bash\n# Create a task and poll for updates (interactive/terminal use)\npython scripts/neo_task.py --org <org-name> --message \"Help me optimize my Pulumi stack\"\n\n# Create task without polling (CI/CD or programmatic use)\npython scripts/neo_task.py --org <org-name> --message \"Analyze this\" --no-poll\n\n# Create task with stack context\npython scripts/neo_task.py --org <org-name> \\\n  --message \"Analyze this stack\" \\\n  --stack-name prod --stack-project my-infra --no-poll\n\n# Create task with repository context\npython scripts/neo_task.py --org <org-name> \\\n  --message \"Review this infrastructure code\" \\\n  --repo-name my-repo --repo-org my-github-org --no-poll\n\n# List existing tasks\npython scripts/neo_task.py --org <org-name> --list\n\n# Fetch current events (single request, no polling)\npython scripts/neo_task.py --org <org-name> --task-id <task-id> --get-events\n\n# Poll an existing task for updates (interactive)\npython scripts/neo_task.py --org <org-name> --task-id <task-id>\n\n# Send approval for a pending request\npython scripts/neo_task.py --org <org-name> --task-id <task-id> --approve\n\n# Cancel a pending request\npython scripts/neo_task.py --org <org-name> --task-id <task-id> --cancel\n```\n\n## Neo Task Workflow\n\n### Creating Tasks\n\nTasks are created with a natural language message describing what you want Neo to do:\n\n- **Infrastructure analysis**: \"Analyze my production stack for security issues\"\n- **Maintenance operations**: \"Help me upgrade my Kubernetes cluster\"\n- **Configuration changes**: \"Add monitoring to my Lambda functions\"\n- **Multi-step workflows**: \"Set up a complete CI/CD pipeline for this project\"\n\n### Entity Context\n\nAttach entities for context: `stack` (name + project), `repository` (name + org + forge), `pull_request` (number + merged + repository), `policy_issue` (id).\n\n### Task Status\n\n| Status | Description |\n|--------|-------------|\n| `running` | Neo is actively processing the task |\n| `idle` | Task is waiting for input or has finished processing |\n\n**Note:** Task completion and approval requests are determined by examining events, not task status.\n\n### Approval Flow\n\nWhen Neo requires confirmation for an operation (this is a key concept \u2014 Neo never makes destructive changes without asking):\n\n1. Task status remains `running` or transitions to `idle`\n2. An `agentResponse` event contains `tool_calls` with an `approval_request` tool \u2014 this is the specific event structure to look for\n3. The `approval_request_id` is found in the tool call parameters\n4. User reviews the proposed changes\n5. Send approval via `--approve` or cancellation via `--cancel`\n\n**Detecting approvals:** Check events for `eventBody.tool_calls` containing `approval_request` entries rather than relying on task status. The approval_request_id from the tool call parameters is needed to respond.\n\n```bash\n# Approve a pending request\npython scripts/neo_task.py --org <org> --task-id <task-id> --approve\n\n# Cancel/reject a pending request\npython scripts/neo_task.py --org <org> --task-id <task-id> --cancel\n```\n\n## Common Workflows\n\n### Analyze Infrastructure\n\n```bash\npython scripts/neo_task.py --org myorg \\\n  --message \"What security improvements can I make to my AWS infrastructure?\" \\\n  --stack-name prod --stack-project aws-infra --no-poll\n```\n\n### Fix Policy Violations\n\n```bash\npython scripts/neo_task.py --org myorg \\\n  --message \"Help me fix the policy violations in my production stack\" --no-poll\n```\n\n### Generate Pulumi Code\n\n```bash\npython scripts/neo_task.py --org myorg \\\n  --message \"Create a new Pulumi TypeScript project for a containerized web app on AWS ECS\" --no-poll\n```\n\n### Review Pull Request\n\n```bash\npython scripts/neo_task.py --org myorg \\\n  --message \"Review the infrastructure changes in this PR\" \\\n  --repo-name infra --repo-org myorg --repo-forge github --no-poll\n```\n\n## Troubleshooting\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| 401 | Invalid/missing token | Verify with `curl -s -H \"Authorization: token $PULUMI_ACCESS_TOKEN\" https://api.pulumi.com/api/user` |\n| 404 | Wrong org or endpoint | Verify org with `pulumi org get-default` |\n| 409 | Task busy | Wait for current operation to complete |\n| Script hangs | Missing `--no-poll` | Kill with Ctrl+C, add `--no-poll` flag |\n| Token not found | Not exported | Run `export PULUMI_ACCESS_TOKEN=\"$PULUMI_ACCESS_TOKEN\"` |\n\n## API Reference\n\nBase URL: `https://api.pulumi.com/api/preview/agents`\n\n| Endpoint | Method | Description |\n|----------|--------|-------------|\n| `/{org}/tasks` | POST | Create task |\n| `/{org}/tasks` | GET | List tasks |\n| `/{org}/tasks/{id}` | GET | Get task |\n| `/{org}/tasks/{id}/events` | GET | Get events |\n| `/{org}/tasks/{id}` | POST | Send message/approval |\n\nRequired headers:\n- `Authorization: token $PULUMI_ACCESS_TOKEN`\n- `Accept: application/vnd.pulumi+8`\n- `Content-Type: application/json`\n\nSee [references/pulumi-neo-api.md](references/pulumi-neo-api.md) for full details.",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "pulumi-neo",
-    "description": "Manages cloud infrastructure through natural language conversations with Pulumi Neo, an AI agent for platform engineers. Enables infrastructure analysis, resource provisioning, stack deployment, and configuration management via conversational AI. Use when creating Neo tasks, requesting infrastructure analysis, automating cloud deployments, managing infrastructure as code (IaC), provisioning AWS/Azure/GCP resources, managing infrastructure through natural language prompts, reviewing PRs with Neo, handling Neo approval workflows, or checking Neo task status and events. Also use when the user mentions \"Pulumi Neo\", \"Neo task\", \"Neo agent\", or wants AI-assisted infrastructure management."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

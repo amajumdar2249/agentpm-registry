@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009445",
   "name": "bio-spatial-transcriptomics-spatial-preprocessing",
   "slug": "bio-spatial-transcriptomics-spatial-preprocessing",
   "description": "Quality control, filtering, normalization, and feature selection for spatial transcriptomics data. Calculate QC metrics, filter spots/cells, normalize counts, and identify highly variable genes. Use when filtering and normalizing spatial transcriptomics data.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: matplotlib 3.8+, numpy 1.26+, scanpy 1.10+, squidpy 1.3+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Spatial Preprocessing\n\n**\"Preprocess my spatial transcriptomics data\"** \u2192 Calculate spatial QC metrics (genes/spot, mitochondrial fraction), filter spots by expression and tissue coverage, normalize, and select variable genes.\n- Python: `scanpy.pp.calculate_qc_metrics()` \u2192 `filter_cells()` \u2192 `normalize_total()` on spatial AnnData\n\nQC, filtering, normalization, and feature selection for spatial data.\n\n## Required Imports\n\n```python\nimport squidpy as sq\nimport scanpy as sc\nimport numpy as np\nimport matplotlib.pyplot as plt\n```\n\n## Calculate QC Metrics\n\n**Goal:** Compute per-spot and per-gene quality control statistics.\n\n**Approach:** Use Scanpy's `calculate_qc_metrics` to generate total counts, gene counts, and other summary statistics.\n\n```python\n# Calculate standard QC metrics\nsc.pp.calculate_qc_metrics(adata, inplace=True)\n\n# View QC columns\nprint(adata.obs[['total_counts', 'n_genes_by_counts']].describe())\nprint(adata.var[['total_counts', 'n_cells_by_counts']].describe())\n```\n\n## Calculate Mitochondrial Content\n\n**Goal:** Quantify mitochondrial gene expression as a quality indicator.\n\n**Approach:** Flag MT-prefixed genes, then compute percentage of counts from mitochondrial genes per spot.\n\n```python\n# Mark mitochondrial genes\nadata.var['mt'] = adata.var_names.str.startswith('MT-')\n\n# Calculate percent mitochondrial\nsc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], inplace=True)\nprint(f\"Mean MT%: {adata.obs['pct_counts_mt'].mean():.1f}\")\n```\n\n## Visualize QC Metrics on Tissue\n\n**Goal:** Display QC metrics overlaid on tissue coordinates to identify spatial patterns in data quality.\n\n**Approach:** Use Squidpy or Scanpy spatial plots with QC metric columns as color variables.\n\n```python\n# Plot QC metrics spatially\nsq.pl.spatial_scatter(adata, color=['total_counts', 'n_genes_by_counts', 'pct_counts_mt'], ncols=3)\n\n# Or with Scanpy\nsc.pl.spatial(adata, color=['total_counts', 'n_genes_by_counts'], spot_size=1.5)\n```\n\n## QC Metric Distributions\n\n```python\nfig, axes = plt.subplots(1, 3, figsize=(12, 4))\naxes[0].hist(adata.obs['total_counts'], bins=50)\naxes[0].set_xlabel('Total counts')\naxes[1].hist(adata.obs['n_genes_by_counts'], bins=50)\naxes[1].set_xlabel('Genes detected')\naxes[2].hist(adata.obs['pct_counts_mt'], bins=50)\naxes[2].set_xlabel('MT %')\nplt.tight_layout()\n```\n\n## Filter Spots\n\n**Goal:** Remove low-quality spots based on count, gene, and mitochondrial thresholds.\n\n**Approach:** Apply sequential filters for minimum counts, minimum genes, and maximum mitochondrial percentage.\n\n```python\n# Filter based on QC metrics\nprint(f'Before filtering: {adata.n_obs} spots')\n\n# Minimum counts and genes\nsc.pp.filter_cells(adata, min_counts=500)\nsc.pp.filter_cells(adata, min_genes=200)\n\n# Maximum mitochondrial content\nadata = adata[adata.obs['pct_counts_mt'] < 20].copy()\n\nprint(f'After filtering: {adata.n_obs} spots')\n```\n\n## Filter Genes\n\n**Goal:** Remove lowly expressed genes detected in very few spots.\n\n**Approach:** Apply a minimum cell count threshold to drop genes with negligible spatial coverage.\n\n```python\n# Remove genes detected in few spots\nprint(f'Before filtering: {adata.n_vars} genes')\nsc.pp.filter_genes(adata, min_cells=10)\nprint(f'After filtering: {adata.n_vars} genes')\n```\n\n## Normalization\n\n**Goal:** Normalize count data to remove library size effects and prepare for downstream analysis.\n\n**Approach:** Store raw counts as a layer, normalize to median total counts, then log-transform.\n\n```python\n# Store raw counts\nadata.layers['counts'] = adata.X.copy()\n\n# Normalize to median total counts\nsc.pp.normalize_total(adata, target_sum=1e4)\n\n# Log transform\nsc.pp.log1p(adata)\n```\n\n## SCTransform-like Normalization\n\n**Goal:** Apply variance-stabilizing normalization analogous to Seurat's SCTransform.\n\n**Approach:** Compute Pearson residuals from raw counts using Scanpy's experimental module.\n\n```python\n# Pearson residuals normalization (similar to SCTransform)\n# Requires raw counts\nadata_raw = adata.copy()\nadata_raw.X = adata_raw.layers['counts']\n\nsc.experimental.pp.normalize_pearson_residuals(adata_raw)\nadata.layers['pearson'] = adata_raw.X.copy()\n```\n\n## Highly Variable Genes\n\n**Goal:** Identify genes with high expression variability for feature selection.\n\n**Approach:** Use Scanpy's HVG detection with the Seurat v3 flavor on raw count data.\n\n```python\n# Find HVGs\nsc.pp.highly_variable_genes(adata, n_top_genes=2000, flavor='seurat_v3', layer='counts')\n\n# View HVG stats\nprint(f\"Found {adata.var['highly_variable'].sum()} HVGs\")\nsc.pl.highly_variable_genes(adata)\n```\n\n## Spatially Variable Genes\n\n**Goal:** Identify genes whose expression varies significantly across tissue space.\n\n**Approach:** Build a spatial neighbor graph, then compute Moran's I autocorrelation to rank genes by spatial variability.\n\n```python\n# Compute spatial neighbors first\nsq.gr.spatial_neighbors(adata, coord_type='generic', n_neighs=6)\n\n# Find spatially variable genes using Moran's I\nsq.gr.spatial_autocorr(adata, mode='moran', genes=adata.var_names[:1000])\n\n# Get top spatially variable genes\nsvg = adata.uns['moranI'].sort_values('I', ascending=False)\nprint('Top spatially variable genes:')\nprint(svg.head(20))\n```\n\n## Combine HVG and SVG\n\n**Goal:** Create a unified gene set that captures both expression variability and spatial patterning.\n\n**Approach:** Take the union of highly variable genes and top spatially variable genes for downstream analysis.\n\n```python\n# Get union of highly variable and spatially variable genes\nhvg = set(adata.var_names[adata.var['highly_variable']])\nsvg_top = set(adata.uns['moranI'].head(500).index)\nselected_genes = hvg | svg_top\n\nprint(f'HVG: {len(hvg)}, SVG: {len(svg_top)}, Union: {len(selected_genes)}')\n\n# Subset to selected genes for downstream\nadata_subset = adata[:, list(selected_genes)].copy()\n```\n\n## Scale Data\n\n```python\n# Scale for PCA (use log-normalized data)\nsc.pp.scale(adata, max_value=10)\n```\n\n## PCA\n\n```python\n# Run PCA\nsc.tl.pca(adata, n_comps=50)\n\n# Variance explained\nsc.pl.pca_variance_ratio(adata, n_pcs=50)\n```\n\n## Complete Preprocessing Pipeline\n\n**Goal:** Execute a full spatial preprocessing workflow from raw data to PCA-ready AnnData.\n\n**Approach:** Chain QC, filtering, normalization, HVG selection, scaling, and PCA into a single pipeline.\n\n```python\nimport squidpy as sq\nimport scanpy as sc\n\n# Load data\nadata = sq.read.visium('spaceranger_output/')\n\n# QC\nadata.var['mt'] = adata.var_names.str.startswith('MT-')\nsc.pp.calculate_qc_metrics(adata, qc_vars=['mt'], inplace=True)\n\n# Filter\nsc.pp.filter_cells(adata, min_counts=1000)\nsc.pp.filter_cells(adata, min_genes=500)\nadata = adata[adata.obs['pct_counts_mt'] < 20].copy()\nsc.pp.filter_genes(adata, min_cells=10)\n\n# Normalize\nadata.layers['counts'] = adata.X.copy()\nsc.pp.normalize_total(adata, target_sum=1e4)\nsc.pp.log1p(adata)\n\n# HVGs\nsc.pp.highly_variable_genes(adata, n_top_genes=2000, flavor='seurat_v3', layer='counts')\n\n# Scale and PCA\nsc.pp.scale(adata, max_value=10)\nsc.tl.pca(adata, n_comps=50)\n\nprint(f'Preprocessed: {adata.n_obs} spots, {adata.n_vars} genes')\nadata.write_h5ad('preprocessed.h5ad')\n```\n\n## Related Skills\n\n- spatial-data-io - Load spatial data\n- spatial-neighbors - Build spatial graphs\n- single-cell/preprocessing - Non-spatial preprocessing\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-spatial-transcriptomics-spatial-preprocessing",
-    "description": "Quality control, filtering, normalization, and feature selection for spatial transcriptomics data. Calculate QC metrics, filter spots/cells, normalize counts, and identify highly variable genes. Use when filtering and normalizing spatial transcriptomics data.",
-    "tool_type": "python",
-    "primary_tool": "squidpy"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

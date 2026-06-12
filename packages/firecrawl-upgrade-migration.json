@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031979",
   "name": "firecrawl-upgrade-migration",
   "slug": "firecrawl-upgrade-migration",
   "description": "Upgrade Firecrawl SDK versions and migrate between API versions (v0",
   "content": "# Firecrawl Upgrade & Migration\n\n## Current State\n\n!`npm list @mendable/firecrawl-js 2>/dev/null | grep firecrawl || echo 'Not installed'`\n\n## Overview\n\nGuide for upgrading `@mendable/firecrawl-js` SDK versions and migrating from Firecrawl API v0/v1 to v2. Covers breaking changes in import paths, method signatures, response formats, and the new extract v2 schema format.\n\n## Version History\n\n| SDK Version | API Version | Key Changes |\n|-------------|-------------|-------------|\n| 1.x | v1 | `asyncCrawlUrl`, `checkCrawlStatus`, `mapUrl` added |\n| 0.x | v0 | Legacy `crawlUrl` with `waitUntilDone` param |\n\n## Instructions\n\n### Step 1: Check Current Version\n\n```bash\nset -euo pipefail\n# Check installed version\nnpm list @mendable/firecrawl-js\n\n# Check latest available\nnpm view @mendable/firecrawl-js version\n```\n\n### Step 2: Create Upgrade Branch\n\n```bash\nset -euo pipefail\ngit checkout -b upgrade/firecrawl-sdk\nnpm install @mendable/firecrawl-js@latest\nnpm test\n```\n\n### Step 3: Migration \u2014 v0 to v1/v2\n\n#### Import Changes\n\n```typescript\n// No change needed \u2014 import has been stable\nimport FirecrawlApp from \"@mendable/firecrawl-js\";\n```\n\n#### Crawl Method Changes (v0 -> v1)\n\n```typescript\n// BEFORE (v0): crawlUrl with waitUntilDone\nconst result = await firecrawl.crawlUrl(\"https://example.com\", {\n  crawlerOptions: { limit: 50 },\n  pageOptions: { onlyMainContent: true },\n  waitUntilDone: true,\n});\n\n// AFTER (v1+): crawlUrl returns synchronously, or use asyncCrawlUrl\nconst result = await firecrawl.crawlUrl(\"https://example.com\", {\n  limit: 50,\n  scrapeOptions: {\n    formats: [\"markdown\"],\n    onlyMainContent: true,\n  },\n});\n\n// For large crawls, use async with polling\nconst job = await firecrawl.asyncCrawlUrl(\"https://example.com\", {\n  limit: 500,\n  scrapeOptions: { formats: [\"markdown\"] },\n});\nconst status = await firecrawl.checkCrawlStatus(job.id);\n```\n\n#### Scrape Options Changes (v0 -> v1)\n\n```typescript\n// BEFORE (v0)\nawait firecrawl.scrapeUrl(\"https://example.com\", {\n  pageOptions: { onlyMainContent: true },\n  extractorOptions: { mode: \"llm-extraction\", schema: mySchema },\n});\n\n// AFTER (v1+)\nawait firecrawl.scrapeUrl(\"https://example.com\", {\n  formats: [\"markdown\", \"extract\"],\n  onlyMainContent: true,\n  extract: { schema: mySchema },\n});\n```\n\n#### Extract v2 Format (v1 -> v2)\n\n```typescript\n// BEFORE (v1): extract as top-level option\nawait firecrawl.scrapeUrl(url, {\n  formats: [\"extract\"],\n  extract: { schema: { type: \"object\", ... } },\n});\n\n// AFTER (v2): schema embedded in formats array\n// Note: SDK handles this internally, but REST API changed\n// POST /v2/extract with { urls: [...], schema: {...} }\n```\n\n#### New Methods in v1+\n\n```typescript\n// mapUrl \u2014 fast URL discovery (not available in v0)\nconst map = await firecrawl.mapUrl(\"https://example.com\");\nconsole.log(map.links);\n\n// batchScrapeUrls \u2014 scrape multiple URLs at once\nconst batch = await firecrawl.batchScrapeUrls(\n  [\"https://a.com\", \"https://b.com\"],\n  { formats: [\"markdown\"] }\n);\n\n// asyncBatchScrapeUrls + checkBatchScrapeStatus\nconst job = await firecrawl.asyncBatchScrapeUrls(urls, { formats: [\"markdown\"] });\nconst status = await firecrawl.checkBatchScrapeStatus(job.id);\n```\n\n### Step 4: Run Tests and Verify\n\n```bash\nset -euo pipefail\nnpm test\n\n# Quick integration check\nnpx tsx -e \"\nimport FirecrawlApp from '@mendable/firecrawl-js';\nconst fc = new FirecrawlApp({ apiKey: process.env.FIRECRAWL_API_KEY! });\nconst r = await fc.scrapeUrl('https://example.com', { formats: ['markdown'] });\nconsole.log('Success:', r.success, 'Chars:', r.markdown?.length);\n\"\n```\n\n### Step 5: Rollback if Needed\n\n```bash\nset -euo pipefail\n# Pin to previous version\nnpm install @mendable/firecrawl-js@1.x.x --save-exact\nnpm test\n```\n\n## Breaking Changes Checklist\n\n- [ ] `crawlerOptions` / `pageOptions` \u2192 flat options + `scrapeOptions`\n- [ ] `waitUntilDone: true` \u2192 use `crawlUrl` (sync) or `asyncCrawlUrl` + polling\n- [ ] `extractorOptions` \u2192 `extract` with `schema` or `prompt`\n- [ ] Response shape: `data` array for crawl results, `markdown`/`html` for scrape\n- [ ] New methods: `mapUrl`, `batchScrapeUrls`, `asyncBatchScrapeUrls`\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `crawlerOptions is not valid` | Using v0 params on v1+ | Flatten to top-level options |\n| `waitUntilDone is not valid` | Removed in v1 | Use `asyncCrawlUrl` + `checkCrawlStatus` |\n| `pageOptions not recognized` | Renamed in v1 | Use `scrapeOptions` inside crawl |\n| Missing `mapUrl` method | SDK too old | Upgrade to latest version |\n\n## Resources\n\n- [Migrating from v0](https://docs.firecrawl.dev/v1-welcome)\n- [Migrating from v1 to v2](https://docs.firecrawl.dev/migrate-to-v2)\n- [Firecrawl Changelog](https://firecrawl.dev/changelog)\n- [GitHub Releases](https://github.com/mendableai/firecrawl/releases)\n\n## Next Steps\n\nFor CI integration during upgrades, see `firecrawl-ci-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "firecrawl-upgrade-migration",
-    "description": "Upgrade Firecrawl SDK versions and migrate between API versions (v0",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(git:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

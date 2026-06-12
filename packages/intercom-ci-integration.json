@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032312",
   "name": "intercom-ci-integration",
   "slug": "intercom-ci-integration",
   "description": "Configure CI/CD pipelines for Intercom integrations with GitHub Actions.",
   "content": "# Intercom CI Integration\n\n## Overview\n\nSet up CI/CD pipelines for Intercom integrations with GitHub Actions, including unit tests with mocked SDK, integration tests against a dev workspace, and secret management.\n\n## Prerequisites\n\n- GitHub repository with Actions enabled\n- Intercom dev workspace access token (separate from production)\n- npm/pnpm project with `intercom-client` installed\n\n## Instructions\n\n### Step 1: GitHub Actions Workflow\n\n```yaml\n# .github/workflows/intercom-ci.yml\nname: Intercom Integration CI\n\non:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n\njobs:\n  unit-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: \"20\"\n          cache: \"npm\"\n      - run: npm ci\n      - run: npm run typecheck\n      - run: npm test -- --coverage\n      - uses: actions/upload-artifact@v4\n        with:\n          name: coverage\n          path: coverage/\n\n  integration-tests:\n    runs-on: ubuntu-latest\n    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n    env:\n      INTERCOM_ACCESS_TOKEN: ${{ secrets.INTERCOM_DEV_TOKEN }}\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: \"20\"\n          cache: \"npm\"\n      - run: npm ci\n      - name: Verify Intercom connectivity\n        run: |\n          STATUS=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n            -H \"Authorization: Bearer $INTERCOM_ACCESS_TOKEN\" \\\n            https://api.intercom.io/me)\n          if [ \"$STATUS\" != \"200\" ]; then\n            echo \"Intercom auth failed: $STATUS\"\n            exit 1\n          fi\n      - name: Run integration tests\n        run: npm run test:integration\n        timeout-minutes: 5\n```\n\n### Step 2: Configure Secrets\n\n```bash\n# Store dev workspace token (never production!)\ngh secret set INTERCOM_DEV_TOKEN --body \"dG9rOmRldl90b2tlbl9oZXJl\"\n\n# If using webhooks in CI, store the signing secret\ngh secret set INTERCOM_WEBHOOK_SECRET --body \"your-webhook-secret\"\n\n# Verify secrets are set\ngh secret list\n```\n\n### Step 3: Unit Tests with Mocked SDK\n\n```typescript\n// tests/unit/intercom-service.test.ts\nimport { describe, it, expect, vi, beforeEach } from \"vitest\";\nimport { IntercomError } from \"intercom-client\";\n\n// Mock the entire module\nvi.mock(\"intercom-client\", () => ({\n  IntercomClient: vi.fn().mockImplementation(() => mockClient),\n  IntercomError: class extends Error {\n    statusCode: number;\n    constructor(message: string, statusCode: number) {\n      super(message);\n      this.statusCode = statusCode;\n    }\n  },\n}));\n\nconst mockClient = {\n  contacts: {\n    create: vi.fn(),\n    find: vi.fn(),\n    search: vi.fn(),\n    list: vi.fn(),\n  },\n  conversations: {\n    create: vi.fn(),\n    reply: vi.fn(),\n    find: vi.fn(),\n  },\n  admins: {\n    list: vi.fn().mockResolvedValue({\n      admins: [{ id: \"admin-1\", name: \"CI Admin\" }],\n    }),\n  },\n};\n\ndescribe(\"Contact sync service\", () => {\n  beforeEach(() => vi.clearAllMocks());\n\n  it(\"should create a contact with correct attributes\", async () => {\n    mockClient.contacts.create.mockResolvedValue({\n      type: \"contact\",\n      id: \"test-id\",\n      role: \"user\",\n      email: \"test@example.com\",\n    });\n\n    const result = await mockClient.contacts.create({\n      role: \"user\",\n      email: \"test@example.com\",\n      externalId: \"usr-1\",\n    });\n\n    expect(result.id).toBe(\"test-id\");\n    expect(mockClient.contacts.create).toHaveBeenCalledWith({\n      role: \"user\",\n      email: \"test@example.com\",\n      externalId: \"usr-1\",\n    });\n  });\n\n  it(\"should handle 409 conflict on duplicate contact\", async () => {\n    mockClient.contacts.create.mockRejectedValue(\n      new IntercomError(\"A contact matching those details already exists\", 409)\n    );\n\n    await expect(\n      mockClient.contacts.create({ role: \"user\", email: \"dupe@example.com\" })\n    ).rejects.toThrow(\"already exists\");\n  });\n});\n```\n\n### Step 4: Integration Tests (Against Dev Workspace)\n\n```typescript\n// tests/integration/contacts.integration.test.ts\nimport { describe, it, expect, afterAll } from \"vitest\";\nimport { IntercomClient } from \"intercom-client\";\n\nconst token = process.env.INTERCOM_ACCESS_TOKEN;\nconst client = token ? new IntercomClient({ token }) : null;\n\n// Track created resources for cleanup\nconst createdContactIds: string[] = [];\n\nafterAll(async () => {\n  if (!client) return;\n  for (const id of createdContactIds) {\n    try { await client.contacts.delete({ contactId: id }); } catch {}\n  }\n});\n\ndescribe.skipIf(!token)(\"Intercom API Integration\", () => {\n  it(\"should authenticate and list admins\", async () => {\n    const admins = await client!.admins.list();\n    expect(admins.admins.length).toBeGreaterThan(0);\n  });\n\n  it(\"should create and retrieve a contact\", async () => {\n    const contact = await client!.contacts.create({\n      role: \"lead\",\n      name: `CI Test ${Date.now()}`,\n    });\n\n    createdContactIds.push(contact.id);\n    expect(contact.role).toBe(\"lead\");\n\n    const found = await client!.contacts.find({ contactId: contact.id });\n    expect(found.id).toBe(contact.id);\n  });\n\n  it(\"should search contacts\", async () => {\n    const results = await client!.contacts.search({\n      query: { field: \"role\", operator: \"=\", value: \"user\" },\n      pagination: { per_page: 5 },\n    });\n\n    expect(results.data).toBeDefined();\n  });\n});\n```\n\n### Step 5: Webhook Signature Test\n\n```typescript\nimport { describe, it, expect } from \"vitest\";\nimport crypto from \"crypto\";\n\nfunction verifySignature(payload: string, signature: string, secret: string): boolean {\n  const expected = \"sha1=\" + crypto\n    .createHmac(\"sha1\", secret)\n    .update(payload)\n    .digest(\"hex\");\n  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));\n}\n\ndescribe(\"Webhook signature verification\", () => {\n  const secret = \"test-webhook-secret\";\n  const payload = '{\"type\":\"notification_event\",\"topic\":\"conversation.user.created\"}';\n\n  it(\"should verify valid signature\", () => {\n    const signature = \"sha1=\" + crypto.createHmac(\"sha1\", secret).update(payload).digest(\"hex\");\n    expect(verifySignature(payload, signature, secret)).toBe(true);\n  });\n\n  it(\"should reject invalid signature\", () => {\n    expect(verifySignature(payload, \"sha1=invalid\", secret)).toBe(false);\n  });\n});\n```\n\n## Error Handling\n\n| CI Issue | Cause | Solution |\n|----------|-------|----------|\n| `INTERCOM_DEV_TOKEN` not found | Secret not configured | `gh secret set INTERCOM_DEV_TOKEN` |\n| Integration tests timeout | Rate limited or slow API | Increase timeout, add delays |\n| 401 in CI | Token expired or rotated | Update secret with new token |\n| Flaky tests | Shared dev workspace state | Use unique names, clean up after |\n\n## Resources\n\n- [GitHub Actions Docs](https://docs.github.com/en/actions)\n- [GitHub Encrypted Secrets](https://docs.github.com/en/actions/security-guides/encrypted-secrets)\n- [Vitest](https://vitest.dev/)\n\n## Next Steps\n\nFor deployment patterns, see `intercom-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "intercom-ci-integration",
-    "description": "Configure CI/CD pipelines for Intercom integrations with GitHub Actions.",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

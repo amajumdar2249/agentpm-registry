@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032595",
   "name": "maintainx-performance-tuning",
   "slug": "maintainx-performance-tuning",
   "description": "Optimize MaintainX API integration performance.",
   "content": "# MaintainX Performance Tuning\n\n## Overview\n\nOptimize MaintainX integration performance with caching, connection pooling, efficient pagination, and request deduplication.\n\n## Prerequisites\n\n- MaintainX integration working\n- Node.js 18+\n- Redis (recommended for production caching)\n- Performance baseline measurements\n\n## Instructions\n\n### Step 1: Connection Pooling with Keep-Alive\n\n```typescript\n// src/performance/pooled-client.ts\nimport axios from 'axios';\nimport http from 'node:http';\nimport https from 'node:https';\n\n// Reuse TCP connections instead of opening new ones per request\nconst httpAgent = new http.Agent({ keepAlive: true, maxSockets: 10 });\nconst httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 10 });\n\nconst client = axios.create({\n  baseURL: 'https://api.getmaintainx.com/v1',\n  headers: {\n    Authorization: `Bearer ${process.env.MAINTAINX_API_KEY}`,\n    'Content-Type': 'application/json',\n  },\n  httpAgent,\n  httpsAgent,\n  timeout: 30_000,\n});\n\n// Benefit: Eliminates TCP handshake + TLS negotiation per request\n// Typical improvement: 100-200ms saved per request\n```\n\n### Step 2: Multi-Level Caching\n\n```typescript\n// src/performance/cache.ts\n\ninterface CacheLayer<T> {\n  get(key: string): Promise<T | undefined>;\n  set(key: string, value: T, ttlMs: number): Promise<void>;\n}\n\n// L1: In-memory (fastest, per-process)\nclass MemoryCache<T> implements CacheLayer<T> {\n  private store = new Map<string, { value: T; expiresAt: number }>();\n\n  async get(key: string) {\n    const entry = this.store.get(key);\n    if (entry && entry.expiresAt > Date.now()) return entry.value;\n    this.store.delete(key);\n    return undefined;\n  }\n\n  async set(key: string, value: T, ttlMs: number) {\n    this.store.set(key, { value, expiresAt: Date.now() + ttlMs });\n  }\n}\n\n// L2: Redis (shared across processes)\nclass RedisCache<T> implements CacheLayer<T> {\n  constructor(private redis: any) {}\n\n  async get(key: string) {\n    const data = await this.redis.get(`mx:${key}`);\n    return data ? JSON.parse(data) : undefined;\n  }\n\n  async set(key: string, value: T, ttlMs: number) {\n    await this.redis.setex(`mx:${key}`, Math.ceil(ttlMs / 1000), JSON.stringify(value));\n  }\n}\n\n// Multi-level cache: check L1 first, then L2, then fetch\nclass MultiCache<T> {\n  constructor(private l1: CacheLayer<T>, private l2: CacheLayer<T>) {}\n\n  async getOrFetch(key: string, ttlMs: number, fetcher: () => Promise<T>): Promise<T> {\n    // Check L1\n    let value = await this.l1.get(key);\n    if (value !== undefined) return value;\n\n    // Check L2\n    value = await this.l2.get(key);\n    if (value !== undefined) {\n      await this.l1.set(key, value, ttlMs / 2); // L1 shorter TTL\n      return value;\n    }\n\n    // Fetch from API\n    value = await fetcher();\n    await this.l1.set(key, value, ttlMs / 2);\n    await this.l2.set(key, value, ttlMs);\n    return value;\n  }\n}\n```\n\n### Step 3: DataLoader for Batch Loading\n\nWhen multiple parts of your app need the same work order, batch and deduplicate:\n\n```typescript\n// src/performance/dataloader.ts\nimport DataLoader from 'dataloader';\n\nconst workOrderLoader = new DataLoader<number, any>(\n  async (ids: readonly number[]) => {\n    // Batch: fetch multiple work orders in parallel\n    const results = await Promise.all(\n      ids.map((id) =>\n        client.get(`/workorders/${id}`).then((r) => r.data)\n      ),\n    );\n    // Return in same order as input ids\n    return ids.map((id) => results.find((r) => r.id === id) || null);\n  },\n  {\n    maxBatchSize: 25,\n    cacheKeyFn: (id) => String(id),\n  },\n);\n\n// These 3 calls collapse into 1 batched operation:\nconst [wo1, wo2, wo3] = await Promise.all([\n  workOrderLoader.load(100),\n  workOrderLoader.load(200),\n  workOrderLoader.load(100), // deduped, same as first\n]);\n```\n\n### Step 4: Efficient Pagination\n\n```typescript\n// Fetch only the fields you need (if API supports field selection)\n// Use larger page sizes to reduce round trips\n\nasync function efficientFetchAll(client: any, endpoint: string, key: string) {\n  const all = [];\n  let cursor: string | undefined;\n  let pageCount = 0;\n\n  const startTime = Date.now();\n\n  do {\n    const { data } = await client.get(endpoint, {\n      params: { limit: 100, cursor }, // Max page size\n    });\n    all.push(...data[key]);\n    cursor = data.cursor;\n    pageCount++;\n  } while (cursor);\n\n  const elapsed = Date.now() - startTime;\n  console.log(`Fetched ${all.length} items in ${pageCount} pages (${elapsed}ms)`);\n  return all;\n}\n\n// Parallel pagination for independent resources\nasync function fetchAllResources(client: any) {\n  const [workOrders, assets, locations] = await Promise.all([\n    efficientFetchAll(client, '/workorders', 'workOrders'),\n    efficientFetchAll(client, '/assets', 'assets'),\n    efficientFetchAll(client, '/locations', 'locations'),\n  ]);\n\n  return { workOrders, assets, locations };\n}\n```\n\n### Step 5: Request Deduplication\n\n```typescript\n// src/performance/dedup.ts\n\nclass RequestDeduplicator {\n  private inflight = new Map<string, Promise<any>>();\n\n  async dedupe<T>(key: string, fetcher: () => Promise<T>): Promise<T> {\n    if (this.inflight.has(key)) {\n      return this.inflight.get(key)! as Promise<T>;\n    }\n\n    const promise = fetcher().finally(() => {\n      this.inflight.delete(key);\n    });\n\n    this.inflight.set(key, promise);\n    return promise;\n  }\n}\n\nconst dedup = new RequestDeduplicator();\n\n// 10 concurrent calls to getWorkOrder(123) = 1 actual API call\nasync function getWorkOrder(id: number) {\n  return dedup.dedupe(`wo:${id}`, () => client.get(`/workorders/${id}`));\n}\n```\n\n## Performance Benchmarks\n\n| Optimization | Before | After | Improvement |\n|-------------|--------|-------|-------------|\n| Connection pooling | 350ms/req | 150ms/req | 57% faster |\n| L1 cache (hot path) | 150ms/req | < 1ms/req | 99% faster |\n| DataLoader batching | 10 calls | 1 call | 90% fewer requests |\n| Max page size (100) | 50 pages | 10 pages | 5x fewer round trips |\n| Request dedup | N calls | 1 call | (N-1) saved |\n\n## Output\n\n- Connection pooling with keep-alive (reuses TCP connections)\n- Multi-level cache (L1 in-memory + L2 Redis)\n- DataLoader for batching and deduplication of entity fetches\n- Efficient pagination with max page sizes\n- Request deduplication preventing redundant concurrent calls\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Stale cache data | TTL too long | Reduce TTL, invalidate on writes |\n| Memory growth | Unbounded cache | Set max size, use LRU eviction |\n| DataLoader errors | One item in batch fails | Handle per-item errors in batch function |\n| Connection pool exhaustion | Too many concurrent requests | Increase `maxSockets` or add queue |\n\n## Resources\n\n- [MaintainX API Reference](https://developer.maintainx.com/reference)\n- [DataLoader](https://github.com/graphql/dataloader) -- Batching and caching utility\n- [Node.js HTTP Agent](https://nodejs.org/api/http.html#class-httpagent)\n\n## Next Steps\n\nFor cost optimization, see `maintainx-cost-tuning`.\n\n## Examples\n\n**Benchmark your API response times**:\n\n```bash\n# Measure latency for 10 sequential requests\nfor i in $(seq 1 10); do\n  curl -s -o /dev/null -w \"Request $i: %{time_total}s\\n\" \\\n    \"https://api.getmaintainx.com/v1/workorders?limit=1\" \\\n    -H \"Authorization: Bearer $MAINTAINX_API_KEY\"\ndone\n```\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "maintainx-performance-tuning",
-    "description": "Optimize MaintainX API integration performance.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

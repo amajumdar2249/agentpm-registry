@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032381",
   "name": "klaviyo-security-basics",
   "slug": "klaviyo-security-basics",
   "description": "Apply Klaviyo security best practices for API key management and access",
   "content": "# Klaviyo Security Basics\n\n## Overview\n\nSecurity best practices for Klaviyo: API key types, OAuth scopes, webhook HMAC-SHA256 signature verification, and secret rotation procedures.\n\n## Prerequisites\n\n- Klaviyo account with API key access\n- Understanding of environment variables and secret management\n- Access to Klaviyo dashboard (Settings > API Keys)\n\n## Instructions\n\n### Step 1: Understand Key Types\n\n| Key Type | Format | Use Case | Sensitivity |\n|----------|--------|----------|-------------|\n| Private API Key | `pk_*` (40+ chars) | Server-side REST API | **CRITICAL** -- never expose client-side |\n| Public API Key | 6 alphanumeric chars | Client-side Track/Identify only | Low -- safe in browser JS |\n\nPrivate keys authenticate via `Authorization: Klaviyo-API-Key pk_***` header. Public keys pass as `company_id` query parameter.\n\n### Step 2: Environment Variable Configuration\n\n```bash\n# .env (NEVER commit)\nKLAVIYO_PRIVATE_KEY=pk_***************************************\nKLAVIYO_PUBLIC_KEY=UXxxXx\nKLAVIYO_WEBHOOK_SIGNING_SECRET=whsec_*************************\n\n# .gitignore -- mandatory entries\n.env\n.env.local\n.env.*.local\n```\n\n```typescript\n// src/config/klaviyo.ts -- validated config loader\nfunction requireEnv(name: string): string {\n  const value = process.env[name];\n  if (!value) throw new Error(`Missing required env: ${name}`);\n  return value;\n}\n\nexport const klaviyoConfig = {\n  privateKey: requireEnv('KLAVIYO_PRIVATE_KEY'),\n  publicKey: process.env.KLAVIYO_PUBLIC_KEY || '',\n  webhookSecret: process.env.KLAVIYO_WEBHOOK_SIGNING_SECRET || '',\n};\n```\n\n### Step 3: Least-Privilege API Key Scopes\n\nCreate separate API keys per environment with minimal scopes:\n\n| Environment | Recommended Scopes | Rationale |\n|-------------|-------------------|-----------|\n| Development | `profiles:read`, `events:read`, `lists:read` | Read-only exploration |\n| Staging | `profiles:read/write`, `events:write`, `lists:read/write` | Full test coverage |\n| Production | Exact scopes your app needs | Minimize blast radius |\n| CI/CD | `profiles:read`, `events:read` | Smoke tests only |\n\n```bash\n# Use separate env vars per environment\nKLAVIYO_PRIVATE_KEY_DEV=pk_dev_***\nKLAVIYO_PRIVATE_KEY_STAGING=pk_staging_***\nKLAVIYO_PRIVATE_KEY_PROD=pk_prod_***\n```\n\n### Step 4: Webhook Signature Verification (HMAC-SHA256)\n\nKlaviyo signs webhook payloads using HMAC-SHA256 with your webhook signing secret.\n\n```typescript\n// src/klaviyo/webhook-verify.ts\nimport crypto from 'crypto';\n\n/**\n * Verify Klaviyo webhook signature.\n * Klaviyo uses the webhook signing secret (set when creating the webhook)\n * to compute an HMAC-SHA256 signature of the payload.\n */\nexport function verifyKlaviyoWebhookSignature(\n  payload: Buffer | string,\n  signature: string,\n  secret: string\n): boolean {\n  if (!signature || !secret) return false;\n\n  const expectedSignature = crypto\n    .createHmac('sha256', secret)\n    .update(typeof payload === 'string' ? payload : payload.toString())\n    .digest('base64');\n\n  // Timing-safe comparison to prevent timing attacks\n  try {\n    return crypto.timingSafeEqual(\n      Buffer.from(signature),\n      Buffer.from(expectedSignature)\n    );\n  } catch {\n    return false;  // Different lengths\n  }\n}\n```\n\n### Step 5: Express Webhook Middleware\n\n```typescript\nimport express from 'express';\n\napp.post('/webhooks/klaviyo',\n  express.raw({ type: 'application/json' }),\n  (req, res) => {\n    const signature = req.headers['klaviyo-webhook-signature'] as string;\n\n    if (!verifyKlaviyoWebhookSignature(\n      req.body,\n      signature,\n      process.env.KLAVIYO_WEBHOOK_SIGNING_SECRET!\n    )) {\n      console.warn('[Security] Invalid webhook signature rejected');\n      return res.status(401).json({ error: 'Invalid signature' });\n    }\n\n    const event = JSON.parse(req.body.toString());\n    // Process verified event...\n    res.status(200).json({ received: true });\n  }\n);\n```\n\n### Step 6: API Key Rotation Procedure\n\n```bash\n# 1. Generate new key in Klaviyo dashboard (Settings > API Keys)\n#    - Name it with date: \"Production API Key 2025-03\"\n#    - Assign same scopes as the old key\n\n# 2. Deploy new key (zero-downtime)\n#    Update secret in your deployment platform:\n#    - Vercel: vercel env add KLAVIYO_PRIVATE_KEY production\n#    - AWS: aws secretsmanager update-secret --secret-id klaviyo-key --secret-string pk_new_***\n#    - GCP: echo -n \"pk_new_***\" | gcloud secrets versions add klaviyo-key --data-file=-\n\n# 3. Verify new key works\ncurl -s -w \"%{http_code}\" -o /dev/null \\\n  -H \"Authorization: Klaviyo-API-Key pk_new_***\" \\\n  -H \"revision: 2024-10-15\" \\\n  \"https://a.klaviyo.com/api/accounts/\"\n\n# 4. Revoke old key in Klaviyo dashboard\n#    Settings > API Keys > Delete old key\n\n# 5. Audit: check logs for any 401s after rotation\n```\n\n## Security Checklist\n\n- [ ] Private API keys stored in environment variables / secret manager\n- [ ] `.env` files in `.gitignore`\n- [ ] Different API keys per environment (dev/staging/prod)\n- [ ] Minimal scopes per environment\n- [ ] Webhook signatures verified with HMAC-SHA256\n- [ ] API key rotation scheduled (quarterly recommended)\n- [ ] No private keys in client-side code\n- [ ] CI/CD uses read-only key for tests\n- [ ] Git history scanned for leaked keys (`git log -p | grep pk_`)\n\n## Error Handling\n\n| Security Issue | Detection | Mitigation |\n|----------------|-----------|------------|\n| Leaked private key | Git scanning, `trufflehog` | Revoke immediately, rotate |\n| Excessive scopes | Scope audit | Reduce to minimum required |\n| Missing webhook verification | Code review | Add HMAC check |\n| Key not rotated | Age > 90 days | Schedule rotation |\n| 401s after rotation | Log monitoring | Verify all services updated |\n\n## Resources\n\n- [Authenticate API Requests](https://developers.klaviyo.com/en/docs/authenticate_)\n- [OAuth Setup](https://developers.klaviyo.com/en/docs/set_up_oauth)\n- [Webhooks API Overview](https://developers.klaviyo.com/en/reference/webhooks_api_overview)\n\n## Next Steps\n\nFor production deployment, see `klaviyo-prod-checklist`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "klaviyo-security-basics",
-    "description": "Apply Klaviyo security best practices for API key management and access",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

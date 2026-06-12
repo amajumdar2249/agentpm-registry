@@ -1,14 +1,48 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000001008",
   "name": "edge-computing-patterns",
   "slug": "edge-computing-patterns",
   "description": "Deploy to edge runtimes (Cloudflare Workers, Vercel Edge, Deno Deploy) for globally distributed, low-latency applications. Master edge middleware, streaming, and runtime constraints for 2025+ edge computing.",
   "content": "\n# Edge Computing Patterns\n\n## Overview\n\nEdge computing runs code closer to users worldwide, reducing latency from seconds to milliseconds. This skill covers Cloudflare Workers, Vercel Edge Functions, and Deno Deploy patterns for building globally distributed applications.\n\n**When to use this skill:**\n- Global applications requiring <50ms latency\n- Authentication/authorization at the edge\n- A/B testing and feature flags\n- Geo-routing and localization\n- API rate limiting and DDoS protection\n- Transforming responses (image optimization, HTML rewriting)\n\n## Platform Comparison\n\n| Feature | Cloudflare Workers | Vercel Edge | Deno Deploy |\n|---------|-------------------|-------------|-------------|\n| Cold Start | <1ms | <10ms | <10ms |\n| Locations | 300+ | 100+ | 35+ |\n| Runtime | V8 Isolates | V8 Isolates | Deno |\n| Max Duration | 30s (paid: unlimited) | 25s | 50ms-5min |\n| Free Tier | 100k req/day | 100k req/month | 100k req/month |\n\n## Cloudflare Workers\n\n```typescript\n// worker.ts\nexport default {\n  async fetch(request: Request, env: Env): Promise<Response> {\n    const url = new URL(request.url)\n\n    // Geo-routing\n    const country = request.cf?.country || 'US'\n\n    if (url.pathname === '/api/hello') {\n      return new Response(JSON.stringify({\n        message: `Hello from ${country}!`\n      }), {\n        headers: { 'Content-Type': 'application/json' }\n      })\n    }\n\n    // Cache API\n    const cache = caches.default\n    let response = await cache.match(request)\n\n    if (!response) {\n      response = await fetch(request)\n      // Cache for 1 hour\n      response = new Response(response.body, response)\n      response.headers.set('Cache-Control', 'max-age=3600')\n      await cache.put(request, response.clone())\n    }\n\n    return response\n  }\n}\n\n// Durable Objects for stateful edge\nexport class Counter {\n  private state: DurableObjectState\n  private count = 0\n\n  constructor(state: DurableObjectState) {\n    this.state = state\n  }\n\n  async fetch(request: Request) {\n    const url = new URL(request.url)\n\n    if (url.pathname === '/increment') {\n      this.count++\n      await this.state.storage.put('count', this.count)\n    }\n\n    return new Response(JSON.stringify({ count: this.count }))\n  }\n}\n```\n\n## Vercel Edge Functions\n\n```typescript\n// middleware.ts (Edge Middleware)\nimport { NextResponse } from 'next/server'\nimport type { NextRequest } from 'next/server'\n\nexport function middleware(request: NextRequest) {\n  // A/B testing\n  const bucket = Math.random() < 0.5 ? 'a' : 'b'\n  const url = request.nextUrl.clone()\n  url.searchParams.set('bucket', bucket)\n\n  // Geo-location\n  const country = request.geo?.country || 'US'\n\n  const response = NextResponse.rewrite(url)\n  response.cookies.set('bucket', bucket)\n  response.headers.set('X-Country', country)\n\n  return response\n}\n\nexport const config = {\n  matcher: '/experiment/:path*'\n}\n\n// Edge API Route\nexport const runtime = 'edge'\n\nexport async function GET(request: Request) {\n  return new Response(JSON.stringify({\n    timestamp: Date.now(),\n    region: process.env.VERCEL_REGION\n  }))\n}\n```\n\n## Edge Runtime Constraints\n\n**\u2705 Available**:\n- `fetch`, `Request`, `Response`, `Headers`\n- `URL`, `URLSearchParams`\n- `TextEncoder`, `TextDecoder`\n- `ReadableStream`, `WritableStream`\n- `crypto`, `SubtleCrypto`\n- Web APIs (atob, btoa, setTimeout, etc.)\n\n**\u274c Not Available**:\n- Node.js APIs (`fs`, `path`, `child_process`)\n- Native modules\n- Some npm packages\n- File system access\n\n## Common Patterns\n\n### Authentication at Edge\n```typescript\nimport { verify } from '@tsndr/cloudflare-worker-jwt'\n\nexport default {\n  async fetch(request: Request, env: Env) {\n    const token = request.headers.get('Authorization')?.replace('Bearer ', '')\n\n    if (!token) {\n      return new Response('Unauthorized', { status: 401 })\n    }\n\n    const isValid = await verify(token, env.JWT_SECRET)\n    if (!isValid) {\n      return new Response('Invalid token', { status: 403 })\n    }\n\n    // Proceed with authenticated request\n    return fetch(request)\n  }\n}\n```\n\n### Rate Limiting\n```typescript\nexport default {\n  async fetch(request: Request, env: Env) {\n    const ip = request.headers.get('CF-Connecting-IP')\n    const key = `ratelimit:${ip}`\n\n    // Use KV for rate limiting\n    const count = await env.KV.get(key)\n    const currentCount = count ? parseInt(count) : 0\n\n    if (currentCount >= 100) {\n      return new Response('Rate limit exceeded', { status: 429 })\n    }\n\n    await env.KV.put(key, (currentCount + 1).toString(), {\n      expirationTtl: 60 // 1 minute\n    })\n\n    return fetch(request)\n  }\n}\n```\n\n### Edge Caching\n```typescript\nasync function handleRequest(request: Request) {\n  const cache = caches.default\n  const cacheKey = new Request(request.url, request)\n\n  // Try cache first\n  let response = await cache.match(cacheKey)\n\n  if (!response) {\n    // Fetch from origin\n    response = await fetch(request)\n\n    // Cache successful responses\n    if (response.status === 200) {\n      response = new Response(response.body, response)\n      response.headers.set('Cache-Control', 'max-age=3600')\n      await cache.put(cacheKey, response.clone())\n    }\n  }\n\n  return response\n}\n```\n\n## Best Practices\n\n- \u2705 Keep bundles small (<1MB)\n- \u2705 Use streaming for large responses\n- \u2705 Leverage edge caching (KV, Durable Objects)\n- \u2705 Handle errors gracefully (edge errors can't be recovered)\n- \u2705 Test cold starts and warm starts\n- \u2705 Monitor edge function performance\n- \u2705 Use environment variables for secrets\n- \u2705 Implement proper CORS headers\n\n## Resources\n\n- [Cloudflare Workers Documentation](https://developers.cloudflare.com/workers/)\n- [Vercel Edge Functions](https://vercel.com/docs/functions/edge-functions)\n- [Deno Deploy](https://deno.com/deploy/docs)\n",
+  "author": "AI Agent Hub",
   "version": "1.0.0",
-  "metadata": {
-    "name": "edge-computing-patterns",
-    "description": "Deploy to edge runtimes (Cloudflare Workers, Vercel Edge, Deno Deploy) for globally distributed, low-latency applications. Master edge middleware, streaming, and runtime constraints for 2025+ edge computing.",
-    "version": "1.0.0",
-    "author": "AI Agent Hub",
-    "tags": "[edge, cloudflare, vercel, deno, serverless, 2025]"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "[edge",
+    "cloudflare",
+    "vercel",
+    "deno",
+    "serverless",
+    "2025]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000030554",
   "name": "laravel-authorization-patterns",
   "slug": "laravel-authorization-patterns-2",
   "description": "Best practices for Laravel authorization including Gates, Policies, middleware auth, and Blade directives for access control.",
   "content": "\n# Laravel Authorization Patterns\n\n## Gates for General Ability Checks\n\n```php\n// In AuthServiceProvider or AppServiceProvider boot()\nuse Illuminate\\Support\\Facades\\Gate;\n\nGate::define('access-admin', function (User $user) {\n    return $user->is_admin;\n});\n\nGate::define('manage-settings', function (User $user) {\n    return $user->hasRole('admin');\n});\n\n// Usage\nif (Gate::allows('access-admin')) {\n    // ...\n}\n\n// \u2705 Abort if unauthorized\nGate::authorize('access-admin'); // Throws AuthorizationException\n\n// \u2705 Check for specific user\nGate::forUser($otherUser)->allows('access-admin');\n```\n\n## Policies for Model-Based Authorization\n\n```php\n<?php\n\nnamespace App\\Policies;\n\nuse App\\Models\\Post;\nuse App\\Models\\User;\nuse Illuminate\\Auth\\Access\\Response;\n\nclass PostPolicy\n{\n    // Runs before all other checks - return null to fall through\n    public function before(User $user, string $ability): ?bool\n    {\n        if ($user->is_super_admin) {\n            return true;\n        }\n\n        return null; // Fall through to specific method\n    }\n\n    public function viewAny(User $user): bool\n    {\n        return true;\n    }\n\n    public function view(User $user, Post $post): bool\n    {\n        return $post->is_published || $user->id === $post->user_id;\n    }\n\n    public function create(User $user): bool\n    {\n        return $user->hasVerifiedEmail();\n    }\n\n    public function update(User $user, Post $post): bool\n    {\n        return $user->id === $post->user_id;\n    }\n\n    public function delete(User $user, Post $post): Response\n    {\n        if ($user->id !== $post->user_id) {\n            return Response::deny('You do not own this post.');\n        }\n\n        if ($post->is_published) {\n            return Response::denyWithStatus(403, 'Published posts cannot be deleted.');\n        }\n\n        return Response::allow();\n    }\n}\n```\n\nPolicies are auto-discovered when they follow the `App\\Policies\\{Model}Policy` convention.\n\n## Response Objects\n\n```php\nuse Illuminate\\Auth\\Access\\Response;\n\n// \u2705 Rich authorization responses\npublic function publish(User $user, Post $post): Response\n{\n    if (! $user->hasVerifiedEmail()) {\n        return Response::denyWithStatus(403, 'Verify your email first.');\n    }\n\n    if ($post->user_id !== $user->id) {\n        return Response::denyAsNotFound(); // Returns 404 instead of 403\n    }\n\n    return Response::allow();\n}\n\n// Inspecting responses without exceptions\n$response = Gate::inspect('publish', $post);\n\nif ($response->allowed()) {\n    // Publish the post\n} else {\n    echo $response->message();\n}\n```\n\n## Middleware Authorization\n\n```php\n// \u2705 Route-level authorization\nRoute::put('/posts/{post}', [PostController::class, 'update'])\n    ->can('update', 'post');\n\nRoute::resource('posts', PostController::class)\n    ->middleware('can:viewAny,App\\Models\\Post')\n    ->only(['index']);\n\n// \u2705 Route group with gate\nRoute::middleware('can:access-admin')->group(function () {\n    Route::get('/admin/dashboard', [AdminController::class, 'index']);\n    Route::get('/admin/users', [AdminController::class, 'users']);\n});\n```\n\n## Blade Directives\n\n```php\n{{-- \u2705 Single ability check --}}\n@can('update', $post)\n    <a href=\"{{ route('posts.edit', $post) }}\">Edit</a>\n@endcan\n\n{{-- \u2705 Multiple abilities --}}\n@canany(['update', 'delete'], $post)\n    <div class=\"actions\">\n        @can('update', $post)\n            <button>Edit</button>\n        @endcan\n        @can('delete', $post)\n            <button>Delete</button>\n        @endcan\n    </div>\n@endcanany\n\n{{-- \u2705 Inverse check --}}\n@cannot('create', App\\Models\\Post::class)\n    <p>You do not have permission to create posts.</p>\n@endcannot\n\n{{-- \u2705 Gate check --}}\n@can('access-admin')\n    <a href=\"/admin\">Admin Panel</a>\n@endcan\n```\n\n## Form Request authorize() Integration\n\n```php\nclass UpdatePostRequest extends FormRequest\n{\n    // \u2705 Combine validation with authorization\n    public function authorize(): bool\n    {\n        return $this->user()->can('update', $this->route('post'));\n    }\n\n    public function rules(): array\n    {\n        return [\n            'title' => ['required', 'string', 'max:255'],\n            'content' => ['required', 'string'],\n        ];\n    }\n}\n```\n\n## Controller Authorization\n\n```php\nclass PostController extends Controller\n{\n    public function index()\n    {\n        // \u2705 Authorize against model class\n        $this->authorize('viewAny', Post::class);\n\n        return Post::paginate();\n    }\n\n    public function update(UpdatePostRequest $request, Post $post)\n    {\n        // \u2705 Authorize against model instance\n        $this->authorize('update', $post);\n\n        $post->update($request->validated());\n\n        return new PostResource($post);\n    }\n\n    // \u274c Don't check authorization with manual if statements\n    public function destroy(Post $post)\n    {\n        if (auth()->id() !== $post->user_id) {\n            abort(403);\n        }\n        // Skips policy, no reuse, harder to test\n    }\n\n    // \u2705 Use policy\n    public function destroy(Post $post)\n    {\n        $this->authorize('delete', $post);\n\n        $post->delete();\n\n        return response()->noContent();\n    }\n}\n```\n\n## Testing Authorization\n\n```php\nuse Illuminate\\Support\\Facades\\Gate;\n\n// \u2705 Test policy methods directly\npublic function test_user_can_update_own_post(): void\n{\n    $user = User::factory()->create();\n    $post = Post::factory()->for($user)->create();\n\n    $this->assertTrue($user->can('update', $post));\n}\n\npublic function test_user_cannot_update_others_post(): void\n{\n    $user = User::factory()->create();\n    $post = Post::factory()->create(); // Different user\n\n    $this->assertFalse($user->can('update', $post));\n}\n\n// \u2705 Test via HTTP\npublic function test_unauthorized_user_gets_403(): void\n{\n    $user = User::factory()->create();\n    $post = Post::factory()->create();\n\n    $this->actingAs($user)\n        ->putJson(\"/api/posts/{$post->id}\", ['title' => 'New Title'])\n        ->assertForbidden();\n}\n\n// \u2705 Bypass authorization in other tests\npublic function test_post_update_logic(): void\n{\n    Gate::before(fn () => true); // Allow everything\n\n    // Test business logic without auth concerns\n}\n```\n\n## Checklist\n\n- [ ] Gates used for general abilities not tied to a model\n- [ ] Policies used for all model-based authorization\n- [ ] Policies follow auto-discovery naming convention\n- [ ] before() returns null to fall through (not false)\n- [ ] Response objects used for detailed denial messages\n- [ ] Authorization applied via middleware, Form Request, or controller\n- [ ] Blade directives used for conditional UI rendering\n- [ ] No manual if/abort(403) checks bypassing policies\n- [ ] Authorization logic tested for allowed and denied cases\n- [ ] Gate::inspect() used when response message is needed\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "laravel-authorization-patterns",
-    "description": "Best practices for Laravel authorization including Gates, Policies, middleware auth, and Blade directives for access control."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

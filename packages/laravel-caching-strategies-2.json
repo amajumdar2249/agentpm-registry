@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000030557",
   "name": "laravel-caching-strategies",
   "slug": "laravel-caching-strategies-2",
   "description": "Best practices for Laravel caching including cache patterns, tags, atomic locks, flexible cache, and cache invalidation strategies.",
   "content": "\n# Laravel Caching Strategies\n\n## Core Cache Patterns\n\n```php\nuse Illuminate\\Support\\Facades\\Cache;\n\n// \u2705 remember - cache for a duration\n$users = Cache::remember('users:active', now()->addMinutes(30), function () {\n    return User::where('active', true)->get();\n});\n\n// \u2705 rememberForever - cache until manually cleared\n$settings = Cache::rememberForever('app:settings', function () {\n    return Setting::all()->pluck('value', 'key');\n});\n\n// \u2705 flexible - stale-while-revalidate pattern\n// Fresh for 5 min, serves stale for up to 15 min while revalidating in background\n$stats = Cache::flexible('dashboard:stats', [300, 900], function () {\n    return DashboardStats::calculate();\n});\n\n// \u2705 put / get / forget\nCache::put('key', $value, now()->addHours(1));\n$value = Cache::get('key', 'default');\nCache::forget('key');\n\n// \u274c Querying the database when cache would suffice\n$settings = Setting::all(); // Every request hits the DB\n```\n\n## Cache Tags for Grouped Invalidation\n\n```php\n// \u2705 Tag related cache entries\nCache::tags(['posts', 'users'])->put(\"user:{$userId}:posts\", $posts, 3600);\nCache::tags(['posts'])->put(\"post:{$postId}\", $post, 3600);\nCache::tags(['users'])->put(\"user:{$userId}:profile\", $profile, 3600);\n\n// \u2705 Flush all caches for a tag group\nCache::tags(['posts'])->flush(); // Clears all post-related caches\n\n// \u2705 Retrieve tagged cache\n$posts = Cache::tags(['posts', 'users'])->get(\"user:{$userId}:posts\");\n\n// Note: Cache tags are only supported by redis and memcached drivers\n```\n\n## Atomic Locks\n\n```php\nuse Illuminate\\Support\\Facades\\Cache;\n\n// \u2705 Prevent concurrent execution\n$lock = Cache::lock('processing:order:' . $orderId, 10); // 10 second lock\n\nif ($lock->get()) {\n    try {\n        // Process order exclusively\n        $this->processOrder($orderId);\n    } finally {\n        $lock->release();\n    }\n}\n\n// \u2705 Block and wait for lock (up to 5 seconds)\n$lock = Cache::lock('report:generate', 30);\n\n$lock->block(5, function () {\n    // Acquired lock, do work\n    $this->generateReport();\n}); // Lock auto-released after closure\n\n// \u2705 Cross-process lock with owner token\n$lock = Cache::lock('deployment', 120);\n\nif ($lock->get()) {\n    $owner = $lock->owner();\n    // Pass $owner to another process\n}\n\n// In the other process\nCache::restoreLock('deployment', $owner)->release();\n\n// \u274c Forgetting to release locks\n$lock->get();\n$this->doWork(); // If this throws, lock is never released\n```\n\n## Cache Memoization\n\n```php\nuse Illuminate\\Support\\Facades\\Cache;\n\n// \u2705 memo - in-memory cache for the current request lifecycle\n// Avoids repeated cache store lookups within the same request\n$config = Cache::memo('app:config', function () {\n    return Config::loadFromDatabase();\n});\n\n// Subsequent calls return the in-memory value without hitting Redis/Memcached\n$config = Cache::memo('app:config', fn () => Config::loadFromDatabase());\n```\n\n## Model Caching Patterns\n\n```php\nclass Product extends Model\n{\n    // \u2705 Cache on read with automatic invalidation\n    public static function findCached(int $id): ?self\n    {\n        return Cache::remember(\n            \"product:{$id}\",\n            now()->addHour(),\n            fn () => static::find($id)\n        );\n    }\n\n    // \u2705 Invalidate cache on model changes\n    protected static function booted(): void\n    {\n        static::saved(function (Product $product) {\n            Cache::forget(\"product:{$product->id}\");\n            Cache::tags(['products'])->flush();\n        });\n\n        static::deleted(function (Product $product) {\n            Cache::forget(\"product:{$product->id}\");\n            Cache::tags(['products'])->flush();\n        });\n    }\n}\n\n// \u2705 Cache query results with tags for group invalidation\nclass ProductService\n{\n    public function getFeatured(): Collection\n    {\n        return Cache::tags(['products'])->remember(\n            'products:featured',\n            now()->addMinutes(30),\n            fn () => Product::where('featured', true)->with('category')->get()\n        );\n    }\n}\n```\n\n## Cache Key Conventions\n\n```php\n// \u2705 Use consistent, descriptive key patterns\n\"user:{$userId}:profile\"\n\"post:{$postId}:comments:page:{$page}\"\n\"tenant:{$tenantId}:settings\"\n\"api:github:repos:{$username}\"\n\"report:daily:{$date}\"\n\n// \u2705 Include cache-busting identifiers when data shape changes\n\"v2:user:{$userId}:profile\"\n\n// \u274c Vague or collision-prone keys\n\"data\"\n\"user\"\n\"temp\"\n\"cache_1\"\n```\n\n## Common Pitfalls\n\n```php\n// \u274c Caching null results without handling them\n$user = Cache::remember(\"user:{$id}\", 3600, fn () => User::find($id));\n// If user doesn't exist, null is cached for an hour\n\n// \u2705 Handle null explicitly\n$user = Cache::remember(\"user:{$id}\", 3600, function () use ($id) {\n    return User::find($id) ?? new NullUser();\n});\n\n// \u274c No invalidation strategy\nCache::forever('products:all', Product::all());\n// Data becomes stale with no way to refresh\n\n// \u2705 Use TTL or event-based invalidation\nCache::remember('products:all', now()->addMinutes(15), fn () => Product::all());\n\n// \u274c Caching too aggressively (serialization cost > query cost)\nCache::remember('user:count', 3600, fn () => User::count());\n// Simple COUNT queries are often fast enough without caching\n\n// \u2705 Cache expensive operations\nCache::remember('dashboard:analytics', 3600, function () {\n    return DB::table('orders')\n        ->selectRaw('DATE(created_at) as date, SUM(total) as revenue')\n        ->groupByRaw('DATE(created_at)')\n        ->orderBy('date')\n        ->get();\n});\n\n// \u274c Cache stampede - many requests regenerate cache simultaneously\n// \u2705 Use flexible() for stale-while-revalidate or atomic locks for regeneration\n```\n\n## Checklist\n\n- [ ] remember/rememberForever used instead of manual get/put\n- [ ] flexible() used for high-traffic keys that tolerate brief staleness\n- [ ] Cache tags used for grouped invalidation (Redis/Memcached only)\n- [ ] Atomic locks used for exclusive operations\n- [ ] Model caches invalidated on save/delete events\n- [ ] Cache keys follow a consistent naming convention\n- [ ] TTLs set appropriately (not too long, not too short)\n- [ ] Null/empty results handled to avoid caching nothing\n- [ ] Expensive queries cached, trivial queries left uncached\n- [ ] Cache stampede prevented with flexible() or locks\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "laravel-caching-strategies",
-    "description": "Best practices for Laravel caching including cache patterns, tags, atomic locks, flexible cache, and cache invalidation strategies."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

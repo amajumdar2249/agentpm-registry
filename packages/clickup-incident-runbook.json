@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031601",
   "name": "clickup-incident-runbook",
   "slug": "clickup-incident-runbook",
   "description": "Execute ClickUp API incident response: triage, diagnosis, mitigation,",
   "content": "# ClickUp Incident Runbook\n\n## Overview\n\nRapid incident response for ClickUp API v2 integration failures. Covers triage, diagnosis by error type, mitigation, and postmortem.\n\n## Severity Classification\n\n| Level | Definition | Response Time | Example |\n|-------|-----------|---------------|---------|\n| P1 | All ClickUp API calls failing | < 15 min | 401 on all requests, API unreachable |\n| P2 | Degraded service | < 1 hour | High latency, rate limited, partial 500s |\n| P3 | Minor impact | < 4 hours | Webhook delays, non-critical endpoint errors |\n| P4 | No user impact | Next business day | Monitoring gaps, documentation issues |\n\n## Step 1: Quick Triage (< 2 minutes)\n\n```bash\n#!/bin/bash\necho \"=== ClickUp Incident Triage ===\"\n\n# 1. Is ClickUp itself down?\necho -n \"ClickUp platform: \"\ncurl -sf https://status.clickup.com/api/v2/summary.json 2>/dev/null | \\\n  python3 -c \"import sys,json; print(json.load(sys.stdin)['status']['description'])\" 2>/dev/null \\\n  || echo \"UNREACHABLE\"\n\n# 2. Can we authenticate?\necho -n \"Auth: \"\nSTATUS=$(curl -sf -o /dev/null -w \"%{http_code}\" \\\n  https://api.clickup.com/api/v2/user \\\n  -H \"Authorization: $CLICKUP_API_TOKEN\" 2>/dev/null)\necho \"HTTP $STATUS\"\n\n# 3. Rate limit status\necho -n \"Rate limit: \"\ncurl -sD - -o /dev/null https://api.clickup.com/api/v2/user \\\n  -H \"Authorization: $CLICKUP_API_TOKEN\" 2>&1 | \\\n  grep -i \"X-RateLimit-Remaining\" | awk '{print $2}' | tr -d '\\r'\n\n# 4. API latency\necho -n \"Latency: \"\ncurl -sf -o /dev/null -w \"%{time_total}s\\n\" \\\n  https://api.clickup.com/api/v2/user \\\n  -H \"Authorization: $CLICKUP_API_TOKEN\"\n\n# 5. Our service health (adjust URL)\necho -n \"Our health endpoint: \"\ncurl -sf http://localhost:3000/health 2>/dev/null | \\\n  python3 -c \"import sys,json; d=json.load(sys.stdin); print(d.get('status','unknown'))\" 2>/dev/null \\\n  || echo \"UNREACHABLE\"\n```\n\n## Decision Tree\n\n```\nClickUp API errors?\n\u251c\u2500\u2500 YES: Check status.clickup.com\n\u2502   \u251c\u2500\u2500 ClickUp incident \u2192 Enable fallback mode. Wait. Monitor.\n\u2502   \u2514\u2500\u2500 No ClickUp incident \u2192 Our issue\n\u2502       \u251c\u2500\u2500 401 errors \u2192 Token rotated/revoked \u2192 Regenerate token\n\u2502       \u251c\u2500\u2500 429 errors \u2192 Rate limited \u2192 Enable queuing, check for loops\n\u2502       \u251c\u2500\u2500 403 errors \u2192 Permission changed \u2192 Check workspace access\n\u2502       \u2514\u2500\u2500 500 errors \u2192 Intermittent ClickUp issue \u2192 Retry with backoff\n\u2514\u2500\u2500 NO: Our service down?\n    \u251c\u2500\u2500 YES \u2192 Infrastructure issue (pods, memory, network)\n    \u2514\u2500\u2500 NO \u2192 Resolved or intermittent. Monitor.\n```\n\n## Remediation by Error Type\n\n### 401 Unauthorized (Token Issue)\n\n```bash\n# Verify token is set and valid\necho \"Token length: ${#CLICKUP_API_TOKEN}\"\n\n# Test with explicit token\ncurl -v https://api.clickup.com/api/v2/user \\\n  -H \"Authorization: $CLICKUP_API_TOKEN\" 2>&1 | grep \"< HTTP\"\n\n# If invalid: regenerate in ClickUp Settings > Apps > API Token\n# Then update in your secrets manager:\ngh secret set CLICKUP_API_TOKEN --body \"pk_NEW_TOKEN\"\n# OR: vault kv put secret/clickup/api-token value=\"pk_NEW_TOKEN\"\n```\n\n### 429 Rate Limited\n\n```bash\n# Check current rate limit state\ncurl -sD - -o /dev/null https://api.clickup.com/api/v2/user \\\n  -H \"Authorization: $CLICKUP_API_TOKEN\" 2>&1 | grep -i ratelimit\n\n# Check for runaway loops in your application\n# Look for rapid repeated calls to same endpoint\n```\n\nMitigation: Enable request queuing, check for infinite loops, consider plan upgrade.\n\n### 500/503 ClickUp Server Error\n\n```bash\n# Check ClickUp status page\ncurl -sf https://status.clickup.com/api/v2/summary.json | \\\n  python3 -c \"import sys,json; [print(f'  {c[\\\"name\\\"]}: {c[\\\"status\\\"]}') for c in json.load(sys.stdin)['components']]\"\n```\n\nMitigation: Enable graceful degradation (circuit breaker), queue writes for retry.\n\n## Graceful Degradation\n\n```typescript\n// Circuit breaker for ClickUp API\nclass ClickUpCircuitBreaker {\n  private failures = 0;\n  private lastFailure = 0;\n  private readonly threshold = 5;\n  private readonly resetMs = 60000;\n\n  isOpen(): boolean {\n    if (this.failures >= this.threshold) {\n      if (Date.now() - this.lastFailure > this.resetMs) {\n        this.failures = 0; // Reset after cooldown\n        return false;\n      }\n      return true;\n    }\n    return false;\n  }\n\n  recordFailure(): void {\n    this.failures++;\n    this.lastFailure = Date.now();\n  }\n\n  recordSuccess(): void {\n    this.failures = 0;\n  }\n}\n\nconst breaker = new ClickUpCircuitBreaker();\n\nasync function resilientClickUpCall<T>(path: string, fallback: T): Promise<T> {\n  if (breaker.isOpen()) {\n    console.warn('[clickup] Circuit breaker OPEN, using fallback');\n    return fallback;\n  }\n\n  try {\n    const result = await clickupRequest(path);\n    breaker.recordSuccess();\n    return result;\n  } catch (error) {\n    breaker.recordFailure();\n    console.error('[clickup] API error, circuit breaker count:', breaker['failures']);\n    return fallback;\n  }\n}\n```\n\n## Communication Templates\n\n### Internal (Slack)\n\n```\nP[1-4] INCIDENT: ClickUp Integration\nStatus: INVESTIGATING | IDENTIFIED | MONITORING | RESOLVED\nImpact: [user-facing impact description]\nCause: [root cause if known]\nAction: [current mitigation steps]\nNext update: [time]\n```\n\n### Postmortem Template\n\n```markdown\n## Incident: ClickUp API [Error Type]\n**Date:** YYYY-MM-DD | **Duration:** Xh Ym | **Severity:** P[1-4]\n\n### Timeline\n- HH:MM - Alert fired / issue reported\n- HH:MM - Triage started\n- HH:MM - Root cause identified\n- HH:MM - Mitigation applied\n- HH:MM - Resolved\n\n### Root Cause\n[Technical explanation]\n\n### Action Items\n- [ ] [Preventive measure] - Owner - Due date\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Can't reach status page | DNS/network issue | Use mobile or VPN |\n| Token rotation fails | Insufficient permissions | Need workspace admin |\n| Circuit breaker stuck open | resetMs too long | Reduce reset threshold |\n| Webhook backlog | ClickUp retrying failed deliveries | Fix endpoint, events replay |\n\n## Resources\n\n- [ClickUp Status Page](https://status.clickup.com)\n- [ClickUp Common Errors](https://developer.clickup.com/docs/common_errors)\n- [ClickUp Rate Limits](https://developer.clickup.com/docs/rate-limits)\n\n## Next Steps\n\nFor data handling during incidents, see `clickup-data-handling`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clickup-incident-runbook",
-    "description": "Execute ClickUp API incident response: triage, diagnosis, mitigation,",
-    "Trigger": "clickup incident\", \"clickup outage\", \"clickup down\",",
-    "allowed-tools": "Read, Grep, Bash(kubectl:*), Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

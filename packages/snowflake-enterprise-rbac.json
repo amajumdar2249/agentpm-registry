@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033285",
   "name": "snowflake-enterprise-rbac",
   "slug": "snowflake-enterprise-rbac",
   "description": "Configure Snowflake enterprise RBAC with system roles, custom role hierarchies,",
   "content": "# Snowflake Enterprise RBAC\n\n## Overview\n\nConfigure enterprise-grade access control using Snowflake's system-defined roles, custom role hierarchies, SSO via SAML/OIDC, and SCIM for automated user provisioning.\n\n## Snowflake System Roles\n\n| Role | Purpose | Use For |\n|------|---------|---------|\n| ACCOUNTADMIN | Top-level admin | Billing, resource monitors, replication |\n| SECURITYADMIN | Security management | Users, roles, grants, network policies |\n| SYSADMIN | Object management | Databases, warehouses, schemas, tables |\n| USERADMIN | User management | Create users and roles |\n| PUBLIC | Default for all users | Minimal access, applied automatically |\n\n**Best Practice:** Never use ACCOUNTADMIN as a default role. Create custom roles and grant them to SYSADMIN.\n\n## Instructions\n\n### Step 1: Design Custom Role Hierarchy\n\n```sql\n-- Functional roles (what people do)\nCREATE ROLE DATA_ENGINEER;\nCREATE ROLE DATA_ANALYST;\nCREATE ROLE DATA_SCIENTIST;\nCREATE ROLE BI_VIEWER;\nCREATE ROLE APP_SERVICE;         -- Service accounts\n\n-- Access roles (what they can access)\nCREATE ROLE RAW_DATA_READER;\nCREATE ROLE CURATED_DATA_READER;\nCREATE ROLE CURATED_DATA_WRITER;\nCREATE ROLE GOLD_DATA_READER;\n\n-- Role hierarchy (bottom-up)\n--   BI_VIEWER \u2192 GOLD_DATA_READER\n--   DATA_ANALYST \u2192 CURATED_DATA_READER + GOLD_DATA_READER\n--   DATA_SCIENTIST \u2192 DATA_ANALYST + RAW_DATA_READER\n--   DATA_ENGINEER \u2192 all access roles\n--   All custom roles \u2192 SYSADMIN\n\nGRANT ROLE GOLD_DATA_READER TO ROLE BI_VIEWER;\nGRANT ROLE CURATED_DATA_READER TO ROLE DATA_ANALYST;\nGRANT ROLE GOLD_DATA_READER TO ROLE DATA_ANALYST;\nGRANT ROLE DATA_ANALYST TO ROLE DATA_SCIENTIST;\nGRANT ROLE RAW_DATA_READER TO ROLE DATA_SCIENTIST;\nGRANT ROLE RAW_DATA_READER TO ROLE DATA_ENGINEER;\nGRANT ROLE CURATED_DATA_READER TO ROLE DATA_ENGINEER;\nGRANT ROLE CURATED_DATA_WRITER TO ROLE DATA_ENGINEER;\nGRANT ROLE GOLD_DATA_READER TO ROLE DATA_ENGINEER;\n\n-- All custom roles under SYSADMIN\nGRANT ROLE DATA_ENGINEER TO ROLE SYSADMIN;\nGRANT ROLE DATA_ANALYST TO ROLE SYSADMIN;\nGRANT ROLE DATA_SCIENTIST TO ROLE SYSADMIN;\nGRANT ROLE BI_VIEWER TO ROLE SYSADMIN;\nGRANT ROLE APP_SERVICE TO ROLE SYSADMIN;\n```\n\n### Step 2: Grant Object Privileges\n\n```sql\n-- Access role: RAW_DATA_READER\nGRANT USAGE ON DATABASE PROD_DW TO ROLE RAW_DATA_READER;\nGRANT USAGE ON SCHEMA PROD_DW.BRONZE TO ROLE RAW_DATA_READER;\nGRANT SELECT ON ALL TABLES IN SCHEMA PROD_DW.BRONZE TO ROLE RAW_DATA_READER;\nGRANT SELECT ON FUTURE TABLES IN SCHEMA PROD_DW.BRONZE TO ROLE RAW_DATA_READER;\n\n-- Access role: CURATED_DATA_READER\nGRANT USAGE ON DATABASE PROD_DW TO ROLE CURATED_DATA_READER;\nGRANT USAGE ON SCHEMA PROD_DW.SILVER TO ROLE CURATED_DATA_READER;\nGRANT SELECT ON ALL TABLES IN SCHEMA PROD_DW.SILVER TO ROLE CURATED_DATA_READER;\nGRANT SELECT ON FUTURE TABLES IN SCHEMA PROD_DW.SILVER TO ROLE CURATED_DATA_READER;\n\n-- Access role: CURATED_DATA_WRITER\nGRANT INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA PROD_DW.SILVER TO ROLE CURATED_DATA_WRITER;\nGRANT INSERT, UPDATE, DELETE ON FUTURE TABLES IN SCHEMA PROD_DW.SILVER TO ROLE CURATED_DATA_WRITER;\n\n-- Access role: GOLD_DATA_READER\nGRANT USAGE ON DATABASE PROD_DW TO ROLE GOLD_DATA_READER;\nGRANT USAGE ON SCHEMA PROD_DW.GOLD TO ROLE GOLD_DATA_READER;\nGRANT SELECT ON ALL TABLES IN SCHEMA PROD_DW.GOLD TO ROLE GOLD_DATA_READER;\nGRANT SELECT ON FUTURE TABLES IN SCHEMA PROD_DW.GOLD TO ROLE GOLD_DATA_READER;\n\n-- Warehouse grants (functional roles)\nGRANT USAGE ON WAREHOUSE ETL_WH TO ROLE DATA_ENGINEER;\nGRANT USAGE ON WAREHOUSE ANALYTICS_WH TO ROLE DATA_ANALYST;\nGRANT USAGE ON WAREHOUSE ANALYTICS_WH TO ROLE DATA_SCIENTIST;\nGRANT USAGE ON WAREHOUSE DASHBOARD_WH TO ROLE BI_VIEWER;\n```\n\n### Step 3: Configure SSO with SAML\n\n```sql\n-- Create SAML security integration\nCREATE OR REPLACE SECURITY INTEGRATION saml_sso\n  TYPE = SAML2\n  ENABLED = TRUE\n  SAML2_ISSUER = 'https://idp.company.com/saml/metadata'\n  SAML2_SSO_URL = 'https://idp.company.com/saml/sso'\n  SAML2_PROVIDER = 'OKTA'        -- Or 'ADFS', 'CUSTOM'\n  SAML2_X509_CERT = '-----BEGIN CERTIFICATE-----\nMIIBIj...\n-----END CERTIFICATE-----'\n  SAML2_SP_INITIATED_LOGIN_PAGE_LABEL = 'Company SSO'\n  SAML2_ENABLE_SP_INITIATED = TRUE\n  SAML2_SNOWFLAKE_ACS_URL = 'https://myorg-myaccount.snowflakecomputing.com/fed/login'\n  SAML2_SNOWFLAKE_ISSUER_URL = 'https://myorg-myaccount.snowflakecomputing.com';\n\n-- Map IdP groups to Snowflake roles (done in IdP, not SQL)\n-- Okta: Group \"Engineering\" \u2192 Snowflake role \"DATA_ENGINEER\"\n-- Okta: Group \"Analytics\" \u2192 Snowflake role \"DATA_ANALYST\"\n```\n\n### Step 4: Configure SCIM for Automated User Provisioning\n\n```sql\n-- Create SCIM integration (users/roles synced from IdP automatically)\nCREATE OR REPLACE SECURITY INTEGRATION scim_provisioning\n  TYPE = SCIM\n  SCIM_CLIENT = 'OKTA'           -- Or 'AZURE', 'GENERIC'\n  RUN_AS_ROLE = 'SECURITYADMIN';\n\n-- Get SCIM endpoint and token for IdP configuration\nSELECT SYSTEM$GENERATE_SCIM_ACCESS_TOKEN('scim_provisioning');\n\n-- SCIM auto-creates users and assigns roles based on IdP groups\n-- No manual user creation needed after SCIM is configured\n```\n\n### Step 5: Audit Role Grants\n\n```sql\n-- All current role grants\nSELECT grantee_name, role,\n       granted_by, created_on\nFROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS\nWHERE deleted_on IS NULL\nORDER BY grantee_name;\n\n-- Users with ACCOUNTADMIN (should be minimal)\nSELECT grantee_name, role, granted_by\nFROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_USERS\nWHERE role = 'ACCOUNTADMIN' AND deleted_on IS NULL;\n\n-- Unused privileges (granted but never used)\nSELECT DISTINCT granted_on, name, privilege, grantee_name\nFROM SNOWFLAKE.ACCOUNT_USAGE.GRANTS_TO_ROLES gtr\nLEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.ACCESS_HISTORY ah\n  ON gtr.name = ah.direct_objects_accessed[0]:objectName\nWHERE ah.query_id IS NULL\n  AND gtr.deleted_on IS NULL\n  AND gtr.granted_on = 'TABLE';\n```\n\n## RBAC Checklist\n\n- [ ] No human user has ACCOUNTADMIN as default role\n- [ ] Custom roles follow functional + access role pattern\n- [ ] All custom roles roll up to SYSADMIN\n- [ ] `GRANT ... ON FUTURE` used for new objects\n- [ ] SSO configured with IdP group-to-role mapping\n- [ ] SCIM enabled for automated provisioning/deprovisioning\n- [ ] Quarterly audit of role grants and unused privileges\n- [ ] Service accounts use key pair auth with dedicated roles\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| SSO login fails | Wrong SAML config | Verify ACS URL and certificate |\n| Role not inherited | Missing role grant | Check hierarchy with `SHOW GRANTS OF ROLE x` |\n| SCIM sync fails | Token expired | Regenerate SCIM access token |\n| Future grants not applying | Schema not included | Add `ON FUTURE` grants per schema |\n\n## Resources\n\n- [Access Control Overview](https://docs.snowflake.com/en/user-guide/security-access-control-overview)\n- [Access Control Best Practices](https://docs.snowflake.com/en/user-guide/security-access-control-considerations)\n- [SAML SSO](https://docs.snowflake.com/en/user-guide/admin-security-fed-auth-use)\n- [SCIM Provisioning](https://docs.snowflake.com/en/user-guide/admin-security-fed-auth-use)\n\n## Next Steps\n\nFor major platform migrations, see `snowflake-migration-deep-dive`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "snowflake-enterprise-rbac",
-    "description": "Configure Snowflake enterprise RBAC with system roles, custom role hierarchies,",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

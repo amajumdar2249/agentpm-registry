@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031276",
   "name": "apify-webhooks-events",
   "slug": "apify-webhooks-events",
   "description": "Implement Apify webhooks for Actor run notifications and event-driven",
   "content": "# Apify Webhooks & Events\n\n## Overview\n\nConfigure webhooks to receive notifications when Actor runs complete, fail, or time out. Apify supports both persistent webhooks (for all runs of an Actor) and ad-hoc webhooks (for a single run). Event-driven architecture is the recommended pattern for production Apify integrations.\n\n## Event Types\n\n| Event | Fired When |\n|-------|-----------|\n| `ACTOR.RUN.CREATED` | A new Actor run starts |\n| `ACTOR.RUN.SUCCEEDED` | Run finishes with `SUCCEEDED` status |\n| `ACTOR.RUN.FAILED` | Run finishes with `FAILED` status |\n| `ACTOR.RUN.ABORTED` | Run is manually or programmatically aborted |\n| `ACTOR.RUN.TIMED_OUT` | Run exceeds its timeout |\n| `ACTOR.RUN.RESURRECTED` | A finished run is resurrected |\n\n## Instructions\n\n### Step 1: Create a Persistent Webhook\n\nPersistent webhooks fire for every run of an Actor:\n\n```typescript\nimport { ApifyClient } from 'apify-client';\n\nconst client = new ApifyClient({ token: process.env.APIFY_TOKEN });\n\nconst webhook = await client.webhooks().create({\n  eventTypes: [\n    'ACTOR.RUN.SUCCEEDED',\n    'ACTOR.RUN.FAILED',\n    'ACTOR.RUN.TIMED_OUT',\n  ],\n  condition: {\n    actorId: 'YOUR_ACTOR_ID',\n  },\n  requestUrl: 'https://your-app.com/api/webhooks/apify',\n  payloadTemplate: JSON.stringify({\n    eventType: '{{eventType}}',\n    createdAt: '{{createdAt}}',\n    actorId: '{{actorId}}',\n    actorRunId: '{{actorRunId}}',\n    defaultDatasetId: '{{resource.defaultDatasetId}}',\n    defaultKeyValueStoreId: '{{resource.defaultKeyValueStoreId}}',\n    status: '{{resource.status}}',\n    statusMessage: '{{resource.statusMessage}}',\n    startedAt: '{{resource.startedAt}}',\n    finishedAt: '{{resource.finishedAt}}',\n  }),\n  isAdHoc: false,\n});\n\nconsole.log(`Webhook created: ${webhook.id}`);\n```\n\n### Step 2: Use Ad-Hoc Webhooks for Single Runs\n\nAd-hoc webhooks are created at run time and fire only for that specific run:\n\n```typescript\n// Ad-hoc webhook via API (pass webhooks array when starting a run)\nconst run = await client.actor('username/my-actor').start(\n  { startUrls: [{ url: 'https://example.com' }] },\n  {\n    webhooks: [\n      {\n        eventTypes: ['ACTOR.RUN.SUCCEEDED', 'ACTOR.RUN.FAILED'],\n        requestUrl: 'https://your-app.com/api/webhooks/apify',\n        payloadTemplate: JSON.stringify({\n          runId: '{{actorRunId}}',\n          status: '{{resource.status}}',\n          datasetId: '{{resource.defaultDatasetId}}',\n        }),\n      },\n    ],\n  },\n);\n```\n\nVia REST API with curl:\n\n```bash\ncurl -X POST \\\n  \"https://api.apify.com/v2/acts/USERNAME~ACTOR_NAME/runs\" \\\n  -H \"Authorization: Bearer $APIFY_TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"startUrls\": [{\"url\": \"https://example.com\"}],\n    \"webhooks\": [\n      {\n        \"eventTypes\": [\"ACTOR.RUN.SUCCEEDED\"],\n        \"requestUrl\": \"https://your-app.com/webhook\"\n      }\n    ]\n  }'\n```\n\n### Step 3: Build the Webhook Handler\n\n```typescript\nimport express from 'express';\nimport { ApifyClient } from 'apify-client';\n\nconst app = express();\nconst client = new ApifyClient({ token: process.env.APIFY_TOKEN });\n\napp.use(express.json());\n\n// Webhook endpoint\napp.post('/api/webhooks/apify', async (req, res) => {\n  // Respond immediately (Apify expects 2xx within 30 seconds)\n  res.status(200).json({ received: true });\n\n  // Process asynchronously\n  try {\n    await processWebhook(req.body);\n  } catch (error) {\n    console.error('Webhook processing failed:', error);\n  }\n});\n\nasync function processWebhook(payload: {\n  eventType: string;\n  actorRunId: string;\n  defaultDatasetId?: string;\n  status: string;\n  statusMessage?: string;\n}) {\n  const { eventType, actorRunId, defaultDatasetId } = payload;\n\n  switch (eventType) {\n    case 'ACTOR.RUN.SUCCEEDED': {\n      if (!defaultDatasetId) return;\n\n      // Fetch results from the dataset\n      const { items } = await client\n        .dataset(defaultDatasetId)\n        .listItems({ limit: 10000 });\n\n      console.log(`Run ${actorRunId} succeeded with ${items.length} items`);\n\n      // Process results: save to DB, trigger downstream jobs, etc.\n      await saveToDatabase(items);\n      await notifyTeam(`Scrape completed: ${items.length} items`);\n      break;\n    }\n\n    case 'ACTOR.RUN.FAILED':\n    case 'ACTOR.RUN.TIMED_OUT': {\n      console.error(`Run ${actorRunId} ${eventType}: ${payload.statusMessage}`);\n\n      // Get full run log for debugging\n      const log = await client.run(actorRunId).log().get();\n      await alertOncall({\n        subject: `Apify run ${eventType}`,\n        runId: actorRunId,\n        message: payload.statusMessage,\n        logTail: log?.slice(-1000),\n      });\n      break;\n    }\n\n    case 'ACTOR.RUN.ABORTED':\n      console.warn(`Run ${actorRunId} was aborted`);\n      break;\n\n    default:\n      console.log(`Unhandled event: ${eventType}`);\n  }\n}\n```\n\n### Step 4: Idempotent Processing\n\nWebhooks may be delivered more than once. Guard against duplicates:\n\n```typescript\n// Using a Set for in-memory dedup (use Redis/DB in production)\nconst processedRuns = new Set<string>();\n\nasync function processWebhookIdempotent(payload: {\n  actorRunId: string;\n  eventType: string;\n}) {\n  const dedupeKey = `${payload.actorRunId}:${payload.eventType}`;\n\n  if (processedRuns.has(dedupeKey)) {\n    console.log(`Skipping duplicate: ${dedupeKey}`);\n    return;\n  }\n\n  processedRuns.add(dedupeKey);\n\n  // Process the webhook...\n  await processWebhook(payload);\n\n  // Cleanup old entries (keep last 10000)\n  if (processedRuns.size > 10000) {\n    const entries = Array.from(processedRuns);\n    entries.slice(0, entries.length - 10000).forEach(e => processedRuns.delete(e));\n  }\n}\n```\n\n### Step 5: Event-Driven Pipeline\n\nChain Actors together using webhooks:\n\n```typescript\n// Actor A finishes \u2192 webhook triggers \u2192 start Actor B\n\napp.post('/api/webhooks/pipeline', async (req, res) => {\n  res.status(200).json({ received: true });\n\n  const { eventType, actorRunId, defaultDatasetId } = req.body;\n\n  if (eventType !== 'ACTOR.RUN.SUCCEEDED') return;\n\n  // Stage 1 completed, start Stage 2\n  console.log(`Pipeline Stage 1 done (run ${actorRunId}). Starting Stage 2...`);\n\n  const stage2Run = await client.actor('username/data-processor').start(\n    {\n      sourceDatasetId: defaultDatasetId,\n      outputFormat: 'json',\n    },\n    {\n      webhooks: [{\n        eventTypes: ['ACTOR.RUN.SUCCEEDED', 'ACTOR.RUN.FAILED'],\n        requestUrl: 'https://your-app.com/api/webhooks/pipeline-stage3',\n      }],\n    },\n  );\n\n  console.log(`Stage 2 started: ${stage2Run.id}`);\n});\n```\n\n### Step 6: Manage Webhooks\n\n```typescript\n// List all webhooks\nconst { items: webhooks } = await client.webhooks().list();\nwebhooks.forEach(wh => {\n  console.log(`${wh.id} | ${wh.eventTypes.join(',')} | ${wh.requestUrl}`);\n});\n\n// Update a webhook\nawait client.webhook('WEBHOOK_ID').update({\n  requestUrl: 'https://new-url.com/webhook',\n  isEnabled: true,\n});\n\n// Delete a webhook\nawait client.webhook('WEBHOOK_ID').delete();\n\n// Get webhook dispatch history (see delivery attempts)\nconst { items: dispatches } = await client\n  .webhook('WEBHOOK_ID')\n  .dispatches()\n  .list();\ndispatches.forEach(d => {\n  console.log(`${d.status} | ${d.createdAt} | HTTP ${d.responseStatus}`);\n});\n```\n\n## Webhook Payload Template Variables\n\n| Variable | Description |\n|----------|-------------|\n| `{{eventType}}` | Event type string |\n| `{{eventData}}` | Full event data object |\n| `{{createdAt}}` | Event creation timestamp |\n| `{{actorId}}` | Actor ID |\n| `{{actorRunId}}` | Run ID |\n| `{{actorTaskId}}` | Task ID (if run from a task) |\n| `{{resource.*}}` | Any field from the run object |\n\n## Testing Webhooks Locally\n\n```bash\n# Use ngrok to expose local server\nngrok http 3000\n# Copy the HTTPS URL\n\n# Create a test webhook pointing to ngrok\n# Then trigger a run to see the webhook fire\n\n# Or manually simulate a webhook payload\ncurl -X POST http://localhost:3000/api/webhooks/apify \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"eventType\": \"ACTOR.RUN.SUCCEEDED\",\n    \"actorRunId\": \"test-run-123\",\n    \"defaultDatasetId\": \"test-dataset-456\",\n    \"status\": \"SUCCEEDED\"\n  }'\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Webhook not delivered | URL unreachable | Verify HTTPS, check firewall |\n| Duplicate processing | Webhook retry on non-2xx | Implement idempotency |\n| Slow processing | Handler takes >30s | Respond 200 immediately, process async |\n| Missing data in payload | Wrong template vars | Check template variable spelling |\n| Webhook disabled | Too many failures | Re-enable in Console or via API |\n\n## Resources\n\n- [Webhook Event Types](https://docs.apify.com/platform/integrations/webhooks/events)\n- [Webhook Actions](https://docs.apify.com/platform/integrations/webhooks/actions)\n- [Ad-Hoc Webhooks](https://docs.apify.com/platform/integrations/webhooks/ad-hoc-webhooks)\n\n## Next Steps\n\nFor performance optimization, see `apify-performance-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "apify-webhooks-events",
-    "description": "Implement Apify webhooks for Actor run notifications and event-driven",
-    "Trigger": "apify webhook\", \"apify events\", \"actor run notification\",",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

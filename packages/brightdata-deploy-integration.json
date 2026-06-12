@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031403",
   "name": "brightdata-deploy-integration",
   "slug": "brightdata-deploy-integration",
   "description": "Deploy Bright Data integrations to Vercel, Fly.io, and Cloud Run platforms.",
   "content": "# Bright Data Deploy Integration\n\n## Overview\n\nDeploy Bright Data scraping applications to cloud platforms with proper secrets management. Key consideration: Bright Data proxy connections require outbound TCP to `brd.superproxy.io` on ports 33335 (proxy) and 9222 (Scraping Browser).\n\n## Prerequisites\n\n- Bright Data production zone credentials\n- Platform CLI installed (vercel, fly, or gcloud)\n- Application tested in staging\n\n## Instructions\n\n### Step 1: Vercel Deployment (Serverless)\n\n```bash\n# Add secrets\nvercel env add BRIGHTDATA_CUSTOMER_ID production\nvercel env add BRIGHTDATA_ZONE production\nvercel env add BRIGHTDATA_ZONE_PASSWORD production\nvercel env add BRIGHTDATA_API_TOKEN production\n```\n\n```json\n// vercel.json\n{\n  \"functions\": {\n    \"api/scrape.ts\": {\n      \"maxDuration\": 60\n    }\n  }\n}\n```\n\n```typescript\n// api/scrape.ts \u2014 Vercel serverless function\nimport type { VercelRequest, VercelResponse } from '@vercel/node';\nimport axios from 'axios';\nimport https from 'https';\n\nexport default async function handler(req: VercelRequest, res: VercelResponse) {\n  const { url } = req.body;\n  if (!url) return res.status(400).json({ error: 'url required' });\n\n  const proxy = {\n    host: 'brd.superproxy.io',\n    port: 33335,\n    auth: {\n      username: `brd-customer-${process.env.BRIGHTDATA_CUSTOMER_ID}-zone-${process.env.BRIGHTDATA_ZONE}`,\n      password: process.env.BRIGHTDATA_ZONE_PASSWORD!,\n    },\n  };\n\n  try {\n    const response = await axios.get(url, {\n      proxy,\n      httpsAgent: new https.Agent({ rejectUnauthorized: false }),\n      timeout: 55000, // Leave 5s buffer for Vercel's 60s limit\n    });\n    res.json({ status: response.status, length: response.data.length });\n  } catch (error: any) {\n    res.status(502).json({ error: error.message });\n  }\n}\n```\n\n### Step 2: Fly.io Deployment (Long-Running)\n\n```toml\n# fly.toml \u2014 better for Scraping Browser (needs WebSocket)\napp = \"my-scraper\"\nprimary_region = \"iad\"\n\n[env]\n  NODE_ENV = \"production\"\n\n[http_service]\n  internal_port = 3000\n  force_https = true\n  auto_stop_machines = true\n  auto_start_machines = true\n  min_machines_running = 0\n```\n\n```bash\n# Set secrets\nfly secrets set BRIGHTDATA_CUSTOMER_ID=c_abc123\nfly secrets set BRIGHTDATA_ZONE=web_unlocker_prod\nfly secrets set BRIGHTDATA_ZONE_PASSWORD=z_prod_pass\nfly secrets set BRIGHTDATA_API_TOKEN=prod_token\n\n# Deploy\nfly deploy\n```\n\n### Step 3: Google Cloud Run\n\n```bash\n# Store secrets in Secret Manager\necho -n \"c_abc123\" | gcloud secrets create brightdata-customer-id --data-file=-\necho -n \"web_unlocker_prod\" | gcloud secrets create brightdata-zone --data-file=-\necho -n \"z_prod_pass\" | gcloud secrets create brightdata-zone-password --data-file=-\n\n# Deploy with secret mounts\ngcloud run deploy scraper \\\n  --image gcr.io/$PROJECT_ID/scraper \\\n  --region us-central1 \\\n  --set-secrets=BRIGHTDATA_CUSTOMER_ID=brightdata-customer-id:latest \\\n  --set-secrets=BRIGHTDATA_ZONE=brightdata-zone:latest \\\n  --set-secrets=BRIGHTDATA_ZONE_PASSWORD=brightdata-zone-password:latest \\\n  --timeout=120 \\\n  --memory=512Mi\n```\n\n### Step 4: Platform Comparison\n\n| Feature | Vercel | Fly.io | Cloud Run |\n|---------|--------|--------|-----------|\n| Max timeout | 60s (Pro: 300s) | No limit | 3600s |\n| WebSocket (Scraping Browser) | No | Yes | No |\n| Outbound TCP | Yes | Yes | Yes |\n| Best for | Web Unlocker API | Scraping Browser | Batch scraping |\n| Cold start | Fast | Configurable | Medium |\n\n### Step 5: Health Check Endpoint\n\n```typescript\n// api/health.ts \u2014 works on all platforms\nexport async function GET() {\n  try {\n    const proxy = { host: 'brd.superproxy.io', port: 33335, auth: { username: `brd-customer-${process.env.BRIGHTDATA_CUSTOMER_ID}-zone-${process.env.BRIGHTDATA_ZONE}`, password: process.env.BRIGHTDATA_ZONE_PASSWORD! } };\n    const start = Date.now();\n    const res = await axios.get('https://lumtest.com/myip.json', { proxy, httpsAgent: new (await import('https')).Agent({ rejectUnauthorized: false }), timeout: 15000 });\n    return Response.json({ status: 'healthy', proxy_ip: res.data.ip, latency_ms: Date.now() - start });\n  } catch {\n    return Response.json({ status: 'degraded' }, { status: 503 });\n  }\n}\n```\n\n## Output\n\n- Platform-specific deployment with secrets management\n- Health check endpoint verifying proxy connectivity\n- Timeout and memory configured for scraping workloads\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Vercel timeout | 60s limit too short | Upgrade to Pro (300s) or use Fly.io |\n| WebSocket refused | Platform blocks WS | Use Fly.io for Scraping Browser |\n| Cold start timeout | Proxy handshake slow | Configure min instances |\n| Secrets not found | Wrong env name | Verify with platform CLI |\n\n## Resources\n\n- [Vercel Serverless Limits](https://vercel.com/docs/functions/runtimes#max-duration)\n- [Fly.io Documentation](https://fly.io/docs)\n- [Cloud Run Docs](https://cloud.google.com/run/docs)\n\n## Next Steps\n\nFor webhook handling, see `brightdata-webhooks-events`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "brightdata-deploy-integration",
-    "description": "Deploy Bright Data integrations to Vercel, Fly.io, and Cloud Run platforms.",
-    "allowed-tools": "Read, Write, Edit, Bash(vercel:*), Bash(fly:*), Bash(gcloud:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

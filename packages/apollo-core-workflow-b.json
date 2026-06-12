@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031280",
   "name": "apollo-core-workflow-b",
   "slug": "apollo-core-workflow-b",
   "description": "Implement Apollo.io email sequences and outreach workflow.",
   "content": "# Apollo Core Workflow B: Email Sequences & Outreach\n\n## Overview\n\nBuild Apollo.io email sequencing and outreach automation via the REST API. Sequences in Apollo are called \"emailer_campaigns\" in the API. This covers listing, searching, adding contacts, tracking engagement, and managing sequence lifecycle. All endpoints require a **master API key**.\n\n## Prerequisites\n\n- Completed `apollo-core-workflow-a` (lead search)\n- Apollo account with Sequences feature enabled\n- Connected email account in Apollo (Settings > Channels > Email)\n- Master API key (not standard)\n\n## Instructions\n\n### Step 1: Search for Existing Sequences\n\n```typescript\n// src/workflows/sequences.ts\nimport axios from 'axios';\n\nconst client = axios.create({\n  baseURL: 'https://api.apollo.io/api/v1',\n  headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.APOLLO_API_KEY! },\n});\n\nexport async function searchSequences(query?: string) {\n  const { data } = await client.post('/emailer_campaigns/search', {\n    q_name: query,       // optional name filter\n    page: 1,\n    per_page: 25,\n  });\n\n  return data.emailer_campaigns.map((seq: any) => ({\n    id: seq.id,\n    name: seq.name,\n    active: seq.active,\n    numSteps: seq.num_steps ?? seq.emailer_steps?.length ?? 0,\n    stats: {\n      totalContacts: seq.unique_scheduled ?? 0,\n      delivered: seq.unique_delivered ?? 0,\n      opened: seq.unique_opened ?? 0,\n      replied: seq.unique_replied ?? 0,\n      bounced: seq.unique_bounced ?? 0,\n    },\n    createdAt: seq.created_at,\n  }));\n}\n```\n\n### Step 2: Get Email Accounts for Sending\n\nBefore adding contacts to a sequence, you need the email account ID that will send the messages.\n\n```typescript\nexport async function getEmailAccounts() {\n  const { data } = await client.get('/email_accounts');\n\n  return data.email_accounts.map((acct: any) => ({\n    id: acct.id,\n    email: acct.email,\n    sendingEnabled: acct.active,\n    provider: acct.type,  // \"gmail\", \"outlook\", \"smtp\"\n    dailySendLimit: acct.daily_email_limit,\n  }));\n}\n```\n\n### Step 3: Add Contacts to a Sequence\n\nThe `add_contact_ids` endpoint enrolls contacts into an existing sequence. You must specify which email account sends the messages.\n\n```typescript\nexport async function addContactsToSequence(\n  sequenceId: string,\n  contactIds: string[],\n  emailAccountId: string,\n) {\n  const { data } = await client.post(\n    `/emailer_campaigns/${sequenceId}/add_contact_ids`,\n    {\n      contact_ids: contactIds,\n      emailer_campaign_id: sequenceId,\n      send_email_from_email_account_id: emailAccountId,\n      sequence_active_in_other_campaigns: false,  // skip if already in another sequence\n    },\n  );\n\n  return {\n    added: data.contacts?.length ?? 0,\n    alreadyInCampaign: data.contacts_already_in_campaign ?? 0,\n    errors: data.not_added_contact_ids ?? [],\n  };\n}\n```\n\n### Step 4: Update Contact Status in a Sequence\n\n```typescript\n// Mark contacts as finished or remove them from a sequence\nexport async function removeContactsFromSequence(\n  sequenceId: string,\n  contactIds: string[],\n  action: 'finished' | 'removed' = 'finished',\n) {\n  const { data } = await client.post('/emailer_campaigns/remove_or_stop_contact_ids', {\n    emailer_campaign_id: sequenceId,\n    contact_ids: contactIds,\n    // \"finished\" marks contact as completed; \"removed\" fully removes\n  });\n\n  return {\n    updated: data.contacts?.length ?? 0,\n  };\n}\n```\n\n### Step 5: Create and Manage Contacts for Sequences\n\nContacts must exist in your Apollo CRM before adding to sequences. Use the Contacts API to create them.\n\n```typescript\n// Create a contact in your Apollo CRM\nexport async function createContact(params: {\n  firstName: string;\n  lastName: string;\n  email: string;\n  title?: string;\n  organizationName?: string;\n  websiteUrl?: string;\n}) {\n  const { data } = await client.post('/contacts', {\n    first_name: params.firstName,\n    last_name: params.lastName,\n    email: params.email,\n    title: params.title,\n    organization_name: params.organizationName,\n    website_url: params.websiteUrl,\n  });\n\n  return {\n    id: data.contact.id,\n    email: data.contact.email,\n    name: `${data.contact.first_name} ${data.contact.last_name}`,\n  };\n}\n\n// Search your CRM contacts (not the Apollo database)\nexport async function searchCrmContacts(query: string) {\n  const { data } = await client.post('/contacts/search', {\n    q_keywords: query,\n    page: 1,\n    per_page: 25,\n  });\n\n  return data.contacts.map((c: any) => ({\n    id: c.id,\n    name: c.name,\n    email: c.email,\n    title: c.title,\n    company: c.organization_name,\n  }));\n}\n```\n\n### Step 6: Full Outreach Pipeline\n\n```typescript\nasync function launchOutreach(\n  sequenceId: string,\n  leads: Array<{ firstName: string; lastName: string; email: string; title?: string; company?: string }>,\n) {\n  // 1. Get a sending email account\n  const accounts = await getEmailAccounts();\n  const sender = accounts.find((a: any) => a.sendingEnabled);\n  if (!sender) throw new Error('No active email account found');\n\n  // 2. Create contacts in Apollo CRM (or find existing)\n  const contactIds: string[] = [];\n  for (const lead of leads) {\n    try {\n      const contact = await createContact({\n        firstName: lead.firstName,\n        lastName: lead.lastName,\n        email: lead.email,\n        title: lead.title,\n        organizationName: lead.company,\n      });\n      contactIds.push(contact.id);\n    } catch (err: any) {\n      // Contact may already exist \u2014 search for them\n      const existing = await searchCrmContacts(lead.email);\n      if (existing.length > 0) contactIds.push(existing[0].id);\n    }\n  }\n\n  // 3. Add contacts to the sequence\n  const result = await addContactsToSequence(sequenceId, contactIds, sender.id);\n  console.log(`Added ${result.added} contacts, ${result.alreadyInCampaign} already enrolled`);\n\n  return result;\n}\n```\n\n## Output\n\n- Sequence search via `POST /emailer_campaigns/search`\n- Email account listing via `GET /email_accounts`\n- Contact enrollment via `POST /emailer_campaigns/{id}/add_contact_ids`\n- Contact removal via `POST /emailer_campaigns/remove_or_stop_contact_ids`\n- Contact creation via `POST /contacts` and search via `POST /contacts/search`\n- Full outreach pipeline: create contacts, find sender, enroll in sequence\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| 403 Forbidden | Standard API key used | Sequence endpoints require a master API key |\n| No email accounts | Inbox not connected | Connect email at Settings > Channels > Email in Apollo UI |\n| Contact already enrolled | Duplicate enrollment | Check `contacts_already_in_campaign` in response |\n| Contact not found | ID does not exist in CRM | Create via `POST /contacts` first |\n\n## Resources\n\n- [Search for Sequences](https://docs.apollo.io/reference/search-for-sequences)\n- [Add Contacts to Sequence](https://docs.apollo.io/reference/add-contacts-to-sequence)\n- [Update Contact Status](https://docs.apollo.io/reference/update-contact-status-sequence)\n- [Get Email Accounts](https://docs.apollo.io/reference/get-a-list-of-email-accounts)\n- [Create a Contact](https://docs.apollo.io/reference/create-a-contact)\n- [Search for Contacts](https://docs.apollo.io/reference/search-for-contacts)\n\n## Next Steps\n\nProceed to `apollo-common-errors` for error handling patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "apollo-core-workflow-b",
-    "description": "Implement Apollo.io email sequences and outreach workflow.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(pip:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031274",
   "name": "apify-security-basics",
   "slug": "apify-security-basics",
   "description": "Secure Apify API tokens, configure proxy access, and protect Actor data.",
   "content": "# Apify Security Basics\n\n## Overview\n\nSecurity best practices for Apify API tokens, Actor data, proxy credentials, and webhook verification. Apify uses personal API tokens (prefixed `apify_api_`) for all authentication.\n\n## Prerequisites\n\n- Apify account with Console access\n- Understanding of environment variables\n- Access to your deployment platform's secrets management\n\n## Token Architecture\n\nApify uses a single API token per user account for full API access. There is no scope-based permission system per token, so token security is critical.\n\n| Token Type | Format | Where to Find |\n|------------|--------|---------------|\n| Personal API token | `apify_api_...` | Console > Settings > Integrations |\n| Proxy password | Alphanumeric | Console > Proxy > Connection settings |\n\n## Instructions\n\n### Step 1: Secure Token Storage\n\n```bash\n# .env (NEVER commit \u2014 must be in .gitignore)\nAPIFY_TOKEN=apify_api_YOUR_TOKEN_HERE\n\n# .gitignore \u2014 mandatory entries\n.env\n.env.local\n.env.*.local\nstorage/   # Local Apify storage may contain scraped data\n```\n\n```typescript\n// Validate token exists at startup\nfunction requireToken(): string {\n  const token = process.env.APIFY_TOKEN;\n  if (!token) {\n    throw new Error(\n      'APIFY_TOKEN is required. Get yours at ' +\n      'https://console.apify.com/account/integrations'\n    );\n  }\n  if (!token.startsWith('apify_api_')) {\n    console.warn('Warning: APIFY_TOKEN does not have expected prefix');\n  }\n  return token;\n}\n```\n\n### Step 2: Per-Environment Token Isolation\n\nUse separate Apify accounts (or at minimum separate tokens) per environment:\n\n```bash\n# Development \u2014 your personal account\nAPIFY_TOKEN=apify_api_dev_token\n\n# Staging \u2014 shared team account (limited usage)\nAPIFY_TOKEN=apify_api_staging_token\n\n# Production \u2014 production account (separate billing)\nAPIFY_TOKEN=apify_api_prod_token\n```\n\nPlatform secrets management:\n\n```bash\n# GitHub Actions\ngh secret set APIFY_TOKEN --body \"apify_api_prod_token\"\n\n# Vercel\nvercel env add APIFY_TOKEN production\n\n# Google Cloud Secret Manager\necho -n \"apify_api_prod_token\" | \\\n  gcloud secrets create apify-token --data-file=-\n```\n\n### Step 3: Token Rotation Procedure\n\n```bash\n# 1. Generate new token in Console > Settings > Integrations\n#    (old token remains valid until explicitly revoked)\n\n# 2. Update in all environments\ngh secret set APIFY_TOKEN --body \"apify_api_NEW_TOKEN\"\n\n# 3. Verify new token works\ncurl -sf -H \"Authorization: Bearer $NEW_TOKEN\" \\\n  https://api.apify.com/v2/users/me | jq '.data.username'\n\n# 4. Revoke old token in Console\n#    Settings > Integrations > (regenerate invalidates old token)\n```\n\n### Step 4: Webhook Payload Verification\n\nApify webhooks include run data in the POST body. Verify the source:\n\n```typescript\nimport crypto from 'crypto';\nimport { type Request, type Response } from 'express';\n\n// Apify doesn't sign webhooks by default, but you can verify\n// by checking that the run ID in the payload actually exists\nasync function verifyWebhookPayload(\n  payload: { eventData: { actorRunId: string } },\n  client: ApifyClient,\n): Promise<boolean> {\n  try {\n    const run = await client.run(payload.eventData.actorRunId).get();\n    return run !== null && run !== undefined;\n  } catch {\n    return false;\n  }\n}\n\n// Alternatively, use a shared secret in your webhook URL\n// https://your-server.com/webhook?secret=YOUR_WEBHOOK_SECRET\nfunction verifyWebhookSecret(req: Request): boolean {\n  const secret = req.query.secret as string;\n  if (!secret || !process.env.APIFY_WEBHOOK_SECRET) return false;\n  return crypto.timingSafeEqual(\n    Buffer.from(secret),\n    Buffer.from(process.env.APIFY_WEBHOOK_SECRET),\n  );\n}\n```\n\n### Step 5: Actor Data Security\n\n```typescript\n// Sanitize sensitive data before pushing to datasets\nfunction sanitizeForDataset(item: Record<string, unknown>): Record<string, unknown> {\n  const sensitiveFields = ['email', 'phone', 'password', 'ssn', 'creditCard'];\n  const sanitized = { ...item };\n  for (const field of sensitiveFields) {\n    if (field in sanitized) {\n      sanitized[field] = '***REDACTED***';\n    }\n  }\n  return sanitized;\n}\n\n// Use named datasets with access control\n// Only your account can access your datasets by default\n// Public datasets require explicit sharing via API\n```\n\n### Step 6: Proxy Security\n\n```typescript\n// Never log or expose proxy URLs (they contain credentials)\nconst proxyConfig = await Actor.createProxyConfiguration({\n  groups: ['RESIDENTIAL'],\n  countryCode: 'US',\n});\n\n// DO NOT do this:\n// console.log(await proxyConfig.newUrl()); // Leaks proxy password!\n\n// Instead, log proxy group info only\nconsole.log(`Using proxy group: ${proxyConfig.groups?.join(', ')}`);\n```\n\n## Security Checklist\n\n- [ ] `APIFY_TOKEN` stored in environment variables (never hardcoded)\n- [ ] `.env` and `storage/` in `.gitignore`\n- [ ] Separate tokens for dev/staging/prod\n- [ ] Token rotation schedule documented\n- [ ] Webhook endpoints verify source\n- [ ] Proxy URLs never logged\n- [ ] Scraped PII redacted before storage\n- [ ] Named datasets used for sensitive data (no public sharing)\n- [ ] CI/CD secrets configured (not in repo)\n\n## Leaked Token Response\n\nIf a token is exposed:\n\n1. **Immediately** regenerate token in Console > Settings > Integrations\n2. Check recent Actor runs for unauthorized usage\n3. Review billing for unexpected charges\n4. Rotate proxy password if exposed\n5. Audit git history: `git log --all -p -- '*.env' '*.json' | grep apify_api_`\n\n## Error Handling\n\n| Issue | Detection | Mitigation |\n|-------|-----------|------------|\n| Token in git history | `git log -p \\| grep apify_api_` | Rotate token, use BFG to clean |\n| Unauthorized runs | Unexpected runs in Console | Rotate token immediately |\n| Proxy password exposed | Credentials in logs | Regenerate proxy password |\n| Data breach in dataset | PII in public dataset | Delete dataset, sanitize pipeline |\n\n## Resources\n\n- [Apify Account Security](https://docs.apify.com/platform/collaboration)\n- [API Authentication](https://docs.apify.com/api/v2/getting-started)\n- [Proxy Connection Settings](https://docs.apify.com/platform/proxy)\n\n## Next Steps\n\nFor production deployment, see `apify-prod-checklist`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "apify-security-basics",
-    "description": "Secure Apify API tokens, configure proxy access, and protect Actor data.",
-    "Trigger": "apify security\", \"apify secrets\", \"secure apify token\",",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

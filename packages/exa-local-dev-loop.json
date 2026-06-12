@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031871",
   "name": "exa-local-dev-loop",
   "slug": "exa-local-dev-loop",
   "description": "Configure Exa local development with hot reload, testing, and mock responses.",
   "content": "# Exa Local Dev Loop\n\n## Overview\n\nSet up a fast, reproducible local development workflow for Exa integrations. Covers project structure, mock responses for unit tests, integration test patterns, and hot-reload configuration.\n\n## Prerequisites\n\n- `exa-js` installed and `EXA_API_KEY` configured\n- Node.js 18+ with npm/pnpm\n- `vitest` for testing (or `jest`)\n\n## Instructions\n\n### Step 1: Project Structure\n\n```\nmy-exa-project/\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 exa/\n\u2502   \u2502   \u251c\u2500\u2500 client.ts       # Singleton Exa client\n\u2502   \u2502   \u251c\u2500\u2500 search.ts       # Search wrappers\n\u2502   \u2502   \u2514\u2500\u2500 types.ts        # Typed interfaces\n\u2502   \u2514\u2500\u2500 index.ts\n\u251c\u2500\u2500 tests/\n\u2502   \u251c\u2500\u2500 exa.unit.test.ts    # Mock-based unit tests\n\u2502   \u2514\u2500\u2500 exa.integration.test.ts  # Real API tests (needs key)\n\u251c\u2500\u2500 .env.local              # Local secrets (git-ignored)\n\u251c\u2500\u2500 .env.example            # Template for team\n\u251c\u2500\u2500 tsconfig.json\n\u251c\u2500\u2500 vitest.config.ts\n\u2514\u2500\u2500 package.json\n```\n\n### Step 2: Package Setup\n\n```json\n{\n  \"scripts\": {\n    \"dev\": \"tsx watch src/index.ts\",\n    \"test\": \"vitest\",\n    \"test:unit\": \"vitest --testPathPattern=unit\",\n    \"test:integration\": \"vitest --testPathPattern=integration\",\n    \"build\": \"tsc\"\n  },\n  \"dependencies\": {\n    \"exa-js\": \"^1.0.0\"\n  },\n  \"devDependencies\": {\n    \"tsx\": \"^4.0.0\",\n    \"vitest\": \"^2.0.0\",\n    \"typescript\": \"^5.0.0\"\n  }\n}\n```\n\n### Step 3: Mock Exa for Unit Tests\n\n```typescript\n// tests/exa.unit.test.ts\nimport { describe, it, expect, vi, beforeEach } from \"vitest\";\n\n// Mock the exa-js module\nvi.mock(\"exa-js\", () => {\n  return {\n    default: vi.fn().mockImplementation(() => ({\n      search: vi.fn().mockResolvedValue({\n        results: [\n          { url: \"https://example.com/1\", title: \"Test Result 1\", score: 0.95 },\n          { url: \"https://example.com/2\", title: \"Test Result 2\", score: 0.87 },\n        ],\n      }),\n      searchAndContents: vi.fn().mockResolvedValue({\n        results: [\n          {\n            url: \"https://example.com/1\",\n            title: \"Test Result 1\",\n            score: 0.95,\n            text: \"This is the full text content of the page.\",\n            highlights: [\"Key excerpt from the page\"],\n            summary: \"A summary of the page content.\",\n          },\n        ],\n      }),\n      findSimilar: vi.fn().mockResolvedValue({\n        results: [\n          { url: \"https://similar.com/1\", title: \"Similar Page\", score: 0.82 },\n        ],\n      }),\n      getContents: vi.fn().mockResolvedValue({\n        results: [\n          { url: \"https://example.com/1\", title: \"Page\", text: \"Content\" },\n        ],\n      }),\n    })),\n  };\n});\n\nimport Exa from \"exa-js\";\n\ndescribe(\"Exa Search\", () => {\n  let exa: any;\n\n  beforeEach(() => {\n    exa = new Exa(\"test-key\");\n  });\n\n  it(\"should return search results\", async () => {\n    const result = await exa.search(\"test query\", { numResults: 5 });\n    expect(result.results).toHaveLength(2);\n    expect(result.results[0].score).toBeGreaterThan(0.9);\n  });\n\n  it(\"should return content with searchAndContents\", async () => {\n    const result = await exa.searchAndContents(\"test\", { text: true });\n    expect(result.results[0].text).toBeDefined();\n    expect(result.results[0].highlights).toHaveLength(1);\n  });\n});\n```\n\n### Step 4: Integration Tests (Real API)\n\n```typescript\n// tests/exa.integration.test.ts\nimport { describe, it, expect } from \"vitest\";\nimport Exa from \"exa-js\";\n\n// Skip if no API key available (CI without secrets)\nconst describeWithKey = process.env.EXA_API_KEY\n  ? describe\n  : describe.skip;\n\ndescribeWithKey(\"Exa Integration\", () => {\n  const exa = new Exa(process.env.EXA_API_KEY!);\n\n  it(\"should execute a basic search\", async () => {\n    const result = await exa.search(\"test connectivity\", { numResults: 1 });\n    expect(result.results.length).toBeGreaterThanOrEqual(1);\n    expect(result.results[0].url).toMatch(/^https?:\\/\\//);\n  }, 10000); // 10s timeout for API calls\n\n  it(\"should return text content\", async () => {\n    const result = await exa.searchAndContents(\"TypeScript tutorial\", {\n      numResults: 1,\n      text: { maxCharacters: 500 },\n    });\n    expect(result.results[0].text).toBeDefined();\n    expect(result.results[0].text!.length).toBeGreaterThan(0);\n  }, 15000);\n\n  it(\"should find similar pages\", async () => {\n    const result = await exa.findSimilar(\"https://nodejs.org\", {\n      numResults: 3,\n    });\n    expect(result.results.length).toBeGreaterThanOrEqual(1);\n  }, 10000);\n});\n```\n\n### Step 5: Environment Configuration\n\n```bash\nset -euo pipefail\n# Create .env.example template (commit this)\ncat > .env.example << 'EOF'\n# Exa API \u2014 get key at https://dashboard.exa.ai\nEXA_API_KEY=\nEOF\n\n# Create local env (git-ignored)\ncp .env.example .env.local\necho \"EXA_API_KEY=your-key-here\" > .env.local\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `Cannot find module 'exa-js'` | Not installed | Run `npm install exa-js` |\n| Test timeout | Slow API response | Increase vitest timeout to 15000ms |\n| Mock not applied | Import order issue | Ensure `vi.mock()` is before imports |\n| Integration test fails in CI | No API key secret | Add `EXA_API_KEY` to CI secrets or skip |\n\n## Examples\n\n### Vitest Config for Exa Projects\n\n```typescript\n// vitest.config.ts\nimport { defineConfig } from \"vitest/config\";\n\nexport default defineConfig({\n  test: {\n    globals: true,\n    environment: \"node\",\n    testTimeout: 15000,   // Exa API calls can take a few seconds\n    setupFiles: [\"dotenv/config\"],\n  },\n});\n```\n\n## Resources\n\n- [Vitest Documentation](https://vitest.dev/)\n- [tsx Documentation](https://github.com/privatenumber/tsx)\n- [exa-js on npm](https://www.npmjs.com/package/exa-js)\n\n## Next Steps\n\nSee `exa-sdk-patterns` for production-ready code patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "exa-local-dev-loop",
-    "description": "Configure Exa local development with hot reload, testing, and mock responses.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(pnpm:*), Bash(npx:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

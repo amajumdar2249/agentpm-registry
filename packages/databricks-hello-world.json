@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031750",
   "name": "databricks-hello-world",
   "slug": "databricks-hello-world",
   "description": "Create a minimal working Databricks example with cluster and notebook.",
   "content": "# Databricks Hello World\n\n## Overview\n\nCreate your first Databricks cluster and notebook via the REST API and Python SDK. Covers single-node dev clusters, SQL warehouses, notebook upload, one-time job runs, and Delta Lake smoke tests.\n\n## Prerequisites\n\n- Completed `databricks-install-auth` setup\n- Workspace access with cluster creation permissions\n- Valid API credentials in env vars or `~/.databrickscfg`\n\n## Instructions\n\n### Step 1: Create a Single-Node Dev Cluster\n\n```bash\n# POST /api/2.0/clusters/create\ndatabricks clusters create --json '{\n  \"cluster_name\": \"hello-world-dev\",\n  \"spark_version\": \"14.3.x-scala2.12\",\n  \"node_type_id\": \"i3.xlarge\",\n  \"autotermination_minutes\": 30,\n  \"num_workers\": 0,\n  \"spark_conf\": {\n    \"spark.databricks.cluster.profile\": \"singleNode\",\n    \"spark.master\": \"local[*]\"\n  },\n  \"custom_tags\": {\n    \"ResourceClass\": \"SingleNode\"\n  }\n}'\n# Returns: {\"cluster_id\": \"0123-456789-abcde123\"}\n```\n\nOr via Python SDK:\n\n```python\nfrom databricks.sdk import WorkspaceClient\nfrom databricks.sdk.service.compute import AutoScale\n\nw = WorkspaceClient()\n\n# create_and_wait blocks until cluster reaches RUNNING state\ncluster = w.clusters.create_and_wait(\n    cluster_name=\"hello-world-dev\",\n    spark_version=\"14.3.x-scala2.12\",\n    node_type_id=\"i3.xlarge\",\n    num_workers=0,\n    autotermination_minutes=30,\n    spark_conf={\n        \"spark.databricks.cluster.profile\": \"singleNode\",\n        \"spark.master\": \"local[*]\",\n    },\n)\nprint(f\"Cluster ready: {cluster.cluster_id} ({cluster.state})\")\n```\n\n### Step 2: Create and Upload a Notebook\n\n```python\nimport base64\nfrom databricks.sdk import WorkspaceClient\nfrom databricks.sdk.service.workspace import ImportFormat, Language\n\nw = WorkspaceClient()\n\nnotebook_source = \"\"\"\n# Databricks notebook source\n# COMMAND ----------\n\n# Simple DataFrame\ndata = [(\"Alice\", 28), (\"Bob\", 35), (\"Charlie\", 42)]\ndf = spark.createDataFrame(data, [\"name\", \"age\"])\ndisplay(df)\n\n# COMMAND ----------\n\n# Write as Delta table\ndf.write.format(\"delta\").mode(\"overwrite\").saveAsTable(\"default.hello_world\")\n\n# COMMAND ----------\n\n# Read it back and verify\nresult = spark.table(\"default.hello_world\")\ndisplay(result)\nassert result.count() == 3, \"Expected 3 rows\"\nprint(\"Hello from Databricks!\")\n\"\"\"\n\nme = w.current_user.me()\nnotebook_path = f\"/Users/{me.user_name}/hello_world\"\n\nw.workspace.import_(\n    path=notebook_path,\n    format=ImportFormat.SOURCE,\n    language=Language.PYTHON,\n    content=base64.b64encode(notebook_source.encode()).decode(),\n    overwrite=True,\n)\nprint(f\"Notebook created at: {notebook_path}\")\n```\n\n### Step 3: Run the Notebook as a One-Time Job\n\n```python\nfrom databricks.sdk import WorkspaceClient\nfrom databricks.sdk.service.jobs import SubmitTask, NotebookTask\n\nw = WorkspaceClient()\n\n# POST /api/2.1/jobs/runs/submit \u2014 no persistent job definition needed\nrun = w.jobs.submit(\n    run_name=\"hello-world-run\",\n    tasks=[\n        SubmitTask(\n            task_key=\"hello\",\n            existing_cluster_id=\"0123-456789-abcde123\",  # from Step 1\n            notebook_task=NotebookTask(\n                notebook_path=f\"/Users/{w.current_user.me().user_name}/hello_world\",\n            ),\n        )\n    ],\n).result()  # .result() blocks until run completes\n\nprint(f\"Run {run.run_id}: {run.state.result_state}\")\n# Expect: \"Run 12345: SUCCESS\"\n```\n\n### Step 4: Create a Serverless SQL Warehouse\n\n```python\nfrom databricks.sdk import WorkspaceClient\n\nw = WorkspaceClient()\n\n# Serverless warehouses start in seconds and cost ~$0.07/DBU\nwarehouse = w.warehouses.create_and_wait(\n    name=\"hello-warehouse\",\n    cluster_size=\"2X-Small\",\n    auto_stop_mins=10,\n    warehouse_type=\"PRO\",\n    enable_serverless_compute=True,\n)\nprint(f\"Warehouse ready: {warehouse.id}\")\n\n# Run SQL against it\nresult = w.statement_execution.execute_statement(\n    warehouse_id=warehouse.id,\n    statement=\"SELECT current_timestamp() AS now, current_user() AS who\",\n)\nprint(result.result.data_array)\n```\n\n### Step 5: Verify Everything via CLI\n\n```bash\n# List clusters\ndatabricks clusters list --output json | jq '.[] | {id: .cluster_id, name: .cluster_name, state: .state}'\n\n# List workspace contents\ndatabricks workspace list /Users/$(databricks current-user me --output json | jq -r .userName)/\n\n# Get run results\ndatabricks runs list --limit 5 --output json | jq '.runs[] | {run_id: .run_id, name: .run_name, state: .state.result_state}'\n\n# Clean up \u2014 terminate the dev cluster (saves money)\ndatabricks clusters delete --cluster-id 0123-456789-abcde123\n```\n\n## Output\n\n- Single-node development cluster created and running\n- Hello world notebook uploaded to workspace\n- Successful notebook execution via runs/submit API\n- Serverless SQL warehouse operational\n- Delta table `default.hello_world` created\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `QUOTA_EXCEEDED` | Workspace cluster limit reached | Terminate unused clusters or request quota increase |\n| `INVALID_PARAMETER_VALUE: Invalid node type` | Instance type unavailable in region | Run `databricks clusters list-node-types` for valid types |\n| `RESOURCE_ALREADY_EXISTS` | Notebook path occupied | Pass `overwrite=True` to `workspace.import_()` |\n| `INVALID_STATE: Cluster is not running` | Cluster still starting or terminated | Call `w.clusters.ensure_cluster_is_running(cluster_id)` |\n| `PERMISSION_DENIED` | Missing cluster create entitlement | Admin must grant \"Allow cluster creation\" in workspace settings |\n\n## Examples\n\n### Quick Node Type Discovery\n\n```python\nw = WorkspaceClient()\n# Find cheapest general-purpose instance types\nnode_types = w.clusters.list_node_types()\nfor nt in sorted(node_types.node_types, key=lambda x: x.memory_mb)[:5]:\n    print(f\"{nt.node_type_id}: {nt.memory_mb}MB RAM, {nt.num_cores} cores\")\n```\n\n### List Available Spark Versions\n\n```python\nw = WorkspaceClient()\nfor v in w.clusters.spark_versions().versions:\n    if \"LTS\" in v.name:\n        print(f\"{v.key}: {v.name}\")\n```\n\n## Resources\n\n- [Clusters API](https://docs.databricks.com/api/workspace/clusters)\n- [Jobs API \u2014 Submit Run](https://docs.databricks.com/api/workspace/jobs/submit)\n- [Workspace API](https://docs.databricks.com/api/workspace/workspace)\n- [SQL Statement Execution API](https://docs.databricks.com/api/workspace/statementexecution)\n\n## Next Steps\n\nProceed to `databricks-local-dev-loop` for local development setup.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "databricks-hello-world",
-    "description": "Create a minimal working Databricks example with cluster and notebook.",
-    "allowed-tools": "Read, Write, Edit, Bash(databricks:*), Bash(python:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

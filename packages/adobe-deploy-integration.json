@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031148",
   "name": "adobe-deploy-integration",
   "slug": "adobe-deploy-integration",
   "description": "Deploy Adobe-powered applications to Vercel, Cloud Run, and Adobe App",
   "content": "# Adobe Deploy Integration\n\n## Overview\n\nDeploy Adobe-powered applications to three platforms: Vercel (serverless), Google Cloud Run (containers), and Adobe App Builder (native Adobe Runtime). Each with proper OAuth credential management.\n\n## Prerequisites\n\n- Adobe OAuth Server-to-Server credentials for production\n- Platform CLI installed (`vercel`, `gcloud`, or `aio`)\n- Application tested in staging environment\n\n## Instructions\n\n### Option A: Adobe App Builder (Native Adobe Hosting)\n\nApp Builder deploys serverless Runtime actions directly to Adobe infrastructure:\n\n```text\n# Login to Adobe I/O CLI (requires IMS auth since AIO CLI v11)\naio login\n\n# Select your project and workspace\naio console project select\naio console workspace select Production\n\n# Deploy all actions, static assets, and event registrations\naio app deploy\n\n# Check deployed actions\naio runtime action list\n\n# View action logs\naio runtime activation list --limit 10\naio runtime activation logs <activationId>\n```\n\n```yaml\n// app.config.yaml \u2014 App Builder configuration\napplication:\n  actions: actions\n  web: web-src\n  runtimeManifest:\n    packages:\n      my-adobe-app:\n        actions:\n          process-image:\n            function: actions/process-image/index.js\n            runtime: nodejs:20\n            inputs:\n              ADOBE_CLIENT_ID: $ADOBE_CLIENT_ID\n              ADOBE_CLIENT_SECRET: $ADOBE_CLIENT_SECRET\n            annotations:\n              require-adobe-auth: true\n              final: true\n```\n\n### Option B: Vercel Deployment\n\n```bash\n# Set Adobe credentials as Vercel environment variables\nvercel env add ADOBE_CLIENT_ID production\nvercel env add ADOBE_CLIENT_SECRET production\nvercel env add ADOBE_SCOPES production\n\n# Deploy\nvercel --prod\n```\n\n```json\n// vercel.json\n{\n  \"functions\": {\n    \"api/**/*.ts\": {\n      \"maxDuration\": 60\n    }\n  },\n  \"env\": {\n    \"ADOBE_CLIENT_ID\": \"@adobe_client_id\",\n    \"ADOBE_CLIENT_SECRET\": \"@adobe_client_secret\",\n    \"ADOBE_SCOPES\": \"@adobe_scopes\"\n  }\n}\n```\n\n```typescript\n// api/firefly/generate.ts \u2014 Vercel serverless function\nimport type { VercelRequest, VercelResponse } from '@vercel/node';\nimport { getAccessToken } from '../../src/adobe/client';\n\nexport default async function handler(req: VercelRequest, res: VercelResponse) {\n  if (req.method !== 'POST') return res.status(405).end();\n\n  try {\n    const token = await getAccessToken();\n    const fireflyResponse = await fetch(\n      'https://firefly-api.adobe.io/v3/images/generate',\n      {\n        method: 'POST',\n        headers: {\n          'Authorization': `Bearer ${token}`,\n          'x-api-key': process.env.ADOBE_CLIENT_ID!,\n          'Content-Type': 'application/json',\n        },\n        body: JSON.stringify(req.body),\n      }\n    );\n\n    const result = await fireflyResponse.json();\n    return res.status(fireflyResponse.status).json(result);\n  } catch (error: any) {\n    return res.status(500).json({ error: error.message });\n  }\n}\n```\n\n### Option C: Google Cloud Run\n\n```bash\n# Store credentials in Secret Manager\necho -n \"${ADOBE_CLIENT_ID}\" | gcloud secrets create adobe-client-id --data-file=-\necho -n \"${ADOBE_CLIENT_SECRET}\" | gcloud secrets create adobe-client-secret --data-file=-\n\n# Build and deploy\ngcloud builds submit --tag gcr.io/${PROJECT_ID}/adobe-service\n\ngcloud run deploy adobe-service \\\n  --image gcr.io/${PROJECT_ID}/adobe-service \\\n  --region us-central1 \\\n  --platform managed \\\n  --set-secrets=\"ADOBE_CLIENT_ID=adobe-client-id:latest,ADOBE_CLIENT_SECRET=adobe-client-secret:latest\" \\\n  --set-env-vars=\"ADOBE_SCOPES=openid,AdobeID,firefly_api\" \\\n  --min-instances=1 \\\n  --timeout=60s\n```\n\n### Health Check Endpoint (All Platforms)\n\n```typescript\n// api/health.ts\nexport async function GET() {\n  const checks: Record<string, any> = {};\n\n  // Test Adobe IMS token generation\n  try {\n    const start = Date.now();\n    const token = await getAccessToken();\n    checks.adobe = {\n      status: 'healthy',\n      latencyMs: Date.now() - start,\n      tokenLength: token.length,\n    };\n  } catch (error: any) {\n    checks.adobe = {\n      status: 'unhealthy',\n      error: error.message,\n    };\n  }\n\n  const overall = Object.values(checks).every(\n    (c: any) => c.status === 'healthy'\n  ) ? 'healthy' : 'degraded';\n\n  return Response.json({\n    status: overall,\n    services: checks,\n    timestamp: new Date().toISOString(),\n  });\n}\n```\n\n## Output\n\n- Application deployed to chosen platform\n- Adobe credentials injected via platform secret management\n- Health check endpoint validates IMS connectivity\n- Serverless function timeout configured for Adobe API latency\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `aio app deploy` auth error | Not logged in to AIO CLI | Run `aio login` |\n| Vercel function timeout | Adobe API takes > 10s | Increase `maxDuration` in vercel.json |\n| Cloud Run cold start timeout | Token generation on cold start | Set `min-instances=1` |\n| Secret not found | Wrong secret name | Verify with `gcloud secrets list` or `vercel env ls` |\n\n## Resources\n\n- [Adobe App Builder Deployment](https://developer.adobe.com/app-builder/docs/guides/app_builder_guides/deployment/deployment)\n- [Vercel Environment Variables](https://vercel.com/docs/environment-variables)\n- [Cloud Run Secrets](https://cloud.google.com/run/docs/configuring/services/secrets)\n\n## Next Steps\n\nFor webhook handling, see `adobe-webhooks-events`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "adobe-deploy-integration",
-    "description": "Deploy Adobe-powered applications to Vercel, Cloud Run, and Adobe App",
-    "allowed-tools": "Read, Write, Edit, Bash(vercel:*), Bash(gcloud:*), Bash(aio:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

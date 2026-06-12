@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032481",
   "name": "lindy-incident-runbook",
   "slug": "lindy-incident-runbook",
   "description": "Incident response procedures for Lindy AI agent failures and outages.",
   "content": "# Lindy Incident Runbook\n\n## Overview\n\nIncident response procedures for Lindy AI agent failures. Covers platform outages,\nindividual agent failures, integration breakdowns, credit exhaustion, and webhook\nendpoint failures.\n\n## Incident Severity Levels\n\n| Severity | Description | Response Time | Examples |\n|----------|-------------|---------------|----------|\n| SEV1 | All agents failing, customer impact | 15 minutes | Lindy platform outage, all webhooks failing |\n| SEV2 | Critical agent down | 30 minutes | Support bot offline, phone agent unreachable |\n| SEV3 | Degraded performance | 2 hours | High latency, intermittent failures |\n| SEV4 | Minor issue | 24 hours | Non-critical agent misconfigured |\n\n## Quick Diagnostics (First 5 Minutes)\n\n### Step 1: Check Lindy Platform Status\n\n```bash\n# Is Lindy up?\ncurl -s -o /dev/null -w \"Lindy API: HTTP %{http_code}\\n\" \\\n  \"https://public.lindy.ai\" --max-time 5\n\n# Check status page\necho \"Status page: https://status.lindy.ai\"\n```\n\n### Step 2: Check Your Integration\n\n```bash\n# Is your webhook receiver up?\ncurl -s -o /dev/null -w \"Our endpoint: HTTP %{http_code}\\n\" \\\n  \"https://api.yourapp.com/health\" --max-time 5\n\n# Is the webhook auth working?\ncurl -s -o /dev/null -w \"Webhook auth: HTTP %{http_code}\\n\" \\\n  -X POST \"https://api.yourapp.com/lindy/callback\" \\\n  -H \"Authorization: Bearer $LINDY_WEBHOOK_SECRET\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"test\": true}' --max-time 5\n```\n\n### Step 3: Check Credit Balance\n\nLog in at https://app.lindy.ai > Settings > Billing\n\n- Credits at 0? Agents stop processing\n- Credits low? Non-essential agents may be paused\n\n## Incident Playbooks\n\n### Incident: Lindy Platform Outage (SEV1)\n\n**Symptoms**: All agents failing, status.lindy.ai shows incident\n**Impact**: All Lindy-dependent workflows halted\n\n**Runbook**:\n\n1. Confirm outage at https://status.lindy.ai\n2. Notify team: \"Lindy platform outage confirmed. All agents affected.\"\n3. Activate fallback procedures:\n   - Route support emails to human inbox\n   - Disable webhook triggers from your app\n   - Queue events for replay when Lindy recovers\n4. Monitor status page for recovery\n5. When recovered: re-enable triggers, replay queued events, verify agent health\n\n**Fallback code**:\n\n```typescript\nasync function triggerLindyWithFallback(payload: any) {\n  try {\n    const response = await fetch(WEBHOOK_URL, {\n      method: 'POST',\n      headers: {\n        'Authorization': `Bearer ${SECRET}`,\n        'Content-Type': 'application/json',\n      },\n      body: JSON.stringify(payload),\n      signal: AbortSignal.timeout(10000), // 10s timeout\n    });\n\n    if (!response.ok) throw new Error(`HTTP ${response.status}`);\n    return { routed: 'lindy' };\n  } catch (error) {\n    console.error('Lindy unreachable, activating fallback:', error);\n    await queueForReplay(payload); // Store for later\n    await notifyTeam(`Lindy trigger failed: ${error}`);\n    return { routed: 'fallback' };\n  }\n}\n```\n\n### Incident: Individual Agent Failure (SEV2)\n\n**Symptoms**: Specific agent tasks showing \"Failed\" status\n**Impact**: One workflow affected, others may be fine\n\n**Runbook**:\n\n1. Open agent > Tasks tab > Filter by \"Failed\"\n2. Click latest failed task \u2014 identify the failing step\n3. Diagnose based on failing step type:\n   - **Trigger step**: Auth expired? Filter too restrictive?\n   - **Action step**: Integration token expired? Target API down?\n   - **Condition step**: Ambiguous condition prompt?\n   - **Agent step**: Looping? Exit conditions unreachable?\n4. Fix the root cause:\n   - Re-authorize expired integrations\n   - Fix action configuration\n   - Simplify condition prompts\n   - Add fallback exit conditions\n5. Test with a manual trigger\n6. Monitor next 5 tasks for success\n\n### Incident: Integration Auth Expired (SEV2-3)\n\n**Symptoms**: Actions failing with \"Not authorized\" or \"Token expired\"\n**Impact**: All tasks using that integration fail\n\n**Runbook**:\n\n1. Identify which integration is failing (Gmail, Slack, Sheets, etc.)\n2. In Lindy dashboard: Settings > Integrations\n3. Find the expired connection (may show warning icon)\n4. Click **Re-authorize** and complete OAuth flow\n5. Re-test the agent with a manual trigger\n6. Set calendar reminder for 90-day re-authorization check\n\n### Incident: Credit Exhaustion (SEV2-3)\n\n**Symptoms**: Agents stop running, no new tasks created\n**Impact**: All agents paused until credits refill\n\n**Runbook**:\n\n1. Confirm at Settings > Billing: credits at 0\n2. Immediate: Upgrade plan or purchase additional credits\n3. Investigate: Which agent consumed the most credits?\n4. Root cause: trigger storm? looping agent step? large model overuse?\n5. Fix: Add trigger filters, set exit conditions, downgrade model\n6. Prevent: Set budget alerts at 50%, 80%, 95% thresholds\n\n### Incident: Webhook Endpoint Failure (SEV2-3)\n\n**Symptoms**: Lindy agent runs but your callback never receives data\n**Impact**: Agent completes but results are lost\n\n**Runbook**:\n\n1. Check your endpoint health: `curl -s https://api.yourapp.com/health`\n2. Check server logs for incoming requests from Lindy\n3. Verify the HTTP Request action URL matches your production endpoint\n4. Test endpoint independently: send a POST with curl\n5. If endpoint was down: replay failed tasks (re-trigger the agent)\n6. If URL mismatch: update URL in Lindy agent HTTP Request action\n\n## Escalation Matrix\n\n| Level | Contact | When |\n|-------|---------|------|\n| L1 | On-call engineer | Initial response, diagnostics |\n| L2 | Engineering lead | After 30 min SEV1, 1 hour SEV2 |\n| L3 | VP Engineering | After 1 hour SEV1 |\n| Lindy Support | support@lindy.ai | Confirmed Lindy platform issue |\n\n## Post-Incident Template\n\n```markdown\n## Incident Report\n\n**Date**: YYYY-MM-DD\n**Severity**: SEV[1-4]\n**Duration**: [start time] to [end time] ([total minutes])\n**Impact**: [what was affected, customer impact]\n\n### Timeline\n- HH:MM \u2014 Issue detected via [monitoring/user report]\n- HH:MM \u2014 On-call paged, diagnostics started\n- HH:MM \u2014 Root cause identified: [cause]\n- HH:MM \u2014 Fix applied: [what was done]\n- HH:MM \u2014 Service restored, monitoring confirmed\n\n### Root Cause\n[Technical description of what failed and why]\n\n### Resolution\n[What was done to fix it]\n\n### Prevention\n- [ ] [Action item 1]\n- [ ] [Action item 2]\n- [ ] [Action item 3]\n```\n\n## Error Handling\n\n| Incident Type | Detection | Automated Response |\n|--------------|-----------|-------------------|\n| Platform outage | Health check fails | Queue events, notify team |\n| Agent failure | Task Completed trigger | Slack alert to #ops |\n| Auth expiry | Action step fails | Alert + re-auth link |\n| Credit exhaustion | Billing check | Pause non-critical agents |\n| Endpoint down | Health check | Redirect to fallback |\n\n## Resources\n\n- [Lindy Status](https://status.lindy.ai)\n- [Lindy Support](mailto:support@lindy.ai)\n- [Lindy Community](https://community.lindy.ai)\n\n## Next Steps\n\nProceed to `lindy-data-handling` for data security and compliance.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "lindy-incident-runbook",
-    "description": "Incident response procedures for Lindy AI agent failures and outages.",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

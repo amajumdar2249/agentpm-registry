@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031131",
   "name": "abridge-performance-tuning",
   "slug": "abridge-performance-tuning",
   "description": "Optimize Abridge clinical AI integration performance for high-volume",
   "content": "# Abridge Performance Tuning\n\n## Overview\n\nPerformance optimization for high-volume Abridge deployments. Large health systems process thousands of encounters daily \u2014 latency in note generation directly impacts clinical workflow throughput.\n\n## Performance Targets\n\n| Metric | Target | Critical Threshold |\n|--------|--------|--------------------|\n| Audio stream \u2192 first transcript | < 2s | > 5s |\n| Encounter \u2192 completed note | < 30s | > 60s |\n| Note \u2192 EHR push | < 3s | > 10s |\n| Patient summary generation | < 10s | > 30s |\n| Concurrent sessions per org | 100+ | < 50 |\n\n## Instructions\n\n### Step 1: Audio Streaming Optimization\n\n```typescript\n// src/performance/audio-optimizer.ts\n// Optimize audio chunk size and streaming for lowest latency\n\ninterface AudioStreamMetrics {\n  chunkSize: number;\n  sendInterval: number;\n  bufferUtilization: number;\n  latencyP50: number;\n  latencyP99: number;\n}\n\nclass OptimizedAudioStream {\n  private buffer: Buffer[] = [];\n  private metrics: AudioStreamMetrics = {\n    chunkSize: 3200,       // 100ms at 16kHz 16-bit mono = 3200 bytes\n    sendInterval: 100,     // Send every 100ms\n    bufferUtilization: 0,\n    latencyP50: 0,\n    latencyP99: 0,\n  };\n\n  constructor(\n    private ws: WebSocket,\n    private sampleRate: number = 16000,\n  ) {}\n\n  // Optimal chunk size: 100ms for low latency, 500ms for bandwidth efficiency\n  processAudioChunk(chunk: Buffer): void {\n    this.buffer.push(chunk);\n\n    const totalSize = this.buffer.reduce((sum, b) => sum + b.length, 0);\n    if (totalSize >= this.metrics.chunkSize) {\n      const combined = Buffer.concat(this.buffer);\n      this.buffer = [];\n\n      if (this.ws.readyState === WebSocket.OPEN) {\n        const start = performance.now();\n        this.ws.send(combined);\n        this.recordLatency(performance.now() - start);\n      }\n    }\n  }\n\n  private recordLatency(ms: number): void {\n    // Track P50/P99 for monitoring\n    this.metrics.latencyP50 = ms; // Simplified \u2014 use histogram in production\n  }\n\n  getMetrics(): AudioStreamMetrics {\n    return { ...this.metrics };\n  }\n}\n```\n\n### Step 2: Note Generation Pipeline Optimization\n\n```typescript\n// src/performance/note-pipeline.ts\n// Pre-warm note generation and parallelize post-processing\n\ninterface PipelineStage {\n  name: string;\n  durationMs: number;\n  parallel: boolean;\n}\n\nasync function optimizedNotePipeline(\n  api: any,\n  sessionId: string,\n): Promise<{ note: any; metrics: PipelineStage[] }> {\n  const stages: PipelineStage[] = [];\n\n  // Stage 1: Finalize session (triggers AI processing)\n  const t1 = performance.now();\n  await api.post(`/encounters/sessions/${sessionId}/finalize`);\n  stages.push({ name: 'finalize', durationMs: performance.now() - t1, parallel: false });\n\n  // Stage 2: Poll with exponential backoff (adaptive polling)\n  const t2 = performance.now();\n  let pollInterval = 500;  // Start fast\n  let note = null;\n\n  for (let i = 0; i < 30; i++) {\n    const { data } = await api.get(`/encounters/sessions/${sessionId}/note`);\n    if (data.status === 'completed') {\n      note = data.note;\n      break;\n    }\n    await new Promise(r => setTimeout(r, pollInterval));\n    pollInterval = Math.min(pollInterval * 1.5, 3000); // Back off gradually\n  }\n  stages.push({ name: 'note_generation', durationMs: performance.now() - t2, parallel: false });\n\n  if (!note) throw new Error('Note generation timed out');\n\n  // Stage 3: Parallel post-processing\n  const t3 = performance.now();\n  const [patientSummary, ehrResult] = await Promise.allSettled([\n    api.post(`/encounters/sessions/${sessionId}/patient-summary`, { language: 'en' }),\n    pushNoteToEhr(note),\n  ]);\n  stages.push({ name: 'post_processing', durationMs: performance.now() - t3, parallel: true });\n\n  return { note, metrics: stages };\n}\n```\n\n### Step 3: Connection Pooling for FHIR Push\n\n```typescript\n// src/performance/connection-pool.ts\nimport axios from 'axios';\nimport https from 'https';\n\n// Reuse TCP connections for FHIR endpoint\nconst fhirAgent = new https.Agent({\n  keepAlive: true,\n  keepAliveMsecs: 30000,\n  maxSockets: 20,          // Max concurrent FHIR connections\n  maxFreeSockets: 5,\n  minVersion: 'TLSv1.3',\n});\n\nconst fhirClient = axios.create({\n  baseURL: process.env.EPIC_FHIR_BASE_URL,\n  httpsAgent: fhirAgent,\n  timeout: 10000,\n});\n\n// Batch FHIR pushes for multi-encounter processing\nasync function batchFhirPush(notes: Array<{ docRef: any }>): Promise<void> {\n  // FHIR Bundle for batch operations\n  const bundle = {\n    resourceType: 'Bundle',\n    type: 'batch',\n    entry: notes.map(n => ({\n      resource: n.docRef,\n      request: { method: 'POST', url: 'DocumentReference' },\n    })),\n  };\n\n  await fhirClient.post('/', bundle, {\n    headers: { 'Content-Type': 'application/fhir+json' },\n  });\n}\n```\n\n### Step 4: Performance Monitoring Dashboard\n\n```typescript\n// src/performance/monitor.ts\ninterface PerformanceSnapshot {\n  timestamp: string;\n  activeSessions: number;\n  avgNoteLatencyMs: number;\n  p99NoteLatencyMs: number;\n  fhirPushSuccessRate: number;\n  audioStreamDropRate: number;\n}\n\nclass PerformanceMonitor {\n  private noteLatencies: number[] = [];\n  private fhirPushResults: boolean[] = [];\n\n  recordNoteLatency(ms: number): void {\n    this.noteLatencies.push(ms);\n    if (this.noteLatencies.length > 1000) this.noteLatencies.shift();\n  }\n\n  recordFhirPush(success: boolean): void {\n    this.fhirPushResults.push(success);\n    if (this.fhirPushResults.length > 1000) this.fhirPushResults.shift();\n  }\n\n  getSnapshot(activeSessions: number): PerformanceSnapshot {\n    const sorted = [...this.noteLatencies].sort((a, b) => a - b);\n    return {\n      timestamp: new Date().toISOString(),\n      activeSessions,\n      avgNoteLatencyMs: sorted.length ? sorted.reduce((a, b) => a + b, 0) / sorted.length : 0,\n      p99NoteLatencyMs: sorted.length ? sorted[Math.floor(sorted.length * 0.99)] : 0,\n      fhirPushSuccessRate: this.fhirPushResults.length\n        ? this.fhirPushResults.filter(Boolean).length / this.fhirPushResults.length\n        : 1,\n      audioStreamDropRate: 0, // Populated by audio stream metrics\n    };\n  }\n}\n```\n\n## Output\n\n- Optimized audio streaming with 100ms chunking\n- Adaptive polling for note generation (500ms \u2192 3s backoff)\n- Connection-pooled FHIR batch pushes\n- Real-time performance monitoring with P50/P99 latency tracking\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| High note latency | Complex encounter | Pre-segment long encounters |\n| FHIR push timeout | EHR server overloaded | Use connection pool; batch pushes |\n| Audio drops | Network jitter | Buffer 500ms; reconnect on drop |\n\n## Resources\n\n- [Abridge Platform](https://www.abridge.com/product)\n- [Node.js HTTPS Agent](https://nodejs.org/api/https.html#class-httpsagent)\n\n## Next Steps\n\nFor cost optimization, see `abridge-cost-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "abridge-performance-tuning",
-    "description": "Optimize Abridge clinical AI integration performance for high-volume",
-    "Trigger": "abridge performance\", \"abridge latency\", \"abridge optimization\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

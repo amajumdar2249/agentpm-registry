@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031277",
   "name": "apollo-ci-integration",
   "slug": "apollo-ci-integration",
   "description": "Configure Apollo.io CI/CD integration.",
   "content": "# Apollo CI Integration\n\n## Overview\n\nSet up CI/CD pipelines for Apollo.io integrations with GitHub Actions. Uses MSW mocks for unit tests (zero API calls), sandbox tokens for staging, and live API tests gated to main branch only. Apollo's sandbox token returns dummy data without consuming credits.\n\n## Prerequisites\n\n- GitHub repository with Actions enabled\n- Apollo master API key + sandbox token\n- Node.js 18+\n\n## Instructions\n\n### Step 1: Store Secrets in GitHub\n\n```bash\n# Master API key for integration tests (main branch only)\ngh secret set APOLLO_API_KEY --body \"$APOLLO_API_KEY\"\n\n# Sandbox token for staging tests (safe, no credits)\ngh secret set APOLLO_SANDBOX_KEY --body \"$APOLLO_SANDBOX_KEY\"\n```\n\n### Step 2: GitHub Actions Workflow\n\n```yaml\n# .github/workflows/apollo-ci.yml\nname: Apollo CI\non:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n\njobs:\n  lint-and-typecheck:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with: { node-version: '20', cache: 'npm' }\n      - run: npm ci\n      - run: npm run lint\n      - run: npm run typecheck\n\n  unit-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with: { node-version: '20', cache: 'npm' }\n      - run: npm ci\n      - run: npm test\n        # Unit tests use MSW mocks \u2014 zero API calls\n\n  integration-tests:\n    runs-on: ubuntu-latest\n    if: github.event_name == 'push' && github.ref == 'refs/heads/main'\n    needs: [unit-tests]\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with: { node-version: '20', cache: 'npm' }\n      - run: npm ci\n      - name: Apollo Health Check\n        env:\n          APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}\n        run: |\n          STATUS=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n            -H \"x-api-key: $APOLLO_API_KEY\" \\\n            \"https://api.apollo.io/api/v1/auth/health\")\n          echo \"Apollo API: HTTP $STATUS\"\n          [ \"$STATUS\" = \"200\" ] || exit 1\n      - run: npm run test:integration\n        env:\n          APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}\n\n  secret-scan:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - name: Check for hardcoded API keys\n        run: |\n          if grep -rn 'x-api-key.*[a-zA-Z0-9]\\{20,\\}' src/ --include='*.ts' --include='*.js'; then\n            echo \"Potential hardcoded API key found!\"\n            exit 1\n          fi\n          echo \"No hardcoded secrets\"\n```\n\n### Step 3: MSW-Based Unit Tests\n\n```typescript\n// src/__tests__/apollo.test.ts\nimport { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';\nimport { setupServer } from 'msw/node';\nimport { http, HttpResponse } from 'msw';\n\nconst BASE = 'https://api.apollo.io/api/v1';\nconst mockServer = setupServer(\n  http.post(`${BASE}/mixed_people/api_search`, () =>\n    HttpResponse.json({\n      people: [{ id: '1', name: 'Jane Doe', title: 'VP Sales' }],\n      pagination: { page: 1, per_page: 25, total_entries: 1, total_pages: 1 },\n    }),\n  ),\n  http.post(`${BASE}/people/match`, () =>\n    HttpResponse.json({\n      person: { id: '1', name: 'Jane Doe', email: 'jane@test.com', title: 'VP Sales' },\n    }),\n  ),\n  http.get(`${BASE}/auth/health`, () =>\n    HttpResponse.json({ is_logged_in: true }),\n  ),\n);\n\nbeforeAll(() => mockServer.listen());\nafterEach(() => mockServer.resetHandlers());\nafterAll(() => mockServer.close());\n\ndescribe('People Search', () => {\n  it('returns contacts from search', async () => {\n    const { searchPeople } = await import('../workflows/lead-search');\n    const result = await searchPeople({ domains: ['test.com'] });\n    expect(result.people).toHaveLength(1);\n    expect(result.people[0].name).toBe('Jane Doe');\n  });\n\n  it('handles 429 errors', async () => {\n    mockServer.use(\n      http.post(`${BASE}/mixed_people/api_search`, () =>\n        HttpResponse.json({ message: 'Rate limited' }, { status: 429 }),\n      ),\n    );\n    const { searchPeople } = await import('../workflows/lead-search');\n    await expect(searchPeople({ domains: ['test.com'] })).rejects.toThrow();\n  });\n});\n```\n\n### Step 4: Integration Tests (Live API)\n\n```typescript\n// src/__tests__/integration/apollo-live.test.ts\nimport { describe, it, expect } from 'vitest';\nimport axios from 'axios';\n\nconst SKIP = !process.env.APOLLO_API_KEY;\nconst client = axios.create({\n  baseURL: 'https://api.apollo.io/api/v1',\n  headers: { 'Content-Type': 'application/json', 'x-api-key': process.env.APOLLO_API_KEY! },\n});\n\ndescribe.skipIf(SKIP)('Apollo Live Integration', () => {\n  it('searches for people at apollo.io', async () => {\n    const { data } = await client.post('/mixed_people/api_search', {\n      q_organization_domains_list: ['apollo.io'],\n      per_page: 5,\n    });\n    expect(data.people.length).toBeGreaterThan(0);\n  });\n\n  it('enriches organization by domain', async () => {\n    const { data } = await client.get('/organizations/enrich', { params: { domain: 'apollo.io' } });\n    expect(data.organization).toBeDefined();\n    expect(data.organization.name).toContain('Apollo');\n  });\n});\n```\n\n## Output\n\n- GitHub Actions workflow with lint, typecheck, unit test, integration test, and secret scan jobs\n- MSW mock server for zero-API-call unit tests in PRs\n- Live integration tests gated to main branch pushes only\n- Apollo health check step before integration tests\n- Secret scanning to prevent API key commits\n\n## Error Handling\n\n| Issue | Resolution |\n|-------|------------|\n| Secret not found | `gh secret list` to verify, re-add with `gh secret set` |\n| Rate limited in CI | Unit tests use MSW, integration tests run only on main |\n| Health check fails | Check [status.apollo.io](https://status.apollo.io); skip flaky on outage |\n| Hardcoded key found | Secret scan job fails the build; rotate the key immediately |\n\n## Resources\n\n- [GitHub Actions Secrets](https://docs.github.com/en/actions/security-guides/encrypted-secrets)\n- [Apollo Sandbox Testing](https://docs.apollo.io/docs/test-api-key)\n- [MSW (Mock Service Worker)](https://mswjs.io/)\n\n## Next Steps\n\nProceed to `apollo-deploy-integration` for deployment configuration.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "apollo-ci-integration",
-    "description": "Configure Apollo.io CI/CD integration.",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*), Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

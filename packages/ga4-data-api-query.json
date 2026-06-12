@@ -1,17 +1,47 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032086",
   "name": "ga4-data-api-query",
   "slug": "ga4-data-api-query",
   "description": "|",
   "content": "\n# GA4 Data API v1 \u2014 runReport\n\nThe Data API v1 is the canonical read path for GA4. One endpoint (`runReport`) covers most use cases. Two paths matter for picking the right query: **dimensions** describe rows (date, page, source), **metrics** describe values (sessions, users, events). Not every combination is valid \u2014 see \"Compatibility\" below.\n\nPrerequisite: auth working (see `ga4-auth-setup`).\n\n## The minimum viable query\n\n```python\nfrom google.analytics.data_v1beta import BetaAnalyticsDataClient\nfrom google.analytics.data_v1beta.types import (\n    RunReportRequest, DateRange, Metric, Dimension,\n)\n\nclient = BetaAnalyticsDataClient()\n\nreq = RunReportRequest(\n    property=\"properties/123456789\",     # YOUR property ID (digits only)\n    date_ranges=[\n        DateRange(start_date=\"30daysAgo\", end_date=\"today\"),\n    ],\n    metrics=[Metric(name=\"activeUsers\")],\n    dimensions=[Dimension(name=\"date\")],\n)\nresp = client.run_report(req)\n\nfor row in resp.rows:\n    date = row.dimension_values[0].value     # YYYYMMDD string\n    users = row.metric_values[0].value       # numeric string\n    print(f\"{date}: {users}\")\n```\n\nThat's the full skeleton. Everything below extends this shape.\n\n## The 12 metrics worth knowing\n\n| Metric | What it counts | Notes |\n|---|---|---|\n| `activeUsers` | Unique users with engagement in the window | The \"users\" people mean by default |\n| `newUsers` | First-seen users in the window | |\n| `totalUsers` | All users (engaged or not) \u2014 superset of `activeUsers` | |\n| `sessions` | Sessions started in the window | Re-engages after 30min inactivity |\n| `engagedSessions` | Sessions \u226510s OR \u22652 pageviews OR \u22651 conversion | The \"good\" sessions |\n| `screenPageViews` | Pageviews + app screenviews combined | What people mean by \"pageviews\" |\n| `eventCount` | Total event count (every event, not just `page_view`) | Often misleadingly large |\n| `bounceRate` | `(sessions - engagedSessions) / sessions` | Lower is better |\n| `averageSessionDuration` | Avg seconds per session | Across `sessions`, not `engagedSessions` |\n| `eventsPerSession` | `eventCount / sessions` | |\n| `conversions` | Events flagged as conversions in the property setup | Property-specific |\n| `totalRevenue` | Sum of `purchase` event revenue | Currency = property default |\n\n`bounceRate` and `averageSessionDuration` are ratios \u2014 don't `SUM` them across rows; they're already aggregated within each row's group.\n\n## The 12 dimensions worth knowing\n\n| Dimension | Cardinality | When to use |\n|---|---|---|\n| `date` | Low (1/day) | Time series |\n| `dateHour` | Med | Intra-day patterns |\n| `pagePath` | High | Top-pages reports |\n| `pageTitle` | High | When path is opaque (e.g. SPA hash routes) |\n| `sessionSource` / `sessionMedium` | Med | Attribution |\n| `sessionDefaultChannelGrouping` | Low (~12 channels) | High-level traffic source breakdown |\n| `country` / `region` / `city` | Med / Med / High | Geo |\n| `deviceCategory` | Low (desktop/mobile/tablet) | |\n| `browser` / `operatingSystem` | Med | Tech audit |\n| `landingPage` | High | Entry-page reports |\n| `eventName` | Med | Event-level breakdowns |\n| `customEvent:<name>` | Property-specific | If you defined custom dimensions in the property setup |\n\n## Compatibility \u2014 not every (dim, metric) combo is valid\n\nGA4 enforces a compatibility matrix at the API level. If you ask for `sessions` + `customEvent:purchaseId` together you may get an empty result or a `400 INVALID_ARGUMENT`. Two rules cover ~90% of cases:\n\n1. **User-scoped vs session-scoped vs event-scoped dimensions don't always mix with each other's metrics.** Stick to dimensions in the same scope as your headline metric where possible.\n2. **High-cardinality custom dimensions can trigger sampling.** GA4 will silently sample if a single query touches more than the property's data-quota threshold; the response includes `metadata.dataLossFromOtherRow=true`. Check it.\n\nIf you're unsure, query the compatibility metadata endpoint:\n\n```python\nfrom google.analytics.data_v1beta.types import CheckCompatibilityRequest\ncompat = client.check_compatibility(CheckCompatibilityRequest(\n    property=\"properties/123456789\",\n    dimensions=[Dimension(name=\"pagePath\"), Dimension(name=\"sessionSource\")],\n    metrics=[Metric(name=\"screenPageViews\"), Metric(name=\"sessions\")],\n))\nprint(compat)\n```\n\n## Filters\n\nFilters are nested expressions. The common case: filter rows by a dimension value.\n\n```python\nfrom google.analytics.data_v1beta.types import (\n    FilterExpression, Filter, FilterExpressionList,\n)\n\n# Just pages under /docs/\ndocs_only = FilterExpression(\n    filter=Filter(\n        field_name=\"pagePath\",\n        string_filter=Filter.StringFilter(\n            match_type=Filter.StringFilter.MatchType.BEGINS_WITH,\n            value=\"/docs/\",\n            case_sensitive=False,\n        ),\n    ),\n)\n\n# AND combine: organic search AND not from referrer \"spam.com\"\ncombined = FilterExpression(\n    and_group=FilterExpressionList(expressions=[\n        FilterExpression(filter=Filter(\n            field_name=\"sessionMedium\",\n            string_filter=Filter.StringFilter(\n                match_type=Filter.StringFilter.MatchType.EXACT,\n                value=\"organic\",\n            ),\n        )),\n        FilterExpression(not_expression=FilterExpression(filter=Filter(\n            field_name=\"sessionSource\",\n            string_filter=Filter.StringFilter(\n                match_type=Filter.StringFilter.MatchType.EXACT,\n                value=\"spam.com\",\n            ),\n        ))),\n    ]),\n)\n\nreq = RunReportRequest(\n    property=\"properties/123456789\",\n    date_ranges=[DateRange(start_date=\"30daysAgo\", end_date=\"today\")],\n    metrics=[Metric(name=\"sessions\")],\n    dimensions=[Dimension(name=\"pagePath\")],\n    dimension_filter=docs_only,\n)\n```\n\nUse `metric_filter` for filtering by metric (e.g. only rows where `sessions > 100`). Same shape.\n\n## Date ranges\n\n| Form | Meaning |\n|---|---|\n| `\"2026-05-01\"` | Absolute (ISO date) |\n| `\"30daysAgo\"` | Relative \u2014 N days before today |\n| `\"yesterday\"`, `\"today\"` | Named relative |\n| `\"NdaysAgo\"` to `\"today\"` | Standard rolling window |\n\nGA4 has **48-hour data freshness** \u2014 today's numbers fluctuate; yesterday's settle ~24h after midnight in the property's timezone; numbers older than 48h are stable. Don't draw conclusions from \"today\" alone.\n\nMultiple `date_ranges` in one request gives you a comparison report:\n\n```python\nDateRange(start_date=\"30daysAgo\", end_date=\"yesterday\", name=\"current\"),\nDateRange(start_date=\"60daysAgo\", end_date=\"31daysAgo\", name=\"prior\"),\n```\n\nThe response will have `dateRange` as an extra dimension on each row.\n\n## Pagination\n\n```python\nreq = RunReportRequest(\n    # ... as above\n    limit=10_000,    # max 250_000 per request\n    offset=0,\n)\nresp = client.run_report(req)\n# resp.row_count is the TOTAL matching rows; resp.rows is the current page\nwhile resp.row_count > req.offset + len(resp.rows):\n    req.offset += len(resp.rows)\n    resp = client.run_report(req)\n    # process resp.rows\n```\n\nFor result sets over ~1M rows, use `ga4-bigquery-export` instead.\n\n## Sampling \u2014 always check\n\n```python\nresp = client.run_report(req)\nif resp.metadata.data_loss_from_other_row:\n    print(\"WARNING: data was sampled. Tighten date range, drop high-cardinality dimensions, or use BigQuery export for unsampled data.\")\n```\n\nIf sampled, results are statistically valid but not exact. For exact counts, BigQuery export is the only path.\n\n## Common errors\n\n| Error | Cause | Fix |\n|---|---|---|\n| `400 INVALID_ARGUMENT: dimension X is incompatible with metric Y` | Compatibility matrix violation | Use `check_compatibility` to find a valid combination |\n| `400 The request must contain at least one valid dimension` | All dimensions in the list are invalid (typo, deprecated name) | Check the [Dimensions & metrics explorer](https://ga-dev-tools.google/ga4/dimensions-metrics-explorer/) |\n| `503 RESOURCE_EXHAUSTED` | Per-property quota hit | Wait 1h or raise quota; batch fewer queries |\n| Empty `rows` despite valid query | Date range outside data window OR property has no data for that period | Sanity-check with a known-good query (e.g. `activeUsers` over `today`) |\n\n## Related skills\n\n- `ga4-auth-setup` \u2014 prerequisite\n- `ga4-realtime-api` \u2014 for \"right now\" data instead of `runReport`'s ~24h lag\n- `ga4-common-reports` \u2014 copy-paste recipes for the canonical 6-7 reports\n- `ga4-bigquery-export` \u2014 when you've outgrown the Data API\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "ga4-data-api-query",
-    "description": "|",
-    "allowed-tools": "Bash(python3:*), Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "[saas, analytics, google-analytics, ga4, data-api]",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "[saas",
+    "analytics",
+    "google-analytics",
+    "ga4",
+    "data-api]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

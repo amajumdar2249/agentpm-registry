@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031186",
   "name": "alchemy-webhooks-events",
   "slug": "alchemy-webhooks-events",
   "description": "Implement Alchemy Notify webhooks for real-time blockchain event notifications.",
   "content": "# Alchemy Webhooks & Events (Notify API)\n\n## Overview\n\nAlchemy Notify provides real-time push notifications for on-chain events. Instead of polling, receive webhook callbacks for wallet activity, mined transactions, dropped transactions, and smart contract events.\n\n## Webhook Types\n\n| Type | Trigger | Use Case |\n|------|---------|----------|\n| Address Activity | ETH/token transfer to/from address | Wallet notifications |\n| Mined Transaction | Transaction confirmed on-chain | Payment confirmation |\n| Dropped Transaction | Transaction removed from mempool | Failed tx alerting |\n| NFT Activity | NFT transfer events | Marketplace notifications |\n| Custom Webhook | GraphQL-defined filter | Complex event tracking |\n\n## Instructions\n\n### Step 1: Create Webhook via Dashboard or API\n\n```bash\n# Create Address Activity webhook via Alchemy API\ncurl -X POST \"https://dashboard.alchemy.com/api/create-webhook\" \\\n  -H \"X-Alchemy-Token: ${ALCHEMY_AUTH_TOKEN}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"network\": \"ETH_MAINNET\",\n    \"webhook_type\": \"ADDRESS_ACTIVITY\",\n    \"webhook_url\": \"https://your-app.com/webhooks/alchemy\",\n    \"addresses\": [\n      \"0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045\"\n    ]\n  }'\n```\n\n### Step 2: Webhook Handler with Signature Verification\n\n```typescript\n// src/webhooks/alchemy-handler.ts\nimport express from 'express';\nimport crypto from 'crypto';\n\nconst router = express.Router();\n\nrouter.post('/webhooks/alchemy',\n  express.raw({ type: 'application/json' }),\n  async (req, res) => {\n    // Verify webhook signature\n    const signature = req.headers['x-alchemy-signature'] as string;\n    if (!verifySignature(req.body.toString(), signature)) {\n      return res.status(401).json({ error: 'Invalid signature' });\n    }\n\n    const event = JSON.parse(req.body.toString());\n    await processAlchemyEvent(event);\n    res.status(200).json({ ok: true });\n  }\n);\n\nfunction verifySignature(body: string, signature: string): boolean {\n  const signingKey = process.env.ALCHEMY_WEBHOOK_SIGNING_KEY!;\n  const hmac = crypto.createHmac('sha256', signingKey);\n  hmac.update(body, 'utf8');\n  const digest = hmac.digest('hex');\n  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest));\n}\n```\n\n### Step 3: Event Router\n\n```typescript\n// src/webhooks/event-router.ts\ninterface AlchemyWebhookEvent {\n  webhookId: string;\n  id: string;\n  createdAt: string;\n  type: 'ADDRESS_ACTIVITY' | 'MINED_TRANSACTION' | 'DROPPED_TRANSACTION' | 'NFT_ACTIVITY';\n  event: {\n    network: string;\n    activity: Array<{\n      fromAddress: string;\n      toAddress: string;\n      value: number;\n      asset: string;\n      category: 'external' | 'internal' | 'erc20' | 'erc721' | 'erc1155';\n      hash: string;\n      blockNum: string;\n    }>;\n  };\n}\n\nasync function processAlchemyEvent(event: AlchemyWebhookEvent): Promise<void> {\n  switch (event.type) {\n    case 'ADDRESS_ACTIVITY':\n      for (const activity of event.event.activity) {\n        console.log(`${activity.category} transfer: ${activity.value} ${activity.asset}`);\n        console.log(`  From: ${activity.fromAddress}`);\n        console.log(`  To: ${activity.toAddress}`);\n        console.log(`  Tx: ${activity.hash}`);\n        // Trigger application logic (e.g., update balance, send notification)\n      }\n      break;\n\n    case 'MINED_TRANSACTION':\n      console.log('Transaction mined:', event.event);\n      break;\n\n    case 'DROPPED_TRANSACTION':\n      console.log('Transaction dropped:', event.event);\n      // Alert user their transaction was dropped\n      break;\n\n    case 'NFT_ACTIVITY':\n      for (const activity of event.event.activity) {\n        console.log(`NFT transfer: ${activity.asset} #${activity.value}`);\n      }\n      break;\n  }\n}\n```\n\n### Step 4: Programmatic Webhook Management\n\n```typescript\n// src/webhooks/manage-webhooks.ts\nimport { Alchemy, Network, WebhookType } from 'alchemy-sdk';\n\nconst alchemy = new Alchemy({\n  apiKey: process.env.ALCHEMY_API_KEY,\n  network: Network.ETH_MAINNET,\n  authToken: process.env.ALCHEMY_AUTH_TOKEN, // Required for Notify API\n});\n\nasync function setupAddressWebhook(addresses: string[], webhookUrl: string) {\n  const webhook = await alchemy.notify.createWebhook(\n    webhookUrl,\n    WebhookType.ADDRESS_ACTIVITY,\n    { addresses, network: Network.ETH_MAINNET }\n  );\n  console.log(`Webhook created: ${webhook.id}`);\n  return webhook;\n}\n\nasync function listWebhooks() {\n  const webhooks = await alchemy.notify.getAllWebhooks();\n  for (const wh of webhooks.webhooks) {\n    console.log(`${wh.id}: ${wh.webhookType} \u2192 ${wh.webhookUrl} (${wh.isActive ? 'active' : 'inactive'})`);\n  }\n}\n\nasync function addAddressToWebhook(webhookId: string, newAddresses: string[]) {\n  await alchemy.notify.updateWebhook(webhookId, {\n    addAddresses: newAddresses,\n  });\n}\n```\n\n## Output\n\n- Address Activity webhook for wallet monitoring\n- HMAC signature verification for webhook security\n- Event router handling all Alchemy webhook types\n- Programmatic webhook management via Notify API\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Invalid signature | Wrong signing key | Copy from Alchemy webhook details page |\n| Missing events | Webhook URL not reachable | Ensure HTTPS endpoint is publicly accessible |\n| Duplicate events | No idempotency | Track webhook event IDs |\n\n## Resources\n\n- [Alchemy Webhooks Overview](https://www.alchemy.com/docs/reference/webhooks-overview)\n- [Alchemy Webhook Types](https://www.alchemy.com/docs/reference/webhook-types)\n- [Alchemy Notify Tutorial](https://github.com/alchemyplatform/Alchemy-Notify-Tutorial)\n\n## Next Steps\n\nFor performance optimization, see `alchemy-performance-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "alchemy-webhooks-events",
-    "description": "Implement Alchemy Notify webhooks for real-time blockchain event notifications.",
-    "Trigger": "alchemy webhook\", \"alchemy notify\", \"alchemy events\",",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000040036",
   "name": "using-webctl",
   "slug": "using-webctl-2",
   "description": "Browser automation via webctl CLI in Claude.ai containers with authenticated proxy support. Use when users mention webctl, browser automation, Playwright browsing, web scraping, or headless Chrome in container environments.",
   "content": "\n# Using webctl in Claude.ai Containers\n\nBrowser automation using webctl CLI with automatic proxy authentication handling for Claude.ai's egress-controlled environment.\n\n## When This Skill Applies\n\n- User requests browser automation, web scraping, or page interaction\n- webctl commands fail with `ERR_TUNNEL_CONNECTION_FAILED`\n- Playwright/Chromium needs to work through authenticated HTTP proxy\n\n## Core Problem\n\nClaude.ai containers route traffic through an authenticated egress proxy (`HTTP_PROXY` env var with JWT credentials). Chromium doesn't properly handle proxy authentication for HTTPS CONNECT tunnels, causing all HTTPS navigation to fail even though curl works.\n\n## Solution\n\nA local forwarding proxy (port 18080) intercepts Chromium connections and injects `Proxy-Authorization` headers before forwarding to the real egress proxy.\n\n## Setup Procedure\n\n### 1. Install webctl\n\n```bash\npip install webctl --break-system-packages\nwebctl setup  # Downloads Chromium if needed\n```\n\n### 2. Deploy Auth Proxy Module\n\nCopy `scripts/auth_proxy.py` to webctl's daemon directory:\n\n```bash\ncp /mnt/skills/user/using-webctl/scripts/auth_proxy.py \\\n   /usr/local/lib/python3.12/dist-packages/webctl/daemon/\n```\n\n### 3. Patch Session Manager\n\nApply this patch to `/usr/local/lib/python3.12/dist-packages/webctl/daemon/session_manager.py`.\n\nRecent webctl versions split context creation into two branches (mobile emulation vs desktop). Both must receive the proxy config. Find the block (search for `cfg = WebctlConfig.load()` followed by the `if mode == \"unattended\" and cfg.mobile_emulation:` branch \u2014 around line 190):\n\n```python\ncfg = WebctlConfig.load()\nif mode == \"unattended\" and cfg.mobile_emulation:\n    # Mobile emulation: cleaner pages, fewer ads, simpler layouts\n    device = self._playwright.devices[\"Pixel 7\"]\n    context = await browser.new_context(\n        storage_state=storage_state,\n        **device,\n    )\nelse:\n    context = await browser.new_context(\n        storage_state=storage_state, viewport={\"width\": 1280, \"height\": 720}\n    )\n```\n\nReplace with:\n```python\ncfg = WebctlConfig.load()\nfrom .auth_proxy import get_local_proxy_url\nproxy_url = get_local_proxy_url()\nproxy_config = {\"server\": proxy_url} if proxy_url else None\nif mode == \"unattended\" and cfg.mobile_emulation:\n    # Mobile emulation: cleaner pages, fewer ads, simpler layouts\n    device = self._playwright.devices[\"Pixel 7\"]\n    context = await browser.new_context(\n        storage_state=storage_state,\n        proxy=proxy_config,\n        **device,\n    )\nelse:\n    context = await browser.new_context(\n        storage_state=storage_state, viewport={\"width\": 1280, \"height\": 720},\n        proxy=proxy_config\n    )\n```\n\nIf the file only has a single `new_context` call (older webctl), inject `proxy=proxy_config` into that one and place the three `proxy_url` lines just above it.\n\n### 4. Verify\n\n```bash\nwebctl start --mode unattended\nwebctl --quiet navigate \"https://github.com\"\nwebctl snapshot --interactive-only --limit 10\nwebctl stop\n```\n\n## Quick Reference\n\n### Session Management\n```bash\nwebctl start --mode unattended    # Headless browser\nwebctl stop                       # Full shutdown (use --keep-daemon to leave daemon running)\nwebctl status                     # Current state + console error counts\n```\n\n### Navigation\n```bash\nwebctl navigate \"https://...\"\nwebctl back / webctl forward / webctl reload\n```\n\n### Observation\n```bash\nwebctl snapshot --interactive-only --limit 30   # Buttons, links, inputs\nwebctl snapshot --within \"role=main\"            # Scope to container\nwebctl query \"role=button name~=Submit\"         # Debug queries\nwebctl screenshot --path shot.png\n```\n\n### Interaction\n```bash\nwebctl click 'role=button name~=\"Submit\"'\nwebctl type 'role=textbox name~=\"Email\"' \"user@example.com\"\nwebctl type 'role=textbox name~=\"Search\"' \"query\" --submit\nwebctl select 'role=combobox name~=\"Country\"' --label \"Germany\"\n```\n\n### Query Syntax\n- `role=button` \u2014 By ARIA role\n- `name~=\"partial\"` \u2014 Contains (preferred, more robust)\n- `name=\"exact\"` \u2014 Exact match\n- `nth=0` \u2014 Select first when multiple matches\n\n### Wait Conditions\n```bash\nwebctl wait network-idle\nwebctl wait 'exists:role=button name~=\"Continue\"'\nwebctl wait 'url-contains:\"/dashboard\"'\n```\n\n## Troubleshooting\n\n### ERR_TUNNEL_CONNECTION_FAILED\nAuth proxy not loaded. Verify:\n1. `auth_proxy.py` exists in webctl daemon directory\n2. Session manager is patched\n3. Restart daemon: `webctl stop && webctl start --mode unattended`\n\n### Multiple matches error\nAdd specificity or use `nth=0`:\n```bash\nwebctl click 'role=link name=\"Sign in\" nth=0'\n```\n\n### Verify proxy is running\n```bash\nnetstat -tlnp | grep 18080\n```\n\n## Limitations\n\n- Patch is session-local (container resets clear it)\n- Only allowed domains in network config are accessible\n- No Firefox support (download blocked by egress policy)\n\n## Domain Restrictions\n\nCheck `<network_configuration>` in system prompt for allowed domains. Common allowed: `*.github.com`, `*.bsky.app`, allowed API endpoints.\n\n## Output Filtering\n\nReduce context consumption:\n```bash\nwebctl snapshot --interactive-only --limit 30    # Cap elements\nwebctl snapshot | grep -i \"submit\"               # Unix filtering\nwebctl --quiet navigate \"...\"                    # Suppress events\n```\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "using-webctl",
-    "description": "Browser automation via webctl CLI in Claude.ai containers with authenticated proxy support. Use when users mention webctl, browser automation, Playwright browsing, web scraping, or headless Chrome in container environments.",
-    "metadata": "",
-    "version": "0.0.2"
+  "author": "agentpm",
+  "version": "0.0.2",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

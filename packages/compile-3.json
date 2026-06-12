@@ -1,30 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000026336",
   "name": "compile",
   "slug": "compile-3",
   "description": "Compile .agents knowledge wiki.",
   "content": "# Compile \u2014 Knowledge Compiler\n\nReads raw `.agents/` artifacts and compiles them into a structured, interlinked\nmarkdown wiki. Inspired by [Karpathy's LLM Knowledge Bases](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f).\n\n## What This Skill Does\n\nThe knowledge flywheel captures signal reactively (via `/retro`, `/post-mortem`,\n`/forge`). `/compile` closes the loop by:\n\n1. **Mining** unextracted signal from git and `.agents/` (existing)\n2. **Growing** learnings via validation, synthesis, and gap detection (existing)\n3. **Compiling** raw artifacts into interlinked wiki articles (NEW \u2014 the core value)\n4. **Linting** the compiled wiki for contradictions, orphans, and gaps (NEW)\n5. **Defragging** stale and duplicate artifacts (existing)\n\n**No vector DB.** At personal scale (~100-400 articles), the compiled wiki fits\nin context windows. The wiki IS the retrieval layer.\n\n**Output:** `.agents/compiled/` \u2014 encyclopedia-style markdown with `[[backlinks]]`,\n`index.md` catalog, and `log.md` chronological record.\n\n## Pluggable Compute Backend\n\nSet `AGENTOPS_COMPILE_RUNTIME` to choose the LLM backend:\n\n| Value | Backend | Notes |\n|-------|---------|-------|\n| `claude-cli` | Local `claude` binary | Zero-config. Inherits your Claude Code auth \u2014 no API key needed. Auto-selected if `claude` is on PATH and nothing else is set. |\n| `ollama` | Ollama API | Default model: `gemma3:27b`. Set `OLLAMA_HOST` for remote (e.g., `ssh -L 11435:localhost:11435 bushido-windows`). |\n| `claude` | Claude API (HTTP) | Uses `ANTHROPIC_API_KEY`. Model: `claude-sonnet-4-20250514`. |\n| `openai` | OpenAI-compatible | Uses `OPENAI_API_KEY` + `OPENAI_BASE_URL`. |\n| (unset) | Claude Code session | Compilation happens inline via the current session's LLM. |\n\nWhen `AGENTOPS_COMPILE_RUNTIME` is unset, `ao compile` first tries to\nauto-detect a local `claude` binary (claude-cli runtime). If that is also\nabsent, headless compile fails fast with an explicit error naming the env var\nto set. Interactive `/compile` invocations still run compilation prompts\ninline \u2014 the agent reading this SKILL.md IS the compiler.\n\n### Runtime preference (override auto-detect)\n\nTo force a non-auto-detected runtime permanently (e.g. you have `claude`\ninstalled but prefer Ollama for privacy), set it in\n`~/.agentops/config.yaml`:\n\n```yaml\ncompile:\n  preferred_runtime: ollama\n```\n\nPrecedence (high \u2192 low): `--runtime` flag, `AGENTOPS_COMPILE_RUNTIME`\nenv, `compile.preferred_runtime` config, `claude`-binary auto-detect,\nempty (error).\n\n### Large-corpus batching\n\n`ao compile` passes `--batch-size` to the headless compiler (default `25`\nchanged files per LLM prompt). A fresh run against a 2000+ file corpus will\nsplit into batches automatically instead of sending one giant prompt.\n\nFlags:\n\n- `--batch-size N` \u2014 files per batch (default 25)\n- `--max-batches N` \u2014 cap batches per invocation; remaining files are picked\n  up on the next run (default 0 = unlimited)\n\n## Execution Steps\n\nPhase-by-phase detail lives in [references/phases.md](references/phases.md).\nSummary of modes:\n\n- `/compile` \u2014 Full cycle: Mine \u2192 Grow \u2192 Compile \u2192 Lint \u2192 Defrag\n- `/compile --compile-only` \u2014 Skip mine/grow, just compile + lint\n- `/compile --lint-only` \u2014 Only lint the existing compiled wiki\n- `/compile --defrag-only` \u2014 Only run defrag/cleanup\n- `/compile --mine-only` \u2014 Only run mine + grow (legacy behavior)\n\nThe steps are:\n\n1. **Mine** \u2014 extract signal from git + `.agents/research/` + complexity hotspots\n2. **Grow** \u2014 LLM-driven validation, synthesis, gap detection; adjust learning confidence\n3. **Compile** \u2014 inventory \u2192 topic extraction \u2192 wiki articles with `[[backlinks]]`\n4. **Lint** \u2014 contradictions, orphans, missing cross-refs, stale claims\n5. **Defrag** \u2014 prune stale, dedup near-duplicates, sweep oscillating goals, normalization scan\n6. **Report** \u2014 write `.agents/compile/YYYY-MM-DD-report.md`\n\nSee [references/phases.md](references/phases.md) for the full per-phase\nprocedure, confidence-scoring table, auto-promotion rules, template\nshapes for article / index / log / lint-report / compile-report, and\nthe normalization defect scan.\n\n## Scheduling / Auto-Trigger\n\nLightweight defrag (prune + dedup, no mining or compilation) runs automatically at\nsession end via the `compile-session-defrag.sh` hook. This keeps the knowledge store\nclean without requiring manual `/compile` invocations. The hook:\n\n- Fires on every `SessionEnd` event after `session-end-maintenance.sh`\n- Skips silently if the `ao` CLI is not available\n- Runs only `ao defrag --prune --dedup` (no compilation or mining)\n- Has a 20-second timeout to avoid blocking session teardown\n\nFor full compilation, invoke `/compile` manually or schedule the headless compiler\nscript with your host OS:\n\n```bash\n# Example: external cron entry for nightly compilation on bushido\n0 3 * * * cd /path/to/repo && AGENTOPS_COMPILE_RUNTIME=ollama bash skills/compile/scripts/compile.sh --force\n```\n\nAgentOps exposes this flow through `ao compile`. If you want unattended\ncompilation, use your host scheduler (`launchd`, `cron`, `systemd`, CI, etc.)\nto invoke `ao compile --force --runtime ollama` or call the lower-level\n`bash skills/compile/scripts/compile.sh` directly.\nIf you want the broader out-of-session compounding loop, run it on Gas City (the\nreference out-of-session substrate) instead of inventing a parallel Dream\nwrapper inside `/compile`.\n\n## Interactive Modes\n\nThese modes describe the interactive `/compile` skill behavior:\n\n| Mode | Description |\n|------|-------------|\n| `--compile-only` | Skip mine/grow, just compile + lint |\n| `--lint-only` | Only lint the existing compiled wiki |\n| `--defrag-only` | Only run defrag/cleanup |\n| `--mine-only` | Only run mine + grow (legacy behavior) |\n| `--full` | Full cycle: mine \u2192 grow \u2192 compile \u2192 lint \u2192 defrag |\n| `--since 26h` | Time window for the mine phase |\n| `--incremental` | Skip unchanged source files (hash-based) |\n| `--force` | Recompile all articles regardless of hashes |\n\n## Headless Script Flags\n\nFor unattended runs, `bash skills/compile/scripts/compile.sh` supports:\n\n| Flag | Default | Description |\n|------|---------|-------------|\n| `--sources <dir>` | `.agents` | Source root for learnings, patterns, research, retros, forge, and knowledge |\n| `--output <dir>` | `.agents/compiled` | Target directory for compiled wiki output |\n| `--incremental` | on | Skip unchanged source files (hash-based) |\n| `--force` | off | Recompile all articles regardless of hashes |\n| `--lint-only` | off | Only run the lint pass on the existing compiled wiki |\n| `--full` | on | Accepted for parity; default behavior already runs the full headless compile path |\n\n## Examples\n\n**User says:** `/compile` \u2014 Full Mine \u2192 Grow \u2192 Compile \u2192 Lint \u2192 Defrag cycle.\n\n**User says:** `/compile --compile-only` \u2014 Just compile raw artifacts into wiki.\n\n**User says:** `/compile --lint-only` \u2014 Scan existing wiki for health issues.\n\n**User says:** `/compile --since 7d` \u2014 Mines with a wider window (7 days).\n\n**Scheduled externally:** Nightly compilation on bushido GPU via Ollama.\n\n**Pre-evolve warmup:** Run `/compile` before `/evolve` for a fresh, validated knowledge base.\n\n## Troubleshooting\n\n| Problem | Cause | Solution |\n|---------|-------|----------|\n| `ao mine` not found | ao CLI not in PATH | Use manual fallback in Step 1 |\n| No orphaned research | All research already referenced | Skip 2b, proceed to synthesis |\n| Empty mine output | No recent activity | Widen `--since` window |\n| Oscillation sweep empty | No oscillating goals | Healthy state \u2014 no action needed |\n| Ollama connection refused | Tunnel not running or wrong host | Run `ssh -L 11435:localhost:11435 bushido-windows` or check `OLLAMA_HOST` |\n| Compilation too slow | Large corpus on small model | Use `--incremental` or switch to larger model |\n| Hash file missing | First compilation | Normal \u2014 full compile runs, hashes saved after |\n\n## Reference Documents\n\n- [references/compile.feature](references/compile.feature) \u2014 Executable spec: Mine\u2192Grow\u2192Lint\u2192Defrag rebuild, lint-not-autofix, incremental batching, evolve warmup (soc-qk4b)\n\n- [references/phases.md](references/phases.md) \u2014 full per-phase procedure (mine \u2192 grow \u2192 compile \u2192 lint \u2192 defrag \u2192 report)\n- [references/confidence-scoring.md](references/confidence-scoring.md)\n- [references/knowledge-synthesis-patterns.md](references/knowledge-synthesis-patterns.md)\n- [references/flywheel-diagnostics.md](references/flywheel-diagnostics.md)\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "compile",
-    "description": "Compile .agents knowledge wiki.",
-    "practices": "",
-    "hexagonal_role": "supporting",
-    "consumes": "[]",
-    "produces": "",
-    "context_rel": "[]",
-    "skill_api_version": "1",
-    "user-invocable": "true",
-    "context": "",
-    "window": "fork",
-    "intent": "",
-    "mode": "task",
-    "sections": "",
-    "exclude": "",
-    "intel_scope": "full",
-    "metadata": "",
-    "tier": "knowledge",
-    "stability": "stable",
-    "dependencies": "[]",
-    "output_contract": ".agents/compiled/*.md, .agents/compiled/index.md, .agents/compiled/log.md,"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000035415",
   "name": "comfyui-voice-pipeline",
   "slug": "comfyui-voice-pipeline-2",
   "description": "Generate character voices using TTS, voice cloning, and lip-sync tools. Supports Chatterbox, F5-TTS, TTS Audio Suite, RVC, and ElevenLabs. Use when creating speech audio for characters or syncing audio to video.",
   "content": "\n# ComfyUI Voice Pipeline\n\nCreates character voices through TTS/voice cloning and synchronizes them with generated video.\n\n## Voice Generation Decision Tree\n\n```\nVOICE REQUEST\n    |\n    |-- Have reference audio of target voice?\n    |   |-- Yes (5+ seconds) \u2192 Chatterbox (MIT, paralinguistic tags)\n    |   |-- Yes (10-15 seconds) \u2192 F5-TTS (fastest zero-shot)\n    |   |-- Yes (10+ minutes) \u2192 RVC training (highest fidelity)\n    |   |-- Yes (any length, budget) \u2192 ElevenLabs (production quality)\n    |\n    |-- No reference audio?\n    |   |-- Need emotion control \u2192 IndexTTS-2 (8-emotion vectors)\n    |   |-- Need multi-language \u2192 TTS Audio Suite (23 languages)\n    |   |-- Need voice design \u2192 ElevenLabs Voice Design (describe voice)\n    |   |-- Quick prototype \u2192 Any TTS with default voice\n    |\n    |-- Need multi-speaker dialog?\n    |   |-- Chatterbox (4 voices) or TTS Audio Suite (character switching)\n    |\n    |-- Need lip-sync?\n    |   |-- Best accuracy \u2192 Wav2Lip + CodeFormer\n    |   |-- Need head movement \u2192 SadTalker\n    |   |-- Full expression control \u2192 LivePortrait\n    |   |-- Unlimited length \u2192 InfiniteTalk\n```\n\n## Tool Reference\n\n### Chatterbox (Recommended Open-Source)\n\n**Strengths**: MIT license, beats ElevenLabs 63.8% in blind tests, 5-second sample, emotion control, sub-200ms latency.\n\n**Paralinguistic tags:**\n```\n[laugh] [chuckle] [sigh] [gasp] [cough] [clear throat]\n[whisper] [excited] [sad] [angry] [surprised]\n```\n\n**Key parameter**: `exaggeration` (0.25-2.0) controls expressiveness.\n\n**Limit**: 40-second generation cap. Split longer content.\n\n### F5-TTS\n\n**Strengths**: Fastest zero-shot cloning, <15 second samples, MIT license, multi-language.\n\n**Requirements**: Reference audio must be paired with `.wav` + `.txt` (matching transcription).\n\n**Languages**: English, German, Spanish, French, Japanese, Hindi, Thai, Portuguese.\n\n### TTS Audio Suite\n\n**Strengths**: Unified multi-engine platform, 23 languages, character switching.\n\n**Special features:**\n- Character switching: `[CharacterName]` tags\n- Language switching: `[de:Alice]`, `[fr:Bob]`\n- Pause control: `[pause:1s]`\n- SRT timing sync\n\n**Integrates**: F5-TTS, Chatterbox, Higgs Audio 2, VibeVoice, IndexTTS-2, RVC.\n\n### IndexTTS-2\n\n**Strengths**: 8-emotion vector control with per-segment parameters.\n\n**Emotions**: happy, angry, sad, surprised, afraid, disgusted, calm, melancholic.\n\n### RVC (Voice Conversion)\n\n**Use case**: Train a model on target voice (10+ min audio), then convert any TTS output.\n\n**Pipeline**: `Text \u2192 Any TTS \u2192 Base Audio \u2192 RVC Model \u2192 Character Voice`\n\n**Training**: 300-500 epochs, RMVPE feature extraction.\n\n### ElevenLabs (Commercial)\n\n**Tiers:**\n- Instant Clone: 1-minute sample, good quality\n- Professional Clone: 30+ minutes (3h ideal), near-indistinguishable\n- Voice Design: Describe voice in text (no sample needed)\n\n## Voice Profile Setup\n\nFor each character, establish a voice profile in `projects/{project}/characters/{name}/profile.yaml`:\n\n```yaml\nvoice:\n  cloned: true\n  model: \"chatterbox\"\n  sample_file: \"references/voice_sample.wav\"\n  settings:\n    exaggeration: 1.2\n    default_emotion: \"neutral\"\n  notes: \"Warm, confident tone. Slight Italian-American undertones.\"\n```\n\n## Script Preparation\n\n### Text Formatting for TTS\n\n1. **Punctuation matters**: Commas create pauses, periods create stops\n2. **Phonetic hints**: Spell unusual words phonetically if mispronounced\n3. **Emotion cues**: Use Chatterbox tags or split by emotion for IndexTTS-2\n4. **Length**: Split into 30-40 second segments for Chatterbox limit\n\n### Multi-Speaker Script\n\n```\n[Sage] Hello! *laughs* I've been looking forward to this.\n[pause:0.5s]\n[Alex] [excited] Same here! Let's dive right in.\n[Sage] [whisper] But first, I need to tell you something...\n```\n\n## Audio Post-Processing\n\n### Requirements for Lip-Sync Input\n\n- Sample rate: 16-24kHz (model dependent)\n- Format: WAV (uncompressed)\n- Mono channel\n- Trim leading silence\n- Add 0.2s trailing silence\n- Normalize to -3dB peak\n\n### FFmpeg Processing\n\n```bash\n# Convert to mono 24kHz WAV, normalized\nffmpeg -i input.wav -ac 1 -ar 24000 -af \"loudnorm=I=-16:TP=-3\" output.wav\n\n# Trim silence from start/end\nffmpeg -i input.wav -af \"silenceremove=start_periods=1:start_threshold=-50dB,areverse,silenceremove=start_periods=1:start_threshold=-50dB,areverse\" trimmed.wav\n\n# Concatenate segments\nffmpeg -f concat -safe 0 -i filelist.txt -c copy combined.wav\n```\n\n## Lip-Sync Methods\n\n### Wav2Lip (Best Accuracy)\n\n**Settings:**\n```\nwav2lip_model: \"wav2lip_gan.pth\"  # Better than wav2lip.pth\nface_detect_batch: 16\nnosmooth: false\npad_bottom: 10\n```\n\n**MUST post-process**: CodeFormer (fidelity 0.7) after Wav2Lip output.\n\n### SadTalker (Head Movement)\n\n**Settings:**\n```\npreprocess: \"full\"     # Better for novel faces\nenhancer: \"gfpgan\"\npose_style: 10-20      # Natural conversation range\n```\n\n### LivePortrait (Expression Control)\n\n**Settings:**\n```\nlip_zero: 0.03         # Reduces unnatural lip movement\nstitching: true        # Seamless face blending\n```\n\n**Best for**: Premium avatar creation, expression transfer from driving video.\n\n### LatentSync 1.6 (Newest, Highest Quality)\n\nByteDance model trained at 512x512 with TREPA modules for temporal consistency.\n\n### InfiniteTalk (Unlimited Length)\n\nFor videos longer than standard lip-sync limits. Integrates with Wan for joint generation.\n\n## Complete Talking Head Workflow\n\n### Pipeline A: Quick (Image \u2192 Talk)\n\n```\n1. [Text] \u2192 Chatterbox/F5-TTS \u2192 audio.wav\n2. [Character Image] + audio.wav \u2192 SadTalker \u2192 video.mp4\n3. video.mp4 \u2192 GFPGAN/CodeFormer \u2192 final.mp4\n```\nTime: ~2 minutes. Quality: Good.\n\n### Pipeline B: Quality (Image \u2192 Video \u2192 Lip-Sync)\n\n```\n1. [Text] \u2192 Chatterbox \u2192 audio.wav\n2. [Character Image] \u2192 Wan I2V \u2192 base_video.mp4\n   Prompt: \"person talking, slight head movement, indoor\"\n3. base_video.mp4 + audio.wav \u2192 Wav2Lip \u2192 lipsync.mp4\n4. lipsync.mp4 \u2192 FaceDetailer batch \u2192 enhanced.mp4\n5. enhanced.mp4 \u2192 Color correct + Deflicker \u2192 final.mp4\n```\nTime: ~10 minutes. Quality: Production.\n\n### Pipeline C: Premium (Expression Transfer)\n\n```\n1. Record driving video (actor performing lines)\n2. [Text] \u2192 Voice Clone TTS \u2192 audio.wav\n3. [Character Image] + driving.mp4 \u2192 LivePortrait \u2192 expression_video.mp4\n4. expression_video.mp4 + audio.wav \u2192 Wav2Lip \u2192 lipsync.mp4\n5. lipsync.mp4 \u2192 CodeFormer \u2192 final.mp4\n```\nTime: ~15 minutes. Quality: Premium.\n\n## Troubleshooting\n\n| Issue | Solution |\n|-------|---------|\n| Audio out of sync | Offset with ffmpeg: `ffmpeg -itsoffset 0.1 -i audio.wav ...` |\n| Subtle mouth movements | Use wav2lip_gan.pth, increase audio volume |\n| Face artifacts | Post-process with CodeFormer (fidelity 0.6-0.8) |\n| Robotic voice clone | Use longer/cleaner reference, increase exaggeration |\n| Unnatural head movement | Lower SadTalker pose_style to 0-10 |\n\n## Reference\n\n- `references/voice-synthesis.md` - Full voice tool documentation\n- `references/models.md` - Voice model download links\n- Character voice profiles in `projects/{project}/characters/`\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "comfyui-voice-pipeline",
-    "description": "Generate character voices using TTS, voice cloning, and lip-sync tools. Supports Chatterbox, F5-TTS, TTS Audio Suite, RVC, and ElevenLabs. Use when creating speech audio for characters or syncing audio to video.",
-    "user-invocable": "true",
-    "metadata": "{\"openclaw\":{\"emoji\":\"\ud83c\udf99\ufe0f\",\"os\":[\"darwin\",\"linux\",\"win32\"],\"requires\":{\"anyBins\":[\"curl\",\"wget\"]},\"primaryEnv\":\"COMFYUI_URL\"}}"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

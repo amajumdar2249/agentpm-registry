@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031547",
   "name": "clerk-cost-tuning",
   "slug": "clerk-cost-tuning",
   "description": "Optimize Clerk costs and understand pricing.",
   "content": "# Clerk Cost Tuning\n\n## Overview\n\nUnderstand Clerk pricing and optimize costs. Clerk charges by Monthly Active Users (MAU). Covers pricing tiers, MAU reduction strategies, caching to reduce API calls, and usage monitoring.\n\n## Prerequisites\n\n- Clerk account active\n- Understanding of MAU (Monthly Active Users)\n- Application usage patterns known\n\n## Instructions\n\n### Step 1: Understand Clerk Pricing Model\n\n| Plan | Price | MAU Included | Extra MAU |\n|------|-------|-------------|-----------|\n| Free | $0/mo | 10,000 MAU | N/A |\n| Pro | $25/mo | 10,000 MAU | $0.02/MAU |\n| Enterprise | Custom | Custom | Custom |\n\nKey pricing concepts:\n\n- **MAU** = unique user who authenticates at least once per month\n- Users who only visit public pages are not counted\n- Bot/crawler sessions are not counted\n- Test/development instances are free and unlimited\n\n### Step 2: Reduce MAU Count\n\n```typescript\n// Strategy 1: Defer authentication \u2014 don't force sign-in until necessary\n// middleware.ts\nimport { clerkMiddleware, createRouteMatcher } from '@clerk/nextjs/server'\n\nconst requiresAuth = createRouteMatcher([\n  '/dashboard(.*)',\n  '/settings(.*)',\n  '/api/protected(.*)',\n])\n\nexport default clerkMiddleware(async (auth, req) => {\n  // Only require auth for specific routes (not entire site)\n  if (requiresAuth(req)) {\n    await auth.protect()\n  }\n})\n```\n\n```typescript\n// Strategy 2: Use anonymous access for read-only features\n// app/blog/[slug]/page.tsx\nimport { auth } from '@clerk/nextjs/server'\n\nexport default async function BlogPost({ params }: { params: { slug: string } }) {\n  const { userId } = await auth() // Check but don't require\n  const post = await db.post.findUnique({ where: { slug: params.slug } })\n\n  return (\n    <article>\n      <h1>{post?.title}</h1>\n      <div>{post?.content}</div>\n      {userId ? <CommentForm /> : <p>Sign in to comment</p>}\n    </article>\n  )\n}\n```\n\n### Step 3: Cache to Reduce API Calls\n\n```typescript\n// lib/user-cache.ts\nimport { cache } from 'react'\nimport { currentUser } from '@clerk/nextjs/server'\n\n// Deduplicate within single request (free)\nexport const getUser = cache(async () => {\n  return currentUser()\n})\n\n// Cross-request caching reduces Backend API calls\nimport { unstable_cache } from 'next/cache'\nimport { clerkClient } from '@clerk/nextjs/server'\n\nexport const getUserMetadata = unstable_cache(\n  async (userId: string) => {\n    const client = await clerkClient()\n    const user = await client.users.getUser(userId)\n    return user.publicMetadata\n  },\n  ['user-metadata'],\n  { revalidate: 600 } // 10-minute cache\n)\n```\n\n### Step 4: Monitor Usage\n\n```typescript\n// app/api/admin/clerk-usage/route.ts\nimport { auth, clerkClient } from '@clerk/nextjs/server'\n\nexport async function GET() {\n  const { has } = await auth()\n  if (!has({ role: 'org:admin' })) {\n    return Response.json({ error: 'Admin only' }, { status: 403 })\n  }\n\n  const client = await clerkClient()\n  const users = await client.users.getUserList({ limit: 1 })\n\n  return Response.json({\n    totalUsers: users.totalCount,\n    // Estimate MAU based on recent sign-ins\n    estimatedMAU: 'Check Clerk Dashboard > Billing for actual MAU',\n    dashboardUrl: 'https://dashboard.clerk.com/last-active?after=30d',\n  })\n}\n```\n\n### Step 5: Clean Up Inactive Users\n\n```typescript\n// scripts/cleanup-inactive-users.ts\nimport { createClerkClient } from '@clerk/backend'\n\nconst clerk = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY! })\n\nasync function findInactiveUsers(daysInactive = 90) {\n  const cutoff = Date.now() - daysInactive * 24 * 60 * 60 * 1000\n  const allUsers = await clerk.users.getUserList({ limit: 500 })\n\n  const inactive = allUsers.data.filter(\n    (user) => (user.lastSignInAt || 0) < cutoff\n  )\n\n  console.log(`Found ${inactive.length} users inactive for ${daysInactive}+ days`)\n  console.log('Consider: notification campaign, data export, or account cleanup')\n\n  return inactive\n}\n\nfindInactiveUsers()\n```\n\n## Output\n\n- Pricing model understood with MAU thresholds\n- Route-level auth to minimize unnecessary MAU counts\n- Request-level and cross-request caching reducing API calls\n- Usage monitoring endpoint for admins\n- Inactive user identification script\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Unexpected bill increase | MAU spike from bot traffic | Add bot detection, restrict auth to needed routes |\n| Feature limitations | Free tier limits (no SSO, etc.) | Upgrade to Pro ($25/mo) |\n| High API call volume | No caching | Add React `cache()` + `unstable_cache()` |\n| MAU count mismatch | Counting test users | Use separate dev instance (free, unlimited) |\n\n## Examples\n\n### Cost Estimation Script\n\n```typescript\nfunction estimateMonthlyCost(mau: number): string {\n  if (mau <= 10_000) return 'Free tier ($0/mo)'\n  const overage = mau - 10_000\n  const cost = 25 + overage * 0.02\n  return `Pro tier: $${cost.toFixed(2)}/mo (${overage.toLocaleString()} extra MAU at $0.02 each)`\n}\n\nconsole.log(estimateMonthlyCost(15_000))  // \"Pro tier: $125.00/mo (5,000 extra MAU at $0.02 each)\"\nconsole.log(estimateMonthlyCost(50_000))  // \"Pro tier: $825.00/mo (40,000 extra MAU at $0.02 each)\"\n```\n\n## Resources\n\n- [Clerk Pricing](https://clerk.com/pricing)\n- [Clerk Usage Dashboard](https://dashboard.clerk.com)\n- [Clerk Fair Use Policy](https://clerk.com/legal/fair-use-policy)\n\n## Next Steps\n\nProceed to `clerk-reference-architecture` for architecture patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clerk-cost-tuning",
-    "description": "Optimize Clerk costs and understand pricing.",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

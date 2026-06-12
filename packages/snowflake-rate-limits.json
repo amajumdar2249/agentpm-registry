@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033298",
   "name": "snowflake-rate-limits",
   "slug": "snowflake-rate-limits",
   "description": "Handle Snowflake concurrency limits, warehouse queuing, and query throttling.",
   "content": "# Snowflake Rate Limits & Concurrency\n\n## Overview\n\nSnowflake doesn't use traditional API rate limits. Instead, concurrency is governed by warehouse size, multi-cluster configuration, and per-session/account limits.\n\n## Key Limits\n\n| Resource | Limit | Notes |\n|----------|-------|-------|\n| Concurrent queries per warehouse | 8 (XS) to 64+ (4XL) | Depends on warehouse size |\n| Queued queries per warehouse | Unlimited (queued, not rejected) | But users experience latency |\n| SQL API requests | 10 concurrent per user | Via REST `/api/v2/statements` |\n| Snowpipe file notifications | 10,000/sec per pipe | Per-pipe limit |\n| Login rate | Throttled per account | Avoid rapid connect/disconnect |\n| COPY INTO files per command | 1,000 files recommended | Performance degrades beyond |\n\n## Instructions\n\n### Step 1: Detect Queuing Issues\n\n```sql\n-- Check warehouse load \u2014 avg_queued_load > 0 means queries are waiting\nSELECT warehouse_name, start_time,\n       avg_running, avg_queued_load, avg_blocked\nFROM TABLE(INFORMATION_SCHEMA.WAREHOUSE_LOAD_HISTORY(\n  DATE_RANGE_START => DATEADD(hours, -4, CURRENT_TIMESTAMP())\n))\nWHERE avg_queued_load > 0\nORDER BY start_time DESC;\n\n-- Find queries that waited in queue\nSELECT query_id, query_text, queued_overload_time / 1000 AS queue_seconds,\n       total_elapsed_time / 1000 AS total_seconds, warehouse_name\nFROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY\nWHERE queued_overload_time > 0\n  AND start_time >= DATEADD(hours, -24, CURRENT_TIMESTAMP())\nORDER BY queued_overload_time DESC\nLIMIT 20;\n```\n\n### Step 2: Right-Size Your Warehouse\n\n```sql\n-- Size recommendations based on workload type\n-- XSMALL: Simple queries, dev/test, low concurrency\n-- SMALL/MEDIUM: Standard analytics, dashboards\n-- LARGE/XLARGE: Complex joins, large scans\n-- 2XL+: Heavy ELT, ML training\n\n-- Create right-sized warehouses per workload\nCREATE WAREHOUSE IF NOT EXISTS ETL_WH\n  WAREHOUSE_SIZE = 'LARGE'\n  AUTO_SUSPEND = 120\n  AUTO_RESUME = TRUE\n  INITIALLY_SUSPENDED = TRUE;\n\nCREATE WAREHOUSE IF NOT EXISTS ANALYTICS_WH\n  WAREHOUSE_SIZE = 'MEDIUM'\n  AUTO_SUSPEND = 300\n  AUTO_RESUME = TRUE\n  INITIALLY_SUSPENDED = TRUE;\n\nCREATE WAREHOUSE IF NOT EXISTS DASHBOARD_WH\n  WAREHOUSE_SIZE = 'SMALL'\n  AUTO_SUSPEND = 60\n  AUTO_RESUME = TRUE\n  INITIALLY_SUSPENDED = TRUE;\n```\n\n### Step 3: Multi-Cluster Warehouse for High Concurrency\n\n```sql\n-- Auto-scale from 1 to 5 clusters based on demand\nCREATE OR REPLACE WAREHOUSE HIGH_CONCURRENCY_WH\n  WAREHOUSE_SIZE = 'MEDIUM'\n  MIN_CLUSTER_COUNT = 1\n  MAX_CLUSTER_COUNT = 5\n  SCALING_POLICY = 'STANDARD'     -- Start new cluster when queries queue\n  AUTO_SUSPEND = 120\n  AUTO_RESUME = TRUE;\n\n-- Economy scaling: minimize clusters, tolerate some queuing\nALTER WAREHOUSE HIGH_CONCURRENCY_WH SET\n  SCALING_POLICY = 'ECONOMY';    -- Only scale when 6+ min queue\n```\n\n### Step 4: Application-Level Concurrency Control\n\n```typescript\nimport PQueue from 'p-queue';\n\n// Limit concurrent Snowflake queries from your application\nconst snowflakeQueue = new PQueue({\n  concurrency: 5,           // Max 5 concurrent queries\n  intervalCap: 20,           // Max 20 queries per interval\n  interval: 60000,           // Per minute\n  timeout: 300000,           // 5-minute timeout per query\n});\n\nasync function rateLimitedQuery<T>(\n  conn: snowflake.Connection,\n  sqlText: string,\n  binds?: any[]\n): Promise<T[]> {\n  return snowflakeQueue.add(async () => {\n    const result = await query<T>(conn, sqlText, binds);\n    return result.rows;\n  });\n}\n\n// Queue status monitoring\nsetInterval(() => {\n  console.log({\n    pending: snowflakeQueue.pending,\n    size: snowflakeQueue.size,\n  });\n}, 30000);\n```\n\n### Step 5: SQL API Rate Limiting\n\n```typescript\n// When using Snowflake SQL REST API (/api/v2/statements)\n// Limit: 10 concurrent requests per user\n\nasync function sqlApiQuery(\n  accountUrl: string,\n  token: string,\n  sqlText: string\n): Promise<any> {\n  const response = await fetch(\n    `https://${accountUrl}/api/v2/statements`,\n    {\n      method: 'POST',\n      headers: {\n        'Authorization': `Bearer ${token}`,\n        'Content-Type': 'application/json',\n        'X-Snowflake-Authorization-Token-Type': 'KEYPAIR_JWT',\n      },\n      body: JSON.stringify({\n        statement: sqlText,\n        timeout: 60,\n        database: 'MY_DB',\n        schema: 'PUBLIC',\n        warehouse: 'COMPUTE_WH',\n        role: 'MY_ROLE',\n      }),\n    }\n  );\n\n  if (response.status === 429) {\n    // SQL API throttled \u2014 back off and retry\n    const retryAfter = parseInt(response.headers.get('Retry-After') || '10');\n    await new Promise((r) => setTimeout(r, retryAfter * 1000));\n    return sqlApiQuery(accountUrl, token, sqlText);\n  }\n\n  return response.json();\n}\n```\n\n## Error Handling\n\n| Symptom | Cause | Solution |\n|---------|-------|----------|\n| Queries queuing (high latency) | Warehouse undersized | Scale up or enable multi-cluster |\n| 429 from SQL API | >10 concurrent API requests | Reduce concurrency, use driver instead |\n| `000630: Statement timeout` | Query too slow for timeout | Optimize query or increase timeout |\n| Login throttled | Too many connect/disconnect | Use connection pooling |\n| Snowpipe backlog | High file volume | Increase pipe throughput, split files |\n\n## Resources\n\n- [Warehouse Considerations](https://docs.snowflake.com/en/user-guide/warehouses-considerations)\n- [Multi-Cluster Warehouses](https://docs.snowflake.com/en/user-guide/warehouses-multicluster)\n- [SQL API Reference](https://docs.snowflake.com/en/developer-guide/sql-api/reference)\n\n## Next Steps\n\nFor security configuration, see `snowflake-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "snowflake-rate-limits",
-    "description": "Handle Snowflake concurrency limits, warehouse queuing, and query throttling.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

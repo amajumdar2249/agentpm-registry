@@ -1,14 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000016353",
   "name": "opening-prs",
   "slug": "opening-prs",
   "description": "Open a GitHub PR via API as a flowing graph \u2014 branch + push + create_pr + mergeable poll, with structural protection against pushing to main/master/etc. Use when a Claude Code or Claude.ai container needs to land changes on GitHub via the API (no git CLI required) and the prose \"create branch, push, open PR, wait for mergeable\" workflow keeps drifting under context pressure.",
   "content": "\n# Opening PRs\n\nA `flowing` graph that turns the imperative \"create branch, push files,\nopen a PR, poll mergeable_state\" workflow into a structural DAG. The\n\"NEVER push directly to main\" rule is encoded as a `validate=` gate that\nphysically can't be skipped.\n\n```python\nfrom opening_prs import open_pr\n\nresult = open_pr(\n    repo=\"owner/repo\",\n    branch_name=\"feat/cool-thing\",\n    title=\"Add cool thing\",\n    body=\"## Summary\\n\\n...\",\n    files=[\n        (\"src/cool.py\", \"<file content>\"),\n        (\"docs/cool.md\", \"<file content>\"),\n    ],\n    base=\"main\",  # default; protected names are also rejected\n)\n\nprint(result[\"pr_url\"])             # https://github.com/.../pull/N\nprint(result[\"mergeable_state\"])    # clean | dirty | unstable | behind | blocked\n```\n\n## What this fixes\n\nThe `gh pr create` workflow (or hand-rolled API calls) has five steps in\nprose form:\n\n1. Determine the branch name\n2. Get the base branch's HEAD SHA\n3. Create the branch\n4. Push files to the branch\n5. Create the PR\n6. Poll `mergeable_state` until GitHub finishes computing it\n\nEach step has known failure modes:\n\n- **Step 1**: Accidentally pushing to `main` \u2014 the diagnosed pattern that\n  motivated github-procedures \u00a76 in the first place.\n- **Step 6**: GitHub returns `mergeable_state: null` immediately after\n  creation. Need to poll. \"Wait a few seconds and check\" is prose, not a\n  procedure \u2014 so it gets skipped under context pressure.\n\nThis skill encodes both as flowing primitives:\n\n```\ndetermine_branch \u2500\u2500\u25b6 guard \u2500\u2500\u25b6 get_base_head \u2500\u2500\u25b6 create_branch\n                      \u2502                              \u2502\n                      \u2502                              \u25bc\n                      \u2502                        push_files\n                      \u2502                              \u2502\n                      \u2502                              \u25bc\n                      \u2502                         create_pr\n                      \u2502                          /        \\\n                      \u2502                         \u25bc          \u25bc\n                      \u2502                  wait_mergeable  present_pr [terminal]\n                      \u2502\n                      \u2514\u2500 validate=must_not_be_base_branch\n```\n\n- **`validate=must_not_be_base_branch`** rejects `branch_name in\n  {\"main\", \"master\", \"trunk\", \"production\", \"prod\"}` \u2014 case-insensitive\n  \u2014 and the configured `base` itself. The body of `create_branch` never\n  fires for a protected name. No GitHub API call happens for an\n  invalid branch name.\n\n- **`retry_until=lambda r: r[\"mergeable_state\"] in SETTLED_STATES`**\n  consumes the retry budget while GitHub computes the merge result.\n  `unknown` and `null` keep polling; settled states (`clean`, `dirty`,\n  `unstable`, `behind`, `blocked`) stop. Exhaustion is soft: the PR is\n  still presented with the last observed state.\n\n## Auth\n\nRequires `GH_TOKEN` (or `GITHUB_TOKEN`) in the environment. Classic PAT\nor fine-grained PAT with `repo` scope.\n\n```python\nimport os\nos.environ[\"GH_TOKEN\"] = \"ghp_...\"   # or load from a .env file\n```\n\nThe skill sends `User-Agent: opening-prs` on every API call. (GitHub\nreturns 401 \"Bad credentials\" without a UA, regardless of token\nvalidity. Common trap.)\n\n## Result shape\n\n```python\n{\n    \"pr_url\": \"https://github.com/owner/repo/pull/N\",\n    \"pr_number\": 42,\n    \"pr_state\": \"open\",\n    \"branch\": \"feat/cool-thing\",\n    \"base\": \"main\",\n    \"head_sha\": \"abc123...\",\n    \"mergeable_state\": \"clean\",\n    \"files_pushed\": [\"src/cool.py\", \"docs/cool.md\"],\n    \"detached_failures\": [],\n}\n```\n\nRaises `RuntimeError` only if the main DAG fails (validate, branch\ncreation, file push, or PR creation). Mergeable polling exhaustion is a\nsoft failure \u2014 the PR exists, the field just isn't computed yet.\n\n## Tuning the mergeable poll\n\n```python\nopen_pr(\n    ...,\n    mergeable_poll_retries=8,         # default 8\n    mergeable_poll_base_ms=2000,      # default 2s\n    mergeable_poll_max_ms=8000,       # default 8s (cap on exponential backoff)\n)\n```\n\n## When NOT to use\n\n- Pushing many large files (the GitHub Contents API is one-file-per-PUT\n  with base64 encoding \u2014 slow above ~10 files). Use `git push` if you\n  have the CLI.\n- Needing to amend commits or rewrite history. This skill creates one\n  commit per file via the contents API.\n- Anything involving force-push, branch deletion, or PR review-state\n  manipulation. Out of scope; use a different tool.\n\n## See also\n\n- `flowing` \u2014 the DAG runner this skill is built on\n- `closing-issues` \u2014 the symmetric \"close + synthesize\" flow\n- The `accessing-github-repos` skill for byte-layer GitHub access patterns\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "opening-prs",
-    "description": "Open a GitHub PR via API as a flowing graph \u2014 branch + push + create_pr + mergeable poll, with structural protection against pushing to main/master/etc. Use when a Claude Code or Claude.ai container needs to land changes on GitHub via the API (no git CLI required) and the prose \"create branch, push, open PR, wait for mergeable\" workflow keeps drifting under context pressure.",
-    "metadata": "",
-    "version": "0.1.0",
-    "requires": "flowing"
+  "author": "agentpm",
+  "version": "0.1.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

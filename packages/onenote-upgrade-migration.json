@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032767",
   "name": "onenote-upgrade-migration",
   "slug": "onenote-upgrade-migration",
   "description": "Migrate OneNote integrations across Graph SDK versions, auth deprecations,",
   "content": "# OneNote Upgrade & Migration\n\n## Overview\n\nMicrosoft shipped three breaking changes to OneNote integrations in under two years: webhook decommissioning (June 2023), search endpoint deprecation (April 2024), and app-only auth deprecation (March 2025). The Graph SDK itself had breaking changes between v5 and v6. This skill provides exact migration diffs, verification steps, and rollback strategies for each breaking change.\n\n## Prerequisites\n\n- Existing OneNote integration using Graph API\n- Node.js 18+ (TypeScript SDK) or Python 3.10+ (Python SDK)\n- Git for branch-based migration with rollback capability\n- Azure portal access for app registration changes (auth migration)\n\n## Instructions\n\n### Breaking Changes Timeline\n\n| Date | Change | Impact |\n|------|--------|--------|\n| June 16, 2023 | Webhooks decommissioned | Subscription notifications stop |\n| April 2024 | Search endpoint deprecated | `/pages?search=` returns 404 |\n| March 31, 2025 | App-only auth deprecated | `ClientSecretCredential` returns 403 |\n\n### Migration 1: App-Only to Delegated Auth\n\n**Before (broken after March 2025):**\n\n```typescript\n// OLD \u2014 ClientSecretCredential (DEPRECATED for OneNote)\nimport { ClientSecretCredential } from \"@azure/identity\";\nconst credential = new ClientSecretCredential(TENANT_ID, CLIENT_ID, CLIENT_SECRET);\nconst authProvider = new TokenCredentialAuthenticationProvider(credential, {\n  scopes: [\"https://graph.microsoft.com/.default\"],\n});\n```\n\n**After:**\n\n```typescript\n// NEW \u2014 DeviceCodeCredential (required)\nimport { DeviceCodeCredential } from \"@azure/identity\";\nconst credential = new DeviceCodeCredential({\n  clientId: CLIENT_ID, tenantId: TENANT_ID,\n  userPromptCallback: (info) =>\n    console.log(`Open ${info.verificationUri} and enter code: ${info.userCode}`),\n});\nconst authProvider = new TokenCredentialAuthenticationProvider(credential, {\n  scopes: [\"Notes.Read\", \"Notes.ReadWrite\"],  // Explicit, not .default\n});\nconst client = Client.initWithMiddleware({ authProvider });\n```\n\n**Python equivalent:**\n\n```python\n# OLD: credential = ClientSecretCredential(tenant_id, client_id, client_secret)\n# NEW:\nfrom azure.identity import DeviceCodeCredential\ncredential = DeviceCodeCredential(client_id=CLIENT_ID, tenant_id=TENANT_ID)\n```\n\n**Required Azure portal changes:** Add \"Mobile and desktop applications\" platform with `http://localhost` redirect URI to your app registration.\n\n### Migration 2: Webhooks to Polling\n\n```typescript\n// OLD \u2014 Webhook subscription (DECOMMISSIONED June 2023)\n// await client.api(\"/subscriptions\").post({ resource: \"/me/onenote/pages\", ... });\n\n// NEW \u2014 Polling with delta link tracking\nasync function pollForChanges(client: any, deltaLink: string | null) {\n  const endpoint = deltaLink || \"/me/onenote/notebooks\";\n  const response = await client.api(endpoint)\n    .header(\"Prefer\", \"odata.track-changes\").get();\n\n  for (const item of response.value || []) {\n    await processChange(item);\n  }\n  return response[\"@odata.deltaLink\"] || deltaLink;\n}\n\n// Poll every 60s (stays under 600 req/60s per-user rate limit)\nlet deltaLink: string | null = null;\nsetInterval(async () => {\n  try { deltaLink = await pollForChanges(client, deltaLink); }\n  catch (err: any) {\n    if (err?.statusCode === 429) {\n      console.warn(`Rate limited. Retry after ${err.headers?.[\"retry-after\"] ?? 30}s`);\n    }\n  }\n}, 60_000);\n```\n\n### Migration 3: Search Endpoint to OData Filters\n\n```typescript\n// OLD \u2014 Search endpoint (DEPRECATED April 2024)\n// const results = await client.api(\"/me/onenote/pages\").query({ search: \"term\" }).get();\n\n// NEW \u2014 OData filter for title, client-side for content\nasync function searchPages(client: any, query: string) {\n  // Server-side title filter\n  const titleMatches = await client.api(\"/me/onenote/pages\")\n    .filter(`contains(title,'${query.replace(/'/g, \"''\")}')`)\n    .top(50).orderby(\"lastModifiedDateTime desc\").get();\n\n  // Client-side content search (Graph no longer supports full-text)\n  const contentMatches: any[] = [];\n  const pages = await client.api(\"/me/onenote/pages\").top(100)\n    .orderby(\"lastModifiedDateTime desc\").get();\n  for (const page of pages.value) {\n    const html = await client.api(`/me/onenote/pages/${page.id}/content`).get();\n    if (html.replace(/<[^>]+>/g, \"\").toLowerCase().includes(query.toLowerCase())) {\n      contentMatches.push(page);\n    }\n  }\n\n  // Deduplicate\n  const seen = new Set(titleMatches.value.map((p: any) => p.id));\n  return [...titleMatches.value, ...contentMatches.filter((m) => !seen.has(m.id))];\n}\n```\n\n### Migration 4: Graph SDK v5 to v6 (TypeScript)\n\n```typescript\n// SDK v5 \u2014 callback-based auth (REMOVED in v6)\nconst client = Client.init({\n  authProvider: (done) => done(null, accessToken),\n});\n\n// SDK v6 \u2014 middleware-based auth (REQUIRED)\nimport { TokenCredentialAuthenticationProvider } from\n  \"@microsoft/microsoft-graph-client/authProviders/azureTokenCredentials\";\nconst authProvider = new TokenCredentialAuthenticationProvider(credential, {\n  scopes: [\"Notes.Read\", \"Notes.ReadWrite\"],\n});\nconst client = Client.initWithMiddleware({ authProvider });\n```\n\n### Migration Checklists\n\n**Auth migration:** Remove `AZURE_CLIENT_SECRET` from env/secrets. Add redirect URI in Azure portal. Replace `.default` with explicit scopes. Verify `GET /me/onenote/notebooks` returns 200.\n\n**SDK upgrade:** Update `@microsoft/microsoft-graph-client` to v6+. Replace `Client.init()` with `Client.initWithMiddleware()`. Remove callback auth providers. Run full test suite.\n\n**Search migration:** Replace `/pages?search=` with OData `$filter`. Add client-side content search fallback. Performance test: client-side search under 2s for 100 pages.\n\n### Feature Detection at Runtime\n\n```typescript\nexport function requiresDelegatedAuth(): boolean { return true; } // Since March 2025\nexport function isSearchEndpointAvailable(): boolean { return false; } // Since April 2024\nexport function isWebhookAvailable(): boolean { return false; } // Since June 2023\n```\n\n### Rollback Strategy\n\nUse a feature flag for gradual auth migration:\n\n```typescript\nconst useDelegated = process.env.ONENOTE_AUTH_MODE !== \"legacy\";\nconst credential = useDelegated\n  ? new DeviceCodeCredential({ clientId, tenantId })\n  : new ClientSecretCredential(tenantId, clientId, clientSecret); // Legacy fallback\n```\n\n## Output\n\n- Auth migration: `ClientSecretCredential` to `DeviceCodeCredential` with code diff\n- Webhook migration: subscription API to polling with delta queries\n- Search migration: deprecated endpoint to OData filters + client-side search\n- SDK v5 to v6: `Client.init()` to `Client.initWithMiddleware()`\n- Migration checklists and feature detection module\n- Rollback strategy with feature flag pattern\n\n## Error Handling\n\n| Migration Error | Cause | Fix |\n|----------------|-------|-----|\n| `403 Forbidden` after auth migration | Missing redirect URI | Add `http://localhost` to \"Mobile and desktop\" platform in Azure portal |\n| `InvalidScope` on token request | Using `.default` with delegated auth | Use explicit scopes: `Notes.Read`, `Notes.ReadWrite` |\n| `TypeError: Client.init is not a function` | SDK v6 removed `Client.init` | Use `Client.initWithMiddleware` |\n| `404` on search endpoint | Removed April 2024 | Use OData `$filter` + client-side content search |\n| `400` on subscription create | Webhooks decommissioned June 2023 | Switch to polling with delta queries |\n\n## Examples\n\n```bash\n# Check which migrations your codebase needs\ngrep -r \"ClientSecretCredential\" src/ --include=\"*.ts\" --include=\"*.py\"\ngrep -r \"search=\" src/ --include=\"*.ts\" --include=\"*.py\"\ngrep -r \"/subscriptions\" src/ --include=\"*.ts\" --include=\"*.py\"\ngrep -r \"Client.init(\" src/ --include=\"*.ts\"\n```\n\n```typescript\n// Smoke test after auth migration\nconst client = getGraphClient();\nconst nb = await client.api(\"/me/onenote/notebooks\").top(1).get();\nconsole.log(\"Auth migration OK:\", nb.value.length, \"notebooks\");\n```\n\n## Resources\n\n- [OneNote API Overview](https://learn.microsoft.com/en-us/graph/api/resources/onenote-api-overview)\n- [Graph API Known Issues](https://learn.microsoft.com/en-us/graph/known-issues)\n- [Azure App Registration](https://portal.azure.com/#blade/Microsoft_AAD_RegisteredApps)\n- [MSAL Python](https://learn.microsoft.com/en-us/entra/msal/python/)\n- [OneNote Error Codes](https://learn.microsoft.com/en-us/graph/onenote-error-codes)\n\n## Next Steps\n\n- Set up CI for migrated code with `onenote-ci-integration`\n- Debug migration issues with `onenote-debug-bundle`\n- Review security after migration with `onenote-security-basics`\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "onenote-upgrade-migration",
-    "description": "Migrate OneNote integrations across Graph SDK versions, auth deprecations,",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(pip:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

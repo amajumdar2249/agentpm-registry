@@ -1,16 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000042809",
   "name": "exa-search",
   "slug": "exa-search-8",
   "description": ">-",
   "content": "\n# Searching with Exa (Search API)\n\nThis skill is a **recipe for consistent web research** using Exa\u2019s Search API: you choose the right search mode, apply the right filters, request only the content you need (highlights/text/summary), and return clean citations.\n\n## Quick start (default path)\n\n1) Ensure an API key is available as an environment variable:\n\n- `EXA_API_KEY` (preferred)\n- or pass `--api-key` to the scripts.\n\n2) Run a search (JSON response to stdout):\n\n```bash\npython {baseDir}/scripts/exa_search.py   --query \"latest research in LLMs\"   --type auto   --category \"research paper\"   --num-results 5   --highlights   --highlights-per-url 3   --num-sentences 2\n```\n\n## Operating principles (always follow)\n\n- **Always return URLs**. Prefer also returning title + a 1\u20132 sentence \u201cwhy this source\u201d note.\n- **Prefer `highlights` first** for agentic workflows. Escalate to full `text` only when necessary.\n- **Use filters aggressively**: domain allowlists, date windows, and `category` improve relevance and reduce noise.\n- **Freshness is explicit**: if the user asks for \u201clatest\u201d, \u201ctoday\u201d, \u201ccurrent\u201d, etc., set a freshness policy (see below).\n- **Don\u2019t overfetch**: cap content length with `maxCharacters` when requesting `text`.\n- **If the user needs hard evidence** (numbers, quotes), fetch full text for the top 1\u20133 pages and verify.\n\n## Workflow\n\n### Step 1 \u2014 Translate the user task into a search plan\n\nDecide:\n\n1. **Search type**\n   - `auto` (default): best general quality.\n   - `instant`: lowest latency, for autocomplete / live suggestions.\n   - `deep`: more comprehensive; can use `additionalQueries`.\n   - `fast` / `neural`: streamlined alternatives.\n\n2. **Category** (when appropriate)\n   - `news`, `research paper`, `company`, `people`, `tweet`, `personal site`, `financial report`, etc.\n\n3. **Freshness**\n   - If \u201creal-time / latest\u201d: consider live crawling via `maxAgeHours` (see *Freshness*).\n   - If \u201chistorical/static\u201d: use cache only (e.g., `maxAgeHours: -1`).\n\n4. **Content mode**\n   - `highlights`: token-efficient evidence snippets.\n   - `text`: deep reading (cap via `maxCharacters`).\n   - `summary`: quick structured overviews (optionally with a guiding `query`).\n\n### Step 2 \u2014 Build the request payload\n\nStart from this template and fill only what you need:\n\n```json\n{\n  \"query\": \"...\",\n  \"type\": \"auto\",\n  \"category\": \"news\",\n  \"numResults\": 10,\n  \"includeDomains\": [\"...\"],\n  \"excludeDomains\": [\"...\"],\n  \"startPublishedDate\": \"2025-01-01T00:00:00.000Z\",\n  \"endPublishedDate\": \"2025-12-31T23:59:59.999Z\",\n  \"includeText\": [\"must contain phrase\"],\n  \"excludeText\": [\"must not contain phrase\"],\n  \"contents\": {\n    \"highlights\": true,\n    \"text\": { \"maxCharacters\": 8000, \"includeHtmlTags\": false },\n    \"summary\": { \"query\": \"...\" },\n    \"subpages\": 0,\n    \"extras\": { \"links\": 0, \"imageLinks\": 0 },\n    \"maxAgeHours\": 24\n  }\n}\n```\n\nNotes:\n- `contents` is optional. If omitted, you\u2019ll only get metadata (`title`, `url`, etc.).\n- `maxAgeHours` controls when Exa should live-crawl vs use cached content (see below).\n- `context` is deprecated; use `highlights` or `text` instead.\n\n### Step 3 \u2014 Execute the request\n\n**Option A (recommended):** use the bundled script so requests are consistent and validated.\n\n```bash\npython {baseDir}/scripts/exa_search.py --query \"...\" --highlights --num-results 10\n```\n\n**Option B:** call the HTTP endpoint directly.\n\n```bash\ncurl --request POST   --url https://api.exa.ai/search   --header \"content-type: application/json\"   --header \"x-api-key: $EXA_API_KEY\"   --data '{\"query\":\"...\",\"type\":\"auto\",\"numResults\":5}'\n```\n\n### Step 4 \u2014 Post-process results into an answer with citations\n\n1. **De-duplicate** near-identical domains/pages when the user wants breadth.\n2. **Select the top sources** (usually 3\u20137) that jointly cover the claim space.\n3. For each selected result, extract:\n   - title, url\n   - key highlight(s) or a short quote from `text`\n   - published date (if available)\n4. **Write the response** with inline citations (URLs) and clear uncertainty where needed.\n5. If the user wants a deliverable (report, memo), preserve a \u201cSources\u201d section listing all URLs.\n\n## Freshness policy (use this when \u201clatest/current/today\u201d appears)\n\nUse `contents.maxAgeHours` (or the `maxAgeHours` top-level alias if the API accepts it):\n\n- `24`: daily-fresh content (use cache if <24h else livecrawl)\n- `1`: near-real-time (cache if <1h else livecrawl)\n- `0`: always livecrawl (slowest, most current)\n- `-1`: never livecrawl (fastest; cache only)\n- omit: default behaviour (livecrawl only when cache missing)\n\n## Common patterns\n\n### Pattern A \u2014 \u201cGive me sources for X\u201d (fast + token efficient)\n- `type: auto`, `numResults: 5\u201310`\n- `contents.highlights: true`\n- Optional: `category` and `includeDomains`\n\n### Pattern B \u2014 \u201cDo deep research on X\u201d (read a few pages thoroughly)\n- Start with highlights on 10\u201320 results.\n- Then fetch full `text` for the top 3\u20135 URLs with a `maxCharacters` cap.\n- Summarise with citations.\n\n### Pattern C \u2014 \u201cLatest news about X\u201d\n- `category: news`\n- Apply a date window (`startPublishedDate`) if the question is time-bound.\n- Use a freshness setting (often `maxAgeHours: 1\u201324`).\n\n### Pattern D \u2014 \u201cFind a company / person page\u201d\n- `category: company` or `people`\n- If using `people`, allowlist LinkedIn domains when needed.\n- IMPORTANT: some filters are unsupported for `company`/`people`; see troubleshooting.\n\n## Troubleshooting\n\n### 401 / 403 (auth)\n- Confirm `x-api-key` header is present and valid.\n- Confirm you aren\u2019t accidentally using a placeholder like `YOUR-EXA-API-KEY`.\n\n### 400 (invalid parameters)\n- `company` and `people` categories support a limited set of filters; unsupported parameters can trigger 400 errors.\n- If in doubt, remove date and text filters first, then re-add one-by-one.\n\n### Too much content / token blow-ups\n- Prefer `highlights` over `text`.\n- Cap `text.maxCharacters`.\n- Reduce `numResults`.\n\n## Bundled references\n\n- API + parameter cheat sheet: `references/exa-search-api.md`\n- Best-practice recipes: `references/exa-search-best-practices.md`\n- Quickstart snippets (SDK + curl): `references/exa-search-quickstart.md`\n",
+  "author": "generated-by-chatgpt",
   "version": "1.0.0",
-  "metadata": {
-    "name": "exa-search",
-    "description": ">-",
-    "metadata": "",
-    "author": "generated-by-chatgpt",
-    "version": "1.0.0",
-    "upstream_docs": "",
-    "- \"https": "//exa.ai/docs/reference/search-best-practices"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

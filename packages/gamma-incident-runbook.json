@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032098",
   "name": "gamma-incident-runbook",
   "slug": "gamma-incident-runbook",
   "description": "Manage incident response for Gamma integration issues.",
   "content": "# Gamma Incident Runbook\n\n## Overview\n\nSystematic procedures for responding to and resolving Gamma integration incidents.\n\n## Prerequisites\n\n- Access to monitoring dashboards\n- Access to application logs\n- On-call responsibilities defined\n- Communication channels established\n\n## Incident Severity Levels\n\n| Level | Description | Response Time | Escalation |\n|-------|-------------|---------------|------------|\n| P1 | Complete outage, no presentations | < 15 min | Immediate |\n| P2 | Degraded, slow or partial failures | < 30 min | 1 hour |\n| P3 | Minor issues, workaround available | < 2 hours | 4 hours |\n| P4 | Cosmetic or non-urgent | < 24 hours | None |\n\n## Quick Diagnostics\n\n### Step 1: Check Gamma Status\n\n```bash\nset -euo pipefail\n# Check Gamma status page\ncurl -s https://status.gamma.app/api/v2/status.json | jq '.status'\n\n# Check our integration health\ncurl -s https://your-app.com/health/gamma | jq '.'\n\n# Quick connectivity test\ncurl -w \"\\nTime: %{time_total}s\\n\" \\\n  -H \"Authorization: Bearer $GAMMA_API_KEY\" \\\n  https://api.gamma.app/v1/ping\n```\n\n### Step 2: Review Key Metrics\n\n```bash\nset -euo pipefail\n# Check error rate (Prometheus)\ncurl -s 'http://prometheus:9090/api/v1/query?query=rate(gamma_requests_total{status=~\"5..\"}[5m])' | jq '.data.result'  # 9090: Prometheus port\n\n# Check latency P95\ncurl -s 'http://prometheus:9090/api/v1/query?query=histogram_quantile(0.95,rate(gamma_request_duration_seconds_bucket[5m]))' | jq '.data.result'  # Prometheus port\n\n# Check rate limit\ncurl -s 'http://prometheus:9090/api/v1/query?query=gamma_rate_limit_remaining' | jq '.data.result'  # Prometheus port\n```\n\n### Step 3: Review Recent Logs\n\n```bash\n# Last 100 error logs\ngrep -i \"gamma.*error\" /var/log/app/gamma-*.log | tail -100\n\n# Rate limit hits\ngrep \"429\" /var/log/app/gamma-*.log | wc -l  # HTTP 429 Too Many Requests\n\n# Timeout errors\ngrep -i \"timeout\" /var/log/app/gamma-*.log | tail -50\n```\n\n## Incident Response Procedures\n\n### Scenario 1: API Returning 5xx Errors\n\n**Symptoms:**\n\n- High error rate in monitoring\n- Users reporting failed presentations\n- 500/502/503 responses from Gamma\n\n**Actions:**\n\n1. Verify Gamma status: https://status.gamma.app\n2. If Gamma outage confirmed:\n   - Enable degraded mode / show maintenance message\n   - Monitor status page for updates\n   - No action needed on our side\n\n3. If Gamma is operational:\n\n   ```bash\n   # Check our request patterns\n   grep \"5[0-9][0-9]\" /var/log/app/gamma-*.log | \\\n     awk '{print $1}' | sort | uniq -c | sort -rn\n\n   # Look for malformed requests\n   grep -B5 \"500\" /var/log/app/gamma-*.log | grep \"request\"\n   ```\n\n4. Rollback recent deployments if issue correlates\n\n### Scenario 2: Rate Limit Exceeded (429)\n\n**Symptoms:**\n\n- 429 responses in logs\n- Rate limit metrics at zero\n- Slow or queued requests\n\n**Actions:**\n\n1. Immediate mitigation:\n\n   ```bash\n   # Enable request throttling\n   curl -X POST http://localhost:8080/admin/throttle \\\n     -d '{\"gamma\": {\"rps\": 10}}'\n   ```\n\n2. Check for runaway processes:\n\n   ```bash\n   # Find high-volume clients\n   grep \"gamma\" /var/log/app/*.log | \\\n     awk '{print $5}' | sort | uniq -c | sort -rn | head -20\n   ```\n\n3. Enable circuit breaker:\n\n   ```bash\n   curl -X POST http://localhost:8080/admin/circuit-breaker \\\n     -d '{\"service\": \"gamma\", \"state\": \"open\"}'\n   ```\n\n4. Long-term: Review rate limit tier with Gamma\n\n### Scenario 3: High Latency\n\n**Symptoms:**\n\n- Slow presentation creation\n- Timeouts in logs\n- P95 latency > 10s\n\n**Actions:**\n\n1. Check Gamma latency vs our latency:\n\n   ```bash\n   # Direct Gamma latency\n   for i in {1..5}; do\n     curl -w \"%{time_total}\\n\" -o /dev/null -s \\\n       -H \"Authorization: Bearer $GAMMA_API_KEY\" \\\n       https://api.gamma.app/v1/ping\n   done\n   ```\n\n2. If Gamma is slow:\n   - Increase timeouts temporarily\n   - Enable async mode for non-critical operations\n   - Queue heavy operations\n\n3. If our infrastructure is slow:\n   - Check CPU/memory on app servers\n   - Review connection pool settings\n   - Check network connectivity\n\n### Scenario 4: Authentication Failures (401/403)\n\n**Symptoms:**\n\n- All requests failing with 401\n- \"Invalid API key\" errors\n- Sudden authentication failures\n\n**Actions:**\n\n1. Verify API key:\n\n   ```bash\n   # Test key directly\n   curl -H \"Authorization: Bearer $GAMMA_API_KEY\" \\\n     https://api.gamma.app/v1/ping\n\n   # Check key format\n   echo $GAMMA_API_KEY | head -c 20\n   ```\n\n2. If key is invalid:\n   - Check if key was rotated\n   - Deploy backup key: `GAMMA_API_KEY_SECONDARY`\n   - Generate new key in Gamma dashboard\n\n3. Notify team and update secrets\n\n## Communication Templates\n\n### Internal Notification\n\n```\nINCIDENT: Gamma Integration Issue\n\nSeverity: P[X]\nStatus: Investigating / Identified / Mitigating / Resolved\nImpact: [Description of user impact]\nStart Time: [ISO timestamp]\n\nSummary: [Brief description]\n\nCurrent Actions:\n- [Action 1]\n- [Action 2]\n\nNext Update: [Time]\n```\n\n### User-Facing Message\n\n```\nWe're currently experiencing issues with presentation generation.\nOur team is actively working to resolve this.\n\nWorkaround: [If available]\nStatus updates: [Link to status page]\nETA: [If known]\n```\n\n## Post-Incident Checklist\n\n- [ ] Incident timeline documented\n- [ ] Root cause identified\n- [ ] User impact quantified\n- [ ] Fix verified in production\n- [ ] Monitoring gaps identified\n- [ ] Preventive measures documented\n- [ ] Post-mortem scheduled (for P1/P2)\n\n## Resources\n\n- [Gamma Status](https://status.gamma.app)\n- [Gamma Support](https://gamma.app/support)\n- Internal Runbook Wiki (fill in your org's URL)\n- On-Call Schedule (fill in your org's URL)\n\n## Next Steps\n\nProceed to `gamma-data-handling` for data management.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "gamma-incident-runbook",
-    "description": "Manage incident response for Gamma integration issues.",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

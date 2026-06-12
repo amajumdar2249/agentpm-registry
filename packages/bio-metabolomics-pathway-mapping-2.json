@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000029425",
   "name": "bio-metabolomics-pathway-mapping",
   "slug": "bio-metabolomics-pathway-mapping-2",
   "description": "Map metabolites to biological pathways using KEGG, Reactome, and MetaboAnalyst. Perform pathway enrichment and topology analysis. Use when interpreting metabolomics results in the context of biochemical pathways.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: ReactomePA 1.46+, clusterProfiler 4.10+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- R: `packageVersion('<pkg>')` then `?function_name` to verify parameters\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Metabolomics Pathway Mapping\n\n**\"Map my metabolites to pathways\"** \u2192 Perform pathway enrichment and topology analysis using KEGG, Reactome, or MetaboAnalyst to interpret metabolomics results in biochemical context.\n- R: `MetaboAnalystR::SetMetabolomeFilter()` \u2192 `PerformDetailMatch()` \u2192 pathway topology\n\n## KEGG Pathway Enrichment\n\n```r\nlibrary(MetaboAnalystR)\n\n# Initialize MetaboAnalyst\nmSet <- InitDataObjects('conc', 'pathora', FALSE)\n\n# Set organism\nmSet <- SetOrganism(mSet, 'hsa')  # Human\n\n# Load metabolite list (HMDB IDs or compound names)\nmetabolites <- c('HMDB0000001', 'HMDB0000005', 'HMDB0000010')  # Example HMDB IDs\n# Or use names: c('Glucose', 'Lactate', 'Pyruvate')\n\nmSet <- Setup.MapData(mSet, metabolites)\nmSet <- CrossReferencing(mSet, 'hmdb')  # Or 'name', 'kegg', 'pubchem'\n\n# Pathway analysis\nmSet <- SetKEGG.PathLib(mSet, 'hsa', 'current')\nmSet <- SetMetabolomeFilter(mSet, FALSE)\nmSet <- CalculateOraScore(mSet, 'rbc', 'hyperg')  # Over-representation\n\n# Get results\npathway_results <- mSet$analSet$ora.mat\nprint(pathway_results)\n```\n\n## Quantitative Enrichment Analysis (QEA)\n\n```r\n# For continuous data (fold changes or concentrations)\nmSet <- InitDataObjects('conc', 'pathqea', FALSE)\nmSet <- SetOrganism(mSet, 'hsa')\n\n# Load data with values\nmetabolite_data <- data.frame(\n    compound = c('Glucose', 'Lactate', 'Pyruvate'),\n    fc = c(1.5, 2.3, 0.7)  # Fold changes\n)\n\nmSet <- Setup.MapData(mSet, metabolite_data)\nmSet <- CrossReferencing(mSet, 'name')\n\n# QEA analysis\nmSet <- SetKEGG.PathLib(mSet, 'hsa', 'current')\nmSet <- CalculateQeaScore(mSet, 'rbc', 'gt')\n\n# Results\nqea_results <- mSet$analSet$qea.mat\n```\n\n## Topology-Based Analysis\n\n```r\n# Considers pathway structure (betweenness, degree)\nmSet <- InitDataObjects('conc', 'pathinteg', FALSE)\nmSet <- SetOrganism(mSet, 'hsa')\n\nmSet <- Setup.MapData(mSet, metabolites)\nmSet <- CrossReferencing(mSet, 'hmdb')\n\n# Topology analysis\nmSet <- SetKEGG.PathLib(mSet, 'hsa', 'current')\nmSet <- SetMetabolomeFilter(mSet, FALSE)\nmSet <- CalculateHyperScore(mSet)  # Combined ORA + topology\n\ntopo_results <- mSet$analSet$topo.mat\n```\n\n## Reactome Pathways\n\n```r\nlibrary(ReactomePA)\nlibrary(clusterProfiler)\n\n# Convert to Reactome IDs (if available)\nreactome_ids <- c('R-HSA-70171', 'R-HSA-1428517')  # Example\n\n# Enrichment\nenriched <- enrichPathway(gene = reactome_ids, organism = 'human', pvalueCutoff = 0.05)\nprint(enriched)\n```\n\n## KEGG Mapper (Direct API)\n\n```r\nlibrary(KEGGREST)\n\n# Get pathway information\npathway_info <- keggGet('hsa00010')  # Glycolysis\n\n# Map compounds to pathways\nkegg_ids <- c('C00031', 'C00186', 'C00022')  # Glucose, Lactate, Pyruvate\n\n# Find pathways containing these compounds\nfind_pathways <- function(kegg_id) {\n    pathways <- keggLink('pathway', kegg_id)\n    return(pathways)\n}\n\nall_pathways <- lapply(kegg_ids, find_pathways)\n```\n\n## Pathway Visualization\n\n```r\nlibrary(pathview)\n\n# Visualize KEGG pathway with metabolite data\nmetabolite_data <- c('C00031' = 1.5, 'C00186' = 2.3, 'C00022' = 0.7)\n\npathview(cpd.data = metabolite_data,\n         pathway.id = '00010',  # Glycolysis\n         species = 'hsa',\n         cpd.idtype = 'kegg',\n         out.suffix = 'glycolysis_mapped')\n\n# Output: hsa00010.glycolysis_mapped.png\n```\n\n## Network-Based Analysis\n\n**Goal:** Visualize metabolite-pathway relationships as a bipartite network for identifying pathway crosstalk and hub metabolites.\n\n**Approach:** Extract metabolite-pathway edges from enrichment results, build an igraph network, and annotate nodes by type for interactive visualization.\n\n```r\nlibrary(igraph)\n\n# Build metabolite-pathway network\nbuild_network <- function(pathway_results) {\n    edges <- data.frame()\n\n    for (i in 1:nrow(pathway_results)) {\n        pathway <- rownames(pathway_results)[i]\n        metabolites <- strsplit(pathway_results$Metabolites[i], '; ')[[1]]\n\n        for (met in metabolites) {\n            edges <- rbind(edges, data.frame(from = met, to = pathway))\n        }\n    }\n\n    g <- graph_from_data_frame(edges, directed = FALSE)\n\n    # Add attributes\n    V(g)$type <- ifelse(V(g)$name %in% edges$from, 'metabolite', 'pathway')\n\n    return(g)\n}\n\nnetwork <- build_network(pathway_results)\nplot(network, vertex.size = ifelse(V(network)$type == 'pathway', 15, 5))\n```\n\n## Metabolite Set Enrichment\n\n```r\n# MSEA using predefined metabolite sets\nmSet <- InitDataObjects('conc', 'msetora', FALSE)\n\n# Use SMPDB (Small Molecule Pathway Database)\nmSet <- SetMetaboliteFilter(mSet, FALSE)\nmSet <- SetCurrentMsetLib(mSet, 'smpdb_pathway', 2)\n\nmSet <- Setup.MapData(mSet, metabolites)\nmSet <- CrossReferencing(mSet, 'hmdb')\n\nmSet <- CalculateHyperScore(mSet)\nmsea_results <- mSet$analSet$ora.mat\n```\n\n## Combine with Gene Expression\n\n```r\n# Integrated pathway analysis (metabolites + genes)\nlibrary(IMPaLA)\n\n# Prepare gene list\ngenes <- c('HK1', 'PFKM', 'ALDOA')  # Glycolysis enzymes\n\n# Prepare metabolite list\nmetabolites <- c('HMDB0000122', 'HMDB0000190')  # Glucose, Lactate\n\n# Joint pathway analysis\n# (Use MetaboAnalyst joint pathway analysis or custom integration)\n```\n\n## Export Results\n\n```r\n# Format for publication\nexport_pathways <- function(results, output_file) {\n    results_df <- as.data.frame(results)\n    results_df$pathway <- rownames(results)\n\n    # Select relevant columns\n    results_df <- results_df[, c('pathway', 'Total', 'Expected', 'Hits',\n                                   'Raw p', 'Holm adjust', 'FDR', 'Impact')]\n\n    # Sort by FDR\n    results_df <- results_df[order(results_df$FDR), ]\n\n    write.csv(results_df, output_file, row.names = FALSE)\n    return(results_df)\n}\n\nexport_pathways(pathway_results, 'pathway_enrichment.csv')\n```\n\n## Related Skills\n\n- metabolite-annotation - Identify metabolites first\n- statistical-analysis - Get significant metabolites\n- pathway-analysis/kegg-pathways - Similar enrichment concepts for genes\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-metabolomics-pathway-mapping",
-    "description": "Map metabolites to biological pathways using KEGG, Reactome, and MetaboAnalyst. Perform pathway enrichment and topology analysis. Use when interpreting metabolomics results in the context of biochemical pathways.",
-    "tool_type": "r",
-    "primary_tool": "MetaboAnalystR"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

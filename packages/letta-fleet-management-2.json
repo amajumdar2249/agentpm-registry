@@ -1,12 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000034892",
   "name": "letta-fleet-management",
   "slug": "letta-fleet-management-2",
   "description": "Manage Letta AI agent fleets declaratively with kubectl-style CLI. Use when creating, updating, or managing multiple Letta agents with shared configurations, memory blocks, tools, folders, canary deployments, multi-tenancy, and bulk operations.",
   "content": "\n# lettactl\n\nkubectl-style CLI for managing Letta AI agent fleets declaratively.\n\n## When to Use\n\n- Deploying multiple agents with shared configurations\n- Managing agent memory blocks, tools, and folders\n- Applying templates to existing agents\n- Running canary deployments before promoting to production\n- Multi-tenant agent management (B2B / B2B2C)\n- Bulk messaging across agent fleets\n- Importing/exporting agents between environments\n- Analyzing agent memory health (self-diagnosis)\n- Calibrating agents with first-message boot sequences\n- Programmatic fleet management via SDK\n\n## Core Workflow\n\n1. Define agents in `fleet.yaml`\n2. Apply with `lettactl apply -f fleet.yaml`\n3. Verify with `lettactl get agents` and `lettactl describe agent <name>`\n\n## Fleet YAML Structure\n\n```yaml\nshared_blocks:\n  - name: company-context\n    description: Shared company knowledge\n    limit: 5000\n    from_file: ./context/company.md\n\nshared_folders:\n  - name: brand_docs\n    files:\n      - \"docs/*.md\"\n\nmcp_servers:\n  - name: firecrawl\n    type: sse\n    server_url: \"https://sse.firecrawl.dev\"\n    auth_header: \"Authorization\"\n    auth_token: \"Bearer ${FIRECRAWL_API_KEY}\"\n\nagents:\n  - name: support-agent\n    description: Customer support assistant\n    tags:\n      - \"tenant:acme-corp\"\n      - \"role:support\"\n    system_prompt:\n      from_file: ./prompts/support.md\n    llm_config:\n      model: google_ai/gemini-2.5-pro\n      context_window: 128000\n    reasoning: true\n    first_message: \"Initialize and confirm readiness.\"\n    memory_blocks:\n      - name: persona\n        description: Agent personality\n        limit: 2000\n        value: \"You are a helpful support agent.\"\n        agent_owned: true\n    archives:\n      - name: knowledge_base\n        description: Long-term knowledge storage\n    shared_blocks:\n      - company-context\n    shared_folders:\n      - brand_docs\n    tools:\n      - send_email\n      - search_docs\n      - \"tools/*\"\n    mcp_tools:\n      - server: firecrawl\n        tools: [\"scrape\", \"crawl\"]\n```\n\nSee `reference/fleet-config.md` for full schema.\n\n## CLI Commands\n\n### Apply Configuration\n```bash\nlettactl apply -f fleet.yaml                    # Create/update agents\nlettactl apply -f fleet.yaml --dry-run          # Preview changes\nlettactl apply -f fleet.yaml --match \"*-prod\"   # Template mode\nlettactl apply -f fleet.yaml --canary           # Deploy canary copies\nlettactl apply -f fleet.yaml --promote          # Promote canary to production\nlettactl apply -f fleet.yaml --recalibrate      # Re-send calibration messages\n```\n\n### Inspect Resources\n```bash\nlettactl get agents                        # List all agents\nlettactl get agents -o wide                # With details\nlettactl get agents --tags \"tenant:acme\"   # Filter by tags\nlettactl get blocks --shared               # Shared blocks only\nlettactl get tools --orphaned              # Unused tools\nlettactl describe agent <name>             # Full agent details\n```\n\n### Messaging\n```bash\nlettactl send <agent> \"Hello\"              # Send message\nlettactl send <agent> \"Hi\" --stream        # Stream response\nlettactl send --all \"support-*\" \"Update\"   # Bulk send by pattern\nlettactl send --tags \"role:support\" \"Hi\"   # Bulk send by tags\nlettactl messages list <agent>             # View history\nlettactl messages reset <agent>            # Clear history\nlettactl messages compact <agent>          # Summarize history\n```\n\n### Import / Export\n```bash\nlettactl export agent <name> -f yaml       # Export single agent\nlettactl export agents --all               # Export entire fleet\nlettactl import agent-export.yaml          # Import agent\n```\n\n### Fleet Reporting\n```bash\nlettactl report memory                     # Memory usage report\nlettactl report memory --analyze           # LLM-powered deep analysis\n```\n\nSee `reference/cli-commands.md` for all options.\n\n## Canary Deployments\n\nTest changes on isolated copies before promoting to production:\n\n```bash\nlettactl apply -f fleet.yaml --canary           # Create CANARY-* copies\nlettactl send CANARY-support-agent \"test msg\"   # Test the canary\nlettactl apply -f fleet.yaml --promote          # Promote to production\nlettactl apply -f fleet.yaml --cleanup          # Remove canary agents\n```\n\nSee `reference/canary-deployments.md`.\n\n## Multi-Tenancy\n\nTag agents for B2B and B2B2C filtering:\n\n```yaml\nagents:\n  - name: acme-support\n    tags:\n      - \"tenant:acme-corp\"\n      - \"role:support\"\n      - \"env:production\"\n```\n\n```bash\nlettactl get agents --tags \"tenant:acme-corp\"\nlettactl send --tags \"tenant:acme-corp,role:support\" \"Policy update\"\n```\n\nSee `reference/multi-tenancy.md`.\n\n## Self-Diagnosis\n\nAnalyze agent memory health fleet-wide:\n\n```bash\nlettactl report memory                  # Usage stats for all agents\nlettactl report memory --analyze        # LLM-powered analysis per agent\n```\n\nReports fill percentages, stale data, redundancy, missing knowledge, and split recommendations. See `reference/self-diagnosis.md`.\n\n## Agent Calibration\n\nPrime agents on creation with a boot message:\n\n```yaml\nagents:\n  - name: support-agent\n    first_message: \"Review your persona and confirm you understand your role.\"\n```\n\nRecalibrate existing agents after updates:\n\n```bash\nlettactl apply -f fleet.yaml --recalibrate\nlettactl apply -f fleet.yaml --recalibrate --recalibrate-tags \"role:support\"\n```\n\nSee `reference/agent-calibration.md`.\n\n## Template Mode\n\nApply configuration to existing agents matching a pattern:\n\n```bash\nlettactl apply -f template.yaml --match \"*-draper\"\n```\n\nUses three-way merge: preserves user-added resources while updating managed ones. See `reference/template-mode.md`.\n\n## SDK Usage\n\n```typescript\nimport { LettaCtl } from 'lettactl';\n\nconst ctl = new LettaCtl({ lettaBaseUrl: 'http://localhost:8283' });\n\n// Deploy from YAML\nawait ctl.deployFromYaml('./fleet.yaml');\n\n// Programmatic fleet config\nconst config = ctl.createFleetConfig()\n  .addSharedBlock({ name: 'kb', description: 'Knowledge', limit: 5000, from_file: 'kb.md' })\n  .addAgent({\n    name: 'support-agent',\n    description: 'Support AI',\n    system_prompt: { from_file: 'prompts/support.md' },\n    llm_config: { model: 'google_ai/gemini-2.5-pro', context_window: 32000 },\n    shared_blocks: ['kb'],\n    tags: ['team:support'],\n  })\n  .build();\n\nawait ctl.deployFleet(config);\n\n// Send message with callbacks\nawait ctl.sendMessage('agent-id', 'Hello', {\n  onComplete: (run) => console.log('Done:', run.id),\n});\n\n// Template mode\nawait ctl.deployFromYaml('./template.yaml', { match: '*-prod' });\n```\n\nSee `reference/sdk-usage.md` for full API.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "letta-fleet-management",
-    "description": "Manage Letta AI agent fleets declaratively with kubectl-style CLI. Use when creating, updating, or managing multiple Letta agents with shared configurations, memory blocks, tools, folders, canary deployments, multi-tenancy, and bulk operations.",
-    "license": "MIT"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

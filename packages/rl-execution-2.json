@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000020126",
   "name": "rl-execution",
   "slug": "rl-execution-2",
   "description": "Reinforcement learning for trade execution optimization including order splitting, adaptive timing, and impact minimization",
   "content": "\n# RL Execution Optimization\n\nReinforcement learning (RL) for trade execution teaches an agent to split and\ntime large orders so that total market impact is minimized. Instead of following\na fixed schedule (TWAP, VWAP), an RL agent observes real-time market state and\nadapts its trading rate on the fly.\n\n## Why Execution Optimization Matters\n\nEvery trade has a cost beyond the quoted spread:\n\n| Cost Component | Cause | Typical Magnitude |\n|---|---|---|\n| Spread cost | Crossing the bid-ask | 5-50 bps on DEXs |\n| Temporary impact | Consuming liquidity | Scales with trade rate |\n| Permanent impact | Information leakage | Scales with total size |\n| Timing risk | Price drifts while waiting | Scales with volatility and time |\n\nA 100 SOL market buy on a thin pool can move the price 2-5%. Splitting it into\nten 10 SOL slices over a few minutes can cut that cost by 30-60%. The question\nis **how** to split optimally \u2014 and that is where execution algorithms and RL\ncome in.\n\n## The RL Framework for Execution\n\n### State Space\n\nThe agent observes at each decision step:\n\n```\nstate = [\n    remaining_qty,    # How much is left to trade (0-1 normalized)\n    time_remaining,   # Fraction of allowed horizon remaining\n    current_price,    # Current mid-price (normalized to arrival price)\n    spread,           # Current bid-ask spread\n    volatility,       # Recent realized volatility\n    volume,           # Recent trading volume (normalized)\n]\n```\n\n### Action Space\n\nDiscrete actions controlling how much to trade this step:\n\n```\nactions = [0%, 10%, 25%, 50%, 100%]  # of remaining quantity\n```\n\nA small action space keeps the problem tractable. Each action represents the\nfraction of the remaining order to execute in the current time step.\n\n### Reward Function\n\nThe reward penalizes execution cost relative to a benchmark:\n\n```\nreward = -(execution_price - arrival_price) * quantity_traded\n```\n\nSummed over all steps, the total reward equals the negative implementation\nshortfall. The agent learns to minimize total cost.\n\n### Episode Structure\n\nOne episode = one order from placement to completion:\n\n1. Agent receives order: buy/sell Q units within T time steps\n2. At each step, agent picks an action (trade amount)\n3. Market simulator applies price impact and updates state\n4. Episode ends when quantity is fully executed or time expires\n5. Any remaining quantity at expiry is executed at market (penalty)\n\n## Standard Execution Algorithms\n\n### TWAP (Time-Weighted Average Price)\n\nThe simplest baseline \u2014 split the order equally across all time steps:\n\n```python\ntrade_per_step = total_quantity / num_steps\n```\n\n**Pros**: Simple, deterministic, easy to implement.\n**Cons**: Ignores market conditions entirely.\n\n### VWAP (Volume-Weighted Average Price)\n\nSplit proportional to expected volume in each period:\n\n```python\ntrade_at_step_t = total_quantity * (expected_volume[t] / total_expected_volume)\n```\n\n**Pros**: Trades more when liquidity is available.\n**Cons**: Requires accurate volume forecasts; still non-adaptive.\n\n### Almgren-Chriss Optimal Execution\n\nThe foundational analytical model. Minimizes a combination of execution cost\nand timing risk:\n\n```\nminimize: E[cost] + \u03bb * Var[cost]\n```\n\nWith linear impact assumptions, this yields a closed-form optimal trajectory.\nSee `references/execution_algorithms.md` for the full derivation.\n\n### RL-Based Adaptive Execution\n\nAn RL agent (DQN, PPO, or similar) that learns the execution policy from\nsimulated experience:\n\n```python\n# Pseudocode training loop\nfor episode in range(num_episodes):\n    state = env.reset(order_qty=Q, horizon=T)\n    done = False\n    while not done:\n        action = agent.select_action(state)\n        next_state, reward, done, info = env.step(action)\n        agent.store_transition(state, action, reward, next_state, done)\n        agent.update()\n        state = next_state\n```\n\n**Pros**: Adapts to current market conditions, can learn non-linear patterns.\n**Cons**: Requires realistic simulator, sim-to-real gap, training instability.\n\n## Price Impact Model\n\nThe simulator uses a standard two-component impact model:\n\n```\ntemporary_impact = \u03b7 * (trade_rate / avg_volume)\npermanent_impact = \u03b3 * (trade_rate / avg_volume)\n```\n\n- **Temporary impact** decays after the trade (liquidity replenishes)\n- **Permanent impact** shifts the equilibrium price (information effect)\n\nThe execution price for a trade of size `q` at time `t`:\n\n```\nexec_price = mid_price + permanent_impact + temporary_impact\nmid_price_next = mid_price + permanent_impact + noise\n```\n\n## When to Use This Skill\n\nThis skill is most valuable when:\n\n- **Order size is large relative to available liquidity** (>1% of daily volume)\n- **Market impact is significant** (thin DEX pools, low-cap tokens)\n- **Execution window is flexible** (minutes to hours, not milliseconds)\n- **Cost savings justify complexity** (institutional-scale orders)\n\nFor small retail orders (<$1,000 on liquid pairs), simple market orders or\nbasic slippage limits are sufficient. See the `slippage-modeling` skill instead.\n\n## Practical Limitations\n\n1. **Sim-to-real gap**: Simulated markets do not capture all real dynamics\n   (queue position, adversarial flow, MEV).\n2. **Non-stationarity**: Market microstructure changes over time; models\n   trained on one regime may fail in another.\n3. **DEX specifics**: On-chain execution has block-level granularity (~400ms\n   on Solana), not continuous-time. Gas/priority fees add cost.\n4. **Data requirements**: Training requires historical orderbook or trade data\n   for realistic simulation.\n\n## Integration with Other Skills\n\n| Skill | Integration |\n|---|---|\n| `slippage-modeling` | Provides impact estimates to calibrate the simulator |\n| `position-sizing` | Determines the total order size to execute |\n| `liquidity-analysis` | Assesses available liquidity for realistic simulation |\n| `volatility-modeling` | Supplies volatility estimates for the state vector |\n| `jupiter-swap` | Actual on-chain execution of the computed trade schedule |\n\n## Quick Start\n\n### Compare Execution Strategies (No API Needed)\n\n```bash\npython scripts/execution_simulator.py\n```\n\nRuns TWAP, VWAP, and adaptive strategies in a simulated market and compares\nexecution costs across many trials.\n\n### Almgren-Chriss Optimal Trajectory\n\n```bash\npython scripts/almgren_chriss.py\n```\n\nComputes the analytically optimal execution trajectory and compares it to\nTWAP for a given set of market parameters.\n\n## Files\n\n### References\n- `references/execution_algorithms.md` \u2014 TWAP, VWAP, Almgren-Chriss, IS, and\n  RL execution algorithms with formulas and comparison\n- `references/rl_framework.md` \u2014 MDP formulation, environment design, training\n  methodology, and practical considerations for RL execution\n\n### Scripts\n- `scripts/execution_simulator.py` \u2014 Simulated order execution comparing TWAP,\n  VWAP, and adaptive strategies with price impact\n- `scripts/almgren_chriss.py` \u2014 Almgren-Chriss optimal execution model with\n  trajectory computation and cost analysis\n\n## Dependencies\n\n```bash\nuv pip install numpy\n```\n\nNo API keys required \u2014 all scripts run in simulation/demo mode.\n\n## Further Reading\n\n- Almgren, R. & Chriss, N. (2001). \"Optimal execution of portfolio transactions.\"\n  *Journal of Risk*, 3(2), 5-39.\n- Bertsimas, D. & Lo, A. (1998). \"Optimal control of execution costs.\"\n  *Journal of Financial Markets*, 1(1), 1-50.\n- Ning, B., Lin, F. H. T., & Jaimungal, S. (2021). \"Double deep Q-learning\n  for optimal execution.\" *Applied Mathematical Finance*, 28(4), 361-380.\n\n## Disclaimer\n\nThis skill provides educational analysis tools for studying execution\nalgorithms. It does not constitute financial advice. Simulated results do\nnot guarantee real-world performance. Always test execution strategies\nwith small sizes before scaling up.\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "rl-execution",
-    "description": "Reinforcement learning for trade execution optimization including order splitting, adaptive timing, and impact minimization"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

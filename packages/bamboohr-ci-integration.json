@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031379",
   "name": "bamboohr-ci-integration",
   "slug": "bamboohr-ci-integration",
   "description": "Configure CI/CD pipelines for BambooHR integrations with GitHub Actions,",
   "content": "# BambooHR CI Integration\n\n## Overview\n\nSet up CI/CD pipelines for BambooHR integrations with proper secret management, unit tests with mocked API, and optional integration tests against the real BambooHR API.\n\n## Prerequisites\n\n- GitHub repository with Actions enabled\n- BambooHR test API key (sandbox company or test account)\n- npm/pnpm project with test suite configured\n\n## Instructions\n\n### Step 1: Configure GitHub Secrets\n\n```bash\n# Required for integration tests\ngh secret set BAMBOOHR_API_KEY --body \"your-test-api-key\"\ngh secret set BAMBOOHR_COMPANY_DOMAIN --body \"your-test-company\"\n\n# Optional: webhook testing\ngh secret set BAMBOOHR_WEBHOOK_SECRET --body \"your-webhook-hmac-secret\"\n```\n\n### Step 2: GitHub Actions Workflow\n\n```yaml\n# .github/workflows/bamboohr-integration.yml\nname: BambooHR Integration\n\non:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n  schedule:\n    # Run daily to catch BambooHR API changes early\n    - cron: '0 6 * * 1-5'\n\njobs:\n  unit-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n      - run: npm run typecheck\n      - name: Unit tests (mocked BambooHR API)\n        run: npm test -- --coverage --reporter=verbose\n      - uses: actions/upload-artifact@v4\n        if: always()\n        with:\n          name: coverage\n          path: coverage/\n\n  integration-tests:\n    runs-on: ubuntu-latest\n    # Only run on main branch and schedule (not PRs from forks)\n    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository\n    needs: unit-tests\n    env:\n      BAMBOOHR_API_KEY: ${{ secrets.BAMBOOHR_API_KEY }}\n      BAMBOOHR_COMPANY_DOMAIN: ${{ secrets.BAMBOOHR_COMPANY_DOMAIN }}\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: '20'\n          cache: 'npm'\n      - run: npm ci\n      - name: Integration tests (real BambooHR API)\n        run: npm run test:integration\n        timeout-minutes: 5\n      - name: API health check\n        run: |\n          STATUS=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n            -u \"${BAMBOOHR_API_KEY}:x\" \\\n            -H \"Accept: application/json\" \\\n            \"https://api.bamboohr.com/api/gateway.php/${BAMBOOHR_COMPANY_DOMAIN}/v1/employees/directory\")\n          echo \"BambooHR API status: $STATUS\"\n          [ \"$STATUS\" -eq 200 ] || exit 1\n```\n\n### Step 3: Test Structure\n\n```typescript\n// tests/unit/bamboohr-client.test.ts\nimport { describe, it, expect, beforeAll, afterAll, afterEach } from 'vitest';\nimport { setupServer } from 'msw/node';\nimport { http, HttpResponse } from 'msw';\nimport { BambooHRClient } from '../../src/bamboohr/client';\n\nconst BASE = 'https://api.bamboohr.com/api/gateway.php/testco/v1';\n\nconst handlers = [\n  http.get(`${BASE}/employees/directory`, () =>\n    HttpResponse.json({\n      employees: [\n        { id: '1', displayName: 'Jane', jobTitle: 'Eng', department: 'Dev' },\n      ],\n    }),\n  ),\n  http.get(`${BASE}/employees/:id/`, () =>\n    HttpResponse.json({ id: '1', firstName: 'Jane', lastName: 'Smith' }),\n  ),\n  http.post(`${BASE}/reports/custom`, () =>\n    HttpResponse.json({ title: 'Report', employees: [] }),\n  ),\n  // Simulate rate limit\n  http.get(`${BASE}/employees/ratelimited`, () =>\n    new HttpResponse(null, { status: 503, headers: { 'Retry-After': '1' } }),\n  ),\n];\n\nconst server = setupServer(...handlers);\nbeforeAll(() => server.listen());\nafterEach(() => server.resetHandlers());\nafterAll(() => server.close());\n\ndescribe('BambooHRClient', () => {\n  const client = new BambooHRClient({ companyDomain: 'testco', apiKey: 'fake' });\n\n  it('fetches employee directory', async () => {\n    const dir = await client.getDirectory();\n    expect(dir.employees).toHaveLength(1);\n    expect(dir.employees[0].displayName).toBe('Jane');\n  });\n\n  it('fetches single employee with fields', async () => {\n    const emp = await client.getEmployee(1, ['firstName', 'lastName']);\n    expect(emp.firstName).toBe('Jane');\n  });\n\n  it('runs custom reports', async () => {\n    const report = await client.customReport(['firstName', 'department']);\n    expect(report.title).toBe('Report');\n  });\n\n  it('handles 503 rate limit with Retry-After', async () => {\n    await expect(\n      client.request('GET', '/employees/ratelimited'),\n    ).rejects.toThrow(/503/);\n  });\n});\n```\n\n```typescript\n// tests/integration/bamboohr-live.test.ts\nimport { describe, it, expect } from 'vitest';\nimport { BambooHRClient } from '../../src/bamboohr/client';\n\nconst HAS_CREDS = !!process.env.BAMBOOHR_API_KEY && !!process.env.BAMBOOHR_COMPANY_DOMAIN;\n\ndescribe.skipIf(!HAS_CREDS)('BambooHR Live API', () => {\n  const client = new BambooHRClient({\n    companyDomain: process.env.BAMBOOHR_COMPANY_DOMAIN!,\n    apiKey: process.env.BAMBOOHR_API_KEY!,\n  });\n\n  it('should fetch employee directory', async () => {\n    const dir = await client.getDirectory();\n    expect(dir.employees.length).toBeGreaterThan(0);\n    expect(dir.employees[0]).toHaveProperty('displayName');\n    expect(dir.employees[0]).toHaveProperty('jobTitle');\n  }, 15_000);\n\n  it('should run a custom report', async () => {\n    const report = await client.customReport(['firstName', 'lastName', 'department']);\n    expect(report).toHaveProperty('employees');\n    expect(Array.isArray(report.employees)).toBe(true);\n  }, 15_000);\n\n  it('should fetch time off types', async () => {\n    const types = await client.request('GET', '/meta/time_off/types');\n    expect(types).toBeTruthy();\n  }, 15_000);\n});\n```\n\n### Step 4: PR Status Check\n\n```yaml\n# Branch protection \u2014 require these checks to pass\n# Settings > Branches > Branch protection rules\nrequired_status_checks:\n  - 'unit-tests'\n  # integration-tests is optional (may fail if API is down)\n```\n\n### Step 5: Scheduled API Health Monitoring\n\n```yaml\n# .github/workflows/bamboohr-health.yml\nname: BambooHR API Health\n\non:\n  schedule:\n    - cron: '0 */4 * * *'  # Every 4 hours\n\njobs:\n  health-check:\n    runs-on: ubuntu-latest\n    env:\n      BAMBOOHR_API_KEY: ${{ secrets.BAMBOOHR_API_KEY }}\n      BAMBOOHR_COMPANY_DOMAIN: ${{ secrets.BAMBOOHR_COMPANY_DOMAIN }}\n    steps:\n      - name: Check BambooHR API\n        run: |\n          STATUS=$(curl -s -o /tmp/response.json -w \"%{http_code}\" \\\n            -u \"${BAMBOOHR_API_KEY}:x\" \\\n            -H \"Accept: application/json\" \\\n            \"https://api.bamboohr.com/api/gateway.php/${BAMBOOHR_COMPANY_DOMAIN}/v1/employees/directory\")\n\n          if [ \"$STATUS\" -ne 200 ]; then\n            echo \"::error::BambooHR API returned $STATUS\"\n            exit 1\n          fi\n\n          COUNT=$(cat /tmp/response.json | jq '.employees | length')\n          echo \"BambooHR API healthy: $COUNT employees\"\n```\n\n## Output\n\n- Unit test pipeline with mocked BambooHR API\n- Integration test pipeline with real API (gated on secrets)\n- Scheduled health monitoring workflow\n- PR status checks configured\n- Coverage reports uploaded\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Secret not available in PR | Fork PR (no secrets access) | Use `if` guard on integration job |\n| Integration test timeout | BambooHR API slow | Set `timeout-minutes: 5` |\n| Flaky 503 in tests | Rate limiting in CI | Add retry logic to test helpers |\n| Health check false alarm | BambooHR maintenance | Check status page before alerting |\n\n## Resources\n\n- [GitHub Actions Documentation](https://docs.github.com/en/actions)\n- [GitHub Encrypted Secrets](https://docs.github.com/en/actions/security-guides/encrypted-secrets)\n- [MSW for Testing](https://mswjs.io/)\n\n## Next Steps\n\nFor deployment patterns, see `bamboohr-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bamboohr-ci-integration",
-    "description": "Configure CI/CD pipelines for BambooHR integrations with GitHub Actions,",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

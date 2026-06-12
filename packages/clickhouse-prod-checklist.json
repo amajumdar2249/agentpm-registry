@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031584",
   "name": "clickhouse-prod-checklist",
   "slug": "clickhouse-prod-checklist",
   "description": "Production readiness checklist for ClickHouse \\u2014 server tuning,\\",
   "content": "# ClickHouse Production Checklist\n\n## Overview\n\nComprehensive go-live checklist for ClickHouse covering server tuning, schema design,\nbackup configuration, monitoring, and operational readiness.\n\n## Prerequisites\n\n- ClickHouse instance provisioned (Cloud or self-hosted)\n- Application integration code tested in staging\n\n## Checklist\n\n### 1. Schema & Engine Design\n\n- [ ] Tables use `MergeTree` family engines (not `Memory`, `Log`, or `TinyLog`)\n- [ ] `ORDER BY` columns match primary filter/group patterns\n- [ ] `PARTITION BY` is coarse (monthly or weekly, never by ID)\n- [ ] `TTL` configured for data retention policy\n- [ ] `LowCardinality(String)` used for low-cardinality columns\n- [ ] `CODEC(ZSTD)` applied to large String/JSON columns\n- [ ] ReplacingMergeTree used with `FINAL` or dedup logic if upserts needed\n\n### 2. Server Configuration (Self-Hosted)\n\n```xml\n<!-- Key production settings in config.xml / users.xml -->\n\n<!-- Memory: set to ~80% of available RAM -->\n<max_server_memory_usage_to_ram_ratio>0.8</max_server_memory_usage_to_ram_ratio>\n\n<!-- Query limits -->\n<max_concurrent_queries>150</max_concurrent_queries>\n<max_memory_usage>10000000000</max_memory_usage>  <!-- 10GB per query -->\n<max_execution_time>300</max_execution_time>       <!-- 5 min timeout -->\n\n<!-- Merge settings -->\n<background_pool_size>16</background_pool_size>\n<background_schedule_pool_size>16</background_schedule_pool_size>\n\n<!-- Logging -->\n<query_log>\n    <database>system</database>\n    <table>query_log</table>\n    <flush_interval_milliseconds>7500</flush_interval_milliseconds>\n</query_log>\n```\n\n### 3. Backup Configuration\n\n```sql\n-- ClickHouse native BACKUP to S3\nBACKUP TABLE analytics.events\n    TO S3(\n        'https://my-bucket.s3.us-east-1.amazonaws.com/backups/events',\n        'ACCESS_KEY',\n        'SECRET_KEY'\n    )\n    SETTINGS compression_method = 'zstd';\n\n-- Incremental backup (base + delta)\nBACKUP TABLE analytics.events\n    TO S3('s3://my-bucket/backups/events-incremental')\n    SETTINGS base_backup = S3('s3://my-bucket/backups/events-base');\n```\n\n**ClickHouse Cloud:** Backups are automatic. Configure retention and frequency\nin the Cloud console under Service Settings.\n\n- [ ] Backup schedule configured (daily minimum)\n- [ ] Backup restore tested and documented\n- [ ] Point-in-time recovery possible (incremental backups)\n- [ ] Backup stored in different region/account from primary\n\n### 4. Monitoring & Alerting\n\n```sql\n-- Key metrics to monitor\n-- 1. Query latency (p50/p95/p99)\n-- 2. Active parts per table (alert > 300)\n-- 3. Merge queue depth\n-- 4. Memory usage\n-- 5. Disk space free\n-- 6. Replication lag (if clustered)\n\n-- Health check query (use for load balancer probes)\nSELECT 1;\n\n-- More thorough health check\nSELECT\n    (SELECT count() FROM system.processes) AS running_queries,\n    (SELECT sum(value) FROM system.metrics WHERE metric = 'MemoryTracking') AS memory_bytes,\n    (SELECT count() FROM system.merges) AS active_merges;\n```\n\n- [ ] Prometheus endpoint configured (`/metrics` via ClickHouse Exporter or Cloud endpoint)\n- [ ] Grafana dashboard with key panels (QPS, latency, memory, parts, merges)\n- [ ] Alerts on: error rate > 5%, p95 latency > 5s, parts > 300, disk < 20%\n- [ ] Query log monitoring for slow/failed queries\n\n### 5. Security\n\n- [ ] Default user password changed or user disabled\n- [ ] Application user has minimal privileges (see `clickhouse-security-basics`)\n- [ ] TLS enabled (HTTPS on port 8443)\n- [ ] IP allowlist configured\n- [ ] Secrets in environment variables or secret manager (not code)\n\n### 6. Application Integration\n\n- [ ] Connection pooling configured (`max_open_connections`)\n- [ ] Graceful shutdown calls `client.close()`\n- [ ] Insert batching in place (10K+ rows per INSERT)\n- [ ] Retry logic for transient errors (see `clickhouse-rate-limits`)\n- [ ] Health check endpoint includes ClickHouse ping\n\n```typescript\n// Health check endpoint\napp.get('/health', async (req, res) => {\n  try {\n    const { success } = await client.ping();\n    res.json({ status: success ? 'healthy' : 'degraded', clickhouse: success });\n  } catch {\n    res.status(503).json({ status: 'unhealthy', clickhouse: false });\n  }\n});\n```\n\n### 7. Operational Readiness\n\n- [ ] Incident runbook documented (see `clickhouse-incident-runbook`)\n- [ ] On-call escalation path defined\n- [ ] Key rotation procedure documented\n- [ ] Schema migration process in place (see `clickhouse-migration-deep-dive`)\n- [ ] Load testing completed at expected peak traffic\n\n### 8. Verification Queries\n\n```sql\n-- Verify table sizes and part health\nSELECT database, table, count() AS parts, sum(rows) AS rows,\n       formatReadableSize(sum(bytes_on_disk)) AS size\nFROM system.parts WHERE active\nGROUP BY database, table ORDER BY sum(bytes_on_disk) DESC;\n\n-- Verify no pending mutations\nSELECT * FROM system.mutations WHERE NOT is_done;\n\n-- Verify no replication lag\nSELECT database, table, queue_size, inserts_in_queue\nFROM system.replicas WHERE queue_size > 0;\n```\n\n## Error Handling\n\n| Issue | Detection | Action |\n|-------|-----------|--------|\n| Parts > 300 | Monitoring alert | Review insert patterns, wait for merges |\n| Disk > 80% | Disk alert | Add storage, drop old partitions |\n| Query p95 > 5s | Latency alert | Check `system.query_log` for slow queries |\n| Replication lag | Replica check | Investigate network, merge backlog |\n\n## Resources\n\n- [ClickHouse Operations Guide](https://clickhouse.com/docs/operations)\n- [Backup & Restore](https://clickhouse.com/docs/operations/backup)\n- [Monitoring with Prometheus](https://clickhouse.com/docs/integrations/prometheus)\n\n## Next Steps\n\nFor SDK version upgrades, see `clickhouse-upgrade-migration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "clickhouse-prod-checklist",
-    "description": "Production readiness checklist for ClickHouse \\u2014 server tuning,\\",
-    "\\ deployment, doing go-live reviews,\\nor auditing production readiness.\\nTrigger": "\\",
-    "allowed-tools": "Read, Bash(kubectl:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

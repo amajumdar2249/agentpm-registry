@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000012059",
   "name": "comfyui-video-pipeline",
   "slug": "comfyui-video-pipeline",
   "description": "Generate videos using ComfyUI with Wan 2.2, FramePack, or AnimateDiff. Handles image-to-video, text-to-video, talking heads, and motion-controlled animation. Use when creating any video content from character images or text descriptions.",
   "content": "\n# ComfyUI Video Pipeline\n\nOrchestrates video generation across three engines, selecting the best one based on requirements and available resources.\n\n## Engine Selection\n\n```\nVIDEO REQUEST\n    |\n    |-- Need film-level quality?\n    |   |-- Yes + 24GB+ VRAM \u2192 Wan 2.2 MoE 14B\n    |   |-- Yes + 8GB VRAM \u2192 Wan 2.2 1.3B\n    |\n    |-- Need long video (>10 seconds)?\n    |   |-- Yes \u2192 FramePack (60 seconds on 6GB)\n    |\n    |-- Need fast iteration?\n    |   |-- Yes \u2192 AnimateDiff Lightning (4-8 steps)\n    |\n    |-- Need camera/motion control?\n    |   |-- Yes \u2192 AnimateDiff V3 + Motion LoRAs\n    |\n    |-- Need first+last frame control?\n    |   |-- Yes \u2192 Wan 2.2 MoE (exclusive feature)\n    |\n    |-- Default \u2192 Wan 2.2 (best general quality)\n```\n\n## Pipeline 1: Wan 2.2 MoE (Highest Quality)\n\n### Image-to-Video\n\n**Prerequisites:**\n- `wan2.1_i2v_720p_14b_bf16.safetensors` in `models/diffusion_models/`\n- `umt5_xxl_fp8_e4m3fn_scaled.safetensors` in `models/clip/`\n- `open_clip_vit_h_14.safetensors` in `models/clip_vision/`\n- `wan_2.1_vae.safetensors` in `models/vae/`\n\n**Settings:**\n| Parameter | Value | Notes |\n|-----------|-------|-------|\n| Resolution | 1280x720 (landscape) or 720x1280 (portrait) | Native training resolution |\n| Frames | 81 (~5 seconds at 16fps) | Multiples of 4 + 1 |\n| Steps | 30-50 | Higher = better quality |\n| CFG | 5-7 | |\n| Sampler | uni_pc | Recommended for Wan |\n| Scheduler | normal | |\n\n**Frame count guide:**\n| Duration | Frames (16fps) |\n|----------|----------------|\n| 1 second | 17 |\n| 3 seconds | 49 |\n| 5 seconds | 81 |\n| 10 seconds | 161 |\n\n**VRAM optimization:**\n- FP8 quantization: halves VRAM with minimal quality loss\n- SageAttention: faster attention computation\n- Reduce frames if OOM\n\n### Text-to-Video\n\nSame as I2V but uses `wan2.1_t2v_14b_bf16.safetensors` and `EmptySD3LatentImage` instead of image conditioning.\n\n### First+Last Frame Control (Wan 2.2 Exclusive)\n\nWan 2.2 MoE allows specifying both the first and last frame, enabling precise video planning:\n1. Generate two hero images with consistent character\n2. Use first as start frame, second as end frame\n3. Wan interpolates the motion between them\n\n## Pipeline 2: FramePack (Long Videos, Low VRAM)\n\n### Key Innovation\n\nVRAM usage is **invariant to video length** - generates 60-second videos at 30fps on just 6GB VRAM.\n\n**How it works:**\n- Dynamic context compression: 1536 markers for key frames, 192 for transitions\n- Bidirectional memory with reverse generation prevents drift\n- Frame-by-frame generation with context window\n\n### Settings\n\n| Parameter | Value | Notes |\n|-----------|-------|-------|\n| Resolution | 640x384 to 1280x720 | Depends on VRAM |\n| Duration | Up to 60 seconds | VRAM-invariant |\n| Quality | High (comparable to Wan) | Uses same base models |\n\n### When to Use\n\n- Videos longer than 10 seconds\n- Limited VRAM systems (but RTX 5090 doesn't need this)\n- When VRAM is needed for parallel operations\n- Batch video generation\n\n## Pipeline 3: AnimateDiff V3 (Fast, Controllable)\n\n### Strengths\n\n- Motion LoRAs for camera control (pan, zoom, tilt, roll)\n- Effect LoRAs (shatter, smoke, explosion, liquid)\n- Sliding context window for infinite length\n- Very fast with Lightning model (4-8 steps)\n\n### Settings\n\n| Parameter | Value (Standard) | Value (Lightning) |\n|-----------|-----------------|-------------------|\n| Motion Module | `v3_sd15_mm.ckpt` | `animatediff_lightning_4step.safetensors` |\n| Steps | 20-25 | 4-8 |\n| CFG | 7-8 | 1.5-2.0 |\n| Sampler | euler_ancestral | lcm |\n| Resolution | 512x512 | 512x512 |\n| Context Length | 16 | 16 |\n| Context Overlap | 4 | 4 |\n\n### Camera Motion LoRAs\n\n| LoRA | Motion |\n|------|--------|\n| v2_lora_ZoomIn | Camera zooms in |\n| v2_lora_ZoomOut | Camera zooms out |\n| v2_lora_PanLeft | Camera pans left |\n| v2_lora_PanRight | Camera pans right |\n| v2_lora_TiltUp | Camera tilts up |\n| v2_lora_TiltDown | Camera tilts down |\n| v2_lora_RollingClockwise | Camera rolls clockwise |\n\n## Post-Processing Pipeline\n\nAfter any video generation:\n\n### 1. Frame Interpolation (RIFE)\n\nDoubles or quadruples frame count for smoother motion:\n```\nInput (16fps) \u2192 RIFE 2x \u2192 Output (32fps)\nInput (16fps) \u2192 RIFE 4x \u2192 Output (64fps)\n```\n\nUse `rife47` or `rife49` model.\n\n### 2. Face Enhancement (if character video)\n\nApply FaceDetailer to each frame:\n- denoise: 0.3-0.4 (lower than image - preserves temporal consistency)\n- guide_size: 384 (speed optimization for video)\n- detection_model: face_yolov8m.pt\n\n### 3. Deflicker (if needed)\n\nReduces temporal inconsistencies between frames.\n\n### 4. Color Correction\n\nMaintain consistent color grading across frames.\n\n### 5. Video Combine\n\nFinal output via VHS Video Combine:\n```\nframe_rate: 16 (native) or 24/30 (after interpolation)\nformat: \"video/h264-mp4\"\ncrf: 19 (high quality) to 23 (smaller file)\n```\n\n## Talking Head Pipeline\n\nComplete pipeline for character dialogue:\n\n```\n1. Generate audio \u2192 comfyui-voice-pipeline\n2. Generate base video \u2192 This skill (Wan I2V or AnimateDiff)\n   - Prompt: \"{character}, talking naturally, slight head movement\"\n   - Duration: match audio length\n3. Apply lip-sync \u2192 Wav2Lip or LatentSync\n4. Enhance faces \u2192 FaceDetailer + CodeFormer\n5. Final output \u2192 video-assembly\n```\n\n## Quality Checklist\n\nBefore marking video as complete:\n- [ ] Character identity consistent across frames\n- [ ] No flickering or temporal artifacts\n- [ ] Motion looks natural (not jerky or frozen)\n- [ ] Face enhancement applied if character video\n- [ ] Frame rate is smooth (24+ fps for delivery)\n- [ ] Audio synced (if talking head)\n- [ ] Resolution matches delivery target\n\n## Reference\n\n- `references/workflows.md` - Workflow templates for Wan and AnimateDiff\n- `references/models.md` - Video model download links\n- `references/research-log.md` - Latest video generation advances\n- `state/inventory.json` - Available video models\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "comfyui-video-pipeline",
-    "description": "Generate videos using ComfyUI with Wan 2.2, FramePack, or AnimateDiff. Handles image-to-video, text-to-video, talking heads, and motion-controlled animation. Use when creating any video content from character images or text descriptions.",
-    "user-invocable": "true",
-    "metadata": "{\"openclaw\":{\"emoji\":\"\ud83c\udfac\",\"os\":[\"darwin\",\"linux\",\"win32\"],\"requires\":{\"anyBins\":[\"curl\",\"wget\"]},\"primaryEnv\":\"COMFYUI_URL\"}}"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

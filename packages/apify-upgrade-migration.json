@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031275",
   "name": "apify-upgrade-migration",
   "slug": "apify-upgrade-migration",
   "description": "Upgrade Apify SDK, apify-client, and Crawlee versions safely.",
   "content": "# Apify Upgrade & Migration\n\n## Overview\n\nGuide for upgrading `apify`, `apify-client`, and `crawlee` packages. The biggest migration in Apify's history was SDK v2 to v3, which split crawling functionality into the `crawlee` package. This skill covers that migration plus general upgrade procedures.\n\n## Prerequisites\n\n- Git branch for the upgrade\n- Test suite available\n- Current versions documented\n\n## Instructions\n\n### Step 1: Check Current Versions\n\n```bash\n# Check installed versions\nnpm list apify apify-client crawlee 2>/dev/null\n\n# Check latest available versions\nnpm view apify version\nnpm view apify-client version\nnpm view crawlee version\n\n# Check for outdated packages\nnpm outdated apify apify-client crawlee\n```\n\n### Step 2: Create Upgrade Branch\n\n```bash\ngit checkout -b upgrade/apify-packages\n```\n\n### Step 3: Upgrade Packages\n\n```bash\n# Upgrade to latest\nnpm install apify@latest crawlee@latest apify-client@latest\n\n# Or upgrade to specific version\nnpm install apify@3.2.0 crawlee@3.11.0\n\n# Check for peer dependency issues\nnpm ls 2>&1 | grep \"ERESOLVE\\|peer dep\"\n```\n\n### Step 4: Run Tests and Fix Issues\n\n```bash\nnpm test\nnpm run build  # Catch TypeScript errors\n```\n\n## Major Migration: Apify SDK v2 to v3 (Crawlee Split)\n\nThis is the most common migration. In v3, crawling code moved to `crawlee`.\n\n### Import Changes\n\n```typescript\n// ---- BEFORE (SDK v2) ----\nimport Apify from 'apify';\nconst { CheerioCrawler, PlaywrightCrawler, log } = Apify;\n\n// ---- AFTER (SDK v3 + Crawlee) ----\nimport { Actor } from 'apify';\nimport { CheerioCrawler, PlaywrightCrawler, log } from 'crawlee';\n```\n\n### Initialization Changes\n\n```typescript\n// ---- BEFORE (v2) ----\nApify.main(async () => {\n  const input = await Apify.getInput();\n  const dataset = await Apify.openDataset();\n  await Apify.pushData({ url: 'https://example.com' });\n  await Apify.setValue('OUTPUT', { done: true });\n});\n\n// ---- AFTER (v3) ----\nawait Actor.main(async () => {\n  const input = await Actor.getInput();\n  const dataset = await Actor.openDataset();\n  await Actor.pushData({ url: 'https://example.com' });\n  await Actor.setValue('OUTPUT', { done: true });\n});\n```\n\n### Crawler Configuration Changes\n\n```typescript\n// ---- BEFORE (v2) ----\nconst crawler = new Apify.CheerioCrawler({\n  handlePageFunction: async ({ request, $ }) => {\n    // ...\n  },\n  handleFailedRequestFunction: async ({ request }) => {\n    // ...\n  },\n});\n\n// ---- AFTER (v3 / Crawlee) ----\nconst crawler = new CheerioCrawler({\n  requestHandler: async ({ request, $ }) => {\n    // renamed from handlePageFunction\n  },\n  failedRequestHandler: async ({ request }, error) => {\n    // renamed from handleFailedRequestFunction\n    // error is now second argument\n  },\n});\n```\n\n### Proxy Configuration Changes\n\n```typescript\n// ---- BEFORE (v2) ----\nconst proxyConfiguration = await Apify.createProxyConfiguration({\n  groups: ['RESIDENTIAL'],\n});\n\n// ---- AFTER (v3) ----\nconst proxyConfiguration = await Actor.createProxyConfiguration({\n  groups: ['RESIDENTIAL'],\n});\n```\n\n### Request Queue Changes\n\n```typescript\n// ---- BEFORE (v2) ----\nconst requestQueue = await Apify.openRequestQueue();\nawait requestQueue.addRequest({ url: 'https://example.com' });\n\n// ---- AFTER (v3) ----\n// Option A: Use enqueueLinks in crawler (preferred)\nawait enqueueLinks({ strategy: 'same-domain' });\n\n// Option B: Open queue directly\nconst requestQueue = await Actor.openRequestQueue();\nawait requestQueue.addRequest({ url: 'https://example.com' });\n```\n\n### Router Pattern (New in v3)\n\n```typescript\n// v3 introduced explicit routers (replaces label-based if/else)\nimport { createCheerioRouter } from 'crawlee';\n\nconst router = createCheerioRouter();\n\nrouter.addDefaultHandler(async ({ request, $, enqueueLinks }) => {\n  // Handle listing pages\n  await enqueueLinks({ selector: 'a.detail', label: 'DETAIL' });\n});\n\nrouter.addHandler('DETAIL', async ({ request, $ }) => {\n  // Handle detail pages\n  await Actor.pushData({ url: request.url, title: $('h1').text() });\n});\n\nconst crawler = new CheerioCrawler({ requestHandler: router });\n```\n\n## apify-client Upgrade Notes\n\nThe `apify-client` package has been more stable. Key changes across versions:\n\n```typescript\n// v1.x \u2192 v2.x: Constructor changed\n// Before\nconst { ApifyClient } = require('apify-client');\nconst client = new ApifyClient({ userId: 'xxx', token: 'yyy' });\n\n// After (v2+): userId removed, just token\nconst client = new ApifyClient({ token: 'yyy' });\n\n// Method chaining style (consistent since v2)\nconst run = await client.actor('username/actor').call(input);\nconst { items } = await client.dataset(run.defaultDatasetId).listItems();\n```\n\n## Upgrade Verification Script\n\n```typescript\n// verify-upgrade.ts \u2014 run after upgrading\nimport { Actor } from 'apify';\nimport { CheerioCrawler, log } from 'crawlee';\nimport { ApifyClient } from 'apify-client';\n\nasync function verifyUpgrade() {\n  const checks: { name: string; pass: boolean; error?: string }[] = [];\n\n  // Check 1: Imports work\n  checks.push({ name: 'Actor import', pass: typeof Actor.init === 'function' });\n  checks.push({ name: 'CheerioCrawler import', pass: typeof CheerioCrawler === 'function' });\n  checks.push({ name: 'ApifyClient import', pass: typeof ApifyClient === 'function' });\n\n  // Check 2: Client connects\n  try {\n    const client = new ApifyClient({ token: process.env.APIFY_TOKEN });\n    const user = await client.user().get();\n    checks.push({ name: 'API connection', pass: !!user.username });\n  } catch (err) {\n    checks.push({ name: 'API connection', pass: false, error: (err as Error).message });\n  }\n\n  // Check 3: Crawler instantiates\n  try {\n    const crawler = new CheerioCrawler({\n      requestHandler: async () => {},\n    });\n    checks.push({ name: 'Crawler instantiation', pass: true });\n  } catch (err) {\n    checks.push({ name: 'Crawler instantiation', pass: false, error: (err as Error).message });\n  }\n\n  // Report\n  console.log('\\n=== Upgrade Verification ===');\n  for (const check of checks) {\n    const status = check.pass ? 'PASS' : 'FAIL';\n    console.log(`  [${status}] ${check.name}${check.error ? ` \u2014 ${check.error}` : ''}`);\n  }\n\n  const allPassed = checks.every(c => c.pass);\n  console.log(`\\n${allPassed ? 'All checks passed.' : 'Some checks failed!'}`);\n  process.exit(allPassed ? 0 : 1);\n}\n\nverifyUpgrade();\n```\n\n## Rollback Procedure\n\n```bash\n# Revert to previous versions\nnpm install apify@3.1.0 crawlee@3.10.0 apify-client@2.9.0 --save-exact\n\n# Or restore from lock file\ngit checkout main -- package-lock.json\nnpm ci\n\n# On the platform: roll back Actor build\n# Console > Actor > Builds > select previous build > Set as default\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `handlePageFunction is not valid` | Using v2 option names in v3 | Rename to `requestHandler` |\n| `Apify.main is not a function` | v2 default export removed | Import `{ Actor }` from `apify` |\n| `Cannot find module 'crawlee'` | Crawlee not installed | `npm install crawlee` |\n| Type errors after upgrade | Changed interfaces | Check release notes for type changes |\n\n## Resources\n\n- [SDK v2 to v3 Migration Guide](https://docs.apify.com/sdk/js/docs/upgrading/upgrading-to-v3)\n- [Crawlee Changelog](https://crawlee.dev/js/api/core/changelog)\n- [apify-client Releases](https://github.com/apify/apify-client-js/releases)\n\n## Next Steps\n\nFor CI integration during upgrades, see `apify-ci-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "apify-upgrade-migration",
-    "description": "Upgrade Apify SDK, apify-client, and Crawlee versions safely.",
-    "Trigger": "upgrade apify\", \"apify migration\", \"apify breaking changes\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(npx:*), Bash(git:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

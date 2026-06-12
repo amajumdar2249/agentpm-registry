@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031946",
   "name": "finta-reference-architecture",
   "slug": "finta-reference-architecture",
   "description": "Reference architecture for fundraising operations with Finta CRM.",
   "content": "# Finta Reference Architecture\n\n## Overview\n\nProduction architecture for fundraising operations integrating with Finta's CRM platform. Designed for startup founders and fund managers who need investor pipeline visibility, automated round management, and document room analytics. Key design drivers: deal velocity tracking, investor communication audit trail, capital collection automation via Stripe, and CRM integration with external systems like HubSpot or Salesforce for LP relationship management.\n\n## Architecture Diagram\n\n```\nFounder Dashboard \u2500\u2500\u2192 Pipeline Service \u2500\u2500\u2192 Cache (Redis) \u2500\u2500\u2192 Finta API\n                           \u2193                                  /investors\n                      Queue (Bull) \u2500\u2500\u2192 Email Sync Worker      /rounds\n                           \u2193                                  /deal-rooms\n                      Doc Room Service \u2500\u2500\u2192 Finta Deal Rooms   /documents\n                           \u2193\n                      Zapier Webhooks \u2500\u2500\u2192 Slack / Sheets / CRM\n```\n\n## Service Layer\n\n```typescript\nclass FundraiseService {\n  constructor(private finta: FintaClient, private cache: CacheLayer) {}\n\n  async getPipelineSnapshot(roundId: string): Promise<PipelineSnapshot> {\n    const investors = await this.cache.getOrFetch(`round:${roundId}:investors`,\n      () => this.finta.getInvestorsByRound(roundId));\n    return { total: investors.length, byStage: this.groupByStage(investors),\n             committed: investors.filter(i => i.stage === 'committed').reduce((s, i) => s + i.amount, 0) };\n  }\n\n  async moveInvestor(investorId: string, toStage: string): Promise<void> {\n    await this.finta.updateInvestor(investorId, { stage: toStage });\n    await this.cache.invalidate(`investor:${investorId}`);\n    await this.queue.add('stage-change', { investorId, toStage, timestamp: Date.now() });\n  }\n}\n```\n\n## Caching Strategy\n\n```typescript\nconst CACHE_CONFIG = {\n  rounds:     { ttl: 600, prefix: 'round' },     // 10 min \u2014 round terms rarely change mid-raise\n  investors:  { ttl: 120, prefix: 'investor' },   // 2 min \u2014 stage changes need freshness\n  documents:  { ttl: 300, prefix: 'doc' },         // 5 min \u2014 doc list stable between uploads\n  dealRooms:  { ttl: 60,  prefix: 'room' },        // 1 min \u2014 view analytics need near-real-time\n  metrics:    { ttl: 30,  prefix: 'metric' },      // 30s \u2014 commitment totals are time-sensitive\n};\n// Stage-change webhooks flush investor cache immediately for dashboard accuracy\n```\n\n## Event Pipeline\n\n```typescript\nclass FundraiseEventPipeline {\n  private queue = new Bull('finta-events', { redis: process.env.REDIS_URL });\n\n  async onStageChange(event: StageChangeEvent): Promise<void> {\n    await this.queue.add('notify', event, { attempts: 3, backoff: { type: 'exponential', delay: 2000 } });\n  }\n\n  async processNotification(event: StageChangeEvent): Promise<void> {\n    if (event.toStage === 'committed') await this.notifySlack(`${event.investorName} committed $${event.amount}`);\n    if (event.toStage === 'passed') await this.logPassReason(event);\n    await this.syncToCRM(event);  // Push stage change to HubSpot/Salesforce\n  }\n}\n```\n\n## Data Model\n\n```typescript\ninterface Round     { id: string; name: string; targetAmount: number; instrument: 'SAFE' | 'convertible-note' | 'priced'; status: 'active' | 'closed'; }\ninterface Investor  { id: string; name: string; email: string; firm: string; roundId: string; stage: 'contacted' | 'meeting' | 'dd' | 'term-sheet' | 'committed' | 'passed'; amount: number; }\ninterface DealRoom  { id: string; roundId: string; investorIds: string[]; documents: Document[]; viewAnalytics: ViewEvent[]; }\ninterface Document  { id: string; name: string; type: 'pitch-deck' | 'financials' | 'cap-table' | 'legal'; uploadedAt: string; viewCount: number; }\n```\n\n## Scaling Considerations\n\n- Partition investor pipelines by round to keep active-raise queries fast and isolated\n- Buffer email sync operations \u2014 Gmail/Outlook API rate limits are aggressive for bulk tracking\n- Batch Zapier webhook deliveries to avoid per-event overhead during rapid stage updates\n- Cache commitment totals at round level; invalidate on any investor stage change\n- Use read-through cache for deal room analytics \u2014 investors check rooms sporadically but in bursts\n\n## Error Handling\n\n| Component | Failure Mode | Recovery |\n|-----------|-------------|----------|\n| Investor sync | Finta API rate limit | Queue with exponential backoff, per-round circuit breaker |\n| Deal room upload | S3/storage timeout | Retry with resumable upload, notify founder on failure |\n| Email tracking | Gmail OAuth token expired | Auto-refresh token, fallback to manual logging alert |\n| Stripe collection | Payment declined | Retry schedule (1d, 3d, 7d), escalate to founder dashboard |\n| CRM sync | HubSpot conflict | Last-write-wins with Finta as source of truth, log discrepancies |\n\n## Resources\n\n- [Finta Website](https://www.trustfinta.com)\n- [Finta for Fund Managers](https://www.trustfinta.com/blog/finta-for-fund-managers-venture-capital-crm)\n\n## Next Steps\n\nSee `finta-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "finta-reference-architecture",
-    "description": "Reference architecture for fundraising operations with Finta CRM.",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033293",
   "name": "snowflake-multi-env-setup",
   "slug": "snowflake-multi-env-setup",
   "description": "Configure Snowflake across dev, staging, and production with account-level",
   "content": "# Snowflake Multi-Environment Setup\n\n## Overview\n\nConfigure dev/staging/production environments using Snowflake's zero-copy cloning, separate databases, and environment-specific roles and warehouses.\n\n## Environment Strategy\n\n| Environment | Approach | Data | Warehouse | Cost |\n|-------------|----------|------|-----------|------|\n| Development | Cloned DB, XSMALL WH | Zero-copy clone (refreshed weekly) | DEV_WH_XS | Minimal |\n| Staging | Cloned DB, same-size WH | Zero-copy clone (refreshed daily) | STAGING_WH | Moderate |\n| Production | Source of truth | Real data | PROD_WH (multi-cluster) | Full |\n\n## Instructions\n\n### Step 1: Create Environment Databases with Zero-Copy Cloning\n\n```sql\n-- Zero-copy clone creates instant copy with no additional storage cost\n-- Storage cost only accrues when cloned data diverges from source\n\n-- Clone production to staging (point-in-time)\nCREATE DATABASE STAGING_DW CLONE PROD_DW;\n\n-- Clone to dev\nCREATE DATABASE DEV_DW CLONE PROD_DW;\n\n-- Clone from a specific point in time (Time Travel)\nCREATE DATABASE STAGING_DW CLONE PROD_DW\n  AT (TIMESTAMP => '2026-03-21 06:00:00'::TIMESTAMP_NTZ);\n\n-- Refresh clone (drop and re-clone)\n-- Schedule this as a task:\nCREATE OR REPLACE TASK refresh_staging_clone\n  WAREHOUSE = ADMIN_WH\n  SCHEDULE = 'USING CRON 0 4 * * * America/New_York'  -- 4 AM ET daily\nAS\n  BEGIN\n    DROP DATABASE IF EXISTS STAGING_DW;\n    CREATE DATABASE STAGING_DW CLONE PROD_DW;\n    -- Re-grant permissions after clone\n    GRANT USAGE ON DATABASE STAGING_DW TO ROLE STAGING_ROLE;\n    GRANT USAGE ON ALL SCHEMAS IN DATABASE STAGING_DW TO ROLE STAGING_ROLE;\n    GRANT SELECT ON ALL TABLES IN DATABASE STAGING_DW TO ROLE STAGING_ROLE;\n  END;\n\nALTER TASK refresh_staging_clone RESUME;\n```\n\n### Step 2: Environment-Specific Warehouses\n\n```sql\n-- Development: minimal size, aggressive auto-suspend\nCREATE WAREHOUSE DEV_WH\n  WAREHOUSE_SIZE = 'XSMALL'\n  AUTO_SUSPEND = 60\n  AUTO_RESUME = TRUE\n  INITIALLY_SUSPENDED = TRUE\n  RESOURCE_MONITOR = dev_monitor;\n\n-- Staging: mirrors production size for realistic testing\nCREATE WAREHOUSE STAGING_WH\n  WAREHOUSE_SIZE = 'MEDIUM'\n  AUTO_SUSPEND = 120\n  AUTO_RESUME = TRUE\n  INITIALLY_SUSPENDED = TRUE\n  RESOURCE_MONITOR = staging_monitor;\n\n-- Production: multi-cluster for concurrency\nCREATE WAREHOUSE PROD_WH\n  WAREHOUSE_SIZE = 'MEDIUM'\n  MIN_CLUSTER_COUNT = 1\n  MAX_CLUSTER_COUNT = 4\n  SCALING_POLICY = 'STANDARD'\n  AUTO_SUSPEND = 300\n  AUTO_RESUME = TRUE\n  RESOURCE_MONITOR = prod_monitor;\n\n-- Resource monitors per environment\nCREATE RESOURCE MONITOR dev_monitor\n  WITH CREDIT_QUOTA = 50 FREQUENCY = MONTHLY START_TIMESTAMP = IMMEDIATELY\n  TRIGGERS ON 100 PERCENT DO SUSPEND;\n\nCREATE RESOURCE MONITOR staging_monitor\n  WITH CREDIT_QUOTA = 200 FREQUENCY = MONTHLY START_TIMESTAMP = IMMEDIATELY\n  TRIGGERS ON 90 PERCENT DO NOTIFY ON 100 PERCENT DO SUSPEND;\n\nCREATE RESOURCE MONITOR prod_monitor\n  WITH CREDIT_QUOTA = 2000 FREQUENCY = MONTHLY START_TIMESTAMP = IMMEDIATELY\n  TRIGGERS ON 75 PERCENT DO NOTIFY ON 90 PERCENT DO NOTIFY ON 100 PERCENT DO SUSPEND;\n```\n\n### Step 3: Environment-Specific Roles\n\n```sql\n-- Dev role: full access to dev DB only\nCREATE ROLE DEV_ROLE;\nGRANT USAGE ON WAREHOUSE DEV_WH TO ROLE DEV_ROLE;\nGRANT ALL ON DATABASE DEV_DW TO ROLE DEV_ROLE;\nGRANT ALL ON ALL SCHEMAS IN DATABASE DEV_DW TO ROLE DEV_ROLE;\n\n-- Staging role: read/write staging, read-only prod\nCREATE ROLE STAGING_ROLE;\nGRANT USAGE ON WAREHOUSE STAGING_WH TO ROLE STAGING_ROLE;\nGRANT ALL ON DATABASE STAGING_DW TO ROLE STAGING_ROLE;\nGRANT USAGE ON DATABASE PROD_DW TO ROLE STAGING_ROLE;\nGRANT SELECT ON ALL TABLES IN DATABASE PROD_DW TO ROLE STAGING_ROLE;\n\n-- Production role: minimal, service-account driven\nCREATE ROLE PROD_ETL_ROLE;\nGRANT USAGE ON WAREHOUSE PROD_WH TO ROLE PROD_ETL_ROLE;\nGRANT ALL ON DATABASE PROD_DW TO ROLE PROD_ETL_ROLE;\n\n-- Hierarchy\nGRANT ROLE DEV_ROLE TO ROLE SYSADMIN;\nGRANT ROLE STAGING_ROLE TO ROLE SYSADMIN;\nGRANT ROLE PROD_ETL_ROLE TO ROLE SYSADMIN;\n```\n\n### Step 4: Application Configuration\n\n```typescript\n// src/snowflake/env-config.ts\ntype Environment = 'development' | 'staging' | 'production';\n\ninterface SnowflakeEnvConfig {\n  account: string;\n  warehouse: string;\n  database: string;\n  role: string;\n}\n\nconst ENV_CONFIGS: Record<Environment, SnowflakeEnvConfig> = {\n  development: {\n    account: process.env.SNOWFLAKE_ACCOUNT!,\n    warehouse: 'DEV_WH',\n    database: 'DEV_DW',\n    role: 'DEV_ROLE',\n  },\n  staging: {\n    account: process.env.SNOWFLAKE_ACCOUNT!,\n    warehouse: 'STAGING_WH',\n    database: 'STAGING_DW',\n    role: 'STAGING_ROLE',\n  },\n  production: {\n    account: process.env.SNOWFLAKE_ACCOUNT!,\n    warehouse: 'PROD_WH',\n    database: 'PROD_DW',\n    role: 'PROD_ETL_ROLE',\n  },\n};\n\nexport function getEnvConfig(): SnowflakeEnvConfig {\n  const env = (process.env.NODE_ENV || 'development') as Environment;\n  const config = ENV_CONFIGS[env];\n  if (!config) throw new Error(`Unknown environment: ${env}`);\n  return config;\n}\n```\n\n### Step 5: Data Masking for Non-Production\n\n```sql\n-- Mask PII in dev/staging clones\nCREATE OR REPLACE MASKING POLICY pii_mask AS (val STRING)\n  RETURNS STRING ->\n  CASE\n    WHEN CURRENT_DATABASE() = 'PROD_DW' THEN val\n    ELSE SHA2(val)  -- Hash PII in non-prod\n  END;\n\n-- Apply to sensitive columns\nALTER TABLE DEV_DW.SILVER.USERS MODIFY COLUMN email\n  SET MASKING POLICY pii_mask;\nALTER TABLE STAGING_DW.SILVER.USERS MODIFY COLUMN email\n  SET MASKING POLICY pii_mask;\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Clone takes too long | Very large DB | Clone is instant; check for metadata operations |\n| Wrong database context | Environment mismatch | Verify `NODE_ENV` and connection config |\n| Dev credits exhausted | Resource monitor hit | Increase quota or wait for monthly reset |\n| Clone permissions lost | Grants not re-applied after refresh | Add grants to refresh task |\n\n## Resources\n\n- [Zero-Copy Cloning](https://docs.snowflake.com/en/sql-reference/sql/create-clone)\n- [Time Travel](https://docs.snowflake.com/en/user-guide/data-time-travel)\n- [Masking Policies](https://docs.snowflake.com/en/user-guide/tag-based-masking-policies)\n\n## Next Steps\n\nFor observability setup, see `snowflake-observability`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "snowflake-multi-env-setup",
-    "description": "Configure Snowflake across dev, staging, and production with account-level",
-    "allowed-tools": "Read, Write, Edit, Bash(aws:*), Bash(gcloud:*), Bash(vault:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

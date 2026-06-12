@@ -1,16 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000025452",
   "name": "square-post",
   "slug": "square-post-2",
   "description": "|",
   "content": "\n# Square Post Skill\n\n## Purpose\n\nPublish new content to Binance Square by running the local scripts in `scripts/`.\n\nSupported post types:\n- Text-only short posts\n- Image posts with up to 4 images\n- Long articles with a title and optional cover image\n- Video posts with an auto-generated cover image\n\nDo not hand-code API requests for normal posting. The scripts own upload, polling, cover generation, and publish behavior.\n\n## Runtime Dependencies\n\n- Node.js 18 or newer. The scripts use native ES modules and the built-in `fetch` API.\n- `ffmpeg` is required for video posts because `post-video.mjs` extracts the first frame as the cover image.\n- `ffprobe` is required when a video duration is not provided by the user.\n- Network access is required for Binance Square OpenAPI requests and presigned media uploads.\n\n## Authentication\n\nPosting requires a Binance Square OpenAPI key.\n\nBefore posting:\n- Prefer `BINANCE_SQUARE_OPENAPI_KEY` from the user's environment if present.\n- If it is not present, the scripts automatically check `~/.config/binance-square/openapi-key`.\n- If no valid key is found, ask the user to provide an API key first.\n- If the user wants to reuse the key in future requests, save it with `BINANCE_SQUARE_OPENAPI_KEY=<apiKey> node scripts/save-key.mjs`; otherwise use it only for the current command environment.\n- Tell the user they can create an API key at: https://www.binance.com/square/creator-center/home\n\nPass the key only via `BINANCE_SQUARE_OPENAPI_KEY` (env or saved file). Never write it into command arguments or print the full key \u2014 CLI args appear in `ps` output and shell history. When mentioning a key, show only the first 5 and last 4 characters, such as `abc12...xyz9`.\n\n## Scripts\n\nAll commands should be run from this skill directory.\n\n### Text Or Article Post\n\nUse for text-only short posts or long articles without images.\n\n```bash\nnode scripts/post-text.mjs --text \"Hello #crypto $BTC\"\n```\n\nLong article with title and no cover:\n\n```bash\nnode scripts/post-text.mjs --text \"Full article body...\" --title \"Market Report\"\n```\n\nFlags:\n- `--text` required, post text content\n- `--title` optional, sets article-style content\n\n### Image Post\n\nUse for short image posts or long articles with a cover image.\n\n```bash\nnode scripts/post-image.mjs --text \"Chart analysis\" --images \"./chart1.png,./chart2.png\"\n```\n\nLong article with title and cover:\n\n```bash\nnode scripts/post-image.mjs --text \"Full analysis...\" --title \"Market Report\" --cover \"./chart.png\"\n```\n\nFlags:\n- `--text` required, post or article content\n- `--images` required for short image posts only. Use comma-separated image paths with max 4.\n- `--title` optional, sets article-style content. When present, do not pass `--images`.\n- `--cover` required when `--title` is present for an article with media. Article mode supports exactly one cover image.\n\nThe script uploads each image, waits for processing, and publishes with the processed image URL returned by the backend. If `--title` is provided, it publishes `contentType=2`, requires `--cover`, and sends that uploaded image URL as `cover` only. If no `--title` is provided, it publishes `contentType=1` and sends all `--images` as `imageList`.\n\n### Video Post\n\nUse for video posts.\n\n```bash\nnode scripts/post-video.mjs --video \"./video.mp4\" --duration 7.5 --text \"My analysis\"\n```\n\nFlags:\n- `--video` required, local video path\n- `--duration` required, video duration in seconds\n- `--text` optional, post text content\n\nThe script uploads the video, waits for processing, extracts the first frame with `ffmpeg`, uploads that frame as the cover image, and publishes with `cover` included in the request.\n\nIf the user does not provide a duration, use `ffprobe` to determine it before running the script.\n\n## Agent Workflow\n\n1. Resolve the API key (see Authentication). If unresolved, stop and ask the user before doing anything else.\n\n2. Pick the script from user intent using the table below. Then validate against Constraints \u2014 if a constraint is violated, explain it and do not run.\n\n   | User intent | Script | Required flags |\n   |---|---|---|\n   | Short text post | `post-text.mjs` | `--text` |\n   | Long article, no media | `post-text.mjs` | `--text --title` |\n   | Image short post (1\u20134 imgs, no title) | `post-image.mjs` | `--text --images \"<p1,p2,...>\"` |\n   | Article with cover | `post-image.mjs` | `--text --title --cover` |\n   | Video post | `post-video.mjs` | `--video --duration` (+ optional `--text`) |\n\n3. Disambiguate edge cases before running:\n   - Title + exactly one image \u2192 that image is the cover (`--cover`, not `--images`).\n   - Title + multiple images \u2192 stop and ask which single image is the cover.\n   - Video without duration \u2192 run `ffprobe` first to get it.\n\n4. Preserve user content exactly. Do not rewrite, translate, add hashtags/cashtags, or change punctuation. `$coin` and `#topic` text passes through verbatim \u2014 the backend parses them.\n\n5. Run the script with `BINANCE_SQUARE_OPENAPI_KEY` injected into the command environment for one-time use (never as a CLI arg).\n\n6. Report the result:\n   - On success, return the `ID` and `Link` printed by the script.\n   - If the script prints `Success!` with `ID: unavailable` and `Link: unavailable`, treat it as successful \u2014 `/content/add` returned 504 after submission, so no post ID or link is available.\n   - On failure, surface the script error and any API code/message.\n\n## Constraints\n\n- Images: max 4 per post; article cover is exactly 1 image.\n- Video: max 1 per post.\n- Images and video are mutually exclusive in a single post.\n- Only attach media the user explicitly provided; do not auto-attach.\n- Do not modify user-provided text. `#topic` and `$coin` are parsed server-side.\n- Daily limits: 100 posts/day, 400 uploads/day.\n\n## Common Errors\n\n- `220003`: API key not found.\n- `220004`: API key expired.\n- `220009`: Daily post limit exceeded for OpenAPI.\n- `220014`: Daily upload limit exceeded.\n- `20002` or `20022`: Sensitive words detected.\n- `20013`: Content length is limited.\n- `20020` or `220011`: Content body must not be empty.\n- `30008`, `2000001`, or `2000002`: Account or device posting restriction.\n\n## Scope\n\nThis skill only supports publishing new posts. It does not support:\n- Reading, listing, or searching existing posts\n- Editing or deleting posts\n- Commenting, liking, or other interactions\n- User profile or account management\n- Scheduling or drafts\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "square-post",
-    "description": "|",
-    "publish content on Square even without naming the skill": "share this analysis on Square\",",
-    "allowed-tools": "",
-    "metadata": "",
-    "author": "binance-square",
-    "version": "2.0.0"
+  "author": "binance-square",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

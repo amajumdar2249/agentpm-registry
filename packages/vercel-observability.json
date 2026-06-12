@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033504",
   "name": "vercel-observability",
   "slug": "vercel-observability",
   "description": "Set up Vercel observability with runtime logs, analytics, log drains,",
   "content": "# Vercel Observability\n\n## Overview\n\nConfigure comprehensive observability for Vercel deployments using built-in analytics, runtime logs, log drains to external providers, OpenTelemetry integration, and custom instrumentation. Covers the full observability stack from function-level metrics to end-user experience monitoring.\n\n## Prerequisites\n\n- Vercel Pro or Enterprise plan (for log drains and extended retention)\n- External logging provider (Datadog, Axiom, Sentry) \u2014 optional\n- OpenTelemetry SDK \u2014 optional\n\n## Instructions\n\n### Step 1: Enable Vercel Analytics\n\nIn the Vercel dashboard:\n\n1. Go to **Analytics** tab\n2. Enable **Web Analytics** (Core Web Vitals, page views)\n3. Enable **Speed Insights** (real user performance data)\n\n```typescript\n// For Next.js \u2014 add the analytics component\n// src/app/layout.tsx\nimport { Analytics } from '@vercel/analytics/react';\nimport { SpeedInsights } from '@vercel/speed-insights/next';\n\nexport default function RootLayout({ children }) {\n  return (\n    <html>\n      <body>\n        {children}\n        <Analytics />\n        <SpeedInsights />\n      </body>\n    </html>\n  );\n}\n```\n\nInstall: `npm install @vercel/analytics @vercel/speed-insights`\n\n### Step 2: Runtime Logs\n\n```bash\n# View runtime logs via CLI\nvercel logs https://my-app.vercel.app --follow\n\n# Filter by level\nvercel logs https://my-app.vercel.app --level=error\n\n# View logs via API\ncurl -s -H \"Authorization: Bearer $VERCEL_TOKEN\" \\\n  \"https://api.vercel.com/v2/deployments/dpl_xxx/events?limit=50&direction=backward\" \\\n  | jq '.[] | {timestamp: .created, level: .level, message: .text}'\n```\n\nRuntime logs include:\n\n- Function invocation start/end with duration\n- `console.log/warn/error` output from functions\n- Edge Middleware execution logs\n- HTTP request/response metadata\n\n### Step 3: Structured Logging in Functions\n\n```typescript\n// lib/logger.ts \u2014 structured JSON logging\ninterface LogEntry {\n  level: 'info' | 'warn' | 'error';\n  message: string;\n  requestId?: string;\n  duration?: number;\n  [key: string]: unknown;\n}\n\nexport function log(entry: LogEntry): void {\n  // Vercel captures console output as runtime logs\n  const output = JSON.stringify({\n    ...entry,\n    timestamp: new Date().toISOString(),\n    region: process.env.VERCEL_REGION,\n    env: process.env.VERCEL_ENV,\n  });\n\n  switch (entry.level) {\n    case 'error': console.error(output); break;\n    case 'warn': console.warn(output); break;\n    default: console.log(output);\n  }\n}\n\n// Usage in API route:\nexport async function GET(request: Request) {\n  const requestId = crypto.randomUUID();\n  const start = Date.now();\n\n  try {\n    const data = await fetchData();\n    log({ level: 'info', message: 'Fetched data', requestId, duration: Date.now() - start });\n    return Response.json(data);\n  } catch (error) {\n    log({ level: 'error', message: 'Data fetch failed', requestId, error: String(error) });\n    return Response.json({ error: 'Internal error', requestId }, { status: 500 });\n  }\n}\n```\n\n### Step 4: Log Drains (External Providers)\n\nConfigure log drains to send all Vercel logs to your logging provider:\n\nIn dashboard: **Settings > Log Drains > Add**\n\nSupported providers:\n\n| Provider | Type | Setup |\n|----------|------|-------|\n| Datadog | HTTP | API key + site URL |\n| Axiom | HTTP | API token + dataset |\n| Sentry | HTTP | DSN |\n| Custom | HTTP/NDJSON | Any HTTPS endpoint |\n| Grafana Loki | HTTP | Push URL + auth |\n\nLog drain delivers:\n\n- **Runtime logs**: function invocations, console output\n- **Build logs**: build step output, warnings, errors\n- **Static logs**: CDN access logs (edge)\n- **Firewall logs**: WAF events\n\n```bash\n# Create a log drain via API\ncurl -X POST \"https://api.vercel.com/v2/integrations/log-drains\" \\\n  -H \"Authorization: Bearer $VERCEL_TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"name\": \"my-datadog-drain\",\n    \"type\": \"json\",\n    \"url\": \"https://http-intake.logs.datadoghq.com/api/v2/logs\",\n    \"headers\": {\"DD-API-KEY\": \"your-datadog-api-key\"},\n    \"sources\": [\"lambda\", \"edge\", \"build\", \"static\"]\n  }'\n```\n\n### Step 5: OpenTelemetry Integration\n\n```typescript\n// instrumentation.ts (Next.js 13.4+)\nimport { NodeSDK } from '@opentelemetry/sdk-node';\nimport { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';\nimport { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';\n\nexport function register() {\n  const sdk = new NodeSDK({\n    traceExporter: new OTLPTraceExporter({\n      url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,\n    }),\n    instrumentations: [getNodeAutoInstrumentations()],\n    serviceName: 'my-vercel-app',\n  });\n  sdk.start();\n}\n```\n\n```javascript\n// next.config.js\nmodule.exports = {\n  experimental: {\n    instrumentationHook: true,\n  },\n};\n```\n\n### Step 6: Error Tracking with Sentry\n\n```bash\nnpx @sentry/wizard@latest -i nextjs\n```\n\n```typescript\n// sentry.client.config.ts\nimport * as Sentry from '@sentry/nextjs';\n\nSentry.init({\n  dsn: process.env.NEXT_PUBLIC_SENTRY_DSN,\n  environment: process.env.VERCEL_ENV,\n  release: process.env.VERCEL_GIT_COMMIT_SHA,\n  tracesSampleRate: process.env.VERCEL_ENV === 'production' ? 0.1 : 1.0,\n});\n```\n\n## Monitoring Dashboard Checklist\n\n| Metric | Source | Alert Threshold |\n|--------|--------|----------------|\n| Error rate | Runtime logs | > 1% of requests |\n| P95 function latency | Vercel Analytics | > 2s |\n| Cold start frequency | Runtime logs | > 20% of invocations |\n| Build success rate | Build logs | Any failure |\n| Core Web Vitals (LCP) | Speed Insights | > 2.5s |\n| Edge cache hit rate | Static logs | < 80% |\n\n## Output\n\n- Vercel Analytics and Speed Insights enabled\n- Structured JSON logging in all functions\n- Log drains configured to external provider\n- Error tracking with Sentry or equivalent\n- OpenTelemetry tracing for distributed systems\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Logs missing | Log retention expired (1hr free, 30d with Plus) | Enable log drains for persistence |\n| Analytics not tracking | Missing `<Analytics />` component | Add to root layout |\n| Log drain not receiving | Wrong URL or auth headers | Test the endpoint directly with curl |\n| Sentry not capturing errors | DSN not set in production env | Add `NEXT_PUBLIC_SENTRY_DSN` to Production scope |\n| OTEL traces missing | instrumentation.ts not loaded | Enable `instrumentationHook` in next.config.js |\n\n## Resources\n\n- [Vercel Observability](https://vercel.com/docs/observability)\n- [Runtime Logs](https://vercel.com/docs/logs/runtime)\n- [Vercel Analytics](https://vercel.com/docs/analytics)\n- [Speed Insights](https://vercel.com/docs/speed-insights)\n- [Log Drains](https://vercel.com/docs/observability/log-drains)\n- [OpenTelemetry + Next.js](https://nextjs.org/docs/app/building-your-application/optimizing/open-telemetry)\n\n## Next Steps\n\nFor incident response, see `vercel-incident-runbook`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "vercel-observability",
-    "description": "Set up Vercel observability with runtime logs, analytics, log drains,",
-    "allowed-tools": "Read, Write, Edit, Bash(vercel:*), Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032289",
   "name": "instantly-common-errors",
   "slug": "instantly-common-errors",
   "description": "Diagnose and fix Instantly.ai API v2 common errors and exceptions.",
   "content": "# Instantly Common Errors\n\n## Overview\n\nDiagnostic reference for Instantly API v2 errors. Covers HTTP status codes, campaign state errors, account health issues, lead operation failures, and webhook delivery problems.\n\n## Prerequisites\n\n- Completed `instantly-install-auth` setup\n- Access to Instantly dashboard for verification\n- API key with appropriate scopes\n\n## HTTP Status Codes\n\n| Status | Meaning | Common Cause | Fix |\n|--------|---------|-------------|-----|\n| `400` | Bad Request | Malformed JSON, invalid field values | Validate request body against schema |\n| `401` | Unauthorized | Invalid, expired, or revoked API key | Regenerate key in Settings > Integrations |\n| `403` | Forbidden | API key missing required scope | Create key with correct scope (e.g., `campaigns:all`) |\n| `404` | Not Found | Invalid campaign/lead/account ID | Verify resource exists with a GET call first |\n| `422` | Unprocessable Entity | Business logic violation (duplicate lead, invalid state) | Check error body for details |\n| `429` | Too Many Requests | Rate limit exceeded | Implement exponential backoff (see below) |\n| `500` | Internal Server Error | Instantly server issue | Retry with backoff; check status.instantly.ai |\n\n## Campaign Errors\n\n### Campaign Won't Activate (Stuck in Draft)\n\n```typescript\n// Diagnosis: check campaign requirements\nasync function diagnoseCampaign(campaignId: string) {\n  const campaign = await instantly<Campaign>(`/campaigns/${campaignId}`);\n\n  const issues: string[] = [];\n\n  // Check sequences\n  if (!campaign.sequences?.length || !campaign.sequences[0]?.steps?.length) {\n    issues.push(\"No email sequences \u2014 add at least one step with subject + body\");\n  }\n\n  // Check schedule\n  if (!campaign.campaign_schedule?.schedules?.length) {\n    issues.push(\"No sending schedule \u2014 add schedule with timing and days\");\n  }\n\n  // Check sending accounts\n  const mappings = await instantly(`/account-campaign-mappings/${campaignId}`);\n  if (!Array.isArray(mappings) || mappings.length === 0) {\n    issues.push(\"No sending accounts assigned \u2014 add via PATCH /campaigns/{id} with email_list\");\n  }\n\n  // Check for leads\n  const leads = await instantly<Lead[]>(\"/leads/list\", {\n    method: \"POST\",\n    body: JSON.stringify({ campaign: campaignId, limit: 1 }),\n  });\n  if (leads.length === 0) {\n    issues.push(\"No leads \u2014 add leads via POST /leads\");\n  }\n\n  if (issues.length === 0) {\n    console.log(\"Campaign looks ready to activate\");\n  } else {\n    console.log(\"Issues preventing activation:\");\n    issues.forEach((i) => console.log(`  - ${i}`));\n  }\n}\n```\n\n### Campaign Status Codes\n\n| Status | Label | Meaning |\n|--------|-------|---------|\n| `0` | Draft | Not yet activated |\n| `1` | Active | Currently sending |\n| `2` | Paused | Manually paused |\n| `3` | Completed | All leads processed |\n| `4` | Running Subsequences | Main sequence done, subsequences active |\n| `-1` | Accounts Unhealthy | Sending accounts have SMTP/IMAP errors |\n| `-2` | Bounce Protect | Auto-paused due to high bounce rate |\n| `-99` | Suspended | Account-level suspension |\n\n### Fix: Accounts Unhealthy (-1)\n\n```typescript\nasync function fixUnhealthyAccounts(campaignId: string) {\n  // 1. Get accounts assigned to campaign\n  const accounts = await instantly<Account[]>(\"/accounts?limit=100\");\n\n  // 2. Test vitals for each\n  const vitals = await instantly(\"/accounts/test/vitals\", {\n    method: \"POST\",\n    body: JSON.stringify({ accounts: accounts.map((a) => a.email) }),\n  });\n\n  // 3. Identify and fix broken accounts\n  for (const v of vitals as any[]) {\n    if (v.smtp_status !== \"ok\" || v.imap_status !== \"ok\") {\n      console.log(`BROKEN: ${v.email} \u2014 SMTP=${v.smtp_status}, IMAP=${v.imap_status}`);\n      // Pause the broken account\n      await instantly(`/accounts/${encodeURIComponent(v.email)}/pause`, { method: \"POST\" });\n      console.log(`  Paused ${v.email}. Fix credentials, then resume.`);\n    }\n  }\n}\n```\n\n## Lead Errors\n\n### Duplicate Lead (422)\n\n```typescript\n// Prevent duplicates by setting skip flags\nawait instantly(\"/leads\", {\n  method: \"POST\",\n  body: JSON.stringify({\n    campaign: campaignId,\n    email: \"user@example.com\",\n    first_name: \"Jane\",\n    skip_if_in_workspace: true,   // skip if email exists anywhere in workspace\n    skip_if_in_campaign: true,    // skip if already in this campaign\n  }),\n});\n```\n\n### Lead Status Reference\n\n| Status | Label | Description |\n|--------|-------|-------------|\n| `1` | Active | Eligible to receive emails |\n| `2` | Paused | Manually paused |\n| `3` | Completed | All sequence steps sent |\n| `-1` | Bounced | Email bounced |\n| `-2` | Unsubscribed | Lead unsubscribed |\n| `-3` | Skipped | Skipped (blocklist, duplicate, etc.) |\n\n## Rate Limit Handling\n\n```typescript\nasync function withBackoff<T>(\n  operation: () => Promise<T>,\n  maxRetries = 5\n): Promise<T> {\n  for (let attempt = 0; attempt <= maxRetries; attempt++) {\n    try {\n      return await operation();\n    } catch (err: any) {\n      if (err.status === 429 && attempt < maxRetries) {\n        const wait = Math.pow(2, attempt) * 1000;\n        console.warn(`429 Rate Limited. Waiting ${wait}ms (attempt ${attempt + 1}/${maxRetries})`);\n        await new Promise((r) => setTimeout(r, wait));\n        continue;\n      }\n      throw err;\n    }\n  }\n  throw new Error(\"Unreachable\");\n}\n```\n\n## Webhook Errors\n\n| Issue | Diagnostic | Fix |\n|-------|-----------|-----|\n| Events not delivered | Check webhook status: `GET /webhooks` | Webhook may be paused \u2014 resume with `POST /webhooks/{id}/resume` |\n| Wrong event format | Compare to expected schema | Ensure `event_type` matches: `email_sent`, `reply_received`, etc. |\n| Delivery failures | Check `GET /webhook-events/summary` | Fix target URL, ensure 2xx response within 30s |\n| Retries exhausting | Instantly retries 3x in 30s | Return 200 immediately, process async |\n\n## Quick Diagnostic Script\n\n```bash\nset -euo pipefail\necho \"=== Instantly Health Check ===\"\n\n# Test auth\ncurl -s -o /dev/null -w \"Auth: HTTP %{http_code}\\n\" \\\n  https://api.instantly.ai/api/v2/campaigns?limit=1 \\\n  -H \"Authorization: Bearer $INSTANTLY_API_KEY\"\n\n# Count campaigns by status\ncurl -s https://api.instantly.ai/api/v2/campaigns?limit=100 \\\n  -H \"Authorization: Bearer $INSTANTLY_API_KEY\" | \\\n  jq 'group_by(.status) | map({status: .[0].status, count: length})'\n\n# Check account health\ncurl -s https://api.instantly.ai/api/v2/accounts?limit=100 \\\n  -H \"Authorization: Bearer $INSTANTLY_API_KEY\" | \\\n  jq '[.[] | {email, status, warmup_status}] | .[:5]'\n```\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `401` after key rotation | Old key cached | Restart app / clear env cache |\n| `403` on campaign activate | Missing `campaigns:update` scope | Regenerate API key with correct scopes |\n| `422` duplicate lead | Lead already in workspace | Use `skip_if_in_workspace: true` |\n| Campaign `-2` bounce protect | Bounce rate >5% | Clean lead list, verify emails before import |\n| Warmup health dropping | Too many campaign emails too soon | Reduce daily_limit, extend warmup period |\n\n## Resources\n\n- [Instantly API v2 Docs](https://developer.instantly.ai/)\n- [Instantly Help Center](https://help.instantly.ai)\n- [API Schemas](https://developer.instantly.ai/api/v2/schemas)\n\n## Next Steps\n\nFor structured debugging, see `instantly-debug-bundle`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "instantly-common-errors",
-    "description": "Diagnose and fix Instantly.ai API v2 common errors and exceptions.",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

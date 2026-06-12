@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032815",
   "name": "openrouter-rate-limits",
   "slug": "openrouter-rate-limits",
   "description": "Understand and handle OpenRouter rate limits. Use when hitting 429 errors,",
   "content": "# OpenRouter Rate Limits\n\n## Overview\n\nOpenRouter rate limits are per-key, not per-account. Free tier keys get lower limits; paid keys get higher limits that scale with credit balance. The OpenAI SDK has built-in retry with exponential backoff for 429 responses. Check your current limits via `GET /api/v1/auth/key`. Rate limit headers are returned on every response.\n\n## Check Your Rate Limits\n\n```bash\n# Query current rate limit configuration for your key\ncurl -s https://openrouter.ai/api/v1/auth/key \\\n  -H \"Authorization: Bearer $OPENROUTER_API_KEY\" | jq '{\n    label: .data.label,\n    rate_limit: .data.rate_limit,\n    is_free_tier: .data.is_free_tier,\n    credits_used: .data.usage,\n    credit_limit: .data.limit\n  }'\n# Example output:\n# {\n#   \"label\": \"my-app-prod\",\n#   \"rate_limit\": {\"requests\": 200, \"interval\": \"10s\"},\n#   \"is_free_tier\": false,\n#   \"credits_used\": 12.34,\n#   \"credit_limit\": 100\n# }\n```\n\n## Rate Limit Tiers\n\n| Tier | Requests | Interval | Who |\n|------|----------|----------|-----|\n| Free (no credits) | 20 | 10s | New accounts |\n| Free (with credits) | 200 | 10s | Accounts with any credits |\n| Paid | Higher | Varies | Based on credit balance |\n\nFree models have separate limits: 50 req/day (free users), 1000 req/day (with $10+ credits).\n\n## Read Rate Limit Headers\n\n```python\nimport os\nfrom openai import OpenAI\nimport requests as http_requests\n\n# The OpenAI SDK abstracts headers, so use requests for direct access\ndef check_rate_headers():\n    \"\"\"Make a request and inspect rate limit headers.\"\"\"\n    resp = http_requests.post(\n        \"https://openrouter.ai/api/v1/chat/completions\",\n        headers={\n            \"Authorization\": f\"Bearer {os.environ['OPENROUTER_API_KEY']}\",\n            \"Content-Type\": \"application/json\",\n            \"HTTP-Referer\": \"https://my-app.com\",\n        },\n        json={\n            \"model\": \"openai/gpt-4o-mini\",\n            \"messages\": [{\"role\": \"user\", \"content\": \"hi\"}],\n            \"max_tokens\": 1,\n        },\n    )\n    return {\n        \"status\": resp.status_code,\n        \"x-ratelimit-limit\": resp.headers.get(\"x-ratelimit-limit\"),\n        \"x-ratelimit-remaining\": resp.headers.get(\"x-ratelimit-remaining\"),\n        \"x-ratelimit-reset\": resp.headers.get(\"x-ratelimit-reset\"),\n        \"retry-after\": resp.headers.get(\"retry-after\"),\n    }\n```\n\n## Retry Strategy with OpenAI SDK\n\n```python\nfrom openai import OpenAI\n\n# The SDK handles 429 retries automatically with exponential backoff\nclient = OpenAI(\n    base_url=\"https://openrouter.ai/api/v1\",\n    api_key=os.environ[\"OPENROUTER_API_KEY\"],\n    max_retries=5,           # Default is 2; increase for high-throughput\n    timeout=60.0,            # Per-request timeout\n    default_headers={\"HTTP-Referer\": \"https://my-app.com\", \"X-Title\": \"my-app\"},\n)\n\n# The SDK will:\n# 1. Catch 429 responses\n# 2. Read Retry-After header\n# 3. Wait with exponential backoff (+ jitter)\n# 4. Retry up to max_retries times\nresponse = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet\",\n    messages=[{\"role\": \"user\", \"content\": \"Hello\"}],\n    max_tokens=200,\n)\n```\n\n## Custom Rate Limiter (Client-Side)\n\n```python\nimport time, threading\nfrom collections import deque\n\nclass TokenBucket:\n    \"\"\"Client-side rate limiter to prevent hitting server limits.\"\"\"\n\n    def __init__(self, rate: int = 200, interval: float = 10.0):\n        self.rate = rate           # Max requests per interval\n        self.interval = interval\n        self._timestamps = deque()\n        self._lock = threading.Lock()\n\n    def acquire(self, timeout: float = 30.0) -> bool:\n        \"\"\"Block until a request slot is available.\"\"\"\n        deadline = time.monotonic() + timeout\n        while time.monotonic() < deadline:\n            with self._lock:\n                now = time.monotonic()\n                # Remove timestamps outside the window\n                while self._timestamps and now - self._timestamps[0] > self.interval:\n                    self._timestamps.popleft()\n\n                if len(self._timestamps) < self.rate:\n                    self._timestamps.append(now)\n                    return True\n\n            time.sleep(0.1)  # Wait and retry\n        return False  # Timed out\n\nlimiter = TokenBucket(rate=150, interval=10.0)  # Stay under 200 limit\n\ndef rate_limited_completion(messages, **kwargs):\n    \"\"\"Completion with client-side rate limiting.\"\"\"\n    if not limiter.acquire(timeout=30):\n        raise TimeoutError(\"Rate limiter timeout\")\n    return client.chat.completions.create(messages=messages, **kwargs)\n```\n\n## Batch Processing with Rate Awareness\n\n```python\nimport asyncio\nfrom openai import AsyncOpenAI\n\nasync def batch_with_rate_limit(prompts: list[str], model=\"openai/gpt-4o-mini\",\n                                 max_concurrent=10, delay_between=0.05):\n    \"\"\"Process a batch of prompts with rate-aware concurrency.\"\"\"\n    semaphore = asyncio.Semaphore(max_concurrent)\n    aclient = AsyncOpenAI(\n        base_url=\"https://openrouter.ai/api/v1\",\n        api_key=os.environ[\"OPENROUTER_API_KEY\"],\n        max_retries=5,\n        default_headers={\"HTTP-Referer\": \"https://my-app.com\", \"X-Title\": \"my-app\"},\n    )\n\n    async def process(prompt, idx):\n        await asyncio.sleep(idx * delay_between)  # Stagger requests\n        async with semaphore:\n            response = await aclient.chat.completions.create(\n                model=model,\n                messages=[{\"role\": \"user\", \"content\": prompt}],\n                max_tokens=200,\n            )\n            return response.choices[0].message.content\n\n    return await asyncio.gather(*[process(p, i) for i, p in enumerate(prompts)])\n```\n\n## Error Handling\n\n| Error | Cause | Fix |\n|-------|-------|-----|\n| 429 Too Many Requests | Exceeded requests per interval | SDK auto-retries; increase `max_retries` |\n| Retry storm | Multiple clients retrying simultaneously | Add random jitter (0-1s) to retry delay |\n| Silent throttling | Responses slow down before 429 | Monitor latency; proactively reduce rate |\n| Free tier limit hit | 50 req/day on free models | Add credits ($10+) for 1000 req/day limit |\n\n## Enterprise Considerations\n\n- Rate limits are per-key: use multiple keys to multiply effective throughput\n- The OpenAI SDK handles 429 retries automatically -- configure `max_retries` (default 2)\n- Implement client-side rate limiting to stay under limits proactively (cheaper than retries)\n- Free models have daily limits separate from the per-key rate limit\n- Monitor `x-ratelimit-remaining` headers to detect approaching limits before hitting 429\n- For batch workloads, use staggered concurrent requests rather than burst patterns\n\n## References\n\n- [Examples](${CLAUDE_SKILL_DIR}/references/examples.md) | [Errors](${CLAUDE_SKILL_DIR}/references/errors.md)\n- [Rate Limits](https://openrouter.ai/docs/api/limits) | [Auth/Key API](https://openrouter.ai/docs/api/reference/authentication)\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "openrouter-rate-limits",
-    "description": "Understand and handle OpenRouter rate limits. Use when hitting 429 errors,",
-    "building high-throughput systems, or implementing retry logic. Triggers": "openrouter",
-    "allowed-tools": "Read, Write, Edit, Bash, Grep",
-    "version": "2.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

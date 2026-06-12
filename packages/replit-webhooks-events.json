@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033062",
   "name": "replit-webhooks-events",
   "slug": "replit-webhooks-events",
   "description": "Handle Replit deployment events, build Replit Extensions, and set up",
   "content": "# Replit Webhooks & Events\n\n## Overview\n\nIntegrate with Replit's event ecosystem: deployment lifecycle hooks, Replit Extensions API for workspace customization, and Agents & Automations for scheduled tasks and chatbots. Also covers external webhook endpoints hosted on Replit.\n\n## Prerequisites\n\n- Replit account with Deployments enabled (Core or Teams)\n- For Extensions: familiarity with React and TypeScript\n- For Automations: Replit Agent access\n\n## Instructions\n\n### Step 1: Deployment Lifecycle Monitoring\n\nMonitor deployment events by polling or building a status dashboard:\n\n```typescript\n// src/deploy-monitor.ts \u2014 Track deployment health\nimport express from 'express';\n\nconst app = express();\napp.use(express.json());\n\n// Health endpoint that deployment monitoring can ping\napp.get('/health', async (req, res) => {\n  res.json({\n    status: 'healthy',\n    environment: process.env.REPL_SLUG,\n    region: process.env.REPLIT_DEPLOYMENT_REGION,\n    deployedAt: process.env.REPLIT_DEPLOYMENT_TIMESTAMP || 'unknown',\n    uptime: process.uptime(),\n  });\n});\n\n// Post-deploy smoke test endpoint\napp.get('/api/readiness', async (req, res) => {\n  const checks = {\n    database: await checkDB(),\n    storage: await checkStorage(),\n    secrets: checkSecrets(),\n  };\n\n  const allHealthy = Object.values(checks).every(Boolean);\n  res.status(allHealthy ? 200 : 503).json({ ready: allHealthy, checks });\n});\n\nasync function checkDB(): Promise<boolean> {\n  try {\n    const { Pool } = await import('pg');\n    const pool = new Pool({ connectionString: process.env.DATABASE_URL });\n    await pool.query('SELECT 1');\n    await pool.end();\n    return true;\n  } catch { return false; }\n}\n\nasync function checkStorage(): Promise<boolean> {\n  try {\n    const { Client } = await import('@replit/object-storage');\n    const storage = new Client();\n    await storage.list({ maxResults: 1 });\n    return true;\n  } catch { return false; }\n}\n\nfunction checkSecrets(): boolean {\n  const required = ['DATABASE_URL', 'JWT_SECRET'];\n  return required.every(k => !!process.env[k]);\n}\n```\n\n### Step 2: External Webhook Receiver\n\nHost webhook endpoints on Replit to receive events from external services:\n\n```typescript\n// src/webhooks.ts \u2014 Receive webhooks from GitHub, Stripe, etc.\nimport express from 'express';\nimport crypto from 'crypto';\n\nconst router = express.Router();\n\n// Webhook signature verification\nfunction verifySignature(\n  payload: string,\n  signature: string,\n  secret: string\n): boolean {\n  const expected = crypto\n    .createHmac('sha256', secret)\n    .update(payload)\n    .digest('hex');\n  return crypto.timingSafeEqual(\n    Buffer.from(signature),\n    Buffer.from(`sha256=${expected}`)\n  );\n}\n\n// GitHub webhook receiver\nrouter.post('/webhooks/github', express.raw({ type: '*/*' }), (req, res) => {\n  const signature = req.headers['x-hub-signature-256'] as string;\n  const secret = process.env.GITHUB_WEBHOOK_SECRET!;\n\n  if (!verifySignature(req.body.toString(), signature, secret)) {\n    return res.status(401).json({ error: 'Invalid signature' });\n  }\n\n  const event = req.headers['x-github-event'] as string;\n  const payload = JSON.parse(req.body.toString());\n\n  // Respond immediately, process async\n  res.status(200).json({ received: true });\n\n  handleGitHubEvent(event, payload).catch(console.error);\n});\n\nasync function handleGitHubEvent(event: string, payload: any) {\n  switch (event) {\n    case 'push':\n      console.log(`Push to ${payload.ref} by ${payload.pusher.name}`);\n      // Replit auto-syncs from connected GitHub \u2014 no manual deploy needed\n      break;\n    case 'pull_request':\n      console.log(`PR #${payload.number}: ${payload.action}`);\n      break;\n    case 'issues':\n      console.log(`Issue #${payload.issue.number}: ${payload.action}`);\n      break;\n  }\n}\n\n// Generic webhook receiver\nrouter.post('/webhooks/:service', express.json(), (req, res) => {\n  const { service } = req.params;\n  console.log(`Webhook from ${service}:`, JSON.stringify(req.body).slice(0, 200));\n  res.status(200).json({ received: true });\n});\n\nexport default router;\n```\n\n### Step 3: Replit Extensions\n\nBuild custom IDE extensions that integrate into the Replit Workspace:\n\n```typescript\n// Extension entry point \u2014 React-based UI panel\nimport { useReplitClient } from '@replit/extensions-react';\n\nfunction MyExtension() {\n  const { data: files, error } = useReplitClient().fs.readDir('/');\n\n  if (error) return <div>Error: {error.message}</div>;\n\n  return (\n    <div>\n      <h2>Project Files</h2>\n      <ul>\n        {files?.map(f => <li key={f.path}>{f.path}</li>)}\n      </ul>\n    </div>\n  );\n}\n\n// Extensions can access:\n// - File system (read/write files)\n// - Theme (match Replit's UI)\n// - Database (Replit DB)\n// - User info\n// Each tab has isolated permissions\n```\n\n```markdown\nPublishing an Extension:\n1. Create Extension from template (Extensions > Build)\n2. Develop in the provided Repl workspace\n3. Test with the Extensions DevTools\n4. Release on the Extensions Store (public or private)\n```\n\n### Step 4: Agents & Automations (Beta)\n\nCreate automated workflows using natural language:\n\n```markdown\nReplit Agents & Automations can:\n- Run on a schedule (cron-like)\n- Respond to Slack/Telegram messages\n- Process incoming webhooks\n- Execute database queries automatically\n\nSetup:\n1. Open your Repl > Automations tab\n2. Create new automation:\n   - Trigger: Schedule (e.g., \"every day at 9am\")\n   - Action: Natural language instruction\n     \"Query the database for users who signed up yesterday,\n      format as CSV, and send to Slack #new-users channel\"\n3. Test and activate\n\nExample automations:\n- Daily database backup to Object Storage\n- Slack bot that queries your app's API\n- Scheduled data cleanup (delete old records)\n- Webhook-to-Slack notification bridge\n```\n\n### Step 5: Deployment Event Notifications\n\nSet up external monitoring for deployment status changes:\n\n```typescript\n// src/deploy-notifier.ts \u2014 Notify team on deployment events\nasync function notifySlack(message: string) {\n  const webhookUrl = process.env.SLACK_WEBHOOK_URL;\n  if (!webhookUrl) return;\n\n  await fetch(webhookUrl, {\n    method: 'POST',\n    headers: { 'Content-Type': 'application/json' },\n    body: JSON.stringify({ text: message }),\n  });\n}\n\n// Call after successful startup\nconst startTime = Date.now();\napp.listen(PORT, '0.0.0.0', async () => {\n  const bootTime = ((Date.now() - startTime) / 1000).toFixed(1);\n  await notifySlack(\n    `Deployment started: ${process.env.REPL_SLUG}\\n` +\n    `Boot time: ${bootTime}s\\n` +\n    `URL: https://${process.env.REPL_SLUG}.replit.app`\n  );\n});\n\n// Graceful shutdown notification\nprocess.on('SIGTERM', async () => {\n  await notifySlack(`Deployment stopping: ${process.env.REPL_SLUG}`);\n  process.exit(0);\n});\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Webhook not received | Repl sleeping | Use Deployments for always-on |\n| Signature verification fails | Wrong secret | Verify secret matches provider config |\n| Extension not loading | API version mismatch | Update `@replit/extensions-react` |\n| Automation not triggering | Schedule syntax error | Verify cron expression in automation settings |\n| Webhook timeout | Processing too slow | Respond 200 immediately, process async |\n\n## Resources\n\n- [Replit Extensions](https://docs.replit.com/extensions/)\n- [Replit Extensions API](https://docs.replit.com/extensions/extensions)\n- [Replit Deployments](https://docs.replit.com/hosting/deployments)\n- [Monitoring Deployments](https://docs.replit.com/cloud-services/deployments/monitoring-a-deployment)\n\n## Next Steps\n\nFor multi-environment setup, see `replit-multi-env-setup`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "replit-webhooks-events",
-    "description": "Handle Replit deployment events, build Replit Extensions, and set up",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

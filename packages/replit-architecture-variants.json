@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033034",
   "name": "replit-architecture-variants",
   "slug": "replit-architecture-variants",
   "description": "Choose and implement Replit architecture blueprints: single-file script,",
   "content": "# Replit Architecture Variants\n\n## Overview\n\nApplication architectures on Replit at three scales: single-file prototype, modular production app, and multi-service architecture. Each matches Replit's container model, built-in services, and deployment types.\n\n## Prerequisites\n\n- Replit account\n- Understanding of deployment types (Static, Autoscale, Reserved VM)\n- Familiarity with Replit's storage options\n\n## Architecture Decision Matrix\n\n| Factor | Single-File | Modular App | Multi-Service |\n|--------|------------|-------------|---------------|\n| **Users** | Prototype, < 100/day | 100-10K/day | 10K+/day |\n| **Database** | Replit KV (50 MiB) | PostgreSQL | PostgreSQL + cache |\n| **Storage** | Local + KV | Object Storage | Object Storage + CDN |\n| **Persistence** | Ephemeral OK | Durable required | Durable required |\n| **Deployment** | Repl Run / Autoscale | Autoscale / Reserved VM | Multiple Reserved VMs |\n| **Cost** | Free-$7/mo | $7-25/mo | $25+/mo |\n| **Always-on** | No (free), Yes (deploy) | Yes (deployment) | Yes (deployment) |\n\n## Instructions\n\n### Variant A: Single-File Script (Prototype)\n\n**Best for:** Bots, scripts, learning, hackathon projects.\n\n```python\n# main.py \u2014 everything in one file\nfrom flask import Flask, request, jsonify\nfrom replit import db\nimport os\n\napp = Flask(__name__)\n\n# KV Database for simple state\n@app.route('/')\ndef home():\n    count = db.get(\"visits\") or 0\n    db[\"visits\"] = count + 1\n    return f\"Visit #{count + 1}\"\n\n@app.route('/api/notes', methods=['GET', 'POST'])\ndef notes():\n    if request.method == 'POST':\n        note = request.json\n        notes = db.get(\"notes\") or []\n        notes.append(note)\n        db[\"notes\"] = notes\n        return jsonify(note), 201\n    return jsonify(db.get(\"notes\") or [])\n\napp.run(host='0.0.0.0', port=int(os.environ.get('PORT', 3000)))\n```\n\n```toml\n# .replit\nrun = \"python main.py\"\n\n[nix]\nchannel = \"stable-24_05\"\n\n[deployment]\nrun = [\"python\", \"main.py\"]\ndeploymentTarget = \"autoscale\"\n```\n\n**Limitations:** 50 MiB data, files lost on restart, cold starts. Upgrade to Variant B when you need structured data or durability.\n\n---\n\n### Variant B: Modular App with PostgreSQL (Production)\n\n**Best for:** Web apps, APIs, SaaS MVPs with 100-10K daily users.\n\n```\nmy-app/\n\u251c\u2500\u2500 .replit\n\u251c\u2500\u2500 replit.nix\n\u251c\u2500\u2500 package.json\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 index.ts          # Express entry point\n\u2502   \u251c\u2500\u2500 config.ts          # Environment + secrets validation\n\u2502   \u251c\u2500\u2500 routes/\n\u2502   \u2502   \u251c\u2500\u2500 api.ts         # Business logic\n\u2502   \u2502   \u251c\u2500\u2500 auth.ts        # Replit Auth integration\n\u2502   \u2502   \u2514\u2500\u2500 health.ts      # Health check\n\u2502   \u251c\u2500\u2500 services/\n\u2502   \u2502   \u251c\u2500\u2500 db.ts          # PostgreSQL pool\n\u2502   \u2502   \u251c\u2500\u2500 kv.ts          # KV for cache/sessions\n\u2502   \u2502   \u2514\u2500\u2500 storage.ts     # Object Storage for files\n\u2502   \u2514\u2500\u2500 middleware/\n\u2502       \u251c\u2500\u2500 auth.ts        # Auth header extraction\n\u2502       \u2514\u2500\u2500 rateLimit.ts   # Rate limiting\n\u2514\u2500\u2500 tests/\n```\n\n```\nArchitecture:\n  Client \u2192 Replit Proxy (Auth) \u2192 Express Server\n                                      \u2502\n                    \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2524\n                    \u2502                 \u2502\n              PostgreSQL         KV Database\n              (structured)       (cache/sessions)\n                    \u2502\n              Object Storage\n              (file uploads)\n```\n\n**Key decisions:**\n\n- PostgreSQL for all structured data (users, posts, orders)\n- KV Database for cache and session data only\n- Object Storage for user uploads and backups\n- Single Deployment (Autoscale or Reserved VM)\n\n---\n\n### Variant C: Multi-Service (Scale)\n\n**Best for:** Production services with 10K+ daily users, background jobs, or real-time features.\n\n```\nArchitecture:\n  CDN (Cloudflare) \u2192 Replit Deployment 1: API Server\n                            \u2502\n                      PostgreSQL (Replit)\n                      Redis (Upstash \u2014 external)\n                            \u2502\n                     Replit Deployment 2: Worker\n                            \u2502\n                      Queue (Upstash Kafka \u2014 external)\n                            \u2502\n                     Replit Deployment 3: Static Frontend\n```\n\n**Implementation:**\n\n```markdown\nRepl 1: my-app-api\n  - Express/Fastify API server\n  - Reserved VM deployment (always-on)\n  - Handles authentication, CRUD operations\n  - Publishes events to queue\n\nRepl 2: my-app-worker\n  - Background job processor\n  - Reserved VM deployment (always-on)\n  - Consumes events from queue\n  - Handles: email sending, image processing, reports\n\nRepl 3: my-app-frontend\n  - React/Next.js frontend\n  - Static deployment (free, CDN-backed)\n  - Calls API server for data\n\nCommunication:\n  - API to Worker: Upstash Kafka/Redis queues\n  - Frontend to API: REST/GraphQL over HTTPS\n  - Shared state: PostgreSQL + Redis\n```\n\n**When to use external services:**\n\n| Service | Replit-native | External (Recommended at Scale) |\n|---------|---------------|--------------------------------|\n| Database | Replit PostgreSQL | Neon, Supabase, PlanetScale |\n| Cache | Replit KV (50 MiB limit) | Upstash Redis |\n| Queue | None built-in | Upstash Kafka, BullMQ |\n| Storage | Object Storage | Cloudflare R2, AWS S3 |\n| Search | None built-in | Algolia, Meilisearch |\n\n---\n\n### Variant D: Static + API Split\n\n**Best for:** Frontend-heavy apps with a lightweight API backend.\n\n```\nArchitecture:\n  Client \u2192 Replit Static Deployment (React/Vue/Svelte)\n              \u2502\n              \u2514\u2500\u2500\u2192 Replit Autoscale Deployment (API)\n                        \u2502\n                   PostgreSQL\n```\n\n```toml\n# Frontend Repl .replit\n[deployment]\ndeploymentTarget = \"static\"\npublicDir = \"dist\"\nbuild = [\"sh\", \"-c\", \"npm ci && npm run build\"]\n```\n\n```toml\n# API Repl .replit\n[deployment]\ndeploymentTarget = \"autoscale\"\nrun = [\"sh\", \"-c\", \"node dist/index.js\"]\nbuild = [\"sh\", \"-c\", \"npm ci && npm run build\"]\n```\n\n**Benefit:** Frontend is free (Static deployment), API only charges when receiving requests (Autoscale).\n\n## Growth Path\n\n```\nSingle-File \u2192 Modular App \u2192 Multi-Service\n   \u2502                \u2502              \u2502\n   \u2502    Add PostgreSQL    Add Worker + Queue\n   \u2502    Add Auth          Add CDN\n   \u2502    Add Storage       Add Redis\n   \u2502                      Split frontend\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| KV database full | Over 50 MiB limit | Migrate to PostgreSQL |\n| Container sleeping | Free plan / no deployment | Use Autoscale or Reserved VM |\n| Cross-service latency | Multiple Repls communicating | Use external queue, not HTTP polling |\n| Static deploy stale | Cache not cleared | Redeploy or add cache-busting |\n\n## Resources\n\n- [Replit Deployments](https://docs.replit.com/hosting/deployments)\n- [Replit Database Options](https://docs.replit.com/category/storage-and-databases)\n- [Upstash (Redis/Kafka)](https://upstash.com)\n- [Neon (PostgreSQL)](https://neon.tech)\n\n## Next Steps\n\nFor known pitfalls at each scale, see `replit-known-pitfalls`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "replit-architecture-variants",
-    "description": "Choose and implement Replit architecture blueprints: single-file script,",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

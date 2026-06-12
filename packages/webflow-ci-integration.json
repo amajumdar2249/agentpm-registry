@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033515",
   "name": "webflow-ci-integration",
   "slug": "webflow-ci-integration",
   "description": "Configure Webflow CI/CD with GitHub Actions \\u2014 automated CMS validation,\\n\\",
   "content": "# Webflow CI Integration\n\n## Overview\n\nSet up CI/CD pipelines for Webflow Data API v2 integrations with GitHub Actions.\nIncludes unit tests with mocked SDK, integration tests with test tokens, CMS schema\nvalidation, and automated publish-on-merge workflows.\n\n## Prerequisites\n\n- GitHub repository with Actions enabled\n- Webflow API token (test environment) stored as GitHub secret\n- `webflow-api` SDK with vitest test suite\n\n## Instructions\n\n### Step 1: Store Secrets\n\n```bash\n# Store Webflow test token as GitHub secret\ngh secret set WEBFLOW_API_TOKEN --body \"your-test-token\"\ngh secret set WEBFLOW_SITE_ID --body \"your-test-site-id\"\n\n# For production deployments\ngh secret set WEBFLOW_API_TOKEN_PROD --body \"your-prod-token\"\n```\n\n### Step 2: Unit Test Workflow\n\nTests that mock the SDK \u2014 run on every PR, no API calls:\n\n```yaml\n# .github/workflows/webflow-test.yml\nname: Webflow Integration Tests\n\non:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\n\njobs:\n  unit-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: \"20\"\n          cache: \"npm\"\n      - run: npm ci\n      - run: npm test -- --coverage\n      - name: Upload coverage\n        uses: actions/upload-artifact@v4\n        with:\n          name: coverage\n          path: coverage/\n\n  lint-and-typecheck:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: \"20\"\n          cache: \"npm\"\n      - run: npm ci\n      - run: npx tsc --noEmit\n      - run: npm run lint\n```\n\n### Step 3: Integration Test Workflow\n\nTests against the real Webflow API \u2014 run only on main branch with secrets:\n\n```yaml\n# .github/workflows/webflow-integration.yml\nname: Webflow Integration Tests\n\non:\n  push:\n    branches: [main]\n  workflow_dispatch: # Manual trigger\n\njobs:\n  integration:\n    runs-on: ubuntu-latest\n    # Only run if secrets are available\n    if: ${{ vars.WEBFLOW_TESTS_ENABLED == 'true' }}\n    env:\n      WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}\n      WEBFLOW_SITE_ID: ${{ secrets.WEBFLOW_SITE_ID }}\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: \"20\"\n          cache: \"npm\"\n      - run: npm ci\n      - name: Verify Webflow connectivity\n        run: |\n          HTTP_CODE=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n            -H \"Authorization: Bearer $WEBFLOW_API_TOKEN\" \\\n            https://api.webflow.com/v2/sites)\n          if [ \"$HTTP_CODE\" != \"200\" ]; then\n            echo \"Webflow API returned HTTP $HTTP_CODE\"\n            exit 1\n          fi\n      - name: Run integration tests\n        run: npm run test:integration\n        timeout-minutes: 5\n```\n\n### Step 4: Integration Test Example\n\n```typescript\n// tests/integration/webflow.integration.test.ts\nimport { describe, it, expect } from \"vitest\";\nimport { WebflowClient } from \"webflow-api\";\n\nconst SKIP = !process.env.WEBFLOW_API_TOKEN;\n\ndescribe.skipIf(SKIP)(\"Webflow API Integration\", () => {\n  const webflow = new WebflowClient({\n    accessToken: process.env.WEBFLOW_API_TOKEN!,\n  });\n  const siteId = process.env.WEBFLOW_SITE_ID!;\n\n  it(\"should list sites\", async () => {\n    const { sites } = await webflow.sites.list();\n    expect(sites).toBeDefined();\n    expect(sites!.length).toBeGreaterThan(0);\n  });\n\n  it(\"should get site details\", async () => {\n    const site = await webflow.sites.get(siteId);\n    expect(site.id).toBe(siteId);\n    expect(site.displayName).toBeDefined();\n  });\n\n  it(\"should list collections\", async () => {\n    const { collections } = await webflow.collections.list(siteId);\n    expect(collections).toBeDefined();\n    for (const col of collections!) {\n      expect(col.id).toBeDefined();\n      expect(col.displayName).toBeDefined();\n      expect(col.fields).toBeDefined();\n    }\n  });\n\n  it(\"should handle rate limits gracefully\", async () => {\n    // The SDK auto-retries on 429 \u2014 this should not throw\n    const promises = Array.from({ length: 5 }, () =>\n      webflow.sites.list()\n    );\n    const results = await Promise.all(promises);\n    expect(results.every(r => r.sites!.length > 0)).toBe(true);\n  });\n});\n```\n\n### Step 5: CMS Schema Validation\n\nEnsure your code matches the live Webflow collection schema:\n\n```typescript\n// tests/integration/schema-validation.test.ts\nimport { describe, it, expect } from \"vitest\";\nimport { WebflowClient } from \"webflow-api\";\n\nconst SKIP = !process.env.WEBFLOW_API_TOKEN;\n\ndescribe.skipIf(SKIP)(\"CMS Schema Validation\", () => {\n  const webflow = new WebflowClient({\n    accessToken: process.env.WEBFLOW_API_TOKEN!,\n  });\n  const siteId = process.env.WEBFLOW_SITE_ID!;\n\n  // Define expected schema for your \"Blog Posts\" collection\n  const EXPECTED_FIELDS = [\n    { slug: \"name\", type: \"PlainText\", required: true },\n    { slug: \"slug\", type: \"PlainText\", required: true },\n    { slug: \"post-body\", type: \"RichText\", required: false },\n    { slug: \"author-name\", type: \"PlainText\", required: false },\n    { slug: \"publish-date\", type: \"DateTime\", required: false },\n  ];\n\n  it(\"should match expected collection schema\", async () => {\n    const { collections } = await webflow.collections.list(siteId);\n    const blogCollection = collections!.find(c => c.slug === \"blog-posts\");\n    expect(blogCollection).toBeDefined();\n\n    for (const expected of EXPECTED_FIELDS) {\n      const field = blogCollection!.fields!.find(f => f.slug === expected.slug);\n      expect(field, `Field \"${expected.slug}\" should exist`).toBeDefined();\n      expect(field!.type).toBe(expected.type);\n    }\n  });\n});\n```\n\n### Step 6: Publish-on-Merge Workflow\n\nAutomatically publish Webflow site when content changes merge to main:\n\n```yaml\n# .github/workflows/webflow-publish.yml\nname: Publish Webflow Site\n\non:\n  push:\n    branches: [main]\n    paths:\n      - \"content/**\"\n      - \"src/webflow/**\"\n\njobs:\n  sync-and-publish:\n    runs-on: ubuntu-latest\n    env:\n      WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN_PROD }}\n      WEBFLOW_SITE_ID: ${{ secrets.WEBFLOW_SITE_ID_PROD }}\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with:\n          node-version: \"20\"\n          cache: \"npm\"\n      - run: npm ci\n      - name: Sync content to Webflow CMS\n        run: npm run sync:webflow\n      - name: Publish site\n        run: |\n          curl -X POST \\\n            \"https://api.webflow.com/v2/sites/$WEBFLOW_SITE_ID/publish\" \\\n            -H \"Authorization: Bearer $WEBFLOW_API_TOKEN\" \\\n            -H \"Content-Type: application/json\" \\\n            -d '{\"publishToWebflowSubdomain\": true}'\n```\n\n## Output\n\n- Unit test pipeline (mocked, runs on every PR)\n- Integration test pipeline (real API, runs on main)\n- CMS schema validation tests\n- Automated publish-on-merge workflow\n- GitHub secrets configured\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Secret not found | Missing `gh secret set` | Add secret via GitHub CLI |\n| Integration tests timeout | Rate limited or slow API | Increase timeout, reduce parallelism |\n| Schema mismatch | Collection changed in Webflow | Update expected schema in tests |\n| Publish fails in CI | Wrong production token | Verify `WEBFLOW_API_TOKEN_PROD` secret |\n\n## Resources\n\n- [GitHub Actions Documentation](https://docs.github.com/en/actions)\n- [Vitest Documentation](https://vitest.dev/)\n- [Webflow API Reference](https://developers.webflow.com/data/reference/rest-introduction)\n\n## Next Steps\n\nFor deployment patterns, see `webflow-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "webflow-ci-integration",
-    "description": "Configure Webflow CI/CD with GitHub Actions \\u2014 automated CMS validation,\\n\\",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*), Bash(npm:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

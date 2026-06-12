@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000029523",
   "name": "bio-format-conversion",
   "slug": "bio-format-conversion-2",
   "description": "Convert between sequence file formats (FASTA, FASTQ, GenBank, EMBL) using Biopython Bio.SeqIO. Use when changing file formats or preparing data for different tools.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: BioPython 1.83+, samtools 1.19+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Format Conversion\n\n**\"Convert this file to a different format\"** \u2192 Read records in one format, optionally add missing annotations, and write in the target format.\n- Python: `SeqIO.convert()` for direct conversion, or `SeqIO.parse()` + `SeqIO.write()` when modifications are needed (BioPython)\n- CLI: `seqkit seq` (SeqKit) for FASTA/FASTQ; `samtools view` for SAM/BAM/CRAM\n\nConvert sequence files between formats using Biopython's Bio.SeqIO module.\n\n## Required Import\n\n```python\nfrom Bio import SeqIO\n```\n\n## Core Function\n\n### SeqIO.convert() - Direct Conversion\nConvert between formats in a single call. Most efficient method.\n\n```python\ncount = SeqIO.convert('input.gb', 'genbank', 'output.fasta', 'fasta')\nprint(f'Converted {count} records')\n```\n\n**Parameters:**\n- `in_file` - Input filename or handle\n- `in_format` - Input format string\n- `out_file` - Output filename or handle\n- `out_format` - Output format string\n\n**Returns:** Number of records converted\n\n## Common Conversions\n\n| From | To | Notes |\n|------|-----|-------|\n| GenBank | FASTA | Loses annotations, keeps sequence |\n| FASTA | GenBank | Need to add molecule_type |\n| FASTQ | FASTA | Loses quality scores |\n| FASTA | FASTQ | Need to add quality scores |\n| GenBank | EMBL | Usually works directly |\n| Stockholm | FASTA | Alignment to sequences |\n\n## Code Patterns\n\n### Simple Conversion\n```python\nSeqIO.convert('input.gb', 'genbank', 'output.fasta', 'fasta')\n```\n\n### GenBank to FASTA\n```python\nSeqIO.convert('sequence.gb', 'genbank', 'sequence.fasta', 'fasta')\n```\n\n### FASTQ to FASTA (drop quality)\n```python\nSeqIO.convert('reads.fastq', 'fastq', 'reads.fasta', 'fasta')\n```\n\n### FASTA to GenBank (requires molecule_type)\n\n**Goal:** Convert FASTA to GenBank format, which requires molecule_type annotation.\n\n**Approach:** Stream records through a generator that injects the missing annotation, then write.\n\n**Reference (BioPython 1.83+):**\n```python\nrecords = SeqIO.parse('input.fasta', 'fasta')\ndef add_molecule_type(records):\n    for record in records:\n        record.annotations['molecule_type'] = 'DNA'\n        yield record\n\nSeqIO.write(add_molecule_type(records), 'output.gb', 'genbank')\n```\n\n### FASTA to FASTQ (add dummy quality)\n\n**Goal:** Convert FASTA to FASTQ by assigning uniform placeholder quality scores.\n\n**Approach:** Stream records through a generator that adds phred_quality to each, then write as FASTQ.\n\n**Reference (BioPython 1.83+):**\n```python\ndef add_quality(records, quality=30):\n    for record in records:\n        record.letter_annotations['phred_quality'] = [quality] * len(record.seq)\n        yield record\n\nrecords = SeqIO.parse('input.fasta', 'fasta')\nSeqIO.write(add_quality(records), 'output.fastq', 'fastq')\n```\n\n### Batch Convert Multiple Files\n\n**Goal:** Convert all files of one format in a directory to another format.\n\n**Approach:** Glob for input files, apply `SeqIO.convert()` to each, and report per-file counts.\n\n**Reference (BioPython 1.83+):**\n```python\nfrom pathlib import Path\n\nfor gb_file in Path('.').glob('*.gb'):\n    fasta_file = gb_file.with_suffix('.fasta')\n    count = SeqIO.convert(str(gb_file), 'genbank', str(fasta_file), 'fasta')\n    print(f'{gb_file.name}: {count} records')\n```\n\n### Convert with Modifications\n```python\nfrom Bio.Seq import Seq\nfrom Bio.SeqRecord import SeqRecord\n\ndef uppercase_record(rec):\n    return SeqRecord(rec.seq.upper(), id=rec.id, description=rec.description)\n\nrecords = SeqIO.parse('input.fasta', 'fasta')\nmodified = (uppercase_record(rec) for rec in records)\nSeqIO.write(modified, 'output.fasta', 'fasta')\n```\n\n### Alignment Format Conversion\n```python\nfrom Bio import AlignIO\n\nAlignIO.convert('alignment.sto', 'stockholm', 'alignment.phy', 'phylip')\n```\n\n## Format Compatibility Matrix\n\n**Can convert directly (no modifications needed):**\n- GenBank <-> EMBL\n- FASTA -> any format (may need annotations added)\n- Any format -> FASTA (always works, may lose data)\n- FASTQ -> FASTA\n\n**Requires adding data:**\n- FASTA -> FASTQ (need quality scores)\n- FASTA -> GenBank (need molecule_type)\n\n**May lose data:**\n- GenBank -> FASTA (loses features, annotations)\n- FASTQ -> FASTA (loses quality scores)\n- Any rich format -> FASTA\n\n## Common Errors\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `ValueError: missing molecule_type` | FASTA to GenBank | Add molecule_type annotation |\n| `ValueError: missing quality scores` | FASTA to FASTQ | Add phred_quality to letter_annotations |\n| `KeyError: 'phred_quality'` | Wrong FASTQ variant | Try 'fastq-sanger', 'fastq-illumina' |\n\n## Decision Tree\n\n```\nConverting formats?\n\u251c\u2500\u2500 Simple conversion (no data changes)?\n\u2502   \u2514\u2500\u2500 Use SeqIO.convert() directly\n\u251c\u2500\u2500 Need to add annotations?\n\u2502   \u2514\u2500\u2500 Parse, modify records, then write\n\u251c\u2500\u2500 Need to transform sequences?\n\u2502   \u2514\u2500\u2500 Parse, apply transformation, then write\n\u2514\u2500\u2500 Multiple files?\n    \u2514\u2500\u2500 Loop with SeqIO.convert() or batch generator\n```\n\n## Related Skills\n\n- read-sequences - Parse sequences for custom conversion logic\n- write-sequences - Write converted sequences with modifications\n- batch-processing - Convert multiple files at once\n- compressed-files - Handle compressed input/output during conversion\n- alignment-files - For SAM/BAM/CRAM conversion, use samtools view\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-format-conversion",
-    "description": "Convert between sequence file formats (FASTA, FASTQ, GenBank, EMBL) using Biopython Bio.SeqIO. Use when changing file formats or preparing data for different tools.",
-    "tool_type": "python",
-    "primary_tool": "Bio.SeqIO"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

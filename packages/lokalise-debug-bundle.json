@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032543",
   "name": "lokalise-debug-bundle",
   "slug": "lokalise-debug-bundle",
   "description": "Collect Lokalise debug evidence for support tickets and troubleshooting.",
   "content": "# Lokalise Debug Bundle\n\n## Current State\n\n!`node --version 2>/dev/null || echo 'N/A'`\n!`python3 --version 2>/dev/null || echo 'N/A'`\n!`uname -a`\n\n## Overview\n\nCollect all diagnostic information needed to troubleshoot Lokalise integration issues or file a support ticket \u2014 environment versions, SDK/CLI status, API connectivity, project listings with key counts, upload process status, and redacted logs, bundled into a timestamped `.tar.gz` archive.\n\n## Prerequisites\n\n- `LOKALISE_API_TOKEN` environment variable set (or token available to provide)\n- `curl` and `jq` available on PATH\n- Optional: `@lokalise/node-api` SDK installed in current project\n- Optional: `lokalise2` CLI installed\n\n## Instructions\n\n### Step 1: Create the Bundle Directory\n\n```bash\nset -euo pipefail\nTIMESTAMP=$(date +%Y%m%d-%H%M%S)\nBUNDLE_DIR=\"lokalise-debug-${TIMESTAMP}\"\nmkdir -p \"${BUNDLE_DIR}\"\necho \"Bundle directory: ${BUNDLE_DIR}\"\n```\n\n### Step 2: Collect Environment Information\n\n```bash\nset -euo pipefail\ncat > \"${BUNDLE_DIR}/environment.txt\" <<ENVEOF\n=== System ===\nOS: $(uname -srm)\nShell: ${SHELL:-unknown}\nDate: $(date -u +\"%Y-%m-%dT%H:%M:%SZ\")\n\n=== Runtime Versions ===\nNode.js: $(node --version 2>/dev/null || echo 'not installed')\nnpm: $(npm --version 2>/dev/null || echo 'not installed')\nPython: $(python3 --version 2>/dev/null || echo 'not installed')\n\n=== Lokalise SDK ===\n$(npm list @lokalise/node-api 2>/dev/null || echo 'SDK not found in project')\n\n=== Lokalise CLI ===\n$(lokalise2 --version 2>/dev/null || echo 'CLI not installed')\n\n=== Token Status ===\nLOKALISE_API_TOKEN: $([ -n \"${LOKALISE_API_TOKEN:-}\" ] && echo \"SET (${#LOKALISE_API_TOKEN} chars)\" || echo \"NOT SET\")\nENVEOF\necho \"Environment info collected.\"\n```\n\n### Step 3: Test API Connectivity\n\n```bash\nset -euo pipefail\necho \"=== API Connectivity Test ===\" > \"${BUNDLE_DIR}/api-connectivity.txt\"\n\n# Test DNS resolution\necho -e \"\\n--- DNS Resolution ---\" >> \"${BUNDLE_DIR}/api-connectivity.txt\"\nnslookup api.lokalise.com 2>&1 | tail -4 >> \"${BUNDLE_DIR}/api-connectivity.txt\" || echo \"nslookup failed\" >> \"${BUNDLE_DIR}/api-connectivity.txt\"\n\n# Test HTTPS connectivity and response time\necho -e \"\\n--- HTTPS Connectivity ---\" >> \"${BUNDLE_DIR}/api-connectivity.txt\"\ncurl -s -o /dev/null -w \"HTTP Status: %{http_code}\\nConnect Time: %{time_connect}s\\nTTFB: %{time_starttransfer}s\\nTotal Time: %{time_total}s\\nRemote IP: %{remote_ip}\\n\" \\\n  -H \"X-Api-Token: ${LOKALISE_API_TOKEN}\" \\\n  \"https://api.lokalise.com/api2/system/languages?limit=1\" \\\n  >> \"${BUNDLE_DIR}/api-connectivity.txt\" 2>&1\n\n# Check rate limit headers\necho -e \"\\n--- Rate Limit Headers ---\" >> \"${BUNDLE_DIR}/api-connectivity.txt\"\ncurl -s -D - -o /dev/null \\\n  -H \"X-Api-Token: ${LOKALISE_API_TOKEN}\" \\\n  \"https://api.lokalise.com/api2/system/languages?limit=1\" 2>/dev/null \\\n  | grep -iE '(x-ratelimit|retry-after)' >> \"${BUNDLE_DIR}/api-connectivity.txt\" || echo \"No rate limit headers found\" >> \"${BUNDLE_DIR}/api-connectivity.txt\"\n\necho \"API connectivity tested.\"\n```\n\n### Step 4: List Projects and Key Counts\n\n```bash\nset -euo pipefail\necho \"Fetching project list...\"\n\ncurl -s -H \"X-Api-Token: ${LOKALISE_API_TOKEN}\" \\\n  \"https://api.lokalise.com/api2/projects?limit=100&include_statistics=1\" \\\n  | jq '[.projects[] | {\n    project_id: .project_id,\n    name: .name,\n    base_language: .base_language_iso,\n    keys: .statistics.keys_total,\n    languages: (.statistics.languages // [] | length),\n    progress: .statistics.progress_total,\n    created: .created_at\n  }]' > \"${BUNDLE_DIR}/projects.json\" 2>/dev/null || echo '{\"error\": \"Failed to fetch projects\"}' > \"${BUNDLE_DIR}/projects.json\"\n\n# Summary line\nPROJ_COUNT=$(jq 'length' \"${BUNDLE_DIR}/projects.json\" 2>/dev/null || echo \"0\")\nTOTAL_KEYS=$(jq '[.[].keys // 0] | add // 0' \"${BUNDLE_DIR}/projects.json\" 2>/dev/null || echo \"0\")\necho \"Found ${PROJ_COUNT} projects with ${TOTAL_KEYS} total keys.\"\n```\n\n### Step 5: Check File Upload Process Status\n\n```bash\nset -euo pipefail\n# Check queued processes for each project (file uploads are async)\necho \"[]\" > \"${BUNDLE_DIR}/processes.json\"\n\nfor PID in $(jq -r '.[].project_id' \"${BUNDLE_DIR}/projects.json\" 2>/dev/null); do\n  curl -s -H \"X-Api-Token: ${LOKALISE_API_TOKEN}\" \\\n    \"https://api.lokalise.com/api2/projects/${PID}/processes?limit=10\" \\\n    | jq --arg pid \"$PID\" '[.processes[]? | {project_id: $pid, type: .type, status: .status, created_at: .created_at, message: .message}]' \\\n    >> \"${BUNDLE_DIR}/processes-raw.json\" 2>/dev/null || true\n  sleep 0.17  # Respect 6 req/s rate limit\ndone\n\n# Merge all process entries\njq -s 'flatten' \"${BUNDLE_DIR}/processes-raw.json\" > \"${BUNDLE_DIR}/processes.json\" 2>/dev/null || true\nrm -f \"${BUNDLE_DIR}/processes-raw.json\"\n\nPROC_COUNT=$(jq 'length' \"${BUNDLE_DIR}/processes.json\" 2>/dev/null || echo \"0\")\necho \"Found ${PROC_COUNT} recent upload processes.\"\n```\n\n### Step 6: Collect and Redact Application Logs\n\n```bash\nset -euo pipefail\n# Gather any lokalise-related log lines from common locations\n{\n  echo \"=== npm debug log (if exists) ===\"\n  cat ~/.npm/_logs/*-debug.log 2>/dev/null | grep -i lokalise | tail -50 || echo \"No npm debug logs\"\n\n  echo -e \"\\n=== Application stderr/stdout (recent) ===\"\n  grep -ri \"lokalise\" /tmp/*.log 2>/dev/null | tail -30 || echo \"No /tmp logs found\"\n} > \"${BUNDLE_DIR}/logs-raw.txt\" 2>/dev/null || true\n\n# Redact sensitive values\nsed -E \\\n  -e 's/([0-9a-f]{32,})/[REDACTED_TOKEN]/gi' \\\n  -e 's/(X-Api-Token:\\s*)[^ ]*/\\1[REDACTED]/gi' \\\n  -e 's/(apiKey:\\s*[\"'\"'\"']?)[^\"'\"'\"',]+/\\1[REDACTED]/gi' \\\n  -e 's/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/[REDACTED_EMAIL]/g' \\\n  \"${BUNDLE_DIR}/logs-raw.txt\" > \"${BUNDLE_DIR}/logs-redacted.txt\" 2>/dev/null || true\nrm -f \"${BUNDLE_DIR}/logs-raw.txt\"\necho \"Logs collected and redacted.\"\n```\n\n### Step 7: Create the tar.gz Bundle\n\n```bash\nset -euo pipefail\ntar -czf \"${BUNDLE_DIR}.tar.gz\" \"${BUNDLE_DIR}/\"\nSIZE=$(du -h \"${BUNDLE_DIR}.tar.gz\" | cut -f1)\necho \"Bundle created: ${BUNDLE_DIR}.tar.gz (${SIZE})\"\necho \"Contents:\"\ntar -tzf \"${BUNDLE_DIR}.tar.gz\"\n```\n\n## Output\n\n- `lokalise-debug-YYYYMMDD-HHMMSS.tar.gz` archive containing:\n  - `environment.txt` \u2014 Node.js, SDK, CLI versions, token status\n  - `api-connectivity.txt` \u2014 DNS, HTTPS latency, rate limit headers\n  - `projects.json` \u2014 Project list with key/language counts and progress\n  - `processes.json` \u2014 Recent file upload process statuses per project\n  - `logs-redacted.txt` \u2014 Relevant logs with tokens and emails scrubbed\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `401 Unauthorized` | Token invalid or expired | Regenerate token in Lokalise > User Profile > API Tokens |\n| `403 Forbidden` | Token lacks read scope | Use a read-write token or admin token |\n| `429 Too Many Requests` | Rate limit exceeded during project scan | Script includes `sleep 0.17` between calls; reduce `--limit` if still hitting |\n| Empty `projects.json` | Token has no project access | Verify the token owner is a contributor on at least one project |\n| `nslookup` fails | DNS resolution blocked | Try `dig api.lokalise.com` or check `/etc/resolv.conf` |\n| `tar` permission denied | Bundle dir in read-only location | Run from a writable directory like `~/tmp` |\n\n## Examples\n\n### Quick One-Liner API Health Check\n\n```bash\nset -euo pipefail\ncurl -s -w \"\\nHTTP %{http_code} in %{time_total}s\\n\" \\\n  -H \"X-Api-Token: $LOKALISE_API_TOKEN\" \\\n  \"https://api.lokalise.com/api2/projects?limit=1\" | jq '{project: .projects[0].name, keys: .projects[0].statistics.keys_total}'\n```\n\n### Check SDK Version Programmatically\n\n```bash\nset -euo pipefail\nnode -e \"const pkg = require('@lokalise/node-api/package.json'); console.log('SDK:', pkg.version, '| Node:', process.version)\"\n```\n\n### Redaction Safety Checklist\n\n**Always redacted:** API tokens, webhook secrets, OAuth credentials, email addresses, any 32+ character hex strings.\n\n**Safe to include:** Error messages, stack traces (after redaction pass), SDK and runtime versions, project IDs, HTTP status codes, rate limit header values.\n\n## Resources\n\n- [Lokalise API Reference](https://developers.lokalise.com/reference)\n- [Lokalise Status Page](https://status.lokalise.com)\n- [Lokalise Support](mailto:support@lokalise.com)\n- [Community Forum](https://community.lokalise.com)\n- [Rate Limits Documentation](https://developers.lokalise.com/docs/api-rate-limits)\n\n## Next Steps\n\n- For rate limit issues found in the bundle, see `lokalise-performance-tuning`.\n- For SDK version mismatches, see `lokalise-upgrade-migration`.\n- Attach the `.tar.gz` bundle directly to a Lokalise support ticket at support@lokalise.com.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "lokalise-debug-bundle",
-    "description": "Collect Lokalise debug evidence for support tickets and troubleshooting.",
-    "allowed-tools": "Read, Bash(grep:*), Bash(curl:*), Bash(tar:*), Bash(lokalise2:*), Bash(node:*),",
-    "Bash(npm": "*), Bash(jq:*), Bash(sed:*), Bash(mkdir:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

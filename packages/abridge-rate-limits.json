@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031133",
   "name": "abridge-rate-limits",
   "slug": "abridge-rate-limits",
   "description": "Implement Abridge rate limiting, backoff, and session throttling patterns.",
   "content": "# Abridge Rate Limits\n\n## Overview\n\nAbridge enforces rate limits per organization to ensure platform stability across thousands of concurrent clinical encounters. Limits vary by contract tier and are enforced at the org_id level.\n\n## Rate Limit Tiers\n\n| Tier | Concurrent Sessions | API Calls/min | Note Generations/min | WebSocket Connections |\n|------|---------------------|---------------|---------------------|-----------------------|\n| Pilot | 10 | 60 | 10 | 10 |\n| Standard | 100 | 600 | 50 | 100 |\n| Enterprise | 1,000+ | 6,000 | 500 | 1,000 |\n\n## Response Headers\n\n```\nX-RateLimit-Limit: 600\nX-RateLimit-Remaining: 42\nX-RateLimit-Reset: 1711234567\nRetry-After: 30\n```\n\n## Instructions\n\n### Step 1: Rate Limit Aware Client\n\n```typescript\n// src/abridge/rate-limiter.ts\ninterface RateLimitState {\n  remaining: number;\n  limit: number;\n  resetAt: Date;\n  retryAfter?: number;\n}\n\nclass AbridgeRateLimiter {\n  private state: RateLimitState = {\n    remaining: Infinity,\n    limit: Infinity,\n    resetAt: new Date(),\n  };\n  private queue: Array<{ resolve: () => void; reject: (err: Error) => void }> = [];\n  private processing = false;\n\n  updateFromHeaders(headers: Record<string, string>): void {\n    if (headers['x-ratelimit-remaining']) {\n      this.state.remaining = parseInt(headers['x-ratelimit-remaining']);\n    }\n    if (headers['x-ratelimit-limit']) {\n      this.state.limit = parseInt(headers['x-ratelimit-limit']);\n    }\n    if (headers['x-ratelimit-reset']) {\n      this.state.resetAt = new Date(parseInt(headers['x-ratelimit-reset']) * 1000);\n    }\n    if (headers['retry-after']) {\n      this.state.retryAfter = parseInt(headers['retry-after']);\n    }\n  }\n\n  async waitForSlot(): Promise<void> {\n    if (this.state.remaining > 0) {\n      this.state.remaining--;\n      return;\n    }\n\n    // Wait until rate limit resets\n    const waitMs = Math.max(0, this.state.resetAt.getTime() - Date.now());\n    console.log(`Rate limited \u2014 waiting ${waitMs}ms for reset`);\n    await new Promise(r => setTimeout(r, waitMs));\n    this.state.remaining = this.state.limit;\n  }\n\n  get utilizationPercent(): number {\n    return ((this.state.limit - this.state.remaining) / this.state.limit) * 100;\n  }\n}\n\nexport { AbridgeRateLimiter };\n```\n\n### Step 2: Concurrent Session Manager\n\n```typescript\n// src/abridge/session-pool.ts\nimport Bottleneck from 'bottleneck';\n\n// Manage concurrent encounter sessions within org limits\nconst sessionLimiter = new Bottleneck({\n  maxConcurrent: 50,          // Stay under tier limit\n  minTime: 100,               // 100ms between session creates\n  reservoir: 50,              // Burst capacity\n  reservoirRefreshInterval: 60000,  // Refill every minute\n  reservoirRefreshAmount: 50,\n});\n\nsessionLimiter.on('depleted', () => {\n  console.warn('Session pool depleted \u2014 queuing new sessions');\n});\n\nasync function createSessionThrottled(\n  api: any,\n  patientId: string,\n  providerId: string,\n  specialty: string,\n): Promise<any> {\n  return sessionLimiter.schedule(() =>\n    api.post('/encounters/sessions', {\n      patient_id: patientId,\n      provider_id: providerId,\n      specialty,\n      encounter_type: 'outpatient',\n    })\n  );\n}\n\nexport { createSessionThrottled, sessionLimiter };\n```\n\n### Step 3: 429 Error Handler with Retry-After\n\n```typescript\n// src/abridge/retry-429.ts\nimport axios, { AxiosError } from 'axios';\n\nasync function handleRateLimitedRequest<T>(\n  requestFn: () => Promise<T>,\n  maxRetries: number = 5,\n): Promise<T> {\n  for (let attempt = 1; attempt <= maxRetries; attempt++) {\n    try {\n      return await requestFn();\n    } catch (err) {\n      const axiosErr = err as AxiosError;\n      if (axiosErr.response?.status !== 429 || attempt === maxRetries) {\n        throw err;\n      }\n\n      const retryAfter = axiosErr.response.headers['retry-after'];\n      const waitMs = retryAfter\n        ? parseInt(retryAfter as string) * 1000\n        : Math.min(1000 * Math.pow(2, attempt), 60000);\n\n      console.log(`429 rate limited \u2014 retry ${attempt}/${maxRetries} in ${waitMs}ms`);\n      await new Promise(r => setTimeout(r, waitMs));\n    }\n  }\n  throw new Error('Unreachable');\n}\n```\n\n### Step 4: Usage Monitoring\n\n```typescript\n// src/abridge/usage-monitor.ts\ninterface UsageSnapshot {\n  timestamp: string;\n  activeSessions: number;\n  apiCallsThisMinute: number;\n  noteGenerationsThisMinute: number;\n  utilizationPercent: number;\n}\n\nclass UsageMonitor {\n  private snapshots: UsageSnapshot[] = [];\n  private apiCallCount = 0;\n  private noteGenCount = 0;\n\n  recordApiCall(): void { this.apiCallCount++; }\n  recordNoteGeneration(): void { this.noteGenCount++; }\n\n  takeSnapshot(activeSessions: number): UsageSnapshot {\n    const snapshot: UsageSnapshot = {\n      timestamp: new Date().toISOString(),\n      activeSessions,\n      apiCallsThisMinute: this.apiCallCount,\n      noteGenerationsThisMinute: this.noteGenCount,\n      utilizationPercent: (activeSessions / 100) * 100, // Adjust per tier\n    };\n    this.snapshots.push(snapshot);\n    this.apiCallCount = 0;\n    this.noteGenCount = 0;\n    return snapshot;\n  }\n\n  getAlerts(): string[] {\n    const latest = this.snapshots.at(-1);\n    if (!latest) return [];\n    const alerts: string[] = [];\n    if (latest.utilizationPercent > 80) alerts.push('Session utilization > 80%');\n    if (latest.apiCallsThisMinute > 500) alerts.push('API calls approaching limit');\n    return alerts;\n  }\n}\n```\n\n## Output\n\n- Rate-limit-aware API client with header parsing\n- Concurrent session pool with Bottleneck throttling\n- Automatic 429 retry with Retry-After header support\n- Usage monitoring with utilization alerts\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `429 Too Many Requests` | Exceeded org rate limit | Use Retry-After header; implement backoff |\n| `503 Service Unavailable` | Platform-wide throttling | Back off exponentially; check status page |\n| Session create rejected | Concurrent session limit | Queue creates with Bottleneck |\n\n## Resources\n\n- [Abridge Platform](https://www.abridge.com/product)\n- [Bottleneck Rate Limiter](https://www.npmjs.com/package/bottleneck)\n\n## Next Steps\n\nFor security configuration, see `abridge-security-basics`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "abridge-rate-limits",
-    "description": "Implement Abridge rate limiting, backoff, and session throttling patterns.",
-    "Trigger": "abridge rate limit\", \"abridge 429\", \"abridge throttling\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

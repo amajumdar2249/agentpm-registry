@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031855",
   "name": "exa-advanced-troubleshooting",
   "slug": "exa-advanced-troubleshooting",
   "description": "Apply advanced debugging techniques for hard-to-diagnose Exa issues.",
   "content": "# Exa Advanced Troubleshooting\n\n## Overview\n\nDeep debugging for complex Exa issues: latency spikes, intermittent failures, result quality degradation, and content retrieval failures. All Exa error responses include a `requestId` \u2014 always capture it.\n\n## Instructions\n\n### Step 1: Layer-by-Layer Diagnostics\n\n```typescript\nimport Exa from \"exa-js\";\n\ninterface DiagnosticResult {\n  layer: string;\n  success: boolean;\n  latencyMs: number;\n  details: string;\n}\n\nasync function diagnoseExa(): Promise<DiagnosticResult[]> {\n  const results: DiagnosticResult[] = [];\n  const exa = new Exa(process.env.EXA_API_KEY);\n\n  // Layer 1: DNS + Network\n  let start = performance.now();\n  try {\n    const resp = await fetch(\"https://api.exa.ai\", { method: \"HEAD\" });\n    results.push({\n      layer: \"network\",\n      success: true,\n      latencyMs: performance.now() - start,\n      details: `HTTP ${resp.status}`,\n    });\n  } catch (err: any) {\n    results.push({\n      layer: \"network\",\n      success: false,\n      latencyMs: performance.now() - start,\n      details: err.message,\n    });\n    return results; // No point continuing if network fails\n  }\n\n  // Layer 2: Authentication\n  start = performance.now();\n  try {\n    await exa.search(\"auth test\", { numResults: 1 });\n    results.push({\n      layer: \"auth\",\n      success: true,\n      latencyMs: performance.now() - start,\n      details: \"API key valid\",\n    });\n  } catch (err: any) {\n    results.push({\n      layer: \"auth\",\n      success: false,\n      latencyMs: performance.now() - start,\n      details: `${err.status}: ${err.message}`,\n    });\n    if (err.status === 401 || err.status === 402) return results;\n  }\n\n  // Layer 3: Neural search\n  start = performance.now();\n  try {\n    const r = await exa.search(\"test neural search quality\", {\n      type: \"neural\",\n      numResults: 3,\n    });\n    results.push({\n      layer: \"neural-search\",\n      success: true,\n      latencyMs: performance.now() - start,\n      details: `${r.results.length} results, top score: ${r.results[0]?.score.toFixed(3)}`,\n    });\n  } catch (err: any) {\n    results.push({\n      layer: \"neural-search\",\n      success: false,\n      latencyMs: performance.now() - start,\n      details: `${err.status}: ${err.message}`,\n    });\n  }\n\n  // Layer 4: Content retrieval\n  start = performance.now();\n  try {\n    const r = await exa.searchAndContents(\"content retrieval test\", {\n      numResults: 1,\n      text: { maxCharacters: 500 },\n      highlights: { maxCharacters: 200 },\n    });\n    const hasText = !!r.results[0]?.text;\n    const hasHighlights = !!r.results[0]?.highlights?.length;\n    results.push({\n      layer: \"content-retrieval\",\n      success: hasText,\n      latencyMs: performance.now() - start,\n      details: `text: ${hasText}, highlights: ${hasHighlights}`,\n    });\n  } catch (err: any) {\n    results.push({\n      layer: \"content-retrieval\",\n      success: false,\n      latencyMs: performance.now() - start,\n      details: `${err.status}: ${err.message}`,\n    });\n  }\n\n  // Layer 5: findSimilar\n  start = performance.now();\n  try {\n    const r = await exa.findSimilar(\"https://nodejs.org\", { numResults: 2 });\n    results.push({\n      layer: \"find-similar\",\n      success: r.results.length > 0,\n      latencyMs: performance.now() - start,\n      details: `${r.results.length} similar pages found`,\n    });\n  } catch (err: any) {\n    results.push({\n      layer: \"find-similar\",\n      success: false,\n      latencyMs: performance.now() - start,\n      details: `${err.status}: ${err.message}`,\n    });\n  }\n\n  return results;\n}\n\n// Print diagnostic report\nconst results = await diagnoseExa();\nconsole.log(\"=== Exa Diagnostic Report ===\");\nfor (const r of results) {\n  const icon = r.success ? \"PASS\" : \"FAIL\";\n  console.log(`[${icon}] ${r.layer}: ${r.latencyMs.toFixed(0)}ms \u2014 ${r.details}`);\n}\n```\n\n### Step 2: Latency Profiling\n\n```typescript\nasync function profileLatency(query: string, iterations = 5) {\n  const exa = new Exa(process.env.EXA_API_KEY);\n  const timings: { type: string; ms: number }[] = [];\n\n  for (const type of [\"instant\", \"fast\", \"auto\", \"neural\"] as const) {\n    for (let i = 0; i < iterations; i++) {\n      const start = performance.now();\n      try {\n        await exa.search(query, { type, numResults: 3 });\n        timings.push({ type, ms: performance.now() - start });\n      } catch {\n        timings.push({ type, ms: -1 }); // -1 indicates failure\n      }\n    }\n  }\n\n  // Summarize\n  const grouped = new Map<string, number[]>();\n  for (const t of timings) {\n    if (!grouped.has(t.type)) grouped.set(t.type, []);\n    if (t.ms > 0) grouped.get(t.type)!.push(t.ms);\n  }\n\n  console.log(`\\nLatency profile for: \"${query}\"`);\n  for (const [type, times] of grouped) {\n    const sorted = times.sort((a, b) => a - b);\n    const p50 = sorted[Math.floor(sorted.length * 0.5)];\n    const p95 = sorted[Math.floor(sorted.length * 0.95)];\n    console.log(`  ${type}: p50=${p50?.toFixed(0)}ms, p95=${p95?.toFixed(0)}ms`);\n  }\n}\n```\n\n### Step 3: Content Retrieval Debugging\n\n```typescript\n// When getContents or searchAndContents returns empty text\nasync function debugContentRetrieval(url: string) {\n  const exa = new Exa(process.env.EXA_API_KEY);\n  const configs = [\n    { name: \"default\", opts: { text: true } },\n    { name: \"livecrawl-preferred\", opts: { text: true, livecrawl: \"preferred\" as const, livecrawlTimeout: 15000 } },\n    { name: \"livecrawl-always\", opts: { text: true, livecrawl: \"always\" as const, livecrawlTimeout: 15000 } },\n    { name: \"highlights-only\", opts: { highlights: { maxCharacters: 500 } } },\n    { name: \"summary-only\", opts: { summary: true } },\n  ];\n\n  console.log(`\\nContent retrieval debug for: ${url}`);\n  for (const { name, opts } of configs) {\n    try {\n      const result = await exa.getContents([url], opts as any);\n      const r = result.results[0];\n      console.log(`  ${name}: text=${r?.text?.length || 0} chars, highlights=${r?.highlights?.length || 0}`);\n    } catch (err: any) {\n      console.log(`  ${name}: ERROR ${err.status} \u2014 ${err.message}`);\n    }\n  }\n}\n```\n\n### Step 4: Support Escalation Template\n\n```markdown\n## Exa Support Escalation\n\n**Severity:** P[1-4]\n**RequestId:** [from error response]\n**Timestamp:** [ISO 8601 from error]\n**SDK:** exa-js [version from npm list]\n\n### Issue Summary\n[One paragraph description]\n\n### Steps to Reproduce\n1. Initialize Exa client\n2. Call [method] with [parameters]\n3. Observe [error/unexpected behavior]\n\n### Expected vs Actual\n- Expected: [behavior]\n- Actual: [behavior]\n\n### Diagnostic Results\n[Output from diagnoseExa() function]\n\n### Evidence\n- Latency profile attached\n- Content retrieval debug output\n- Error response with requestId\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Intermittent 5xx | Exa transient failure | Retry with backoff, capture requestId |\n| Neural search slow | Complex/long query | Switch to `fast`, shorten query |\n| Empty text for valid URL | Site blocks crawling | Try `livecrawl: \"always\"`, use highlights |\n| Score drops across queries | Query drift | Compare with baseline queries |\n| findSimilar returns nothing | Seed URL not indexed | Try a more popular seed URL |\n\n## Resources\n\n- [Exa Error Codes](https://docs.exa.ai/reference/error-codes)\n- [Exa Support](mailto:hello@exa.ai)\n- [Exa Rate Limits](https://docs.exa.ai/reference/rate-limits)\n\n## Next Steps\n\nFor load testing, see `exa-load-scale`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "exa-advanced-troubleshooting",
-    "description": "Apply advanced debugging techniques for hard-to-diagnose Exa issues.",
-    "allowed-tools": "Read, Grep, Bash(curl:*), Bash(node:*), Bash(tcpdump:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

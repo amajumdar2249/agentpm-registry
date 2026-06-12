@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032326",
   "name": "intercom-multi-env-setup",
   "slug": "intercom-multi-env-setup",
   "description": "Configure Intercom across development, staging, and production workspaces.",
   "content": "# Intercom Multi-Environment Setup\n\n## Overview\n\nConfigure separate Intercom workspaces for development, staging, and production with environment-specific access tokens, webhook URLs, and safety guards.\n\n## Prerequisites\n\n- Separate Intercom workspaces (or at minimum, separate apps in Developer Hub)\n- Secret management solution (Vault, AWS Secrets Manager, GCP Secret Manager)\n- CI/CD pipeline with environment variable support\n\n## Environment Strategy\n\n| Environment | Workspace | Token Type | Data | Webhooks |\n|-------------|-----------|-----------|------|----------|\n| Development | Dev/sandbox workspace | Dev access token | Test data | localhost via ngrok |\n| Staging | Staging workspace | Staging token | Seed data | staging.example.com |\n| Production | Production workspace | Production token | Real data | api.example.com |\n\n## Instructions\n\n### Step 1: Environment Configuration\n\n```typescript\n// src/config/intercom.ts\ninterface IntercomEnvironmentConfig {\n  accessToken: string;\n  webhookSecret: string;\n  identitySecret: string;\n  environment: \"development\" | \"staging\" | \"production\";\n  baseUrl: string;\n  debug: boolean;\n  cache: { enabled: boolean; ttlSeconds: number };\n  rateLimit: { maxConcurrency: number };\n}\n\nfunction loadConfig(): IntercomEnvironmentConfig {\n  const env = (process.env.NODE_ENV || \"development\") as IntercomEnvironmentConfig[\"environment\"];\n\n  const shared = {\n    accessToken: process.env.INTERCOM_ACCESS_TOKEN!,\n    webhookSecret: process.env.INTERCOM_WEBHOOK_SECRET!,\n    identitySecret: process.env.INTERCOM_IDENTITY_SECRET || \"\",\n    environment: env,\n    baseUrl: \"https://api.intercom.io\",\n  };\n\n  const envDefaults: Record<string, Partial<IntercomEnvironmentConfig>> = {\n    development: {\n      debug: true,\n      cache: { enabled: false, ttlSeconds: 0 },\n      rateLimit: { maxConcurrency: 2 },\n    },\n    staging: {\n      debug: false,\n      cache: { enabled: true, ttlSeconds: 60 },\n      rateLimit: { maxConcurrency: 5 },\n    },\n    production: {\n      debug: false,\n      cache: { enabled: true, ttlSeconds: 300 },\n      rateLimit: { maxConcurrency: 10 },\n    },\n  };\n\n  return { ...shared, ...envDefaults[env] } as IntercomEnvironmentConfig;\n}\n\nexport const intercomConfig = loadConfig();\n```\n\n### Step 2: Environment-Aware Client Factory\n\n```typescript\n// src/intercom/client.ts\nimport { IntercomClient } from \"intercom-client\";\nimport { intercomConfig } from \"../config/intercom\";\n\nlet client: IntercomClient | null = null;\n\nexport function getClient(): IntercomClient {\n  if (!client) {\n    if (!intercomConfig.accessToken) {\n      throw new Error(\n        `INTERCOM_ACCESS_TOKEN not set for ${intercomConfig.environment}. ` +\n        `Create a .env.${intercomConfig.environment} file.`\n      );\n    }\n\n    client = new IntercomClient({\n      token: intercomConfig.accessToken,\n    });\n\n    if (intercomConfig.debug) {\n      console.log(`[Intercom] Connected to ${intercomConfig.environment} workspace`);\n    }\n  }\n  return client;\n}\n```\n\n### Step 3: Secret Management by Platform\n\n```bash\n# Local development (.env.development - git-ignored)\nINTERCOM_ACCESS_TOKEN=dG9rOmRldl90b2tlbg==\nINTERCOM_WEBHOOK_SECRET=dev-webhook-secret\nNODE_ENV=development\n\n# GitHub Actions (for CI)\ngh secret set INTERCOM_DEV_TOKEN --body \"dev-token\"\ngh secret set INTERCOM_STAGING_TOKEN --body \"staging-token\"\ngh secret set INTERCOM_PROD_TOKEN --body \"prod-token\"\n\n# AWS Secrets Manager\naws secretsmanager create-secret \\\n  --name intercom/production/access-token \\\n  --secret-string \"prod-token\"\n\n# GCP Secret Manager\necho -n \"prod-token\" | gcloud secrets create intercom-prod-token --data-file=-\n\n# HashiCorp Vault\nvault kv put secret/intercom/production \\\n  access_token=\"prod-token\" \\\n  webhook_secret=\"prod-webhook-secret\"\n```\n\n### Step 4: Production Safety Guards\n\n```typescript\n// Prevent destructive operations in wrong environment\nclass EnvironmentGuard {\n  constructor(private env: string) {}\n\n  requireProduction(operation: string): void {\n    if (this.env !== \"production\") {\n      throw new Error(\n        `${operation} is only allowed in production (current: ${this.env})`\n      );\n    }\n  }\n\n  preventProduction(operation: string): void {\n    if (this.env === \"production\") {\n      throw new Error(\n        `${operation} is blocked in production for safety`\n      );\n    }\n  }\n}\n\nconst guard = new EnvironmentGuard(intercomConfig.environment);\n\n// Usage\nasync function deleteAllTestContacts() {\n  guard.preventProduction(\"deleteAllTestContacts\"); // Blocks in prod\n\n  const contacts = await client.contacts.search({\n    query: { field: \"custom_attributes.is_test\", operator: \"=\", value: true },\n  });\n\n  for (const contact of contacts.data) {\n    await client.contacts.delete({ contactId: contact.id });\n  }\n}\n\nasync function sendBulkMessages(contactIds: string[], message: string) {\n  guard.requireProduction(\"sendBulkMessages\"); // Only works in prod\n  // ... send messages\n}\n```\n\n### Step 5: Webhook URL per Environment\n\n```typescript\n// CI/CD: Set webhook URL based on environment\nconst webhookUrls: Record<string, string> = {\n  development: \"https://dev-abc123.ngrok.io/webhooks/intercom\",\n  staging: \"https://staging.example.com/webhooks/intercom\",\n  production: \"https://api.example.com/webhooks/intercom\",\n};\n\n// In your webhook handler, log the environment for debugging\napp.post(\"/webhooks/intercom\", (req, res) => {\n  console.log(`[${intercomConfig.environment}] Webhook received: ${req.body.topic}`);\n  // ... process webhook\n});\n```\n\n### Step 6: Environment Validation on Startup\n\n```typescript\nasync function validateIntercomSetup(): Promise<void> {\n  const client = getClient();\n  const config = intercomConfig;\n\n  console.log(`[Intercom] Validating ${config.environment} setup...`);\n\n  try {\n    const admins = await client.admins.list();\n    const appName = admins.admins[0]?.name || \"Unknown\";\n    console.log(`[Intercom] Connected to workspace (admin: ${appName})`);\n\n    // Verify we're in the right workspace\n    if (config.environment === \"production\") {\n      // In production, verify the token has expected permissions\n      try {\n        await client.contacts.list({ perPage: 1 });\n        console.log(\"[Intercom] Contact access: OK\");\n      } catch {\n        console.error(\"[Intercom] WARNING: Cannot access contacts\");\n      }\n    }\n  } catch (err) {\n    console.error(`[Intercom] Setup validation FAILED for ${config.environment}:`, err);\n    if (config.environment === \"production\") {\n      throw err; // Fail fast in production\n    }\n  }\n}\n\n// Call during application startup\nvalidateIntercomSetup().catch(console.error);\n```\n\n## GitHub Actions Environment Matrix\n\n```yaml\njobs:\n  test:\n    strategy:\n      matrix:\n        environment: [development, staging]\n    runs-on: ubuntu-latest\n    env:\n      NODE_ENV: ${{ matrix.environment }}\n      INTERCOM_ACCESS_TOKEN: ${{ secrets[format('INTERCOM_{0}_TOKEN', matrix.environment)] }}\n    steps:\n      - uses: actions/checkout@v4\n      - run: npm ci\n      - run: npm test\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Wrong workspace | Dev token used in staging | Validate workspace on startup |\n| Token not found | Missing env file | Copy `.env.example` to `.env.{env}` |\n| Guard blocked operation | Environment mismatch | Verify `NODE_ENV` is correct |\n| Webhook URL mismatch | Forgot to update URL | Use env-based URL config |\n\n## Resources\n\n- [Intercom Developer Hub](https://developers.intercom.com/docs/build-an-integration/getting-started)\n- [Authentication](https://developers.intercom.com/docs/build-an-integration/learn-more/authentication)\n- [12-Factor App Config](https://12factor.net/config)\n\n## Next Steps\n\nFor observability setup, see `intercom-observability`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "intercom-multi-env-setup",
-    "description": "Configure Intercom across development, staging, and production workspaces.",
-    "allowed-tools": "Read, Write, Edit, Bash(aws:*), Bash(gcloud:*), Bash(vault:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

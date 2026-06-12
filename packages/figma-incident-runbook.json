@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031915",
   "name": "figma-incident-runbook",
   "slug": "figma-incident-runbook",
   "description": "Respond to Figma API outages, auth failures, and rate limit incidents.",
   "content": "# Figma Incident Runbook\n\n## Overview\n\nRapid incident response procedures for Figma REST API integration failures. Covers triage, mitigation, and postmortem for the most common failure modes.\n\n## Prerequisites\n\n- Access to application logs and metrics\n- Figma PAT for health checks\n- Communication channel (Slack, PagerDuty)\n\n## Instructions\n\n### Step 1: Quick Triage (First 5 Minutes)\n\n```bash\n#!/bin/bash\necho \"=== Figma Incident Triage ===\"\n\n# 1. Is Figma itself down?\necho -n \"Figma Status: \"\ncurl -s https://www.figmastatus.com/api/v2/status.json 2>/dev/null \\\n  | jq -r '.status.description // \"Cannot reach status page\"'\n\n# 2. Is our token valid?\necho -n \"Auth Check: \"\nHTTP_CODE=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"X-Figma-Token: ${FIGMA_PAT}\" \\\n  https://api.figma.com/v1/me)\necho \"$HTTP_CODE\"\n\n# 3. Can we read a known file?\necho -n \"File Access: \"\ncurl -s -H \"X-Figma-Token: ${FIGMA_PAT}\" \\\n  \"https://api.figma.com/v1/files/${FIGMA_FILE_KEY}?depth=1\" \\\n  | jq -r '.name // \"FAILED\"'\n\n# 4. Are we rate limited?\necho \"Rate Limit Headers:\"\ncurl -s -D - -o /dev/null \\\n  -H \"X-Figma-Token: ${FIGMA_PAT}\" \\\n  https://api.figma.com/v1/me 2>/dev/null \\\n  | grep -iE \"(retry-after|rate-limit|figma)\" || echo \"No rate limit headers\"\n```\n\n### Step 2: Decision Tree\n\n```\nAPI returning errors?\n\u251c\u2500\u2500 403 Forbidden\n\u2502   \u251c\u2500\u2500 Token expired (>90 days) \u2192 Rotate PAT immediately\n\u2502   \u251c\u2500\u2500 Wrong scopes \u2192 Regenerate with correct scopes\n\u2502   \u2514\u2500\u2500 File not shared \u2192 Check file permissions\n\u2502\n\u251c\u2500\u2500 429 Rate Limited\n\u2502   \u251c\u2500\u2500 Retry-After < 60s \u2192 Wait and retry automatically\n\u2502   \u251c\u2500\u2500 Retry-After > 300s \u2192 Reduce request volume\n\u2502   \u2514\u2500\u2500 X-Figma-Rate-Limit-Type: low \u2192 Consider upgrading plan\n\u2502\n\u251c\u2500\u2500 404 Not Found\n\u2502   \u251c\u2500\u2500 File deleted \u2192 Check with file owner\n\u2502   \u251c\u2500\u2500 Wrong file key \u2192 Verify FIGMA_FILE_KEY\n\u2502   \u2514\u2500\u2500 API path wrong \u2192 Check endpoint documentation\n\u2502\n\u251c\u2500\u2500 500/503 Server Error\n\u2502   \u251c\u2500\u2500 status.figma.com shows incident \u2192 Wait for resolution\n\u2502   \u251c\u2500\u2500 Intermittent \u2192 Retry with backoff\n\u2502   \u2514\u2500\u2500 Persistent \u2192 Contact Figma support\n\u2502\n\u2514\u2500\u2500 Network Error (ECONNREFUSED, timeout)\n    \u251c\u2500\u2500 DNS resolution failing \u2192 Check DNS config\n    \u251c\u2500\u2500 Firewall blocking \u2192 Verify outbound HTTPS to api.figma.com\n    \u2514\u2500\u2500 TLS error \u2192 Check Node.js version (18+ required)\n```\n\n### Step 3: Immediate Mitigation\n\n**For 403 (Token Expired):**\n\n```bash\n# Generate new PAT in Figma Settings > Personal access tokens\n# Then update your deployment:\n\n# GitHub Actions\ngh secret set FIGMA_PAT --body \"figd_new-token-here\"\n\n# Cloud Run\necho -n \"figd_new-token\" | gcloud secrets versions add figma-pat --data-file=-\ngcloud run services update my-service --update-secrets=\"FIGMA_PAT=figma-pat:latest\"\n\n# Fly.io\nfly secrets set FIGMA_PAT=figd_new-token\n```\n\n**For 429 (Rate Limited):**\n\n```typescript\n// Emergency: disable non-critical Figma calls\nconst EMERGENCY_MODE = process.env.FIGMA_EMERGENCY === 'true';\n\nasync function safeFigmaCall<T>(\n  path: string,\n  critical: boolean = false\n): Promise<T | null> {\n  if (EMERGENCY_MODE && !critical) {\n    console.warn(`Figma call skipped (emergency mode): ${path}`);\n    return null;\n  }\n  return figmaFetch(path);\n}\n```\n\n**For 500/503 (Figma Down):**\n\n```typescript\n// Serve cached data when Figma is unavailable\nasync function getTokensWithFallback() {\n  try {\n    return await extractTokensFromFigma();\n  } catch (error) {\n    console.warn('Figma unavailable, serving cached tokens');\n    // Return last-known-good tokens from cache or file\n    const cached = await readFile('output/tokens.json', 'utf-8');\n    return JSON.parse(cached);\n  }\n}\n```\n\n### Step 4: Communication\n\n```markdown\n## Internal Notification (Slack)\n**Figma Integration Alert**\n- Status: INVESTIGATING / MITIGATED / RESOLVED\n- Impact: [Design token sync paused / Asset export failing]\n- Cause: [403 expired token / 429 rate limit / Figma outage]\n- Action: [Rotating token / Reducing request rate / Waiting for Figma]\n- ETA: [Next update in 15 min]\n\n## External (if applicable)\nDesign system updates may be delayed due to a temporary issue\nwith our Figma integration. Cached data is being served.\n```\n\n### Step 5: Postmortem Template\n\n```markdown\n## Figma Incident Postmortem\n**Date:** YYYY-MM-DD\n**Duration:** X hours Y minutes\n**Severity:** P1/P2/P3\n\n### Summary\n[One sentence: what happened and what was the impact]\n\n### Timeline\n- HH:MM UTC - First alert fired (describe alert)\n- HH:MM UTC - On-call acknowledged\n- HH:MM UTC - Root cause identified\n- HH:MM UTC - Mitigation applied\n- HH:MM UTC - Full resolution confirmed\n\n### Root Cause\n[Technical explanation, e.g., \"PAT expired after 90 days without rotation\"]\n\n### Action Items\n- [ ] Set up PAT rotation reminder at 80-day mark\n- [ ] Add 403 alert to PagerDuty\n- [ ] Implement cached fallback for token data\n```\n\n## Output\n\n- Issue identified via triage script\n- Root cause determined from decision tree\n- Mitigation applied (token rotation, fallback mode, etc.)\n- Stakeholders notified\n- Postmortem documented\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Can't reach status.figma.com | Network issue | Try from different network or mobile |\n| Triage script fails | PAT not set | Set FIGMA_PAT before running |\n| Fallback data stale | Last cache too old | Set up regular cache refresh |\n| Alert not firing | Missing metrics | Verify Prometheus scrape config |\n\n## Resources\n\n- [Figma Status Page](https://status.figma.com)\n- [Figma Support](https://help.figma.com/hc/en-us/requests/new)\n- [Figma Developer Forum](https://forum.figma.com/)\n\n## Next Steps\n\nFor data handling, see `figma-data-handling`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "figma-incident-runbook",
-    "description": "Respond to Figma API outages, auth failures, and rate limit incidents.",
-    "allowed-tools": "Read, Grep, Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

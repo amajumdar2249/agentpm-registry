@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031870",
   "name": "exa-load-scale",
   "slug": "exa-load-scale",
   "description": "Implement Exa load testing, capacity planning, and scaling strategies.",
   "content": "# Exa Load & Scale\n\n## Overview\n\nLoad testing and capacity planning for Exa integrations. Key constraint: Exa's default rate limit is 10 QPS. Scaling strategies focus on caching, request queuing, parallel processing within rate limits, and search type selection for latency budgets.\n\n## Prerequisites\n\n- k6 load testing tool installed\n- Test environment Exa API key (separate from production)\n- Redis for result caching\n\n## Capacity Reference\n\n| Search Type | Typical Latency | Max Throughput (10 QPS) |\n|-------------|----------------|-------------------------|\n| `instant` | < 150ms | 10 req/s (600/min) |\n| `fast` | < 425ms | 10 req/s (600/min) |\n| `auto` | 300-1500ms | 10 req/s (600/min) |\n| `neural` | 500-2000ms | 10 req/s (600/min) |\n| `deep` | 2-5s | 10 req/s (600/min) |\n\n**With caching (50% hit rate):** Effective throughput doubles to 20 req/s equivalent.\n\n## Instructions\n\n### Step 1: k6 Load Test Against Your Wrapper\n\n```javascript\n// exa-load-test.js\nimport http from \"k6/http\";\nimport { check, sleep } from \"k6\";\n\nexport const options = {\n  stages: [\n    { duration: \"1m\", target: 5 },    // Ramp up to 5 VUs\n    { duration: \"3m\", target: 5 },    // Steady state\n    { duration: \"1m\", target: 10 },   // Push toward rate limit\n    { duration: \"2m\", target: 10 },   // Stress test\n    { duration: \"1m\", target: 0 },    // Ramp down\n  ],\n  thresholds: {\n    http_req_duration: [\"p(95)<3000\"],  // 3s P95 for neural search\n    http_req_failed: [\"rate<0.05\"],     // < 5% error rate\n  },\n};\n\nconst queries = [\n  \"best practices for building RAG systems\",\n  \"transformer architecture improvements 2025\",\n  \"TypeScript 5.5 new features\",\n  \"vector database comparison guide\",\n  \"AI safety alignment research\",\n];\n\nexport default function () {\n  const query = queries[Math.floor(Math.random() * queries.length)];\n\n  const response = http.post(\n    `${__ENV.APP_URL}/api/search`,\n    JSON.stringify({ query, numResults: 3 }),\n    {\n      headers: { \"Content-Type\": \"application/json\" },\n      timeout: \"10s\",\n    }\n  );\n\n  check(response, {\n    \"status 200\": (r) => r.status === 200,\n    \"has results\": (r) => JSON.parse(r.body).results?.length > 0,\n    \"latency < 3s\": (r) => r.timings.duration < 3000,\n  });\n\n  sleep(0.5 + Math.random()); // 0.5-1.5s between requests\n}\n```\n\n```bash\n# Run load test\nk6 run --env APP_URL=http://localhost:3000 exa-load-test.js\n```\n\n### Step 2: Throughput Maximizer with Request Queue\n\n```typescript\nimport Exa from \"exa-js\";\nimport PQueue from \"p-queue\";\n\nconst exa = new Exa(process.env.EXA_API_KEY);\n\n// Stay under 10 QPS rate limit\nconst searchQueue = new PQueue({\n  concurrency: 8,        // max concurrent requests\n  interval: 1000,        // per second\n  intervalCap: 10,       // Exa's QPS limit\n});\n\nasync function highThroughputSearch(queries: string[]) {\n  const results = [];\n\n  for (const query of queries) {\n    const promise = searchQueue.add(async () => {\n      const result = await exa.searchAndContents(query, {\n        type: \"auto\",\n        numResults: 3,\n        text: { maxCharacters: 500 },\n      });\n      return { query, results: result.results };\n    });\n    results.push(promise);\n  }\n\n  return Promise.all(results);\n}\n\n// Process 100 queries respecting rate limits\nconst queries = Array.from({ length: 100 }, (_, i) => `research topic ${i}`);\nconsole.time(\"batch\");\nconst results = await highThroughputSearch(queries);\nconsole.timeEnd(\"batch\");\n// Expected: ~10-12 seconds (100 queries / 10 QPS)\n```\n\n### Step 3: Caching for Scale\n\n```typescript\nimport { LRUCache } from \"lru-cache\";\n\n// Cache eliminates repeat queries entirely\nconst cache = new LRUCache<string, any>({\n  max: 10000,\n  ttl: 3600 * 1000, // 1-hour TTL\n});\n\nasync function scalableSearch(query: string, opts: any) {\n  const key = `${query.toLowerCase().trim()}:${opts.type}:${opts.numResults}`;\n  const cached = cache.get(key);\n  if (cached) return cached;\n\n  const result = await searchQueue.add(() =>\n    exa.searchAndContents(query, opts)\n  );\n  cache.set(key, result);\n  return result;\n}\n\n// With 50% cache hit rate:\n// 100 unique queries \u2192 50 API calls \u2192 5 seconds instead of 10\n```\n\n### Step 4: Capacity Planning Calculator\n\n```typescript\ninterface CapacityEstimate {\n  dailySearches: number;\n  peakQPS: number;\n  cacheHitRate: number;\n  effectiveQPS: number;\n  withinLimits: boolean;\n  recommendation: string;\n}\n\nfunction estimateCapacity(\n  dailySearches: number,\n  peakMultiplier = 3,\n  expectedCacheHitRate = 0.5\n): CapacityEstimate {\n  const avgQPS = dailySearches / (24 * 3600);\n  const peakQPS = avgQPS * peakMultiplier;\n  const effectiveQPS = peakQPS * (1 - expectedCacheHitRate);\n  const withinLimits = effectiveQPS <= 10; // Default Exa limit\n\n  let recommendation = \"Within default limits\";\n  if (effectiveQPS > 10 && effectiveQPS <= 50) {\n    recommendation = \"Contact hello@exa.ai for Enterprise rate limits\";\n  } else if (effectiveQPS > 50) {\n    recommendation = \"Requires Enterprise plan + aggressive caching + request queue\";\n  }\n\n  return { dailySearches, peakQPS, cacheHitRate: expectedCacheHitRate, effectiveQPS, withinLimits, recommendation };\n}\n\n// Example: 50,000 searches/day\nconst estimate = estimateCapacity(50000);\nconsole.log(estimate);\n// { effectiveQPS: ~0.87, withinLimits: true, recommendation: \"Within default limits\" }\n```\n\n## Benchmark Results Template\n\n```markdown\n## Exa Performance Benchmark\n**Date:** YYYY-MM-DD | **SDK:** exa-js X.Y.Z\n\n| Metric | Value |\n|--------|-------|\n| Total Requests | N |\n| Success Rate | X% |\n| Cache Hit Rate | X% |\n| P50 Latency | Xms |\n| P95 Latency | Xms |\n| Peak QPS (actual API calls) | X |\n| 429 Rate Limit Errors | N |\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| 429 errors in load test | Exceeding 10 QPS | Reduce concurrency, add cache |\n| Inconsistent latency | Different search types | Standardize on one type per test |\n| Timeout errors | Deep search under load | Use `fast` or `auto` for load tests |\n| Cache miss rate high | Unique queries per request | Use a fixed query pool |\n\n## Resources\n\n- [Exa Rate Limits](https://docs.exa.ai/reference/rate-limits)\n- [k6 Documentation](https://k6.io/docs/)\n- [p-queue](https://github.com/sindresorhus/p-queue)\n\n## Next Steps\n\nFor reliability patterns, see `exa-reliability-patterns`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "exa-load-scale",
-    "description": "Implement Exa load testing, capacity planning, and scaling strategies.",
-    "allowed-tools": "Read, Write, Edit, Bash(k6:*), Bash(node:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

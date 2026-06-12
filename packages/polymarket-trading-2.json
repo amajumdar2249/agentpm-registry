@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000039880",
   "name": "polymarket-trading",
   "slug": "polymarket-trading-2",
   "description": "Polymarket-specific terminology, trading strategies, and API reference.",
   "content": "\n## Terminology & Concepts\n\n- **Exit Plan**: Automated limit sell at $0.99 placed as soon as position opens.\n- **Hedged Reversal**: Holding both UP and DOWN positions simultaneously when trend flips.\n- **Midpoint Stop Loss**: Market sell triggered by midpoint price dropping to/below $0.30.\n- **Scale-In**: Adding capital to winning positions via Market Orders (FAK).\n- **Underdog**: Side trading below $0.50. Requires >40% confidence for entry.\n- **Tick Size**: Minimum price increment allowed for a market (e.g., 0.01 or 0.001).\n\n## Strategy Nuances\n\n### Confidence Calculation Methods (v0.5.0+)\n\nThe bot supports two confidence calculation methods for A/B testing:\n\n**Additive Method (Default)**:\n- Directional voting system with weighted signal aggregation\n- Confidence = (winning_total - (losing_total \u00d7 0.2)) \u00d7 lead_lag_bonus\n- Trend agreement bonus (1.1x) when Binance and Polymarket momentum align\n\n**Bayesian Method (Alternative)**:\n- Statistically principled probability theory using log-odds\n- Starts with market prior from Polymarket orderbook\n- Accumulates evidence via log-likelihood ratios:\n  ```python\n  evidence = (score - 0.5) \u00d7 2  # Scale to -1 to +1\n  log_LR = evidence \u00d7 3.0 \u00d7 quality  # Quality factor (0.7-1.5x)\n  log_odds += log_LR \u00d7 weight\n  confidence = 1 / (1 + exp(-log_odds))\n  ```\n- Naturally handles conflicting signals (they cancel out)\n- Market prior anchors calculation to Polymarket reality\n\n**A/B Testing**:\n- Both methods calculated simultaneously on every trade\n- Results stored in database for comparison\n- Toggle via `BAYESIAN_CONFIDENCE` environment variable (default: NO)\n- Compare win rates after 100+ trades:\n  ```sql\n  SELECT\n      AVG(CASE WHEN bias='UP' THEN edge ELSE -edge END) as avg_edge,\n      COUNT(*) as total,\n      SUM(CASE WHEN result='WIN' THEN 1 ELSE 0 END) as wins,\n      CAST(wins AS REAL) / COUNT(*) as win_rate\n  FROM trades\n  WHERE settled = 1\n  GROUP BY method;\n  ```\n\n### Exit Plan Optimization\n- **Smart Exit Pricing**: \n  - High confidence trades (\u226585%): Use $0.999 exit price for maximum profit\n  - Standard trades: Use $0.99 exit price (configurable via EXIT_PRICE_TARGET)\n  - Only apply 0.999 for winning positions (UP side with price \u2265 entry OR DOWN side with price \u2264 entry)\n- **Immediate Placement**: Exit plans placed immediately after position fill (no age requirement)\n- **Real-Time Size Validation**: Exit order size validated every 1-second cycle\n- **Repair Logic**: \n  - Automatic repair if exit order size mismatches database size\n  - Uses 0.05 share threshold to prevent infinite repair loops from exchange rounding\n  - Cancels incorrect order and places new one with correct size\n- **Adoption Logic**: Discovers and adopts existing SELL orders on exchange to prevent duplicates\n\n### Scale-In Strategy (Dynamic)\n- Default `SCALE_IN_TIME_LEFT`: 450s (7.5 minutes)\n- Dynamic early entry timing based on confidence (`edge`) and midpoint price:\n  - 12m left: `edge` >= 90% and price >= $0.80\n  - 9m left: `edge` >= 80% and price >= $0.70\n  - 7m left: `edge` >= 70% and price >= $0.65\n- Uses Market Orders (FAK) to ensure immediate fills\n- Multiplier: 1.5x (adds 150% more capital, creating 2.5x total position)\n\n### Signal Bonuses\n- **Trend Agreement Bonus**: 1.1x multiplier if Binance and Polymarket trends align\n- **Lead/Lag Bonus**: 1.2x bonus or 0.8x penalty based on cross-exchange consistency\n\n### Technical Requirements\n- **Precision**: Use strict 0.0001 threshold for balance syncing\n- **Minimum Size**: Polymarket enforces a 5.0 share minimum for limit orders\n- **Rounding**: Use `truncate_float(value, 2)` for all order sizes to match exchange precision\n\n## Fees & Rebates (15-Minute Crypto Markets)\n\n- **Taker Fees**: Applied ONLY to 15-minute crypto markets.\n- **Fee Deduction**: \n    - **BUY**: Fee is taken in **Tokens** from the proceeds.\n    - **SELL**: Fee is taken in **USDC** from the proceeds.\n- **Effective Rates**: \n    - **Buying**: Peaks at ~1.6% at $0.50 price.\n    - **Selling**: Peaks at ~3.7% at $0.30 price. Selling is generally more expensive because USDC is taken directly.\n- **Fee Precision**: Rounded to 4 decimal places (min 0.0001 USDC). Small trades at extremes might be fee-free.\n- **Maker Rebates**: Distributed daily in USDC to makers who provide liquidity that gets filled.\n- **Strategy Implications**: \n    - Prefer **Maker orders** (Limit orders that add liquidity) to avoid fees and potentially earn rebates.\n    - Selling at low prices as a taker is particularly costly.\n\n## Common Code Patterns\n\n### Market Data\n```python\nfrom src.trading.orders import get_midpoint, get_spread, check_liquidity\n# Get accurate midpoint price\nprice = get_midpoint(token_id)\n# Check if liquidity is good\nif check_liquidity(token_id, size=100, warn_threshold=0.05):\n    # Safe to trade\n```\n\n### Order Placement\n```python\nfrom src.trading.orders import place_batch_orders, place_market_order\n# Batch Orders\nresults = place_batch_orders(orders)\n# Market Sell\nresult = place_market_order(token_id, amount=10.0, side=\"SELL\", order_type=\"FAK\")\n```\n\n## Standard Emoji Guide\n\n### Position Monitoring\n- \ud83d\udc40 Monitoring positions\n- \ud83d\udcc8 UP side position (winning if PnL positive)\n- \ud83d\udcc9 DOWN side position (winning if PnL positive)\n- \ud83d\udce6 Position size display\n- \ud83e\uddee PnL percentage display\n\n### Position Status\n- \u23f0 Exit plan active (limit sell order placed)\n- \u23f3 Exit plan pending (waiting for conditions)\n- \u23ed\ufe0f Exit skipped (position below MIN_SIZE threshold)\n- \ud83d\udcca Scaled in position indicator\n\n### Order Lifecycle\n- \ud83d\ude80 Trade execution / Entry\n- \ud83c\udfaf Limit order placement\n- \u2705 Success / Order filled\n- \ud83e\uddf9 Order cancellation\n- \u274c Error/Failure\n\n### Risk Management\n- \ud83d\uded1 Stop loss triggered\n- \ud83d\udd04 Reversal / Trend flip\n- \u26a0\ufe0f Warning / Validation issue\n- \ud83d\udd27 Position repair/sync\n\n### System\n- \ud83d\udcb0 Money/Balance/Settlement\n- \ud83c\udf0d Geographic restriction\n- \ud83e\udddf Ghost trade detection\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "polymarket-trading",
-    "description": "Polymarket-specific terminology, trading strategies, and API reference."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

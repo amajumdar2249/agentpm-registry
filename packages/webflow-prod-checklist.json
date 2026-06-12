@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033532",
   "name": "webflow-prod-checklist",
   "slug": "webflow-prod-checklist",
   "description": "Execute Webflow production deployment checklist \\u2014 token security,\\",
   "content": "# Webflow Production Checklist\n\n## Overview\n\nComplete pre-deployment checklist for Webflow Data API v2 integrations, covering\nauthentication, error handling, rate limits, monitoring, and rollback.\n\n## Prerequisites\n\n- Staging environment tested and verified\n- Production API token with minimal scopes\n- Deployment pipeline configured\n- Monitoring/alerting infrastructure ready\n\n## Instructions\n\n### Pre-Deployment Configuration\n\n- [ ] **Production API token** in secure vault (not .env file on server)\n- [ ] **Minimal scopes** \u2014 only scopes the integration actually uses\n- [ ] **Site token** used where workspace token is not needed\n- [ ] **Environment variables** set in deployment platform (Vercel/Fly/Cloud Run)\n- [ ] **Webhook secrets** stored securely, not hardcoded\n- [ ] **No tokens in client-side code** \u2014 all API calls server-side only\n\n### Code Quality Verification\n\n- [ ] **All tests passing** \u2014 unit tests with mocked SDK, integration tests with test token\n- [ ] **No hardcoded credentials** \u2014 `grep -r \"Bearer \" src/` returns nothing\n- [ ] **Error handling** covers 400, 401, 403, 404, 409, 429, 500\n- [ ] **Rate limit handling** \u2014 SDK `maxRetries` configured, bulk endpoints used\n- [ ] **Pagination** \u2014 all list operations handle `offset`/`limit` correctly\n- [ ] **Logging** is production-appropriate (no PII, structured JSON)\n- [ ] **Webhook signatures verified** \u2014 `verifyWebhookSignature()` on every webhook\n\n### Rate Limit Readiness\n\n- [ ] **Bulk endpoints** used for multi-item operations (100 items/request max)\n- [ ] **Request queue** with concurrency control (p-queue or similar)\n- [ ] **Site publish** rate limited to max 1 per minute\n- [ ] **Retry-After** header honored in custom retry logic\n- [ ] **SDK maxRetries** set (default: 2, increase for critical paths)\n\n### Health Check Endpoint\n\n```typescript\n// api/health.ts\nimport { WebflowClient } from \"webflow-api\";\n\nexport async function GET() {\n  const webflow = new WebflowClient({\n    accessToken: process.env.WEBFLOW_API_TOKEN!,\n  });\n\n  const checks: Record<string, any> = {};\n  const start = Date.now();\n\n  try {\n    const { sites } = await webflow.sites.list();\n    checks.webflow = {\n      status: \"connected\",\n      sites: sites?.length || 0,\n      latencyMs: Date.now() - start,\n    };\n  } catch (error: any) {\n    checks.webflow = {\n      status: \"disconnected\",\n      error: error.statusCode || error.message,\n      latencyMs: Date.now() - start,\n    };\n  }\n\n  const healthy = checks.webflow.status === \"connected\";\n\n  return Response.json(\n    {\n      status: healthy ? \"healthy\" : \"degraded\",\n      services: checks,\n      timestamp: new Date().toISOString(),\n    },\n    { status: healthy ? 200 : 503 }\n  );\n}\n```\n\n### Circuit Breaker Pattern\n\n```typescript\nclass WebflowCircuitBreaker {\n  private failures = 0;\n  private lastFailure = 0;\n  private state: \"closed\" | \"open\" | \"half-open\" = \"closed\";\n\n  constructor(\n    private threshold = 5,      // failures before opening\n    private resetTimeMs = 60000  // time before trying again\n  ) {}\n\n  async execute<T>(operation: () => Promise<T>): Promise<T> {\n    if (this.state === \"open\") {\n      if (Date.now() - this.lastFailure > this.resetTimeMs) {\n        this.state = \"half-open\";\n      } else {\n        throw new Error(\"Circuit breaker is open \u2014 Webflow API unavailable\");\n      }\n    }\n\n    try {\n      const result = await operation();\n      this.onSuccess();\n      return result;\n    } catch (error: any) {\n      this.onFailure();\n      throw error;\n    }\n  }\n\n  private onSuccess() {\n    this.failures = 0;\n    this.state = \"closed\";\n  }\n\n  private onFailure() {\n    this.failures++;\n    this.lastFailure = Date.now();\n    if (this.failures >= this.threshold) {\n      this.state = \"open\";\n      console.error(`Circuit breaker OPEN after ${this.failures} failures`);\n    }\n  }\n}\n\nconst breaker = new WebflowCircuitBreaker();\n\n// Usage\nconst sites = await breaker.execute(() => webflow.sites.list());\n```\n\n### Monitoring Alerts\n\n| Alert | Condition | Severity |\n|-------|-----------|----------|\n| API unreachable | Health check fails 3x consecutive | P1 |\n| Auth failure | Any 401 or 403 response | P1 |\n| High error rate | Error rate > 5% over 5 min | P2 |\n| Rate limited | 429 responses > 5/min | P2 |\n| High latency | P95 > 3000ms | P3 |\n| Token expiring | Token age > 90 days (rotation schedule) | P3 |\n\n### Graceful Degradation\n\n```typescript\nasync function getContentWithFallback(\n  collectionId: string,\n  cachedData: any[]\n): Promise<any[]> {\n  try {\n    const { items } = await breaker.execute(() =>\n      webflow.collections.items.listItemsLive(collectionId)\n    );\n    // Update cache on success\n    await updateCache(collectionId, items);\n    return items || [];\n  } catch (error) {\n    console.warn(\"Webflow unavailable, serving cached content\");\n    return cachedData;\n  }\n}\n```\n\n### Pre-Flight Verification Script\n\n```bash\n#!/bin/bash\necho \"=== Webflow Production Pre-Flight ===\"\n\n# 1. Token works\nHTTP=$(curl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"Authorization: Bearer $WEBFLOW_API_TOKEN\" \\\n  https://api.webflow.com/v2/sites)\necho \"Token valid: $([ \"$HTTP\" = \"200\" ] && echo \"YES\" || echo \"NO (HTTP $HTTP)\")\"\n\n# 2. Webflow platform status\nSTATUS=$(curl -s https://status.webflow.com/api/v2/status.json | \\\n  python3 -c \"import sys,json; print(json.load(sys.stdin)['status']['description'])\" 2>/dev/null)\necho \"Webflow status: ${STATUS:-unknown}\"\n\n# 3. Rate limit headroom\ncurl -s -I -H \"Authorization: Bearer $WEBFLOW_API_TOKEN\" \\\n  https://api.webflow.com/v2/sites 2>/dev/null | \\\n  grep -i \"x-ratelimit-remaining\" || echo \"Rate limit headers not available\"\n\n# 4. Health endpoint\nHEALTH=$(curl -s -o /dev/null -w \"%{http_code}\" https://your-app.com/api/health)\necho \"Health endpoint: HTTP $HEALTH\"\n```\n\n### Rollback Procedure\n\n```bash\n# Immediate rollback steps:\n# 1. Revert to previous deployment\nvercel rollback     # Vercel\nfly releases        # Fly.io \u2014 find previous release\nfly deploy --image registry/app:previous-tag  # Fly.io\n\n# 2. If using feature flags, disable Webflow integration\n# 3. Monitor error rates for resolution\n```\n\n## Output\n\n- Production-hardened Webflow integration\n- Health check endpoint with latency tracking\n- Circuit breaker preventing cascade failures\n- Monitoring alerts configured\n- Rollback procedure documented and tested\n\n## Error Handling\n\n| Issue | Response | Severity |\n|-------|----------|----------|\n| Token revoked in production | Rotate immediately, restart pods | P1 |\n| Webflow outage | Circuit breaker opens, serve cache | P2 |\n| Rate limit exhaustion | Queue backs up, requests delayed | P2 |\n| Webhook delivery failures | Check ngrok/tunnel, verify URL | P3 |\n\n## Resources\n\n- [Webflow Status Page](https://status.webflow.com)\n- [Rate Limits](https://developers.webflow.com/data/reference/rate-limits)\n- [API Reference](https://developers.webflow.com/data/reference/rest-introduction)\n\n## Next Steps\n\nFor version upgrades, see `webflow-upgrade-migration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "webflow-prod-checklist",
-    "description": "Execute Webflow production deployment checklist \\u2014 token security,\\",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

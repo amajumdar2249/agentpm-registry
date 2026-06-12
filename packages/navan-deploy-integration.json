@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032677",
   "name": "navan-deploy-integration",
   "slug": "navan-deploy-integration",
   "description": "Use when deploying Navan integrations with ERP systems (NetSuite, Sage",
   "content": "# Navan Deploy Integration\n\n## Overview\n\nNavan connects to enterprise systems through multiple integration methods: direct REST API with OAuth 2.0, SCIM for user provisioning, SFTP for batch file exchange, SAML/OIDC for SSO, and webhooks for real-time events. There is no SDK \u2014 all integrations use Navan's REST endpoints or admin console configuration. This skill provides deployment checklists for the three most common integration categories: ERP expense sync, HRIS user provisioning, and identity provider SSO.\n\n## Prerequisites\n\n- **Navan Admin** account with integration management permissions\n- **OAuth 2.0 credentials** \u2014 `client_id` and `client_secret` from Admin > API Settings\n- **Target system admin access** \u2014 NetSuite/Sage Intacct/Xero admin, Workday/BambooHR admin, or Okta/Azure AD admin\n- API base URL: `https://api.navan.com/v1`\n\n## Instructions\n\n### Category A \u2014 ERP Expense Sync (NetSuite, Sage Intacct, Xero, QuickBooks)\n\n**Deployment Checklist:**\n\n1. **Create OAuth credentials** in Navan Admin > API Settings\n2. **Configure GL code mappings** \u2014 Map Navan expense categories to your chart of accounts\n3. **Set cost center mappings** \u2014 Align Navan departments with ERP cost centers\n4. **Enable expense export** via REST API:\n\n```bash\n# Fetch approved expenses ready for ERP sync\ncurl -s -X GET \"https://api.navan.com/v1/expenses?status=approved&limit=50\" \\\n  -H \"Authorization: Bearer ${ACCESS_TOKEN}\" \\\n  -H \"Content-Type: application/json\"\n\n# Response includes fields for ERP mapping:\n# {\n#   \"uuid\": \"exp_abc123\",\n#   \"amount\": 245.50,\n#   \"currency\": \"USD\",\n#   \"category\": \"meals_entertainment\",\n#   \"cost_center\": \"engineering\",\n#   \"gl_code\": \"6200\",\n#   \"receipt_url\": \"https://api.navan.com/v1/receipts/exp_abc123\",\n#   \"approved_at\": \"2026-03-20T14:30:00Z\"\n# }\n```\n\n1. **Set up sync schedule** \u2014 Navan supports daily or real-time export via webhooks\n2. **Validate with test expenses** \u2014 Submit 3-5 test expenses through the full approval flow\n3. **Enable in production** \u2014 Switch from sandbox to production OAuth credentials\n\n### Category B \u2014 HRIS User Provisioning (Workday, BambooHR, ADP)\n\n**SCIM Provisioning Setup:**\n\n1. **Enable SCIM** in Navan Admin > Integrations > User Provisioning\n2. **Configure SCIM endpoint** in your HRIS:\n   - SCIM Base URL: `https://api.navan.com/scim/v2`\n   - Authentication: OAuth 2.0 Bearer Token\n3. **Map user attributes:**\n\n| HRIS Field | Navan SCIM Attribute | Required |\n|------------|---------------------|----------|\n| Email | `userName` | Yes |\n| First Name | `name.givenName` | Yes |\n| Last Name | `name.familyName` | Yes |\n| Department | `urn:navan:department` | Recommended |\n| Manager | `urn:navan:manager_email` | Recommended |\n| Cost Center | `urn:navan:cost_center` | Optional |\n\n1. **Test provisioning** \u2014 Create a test user in HRIS and verify they appear in Navan within 15 minutes\n2. **Test deprovisioning** \u2014 Deactivate the test user and confirm Navan access is revoked\n3. **Verify via API:**\n\n```bash\n# Check provisioned users\ncurl -s \"https://api.navan.com/v1/users?provisioning_source=scim&limit=10\" \\\n  -H \"Authorization: Bearer ${ACCESS_TOKEN}\" | jq '.[] | {email, status, provisioned_at}'\n```\n\n### Category C \u2014 SSO Deployment (Okta, Azure AD)\n\n**SAML Configuration:**\n\n1. **Create SAML application** in your IdP (Okta or Azure AD)\n2. **Configure Navan SAML settings** in Admin > Security > SSO:\n   - Entity ID: `https://app.navan.com/saml/metadata`\n   - ACS URL: `https://app.navan.com/saml/acs`\n   - Name ID Format: `emailAddress`\n3. **Map SAML attributes:**\n\n```\nemail       \u2192 user.email        (Required)\nfirstName   \u2192 user.firstName    (Required)\nlastName    \u2192 user.lastName     (Required)\ndepartment  \u2192 user.department   (Optional \u2014 enables policy routing)\n```\n\n1. **Upload IdP metadata XML** to Navan Admin console\n2. **Enable JIT provisioning** (optional) \u2014 Auto-create Navan accounts on first SSO login\n3. **Test with a pilot group** \u2014 Assign 5-10 users before org-wide rollout\n4. **Enforce SSO** \u2014 After pilot validation, enable \"SSO Required\" to disable password login\n\n## Output\n\nEach integration deployment produces:\n\n- **Connection validation** confirming data flows between systems\n- **Field mapping documentation** for ongoing maintenance\n- **Test results** from pilot user group\n- **Rollback instructions** if issues arise post-deployment\n\n## Error Handling\n\n| HTTP Code | Meaning | Resolution |\n|-----------|---------|------------|\n| `400` | Invalid field mapping or malformed request | Review GL code / attribute mappings |\n| `401` | OAuth token expired or invalid | Rotate credentials in Navan Admin |\n| `403` | Integration not enabled for your plan | Verify Navan plan includes this integration (Enterprise required for some) |\n| `409` | Duplicate user in SCIM provisioning | Check for existing user with same email |\n| `422` | Validation error on expense export | Verify required fields (amount, currency, category) are present |\n| `429` | Rate limited | Reduce sync frequency or implement exponential backoff |\n\n## Examples\n\n**Automated daily expense export to NetSuite:**\n\n```bash\n#!/usr/bin/env bash\n# scripts/navan-netsuite-sync.sh\nset -euo pipefail\n\n# Authenticate\nTOKEN=$(curl -sf -X POST https://api.navan.com/ta-auth/oauth/token \\\n  -H \"Content-Type: application/x-www-form-urlencoded\" \\\n  -d \"grant_type=client_credentials&client_id=${NAVAN_CLIENT_ID}&client_secret=${NAVAN_CLIENT_SECRET}\" \\\n  | jq -r '.access_token')\n\n# Fetch yesterday's approved expenses\nYESTERDAY=$(date -d \"yesterday\" +%Y-%m-%d)\ncurl -s \"https://api.navan.com/v1/expenses?status=approved&approved_after=${YESTERDAY}T00:00:00Z\" \\\n  -H \"Authorization: Bearer $TOKEN\" \\\n  -o /tmp/navan-expenses.json\n\nEXPENSE_COUNT=$(jq length /tmp/navan-expenses.json)\necho \"Exporting $EXPENSE_COUNT expenses to NetSuite\"\n```\n\n## Resources\n\n- [Navan Help Center](https://app.navan.com/app/helpcenter) \u2014 Integration setup guides\n- [Navan Integrations Directory](https://navan.com/integrations) \u2014 Full list of supported connectors\n- [SCIM Protocol Spec (RFC 7644)](https://datatracker.ietf.org/doc/html/rfc7644) \u2014 SCIM provisioning standard\n- [Navan Pricing](https://navan.com/pricing) \u2014 Plan comparison for integration availability\n\n## Next Steps\n\n- Add `navan-observability` to monitor integration health post-deployment\n- Add `navan-webhooks-events` for real-time event-driven sync instead of polling\n- See `navan-security-basics` for credential rotation and access control\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "navan-deploy-integration",
-    "description": "Use when deploying Navan integrations with ERP systems (NetSuite, Sage",
-    "allowed-tools": "Read, Write, Edit, Bash(curl:*), Grep, Glob",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

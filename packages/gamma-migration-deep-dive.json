@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032101",
   "name": "gamma-migration-deep-dive",
   "slug": "gamma-migration-deep-dive",
   "description": "Deep dive into migrating to Gamma from other presentation platforms.",
   "content": "# Gamma Migration Deep Dive\n\n## Current State\n\n!`npm list 2>/dev/null | head -10`\n\n## Overview\n\nMigrate presentation workflows from PowerPoint, Google Slides, Canva, or other platforms to Gamma's AI-powered generation. Gamma takes a fundamentally different approach -- instead of manually placing slides, you provide content and Gamma generates the presentation. Migration is about converting your content pipeline, not your slide files.\n\n## Prerequisites\n\n- Gamma API access (Pro+ plan)\n- Source presentations accessible for content extraction\n- Node.js 18+ for migration scripts\n- Completed `gamma-install-auth` setup\n\n## Migration Approaches\n\n| Approach | When to Use | Effort |\n|----------|-------------|--------|\n| Content extraction + regeneration | Lots of text-heavy presentations | Medium |\n| Import via Gamma UI | One-off migration of key decks | Low |\n| Template recreation | Repeatable presentation formats | Medium |\n| Parallel operation | Gradual transition over time | Low |\n\n**Key insight:** You don't \"import\" slides into Gamma. You extract content from old presentations and regenerate them using Gamma's AI. This often produces better results than the originals.\n\n## Instructions\n\n### Step 1: Inventory Source Presentations\n\n```typescript\n// scripts/inventory-presentations.ts\nimport { readdir, stat } from \"node:fs/promises\";\nimport { join, extname } from \"node:path\";\n\ninterface PresentationInfo {\n  path: string;\n  format: string;\n  sizeMB: number;\n  lastModified: Date;\n}\n\nasync function inventoryPresentations(dir: string): Promise<PresentationInfo[]> {\n  const entries = await readdir(dir, { recursive: true });\n  const presentations: PresentationInfo[] = [];\n\n  for (const entry of entries) {\n    const ext = extname(entry).toLowerCase();\n    if ([\".pptx\", \".ppt\", \".key\", \".pdf\", \".md\"].includes(ext)) {\n      const fullPath = join(dir, entry);\n      const info = await stat(fullPath);\n      presentations.push({\n        path: fullPath,\n        format: ext,\n        sizeMB: info.size / (1024 * 1024),\n        lastModified: info.mtime,\n      });\n    }\n  }\n\n  console.log(`Found ${presentations.length} presentations:`);\n  const byFormat = presentations.reduce((acc, p) => {\n    acc[p.format] = (acc[p.format] || 0) + 1;\n    return acc;\n  }, {} as Record<string, number>);\n  console.log(\"By format:\", byFormat);\n\n  return presentations;\n}\n```\n\n### Step 2: Extract Content from PowerPoint\n\n```typescript\n// scripts/extract-pptx.ts\n// Use 'pptx-parser' or 'officegen' to extract text content\n\nimport JSZip from \"jszip\";\nimport { readFile } from \"node:fs/promises\";\nimport { DOMParser } from \"xmldom\";\n\nasync function extractPptxContent(pptxPath: string): Promise<string[]> {\n  const buffer = await readFile(pptxPath);\n  const zip = await JSZip.loadAsync(buffer);\n\n  const slides: string[] = [];\n  const slideFiles = Object.keys(zip.files)\n    .filter((f) => f.match(/ppt\\/slides\\/slide\\d+\\.xml$/))\n    .sort();\n\n  for (const slideFile of slideFiles) {\n    const xml = await zip.file(slideFile)!.async(\"string\");\n    const doc = new DOMParser().parseFromString(xml);\n    // Extract all text elements\n    const textNodes = doc.getElementsByTagName(\"a:t\");\n    const texts: string[] = [];\n    for (let i = 0; i < textNodes.length; i++) {\n      const text = textNodes[i].textContent?.trim();\n      if (text) texts.push(text);\n    }\n    slides.push(texts.join(\"\\n\"));\n  }\n\n  return slides;\n}\n\n// Convert extracted content to Gamma prompt\nfunction slidesToGammaPrompt(slides: string[], title: string): string {\n  let prompt = `${title}\\n\\n`;\n  slides.forEach((content, i) => {\n    prompt += `Slide ${i + 1}:\\n${content}\\n\\n`;\n  });\n  return prompt;\n}\n```\n\n### Step 3: Batch Migration Script\n\n```typescript\n// scripts/migrate-to-gamma.ts\nimport { createGammaClient } from \"../src/client\";\nimport { pollUntilDone } from \"../src/poll\";\nimport pLimit from \"p-limit\";\n\nconst gamma = createGammaClient({ apiKey: process.env.GAMMA_API_KEY! });\nconst limit = pLimit(2); // Max 2 concurrent generations\n\ninterface MigrationItem {\n  title: string;\n  content: string;\n  sourceFile: string;\n}\n\nasync function migrateBatch(items: MigrationItem[]) {\n  const results = await Promise.allSettled(\n    items.map((item) =>\n      limit(async () => {\n        console.log(`Migrating: ${item.title}`);\n        const { generationId } = await gamma.generate({\n          content: item.content,\n          outputFormat: \"presentation\",\n          textMode: \"condense\", // AI condenses extracted text\n          exportAs: \"pptx\",    // Get PPTX for comparison\n        });\n\n        const result = await pollUntilDone(gamma, generationId);\n        return {\n          title: item.title,\n          sourceFile: item.sourceFile,\n          gammaUrl: result.gammaUrl,\n          exportUrl: result.exportUrl,\n          creditsUsed: result.creditsUsed,\n        };\n      })\n    )\n  );\n\n  // Report\n  const succeeded = results.filter((r) => r.status === \"fulfilled\");\n  const failed = results.filter((r) => r.status === \"rejected\");\n  console.log(`\\nMigration complete: ${succeeded.length} succeeded, ${failed.length} failed`);\n\n  for (const r of results) {\n    if (r.status === \"fulfilled\") {\n      console.log(`  OK: ${r.value.title} \u2192 ${r.value.gammaUrl}`);\n    } else {\n      console.log(`  FAIL: ${r.reason}`);\n    }\n  }\n}\n```\n\n### Step 4: Template Recreation\n\nFor recurring presentation types (weekly reports, proposals, etc.), create Gamma templates:\n\n```text\nMigration steps for templates:\n1. Identify repeating presentation formats in your org\n2. Create a one-page template gamma in the Gamma app:\n   - gamma.app \u2192 Create \u2192 design a single representative page\n3. Note the template gamma ID from the URL\n4. Use POST /v1.0/generations/from-template with the gammaId\n5. Update your automation scripts to use generateFromTemplate()\n```\n\n```typescript\n// After template creation in Gamma UI\nconst MIGRATED_TEMPLATES: Record<string, string> = {\n  \"weekly-report\": \"gamma_template_weekly_abc123\",\n  \"sales-proposal\": \"gamma_template_proposal_def456\",\n  \"team-update\": \"gamma_template_update_ghi789\",\n};\n\nasync function generateFromMigratedTemplate(\n  templateKey: string,\n  content: string\n) {\n  const gammaId = MIGRATED_TEMPLATES[templateKey];\n  if (!gammaId) throw new Error(`Unknown template: ${templateKey}`);\n\n  const { generationId } = await gamma.generateFromTemplate({\n    gammaId,\n    prompt: content,\n    exportAs: \"pdf\",\n  });\n\n  return pollUntilDone(gamma, generationId);\n}\n```\n\n### Step 5: Validation Checklist\n\nAfter migrating each presentation:\n\n```text\n- [ ] Content accuracy: AI-generated text matches source intent\n- [ ] Slide count: reasonable for the content volume\n- [ ] Theme/branding: workspace theme applied correctly\n- [ ] Export quality: PDF/PPTX downloads successfully\n- [ ] Links preserved: any URLs from original are in the content\n- [ ] Stakeholder review: key presentations reviewed by owners\n```\n\n## Supported Migration Paths\n\n| Source | Method | Fidelity | Notes |\n|--------|--------|----------|-------|\n| PowerPoint (.pptx) | Extract text \u2192 regenerate | Content-high, design-new | AI redesigns slides |\n| Google Slides | Export as .pptx \u2192 extract | Content-high, design-new | Export first |\n| Canva | Export as .pdf \u2192 extract text | Medium | Limited text extraction |\n| Keynote (.key) | Export as .pptx \u2192 extract | Content-high, design-new | Export first |\n| Markdown (.md) | Direct use as content | High | Best migration path |\n| Notion pages | Export as .md \u2192 use directly | High | Clean text extraction |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Content too long | Exceeds 100K token limit | Split into multiple presentations |\n| Credit budget exceeded | Too many migrations at once | Batch over multiple days |\n| Poor output quality | Content too unstructured | Add structure (headings, bullets) to extracted content |\n| Missing images | Images in source not extracted | Gamma generates new images; reference image concepts in text |\n\n## Resources\n\n- [Gamma Import Guide](https://gamma.app/docs/import)\n- [Generate API Parameters](https://developers.gamma.app/guides/generate-api-parameters-explained)\n- [Text Mode Options](https://developers.gamma.app/docs/understand-the-api-options)\n\n## Next Steps\n\nReview `gamma-core-workflow-a` for ongoing content generation after migration.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "gamma-migration-deep-dive",
-    "description": "Deep dive into migrating to Gamma from other presentation platforms.",
-    "allowed-tools": "Read, Write, Edit, Bash(node:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,16 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000011703",
   "name": "website-analyzer",
   "slug": "website-analyzer",
   "description": "Analyze any website URL across 6 dimensions: UI/UX, category, style, performance (LCP/CLS/TTFB/weight/requests), surface-level security, and SEO (score 0-100 with breakdown). Outputs structured JSON for downstream skills. Use when asked to analyze, audit, or scan a website. Don't use for full SEO audits or penetration testing.",
   "content": "\n# Website Analyzer\n\nAnalyzes any website URL across 6 dimensions and produces structured JSON output for downstream skills in the website-cloner suite.\n\n## When to Use\n\nTrigger when the user asks to:\n- Analyze, audit, or scan a website\n- Get a performance, SEO, security, or UI/UX assessment of a URL\n- Understand a website's structure, style, or category\n\nDo **not** use for full penetration testing, deep security audits, or App Store ASO.\n\n## Workflow\n\n```\n1. Fetch page content via WebFetch\n2. Extract HTML structure, metadata, headings, links, images, scripts\n3. Estimate performance metrics (LCP, CLS, TTFB, page weight, request count)\n4. Run surface-level security checks\n5. Score SEO across 5 weighted dimensions\n6. Classify UI/UX layout, category, and style\n7. Output structured JSON\n```\n\n## Output\n\nProduce structured JSON at the requested output path (or stdout):\n\n```json\n{\n  \"url\": \"https://example.com\",\n  \"timestamp\": \"2026-05-07T12:00:00Z\",\n  \"ui_ux\": {\n    \"layout\": \"single-column | two-column | grid | ...\",\n    \"visual_hierarchy\": \"what draws attention first\",\n    \"components\": [\"nav\", \"hero\", \"cta\", \"footer\", ...],\n    \"responsive\": \"desktop-first | mobile-first | adaptive | unknown\",\n    \"friction_points\": [\"slow nav\", \"missing CTA\", ...]\n  },\n  \"category\": \"saas-landing | portfolio | e-commerce | blog | docs | dashboard | ...\",\n  \"category_confidence\": 0.9,\n  \"style\": {\n    \"typography\": \"brief description\",\n    \"palette\": [\"#hex\", ...],\n    \"spacing\": \"compact | comfortable | spacious\",\n    \"motion\": \"minimal | moderate | heavy\",\n    \"aesthetic\": \"vibe description\"\n  },\n  \"performance\": {\n    \"lcp_estimate\": 2.5,\n    \"cls_estimate\": 0.05,\n    \"ttfb_estimate\": 0.3,\n    \"total_page_weight_kb\": 1200,\n    \"request_count\": 45,\n    \"notes\": \"estimated from static analysis\"\n  },\n  \"security\": {\n    \"https\": true,\n    \"mixed_content\": false,\n    \"security_headers\": [\"strict-transport-security\", ...],\n    \"exposed_metadata\": [],\n    \"note\": \"Surface-level check only. Not a full security audit.\"\n  },\n  \"seo\": {\n    \"score\": 72,\n    \"title_tag\": \"present | missing | duplicate\",\n    \"meta_description\": \"present | missing | too-short\",\n    \"heading_structure\": \"h1:N h2:N ...\",\n    \"alt_text_coverage\": 0.85,\n    \"structured_data\": \"present | missing\",\n    \"canonical_url\": \"present | missing\",\n    \"robots_sitemap\": \"robots=ok | sitemap=found | ...\",\n    \"dimension_scores\": {\n      \"meta_tags\": 80,\n      \"heading_structure\": 60,\n      \"image_alt_text\": 90,\n      \"structured_data\": 50,\n      \"crawlability\": 75\n    }\n  }\n}\n```\n\n## Step 1: Fetch the Page\n\nUse `WebFetch` to retrieve content:\n\n```\nWebFetch(url=<url>, prompt=\"Extract all HTML structure, meta tags, headings, links, images, scripts, styles, and any structured data (JSON-LD, Open Graph, etc.)\")\n```\n\nIf WebFetch fails (4xx, 5xx, timeout), return immediately:\n```json\n{\"url\": \"<url>\", \"error\": \"unreachable\", \"detail\": \"<error>\"}\n```\n\nFor JS-heavy SPAs where WebFetch returns minimal content, note:\n`{\"note\": \"SPA detected \u2014 analysis based on crawlable content only; some metrics may be incomplete\"}`\n\n## Step 2: Extract Structure\n\nFrom fetched content, extract:\n- `<title>`, `<meta>` tags (description, keywords, OG, Twitter)\n- Heading hierarchy (`<h1>`\u2013`<h6>`)\n- Images with `alt` attributes\n- Link structure and count\n- Script/style count and sizes\n- JSON-LD structured data\n- Canonical URL\n- Robots meta tag\n\n## Step 3: Estimate Performance\n\n| Metric | Method |\n|--------|--------|\n| Page weight | Sum of referenced resource sizes; estimate image sizes from layout |\n| Request count | Count `<img>`, `<link rel=\"stylesheet\">`, `<script>`, font refs |\n| LCP | Inferred from above-fold content size; min 0.5s for bare HTML |\n| CLS | Estimated from layout shift indicators (missing dimensions, late loaders) |\n| TTFB | Inferred from hosting signals; static \u2192 low, dynamic \u2192 moderate |\n\nAll metrics are estimates from static analysis. Note this in output.\n\n## Step 4: Security Check (Surface-Level Only)\n\nCheck:\n- HTTPS usage\n- Mixed content (HTTP resources on HTTPS page)\n- Security headers: HSTS, X-Content-Type-Options, X-Frame-Options, CSP\n- Exposed metadata (dev tools, debug endpoints, sensitive data in comments)\n\nAlways label as surface-level.\n\n## Step 5: SEO Scoring\n\nCompute each dimension's 0\u2013100 sub-score using the rubrics below, then combine with the weights to yield the overall `seo.score`. Round each sub-score to the nearest integer; the final score is `round(\u03a3 weight_i \u00d7 sub_i)`.\n\n| Dimension | Weight | Sub-score rubric (0\u2013100) |\n|-----------|--------|--------------------------|\n| Meta tags (title + description) | 20% | Start at 0. +50 if `<title>` is present and 10\u201360 chars. +50 if `<meta name=\"description\">` is present and 50\u2013160 chars. Subtract 25 each for: title outside 10\u201360, description outside 50\u2013160, duplicate title across siblings (when crawlable). Floor at 0. |\n| Heading structure | 15% | 100 if exactly one `<h1>` and at least one `<h2>`. 70 if exactly one `<h1>` but no `<h2>`. 40 if zero or multiple `<h1>`s. Subtract 20 if any heading level is skipped (e.g. h2 \u2192 h4). Floor at 0. |\n| Image alt text coverage | 15% | `round(100 \u00d7 non_empty_alt_count / total_img_count)`. If `total_img_count == 0`, report 100 (no images = no alt-text debt). Decorative images using `alt=\"\"` count as \"non-empty intent\" only when paired with `role=\"presentation\"`; otherwise count as missing. |\n| Structured data | 20% | 100 if at least one valid JSON-LD block is present and parses (any schema). 60 if only Open Graph or Twitter Card meta tags are present (no JSON-LD). 30 if only microdata or RDFa. 0 if none. |\n| Crawlability (canonical, robots, sitemap) | 30% | Start at 0. +40 if a `<link rel=\"canonical\">` resolves to an absolute URL. +30 if `robots.txt` is fetchable and not `Disallow: /`. +30 if a sitemap is referenced (via `robots.txt` `Sitemap:` directive, `<link rel=\"sitemap\">`, or a fetchable `/sitemap.xml`). Cap at 100. |\n\nWhen a sub-score cannot be computed (e.g. `robots.txt` unreachable), record the dimension as `null` in `dimension_scores` and exclude it from the weighted sum, redistributing its weight proportionally across the remaining dimensions. Note any nulls in `seo.notes`.\n\n## Step 6: UI/UX, Category, Style\n\n- **Layout**: Infer from HTML structure (divs, sections, nav, main, footer)\n- **Category**: `saas-landing` | `portfolio` | `e-commerce` | `blog` | `docs` | `dashboard` | `marketing-site` | `web-app` | `other`\n- **Style**: Typography, color palette, spacing density, motion indicators, aesthetic vibe\n\n## Error Handling\n\n| Failure | Behavior |\n|---|---|\n| Unreachable (4xx/5xx/timeout) | `{\"error\": \"unreachable\"}` \u2014 stop |\n| JS-heavy SPA | Note limitation, proceed with crawlable content |\n| Paywall / login | `{\"error\": \"paywall\"}` \u2014 stop |\n| Redirect loop | `{\"error\": \"redirect-loop\"}` \u2014 stop |\n| Empty page | `{\"error\": \"empty\"}` \u2014 stop |\n\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "website-analyzer",
-    "description": "Analyze any website URL across 6 dimensions: UI/UX, category, style, performance (LCP/CLS/TTFB/weight/requests), surface-level security, and SEO (score 0-100 with breakdown). Outputs structured JSON for downstream skills. Use when asked to analyze, audit, or scan a website. Don't use for full SEO audits or penetration testing.",
-    "license": "MIT",
-    "effort": "high",
-    "metadata": "",
-    "version": "1.0.2",
-    "author": "Luong NGUYEN <luongnv89@gmail.com>"
+  "author": "Luong NGUYEN <luongnv89@gmail.com>",
+  "version": "1.0.2",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

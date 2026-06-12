@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032946",
   "name": "posthog-observability",
   "slug": "posthog-observability",
   "description": "Monitor PostHog integration health: event ingestion rates, feature flag",
   "content": "# PostHog Observability\n\n## Overview\n\nMonitor PostHog integration health with four key signals: event ingestion rate (are events flowing?), feature flag evaluation latency (are flags fast enough for hot paths?), event volume by type (detect instrumentation regressions), and API rate limit consumption (are we approaching 429s?).\n\n## Prerequisites\n\n- PostHog project with personal API key (`phx_...`)\n- Application instrumented with PostHog SDK\n- Prometheus/Grafana or equivalent monitoring stack (optional)\n\n## Instructions\n\n### Step 1: Event Ingestion Health Check\n\n```bash\nset -euo pipefail\n# Check if events are flowing (last 24 hours)\ncurl \"https://app.posthog.com/api/projects/$POSTHOG_PROJECT_ID/query/\" \\\n  -H \"Authorization: Bearer $POSTHOG_PERSONAL_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"query\": {\n      \"kind\": \"HogQLQuery\",\n      \"query\": \"SELECT toStartOfHour(timestamp) AS hour, count() AS events FROM events WHERE timestamp > now() - interval 24 hour GROUP BY hour ORDER BY hour\"\n    }\n  }' | jq '.results | map({hour: .[0], events: .[1]}) | .[-3:]'\n```\n\n### Step 2: Instrument Flag Evaluation Latency\n\n```typescript\n// posthog-instrumented.ts\nimport { PostHog } from 'posthog-node';\n\nconst posthog = new PostHog(process.env.NEXT_PUBLIC_POSTHOG_KEY!, {\n  host: 'https://us.i.posthog.com',\n  personalApiKey: process.env.POSTHOG_PERSONAL_API_KEY,\n});\n\n// Wrap flag evaluation with timing\nasync function getFlag(flagKey: string, userId: string): Promise<any> {\n  const start = performance.now();\n  const value = await posthog.getFeatureFlag(flagKey, userId);\n  const durationMs = performance.now() - start;\n\n  // Emit metrics to your monitoring system\n  emitHistogram('posthog_flag_eval_duration_ms', durationMs, { flag: flagKey });\n  emitCounter('posthog_flag_evals_total', 1, { flag: flagKey, result: String(value) });\n\n  // Alert on slow evaluations (likely means local eval not configured)\n  if (durationMs > 200) {\n    console.warn(`[PostHog] Slow flag eval: ${flagKey} took ${durationMs.toFixed(0)}ms \u2014 check personalApiKey`);\n  }\n\n  return value;\n}\n\n// Example: emit to Prometheus via prom-client\nimport { Histogram, Counter, Gauge } from 'prom-client';\n\nconst flagDuration = new Histogram({\n  name: 'posthog_flag_eval_duration_ms',\n  help: 'PostHog feature flag evaluation duration',\n  labelNames: ['flag'],\n  buckets: [1, 5, 10, 50, 100, 200, 500, 1000],\n});\n\nconst flagEvals = new Counter({\n  name: 'posthog_flag_evals_total',\n  help: 'Total PostHog feature flag evaluations',\n  labelNames: ['flag', 'result'],\n});\n\nfunction emitHistogram(name: string, value: number, labels: Record<string, string>) {\n  flagDuration.observe(labels, value);\n}\n\nfunction emitCounter(name: string, value: number, labels: Record<string, string>) {\n  flagEvals.inc(labels, value);\n}\n```\n\n### Step 3: Monitor Event Volume and Billing\n\n```typescript\n// Run on a cron (e.g., every 6 hours)\nasync function checkEventVolume() {\n  const result = await fetch(\n    `https://app.posthog.com/api/projects/${process.env.POSTHOG_PROJECT_ID}/query/`,\n    {\n      method: 'POST',\n      headers: {\n        'Content-Type': 'application/json',\n        Authorization: `Bearer ${process.env.POSTHOG_PERSONAL_API_KEY}`,\n      },\n      body: JSON.stringify({\n        query: {\n          kind: 'HogQLQuery',\n          query: `\n            SELECT\n              count() AS events_this_month,\n              uniq(distinct_id) AS unique_users,\n              count() / dateDiff('day', toStartOfMonth(now()), now()) AS daily_avg\n            FROM events\n            WHERE timestamp > toStartOfMonth(now())\n          `,\n        },\n      }),\n    }\n  );\n\n  const data = await result.json();\n  const [eventsThisMonth, uniqueUsers, dailyAvg] = data.results[0];\n  const projectedMonthly = dailyAvg * 30;\n  const FREE_TIER = 1_000_000;\n\n  const metrics = {\n    events_this_month: eventsThisMonth,\n    unique_users: uniqueUsers,\n    daily_average: Math.round(dailyAvg),\n    projected_monthly: Math.round(projectedMonthly),\n    pct_of_free_tier: Math.round((projectedMonthly / FREE_TIER) * 100),\n  };\n\n  // Emit gauge metrics\n  const volumeGauge = new Gauge({\n    name: 'posthog_events_month_total',\n    help: 'PostHog events this month',\n  });\n  volumeGauge.set(eventsThisMonth);\n\n  // Alert if approaching limits\n  if (projectedMonthly > FREE_TIER * 0.8) {\n    await sendAlert(`PostHog: projected ${Math.round(projectedMonthly / 1000)}K events this month (free tier: 1M)`);\n  }\n\n  return metrics;\n}\n```\n\n### Step 4: Prometheus Alert Rules\n\n```yaml\n# prometheus/posthog-alerts.yml\ngroups:\n  - name: posthog\n    rules:\n      - alert: PostHogIngestionDrop\n        expr: |\n          rate(posthog_events_captured_total[1h])\n          < rate(posthog_events_captured_total[1h] offset 1d) * 0.5\n        for: 15m\n        labels:\n          severity: warning\n        annotations:\n          summary: \"PostHog event ingestion dropped >50% vs yesterday\"\n\n      - alert: PostHogFlagEvalSlow\n        expr: |\n          histogram_quantile(0.95, rate(posthog_flag_eval_duration_ms_bucket[5m])) > 200\n        for: 5m\n        labels:\n          severity: warning\n        annotations:\n          summary: \"PostHog flag eval P95 > 200ms \u2014 check if personalApiKey is set\"\n\n      - alert: PostHogBillingAlert\n        expr: posthog_events_month_total > 800000\n        labels:\n          severity: info\n        annotations:\n          summary: \"PostHog events approaching 1M free tier limit\"\n\n      - alert: PostHogCaptureErrors\n        expr: rate(posthog_capture_errors_total[5m]) > 0.1\n        for: 5m\n        labels:\n          severity: critical\n        annotations:\n          summary: \"PostHog capture errors elevated \u2014 events may be lost\"\n```\n\n### Step 5: Health Check Dashboard Queries\n\n```typescript\n// Dashboard panels to track PostHog health\nconst dashboardQueries = {\n  // Events per hour (last 24h)\n  eventRate: `\n    SELECT toStartOfHour(timestamp) AS hour, count() AS events\n    FROM events WHERE timestamp > now() - interval 24 hour\n    GROUP BY hour ORDER BY hour\n  `,\n\n  // Events by type (last 7 days)\n  eventsByType: `\n    SELECT event, count() AS total\n    FROM events WHERE timestamp > now() - interval 7 day\n    GROUP BY event ORDER BY total DESC LIMIT 15\n  `,\n\n  // Unique users per day (last 30 days)\n  dailyActiveUsers: `\n    SELECT toDate(timestamp) AS day, uniq(distinct_id) AS users\n    FROM events WHERE timestamp > now() - interval 30 day\n    GROUP BY day ORDER BY day\n  `,\n\n  // Event ingestion latency estimate\n  ingestionFreshness: `\n    SELECT max(timestamp) AS latest_event,\n           dateDiff('second', max(timestamp), now()) AS seconds_behind\n    FROM events\n  `,\n};\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Zero events for 1h+ | SDK not initialized or API down | Check PostHog status, verify SDK init |\n| Flag eval >200ms | No `personalApiKey` | Add personal key for local evaluation |\n| Event volume spike | New feature autocapturing | Review autocapture config, add filters |\n| Rate limit 429 | Too many API queries | Cache results, reduce poll frequency |\n\n## Output\n\n- Flag evaluation latency instrumentation\n- Event volume and billing monitoring\n- Prometheus alert rules for PostHog health\n- HogQL dashboard queries for key metrics\n- Automated alerts for ingestion drops and billing limits\n\n## Resources\n\n- [PostHog API Overview](https://posthog.com/docs/api)\n- [PostHog HogQL](https://posthog.com/docs/sql)\n- [PostHog Status Page](https://status.posthog.com)\n- [Prometheus Alerting](https://prometheus.io/docs/alerting/latest/overview/)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "posthog-observability",
-    "description": "Monitor PostHog integration health: event ingestion rates, feature flag",
-    "Trigger": "posthog monitoring\", \"posthog metrics\", \"posthog observability\",",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

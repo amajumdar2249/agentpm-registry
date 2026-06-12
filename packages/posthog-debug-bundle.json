@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032937",
   "name": "posthog-debug-bundle",
   "slug": "posthog-debug-bundle",
   "description": "Collect PostHog debug evidence for support tickets and troubleshooting.",
   "content": "# PostHog Debug Bundle\n\n## Current State\n\n!`node --version 2>/dev/null || echo 'N/A'`\n!`npm list posthog-js posthog-node 2>/dev/null | grep posthog || echo 'No PostHog SDK found'`\n\n## Overview\n\nCollect diagnostic evidence for PostHog support tickets. Gathers SDK versions, API connectivity, feature flag status, event flow verification, and redacted configuration. All secrets are automatically redacted.\n\n## Prerequisites\n\n- PostHog SDK installed in project\n- Access to environment variables\n- `curl` and `jq` available\n\n## Instructions\n\n### Step 1: Run Full Diagnostic Script\n\n```bash\n#!/bin/bash\nset -euo pipefail\n\nBUNDLE_DIR=\"posthog-debug-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE_DIR\"\n\necho \"=== PostHog Debug Bundle ===\" > \"$BUNDLE_DIR/summary.txt\"\necho \"Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# --- Environment ---\necho \"--- Runtime Environment ---\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"Node: $(node --version 2>/dev/null || echo 'not found')\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"npm: $(npm --version 2>/dev/null || echo 'not found')\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"Python: $(python3 --version 2>/dev/null || echo 'not found')\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"OS: $(uname -srm)\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# --- SDK Versions ---\necho \"--- PostHog SDK Versions ---\" >> \"$BUNDLE_DIR/summary.txt\"\nnpm list posthog-js posthog-node 2>/dev/null >> \"$BUNDLE_DIR/summary.txt\" || echo \"No npm PostHog packages\" >> \"$BUNDLE_DIR/summary.txt\"\npip3 show posthog 2>/dev/null | grep -E \"Name|Version\" >> \"$BUNDLE_DIR/summary.txt\" || true\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# --- API Connectivity ---\necho \"--- API Connectivity ---\" >> \"$BUNDLE_DIR/summary.txt\"\necho -n \"US Cloud ingest: \" >> \"$BUNDLE_DIR/summary.txt\"\ncurl -s -o /dev/null -w \"%{http_code} (%{time_total}s)\" https://us.i.posthog.com/healthz >> \"$BUNDLE_DIR/summary.txt\" 2>&1\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho -n \"EU Cloud ingest: \" >> \"$BUNDLE_DIR/summary.txt\"\ncurl -s -o /dev/null -w \"%{http_code} (%{time_total}s)\" https://eu.i.posthog.com/healthz >> \"$BUNDLE_DIR/summary.txt\" 2>&1\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho -n \"App API: \" >> \"$BUNDLE_DIR/summary.txt\"\ncurl -s -o /dev/null -w \"%{http_code} (%{time_total}s)\" https://app.posthog.com/api/ >> \"$BUNDLE_DIR/summary.txt\" 2>&1\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# --- Environment Variables (redacted) ---\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"--- Environment Variables (redacted) ---\" >> \"$BUNDLE_DIR/summary.txt\"\nenv | grep -i posthog | sed 's/=.*/=***REDACTED***/' >> \"$BUNDLE_DIR/summary.txt\" 2>/dev/null || echo \"No POSTHOG env vars found\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\n\n# --- Key Type Detection ---\necho \"--- API Key Types ---\" >> \"$BUNDLE_DIR/summary.txt\"\nif [ -n \"${NEXT_PUBLIC_POSTHOG_KEY:-}\" ]; then\n  echo \"Project key prefix: $(echo \"$NEXT_PUBLIC_POSTHOG_KEY\" | head -c 4)_...\" >> \"$BUNDLE_DIR/summary.txt\"\nfi\nif [ -n \"${POSTHOG_PERSONAL_API_KEY:-}\" ]; then\n  echo \"Personal key prefix: $(echo \"$POSTHOG_PERSONAL_API_KEY\" | head -c 4)_...\" >> \"$BUNDLE_DIR/summary.txt\"\nfi\n\necho \"\" >> \"$BUNDLE_DIR/summary.txt\"\necho \"Bundle complete: $BUNDLE_DIR/\" >> \"$BUNDLE_DIR/summary.txt\"\n```\n\n### Step 2: Test Event Capture Flow\n\n```bash\nset -euo pipefail\n# Send a test event and verify it was accepted\nRESPONSE=$(curl -s -w \"\\n%{http_code}\" -X POST 'https://us.i.posthog.com/capture/' \\\n  -H 'Content-Type: application/json' \\\n  -d \"{\n    \\\"api_key\\\": \\\"${NEXT_PUBLIC_POSTHOG_KEY}\\\",\n    \\\"event\\\": \\\"debug_bundle_test\\\",\n    \\\"distinct_id\\\": \\\"debug-$(date +%s)\\\",\n    \\\"properties\\\": {\\\"test\\\": true}\n  }\")\n\nHTTP_CODE=$(echo \"$RESPONSE\" | tail -1)\nBODY=$(echo \"$RESPONSE\" | head -1)\n\necho \"Capture test: HTTP $HTTP_CODE\"\necho \"Response: $BODY\"\n\n# Expected: HTTP 200, Response: {\"status\": 1}\n```\n\n### Step 3: Check Feature Flag Status\n\n```bash\nset -euo pipefail\n# Evaluate flags via the /decide endpoint\ncurl -s -X POST 'https://us.i.posthog.com/decide/?v=3' \\\n  -H 'Content-Type: application/json' \\\n  -d \"{\n    \\\"api_key\\\": \\\"${NEXT_PUBLIC_POSTHOG_KEY}\\\",\n    \\\"distinct_id\\\": \\\"debug-test\\\"\n  }\" | jq '{\n    featureFlags: .featureFlags,\n    errorsWhileComputingFlags: .errorsWhileComputingFlags,\n    sessionRecording: (.sessionRecording != false)\n  }'\n```\n\n### Step 4: Verify Admin API Access\n\n```bash\nset -euo pipefail\n# Test personal API key (if available)\nif [ -n \"${POSTHOG_PERSONAL_API_KEY:-}\" ]; then\n  curl -s \"https://app.posthog.com/api/projects/\" \\\n    -H \"Authorization: Bearer $POSTHOG_PERSONAL_API_KEY\" | \\\n    jq '[.[] | {id, name, created_at}]' > \"$BUNDLE_DIR/projects.json\" 2>/dev/null || \\\n    echo \"Personal API key failed\" >> \"$BUNDLE_DIR/summary.txt\"\nfi\n```\n\n### Step 5: Package and Review\n\n```bash\nset -euo pipefail\n# Review for any accidentally included secrets\ngrep -rn \"phc_\\|phx_\\|Bearer \" \"$BUNDLE_DIR/\" | grep -v REDACTED | grep -v \"prefix:\" && \\\n  echo \"WARNING: Potential secret found \u2014 review before sharing\" || \\\n  echo \"No secrets detected in bundle\"\n\n# Package\ntar -czf \"$BUNDLE_DIR.tar.gz\" \"$BUNDLE_DIR\"\necho \"Bundle created: $BUNDLE_DIR.tar.gz ($(du -h \"$BUNDLE_DIR.tar.gz\" | cut -f1))\"\n```\n\n## Checklist\n\n| Item | Collected | Purpose |\n|------|-----------|---------|\n| Node/Python versions | Yes | SDK compatibility |\n| PostHog SDK versions | Yes | Version-specific bugs |\n| API connectivity | Yes | Network/firewall issues |\n| Event capture test | Yes | End-to-end verification |\n| Feature flag status | Yes | Flag evaluation issues |\n| Environment vars (redacted) | Yes | Configuration problems |\n| Key type detection | Yes | Wrong key type errors |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| All connectivity fails | Corporate firewall | Check proxy settings, try VPN |\n| Capture returns non-200 | Invalid API key | Verify `phc_` key in project settings |\n| `/decide` fails | Key/host mismatch | Ensure key matches the host region |\n| Personal API 401 | Expired key | Regenerate in Settings > Personal API Keys |\n\n## Output\n\n- `posthog-debug-YYYYMMDD-HHMMSS.tar.gz` archive containing:\n  - `summary.txt` \u2014 Runtime, SDK versions, connectivity, redacted config\n  - `projects.json` \u2014 Project list (if personal key available)\n  - Test event capture and flag evaluation results\n\n## Resources\n\n- [PostHog Status Page](https://status.posthog.com)\n- [PostHog Support](https://posthog.com/docs/support)\n- [PostHog API Overview](https://posthog.com/docs/api)\n\n## Next Steps\n\nFor rate limit issues, see `posthog-rate-limits`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "posthog-debug-bundle",
-    "description": "Collect PostHog debug evidence for support tickets and troubleshooting.",
-    "Trigger": "posthog debug\", \"posthog support bundle\", \"collect posthog logs\",",
-    "allowed-tools": "Read, Bash(grep:*), Bash(curl:*), Bash(tar:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033039",
   "name": "replit-cost-tuning",
   "slug": "replit-cost-tuning",
   "description": "Optimize Replit costs: deployment sizing, seat audit, egress control,",
   "content": "# Replit Cost Tuning\n\n## Overview\n\nOptimize Replit spending across deployment compute, seat licenses, egress, and storage. Covers right-sizing deployment resources, choosing between Autoscale and Reserved VM, eliminating idle Repls, and managing team seat costs.\n\n## Prerequisites\n\n- Replit account with billing access\n- Understanding of current deployment architecture\n- Access to usage metrics in Replit dashboard\n\n## Replit Pricing Model\n\n| Component | Pricing |\n|-----------|---------|\n| **Replit Core** | $25/month (includes $8 flexible credits) |\n| **Replit Pro** | $40/month (team features + credits) |\n| **Autoscale** | Pay per compute unit consumed |\n| **Reserved VM** | From $0.20/day (~$6.20/month) |\n| **Static Deploy** | Free (CDN-backed) |\n| **Egress** | $0.10/GiB over monthly allowance |\n| **PostgreSQL** | Included in plan allowance |\n| **Object Storage** | Included in plan allowance |\n\n## Instructions\n\n### Step 1: Audit Deployment Costs\n\nReview what you're spending and where:\n\n```markdown\nIn Replit Dashboard > Billing:\n1. View \"Usage\" tab for compute breakdown\n2. Sort by cost to find expensive Repls\n3. Check \"Always On\" Repls (legacy) \u2014 convert to Deployments\n\nKey metrics to check:\n- CPU hours consumed per Repl\n- Memory-hours consumed per Repl\n- Egress data transfer per Repl\n- Number of cold starts (Autoscale)\n```\n\n### Step 2: Right-Size Deployment Resources\n\n```yaml\n# Match resources to actual workload\n\nmicro:  # Simple bot, webhook receiver\n  type: autoscale\n  cost: \"Pay per request (free when idle)\"\n  best_for: \"< 1000 requests/day, tolerates cold starts\"\n\nsmall:  # Basic API or web app\n  type: reserved_vm\n  cpu: 0.25 vCPU\n  memory: 512 MB\n  cost: \"~$6/month\"\n  best_for: \"Low traffic, always-on required\"\n\nmedium:  # Production web app\n  type: reserved_vm\n  cpu: 0.5 vCPU\n  memory: 1 GB\n  cost: \"~$12/month\"\n  best_for: \"Standard traffic, good response times\"\n\nlarge:  # Compute-heavy or high-traffic\n  type: reserved_vm\n  cpu: 2 vCPU\n  memory: 4 GB\n  cost: \"~$40/month\"\n  best_for: \"High traffic, background processing\"\n\n# Rule of thumb: if peak CPU < 30% and peak memory < 50%, downsize\n```\n\n### Step 3: Choose Autoscale vs Reserved VM\n\n```markdown\nUse AUTOSCALE when:\n- Traffic is unpredictable or bursty\n- App can tolerate 5-15s cold starts\n- Many hours of zero traffic per day\n- Low daily request count (< 5000)\n- Cost: $0 when idle, proportional to traffic\n\nUse RESERVED VM when:\n- Traffic is consistent throughout the day\n- App needs instant response times\n- Running cron jobs, webhooks, or WebSocket\n- Cost: fixed monthly, predictable\n- Cheaper than Autoscale when utilization > 60%\n\nUse STATIC when:\n- Frontend-only app (HTML/CSS/JS)\n- No server-side processing needed\n- Cost: FREE (CDN-backed, auto-cached)\n```\n\n### Step 4: Reduce Egress Costs\n\nEgress (outbound data) costs $0.10/GiB over your plan allowance:\n\n```typescript\n// Compress API responses\nimport compression from 'compression';\napp.use(compression());  // gzip responses \u2014 reduces egress 60-80%\n\n// Paginate large responses\napp.get('/api/items', async (req, res) => {\n  const limit = Math.min(parseInt(req.query.limit as string) || 50, 100);\n  const { rows } = await pool.query('SELECT * FROM items LIMIT $1', [limit]);\n  res.json(rows);\n});\n\n// Serve static assets from CDN, not Replit\n// Use Cloudflare, Vercel, or other CDN for images/videos/large files\n// Only serve API responses from Replit deployment\n```\n\n### Step 5: Team Seat Optimization\n\n```markdown\nSeat audit checklist:\n1. Export member list: Team Settings > Members\n2. Identify inactive members (no activity in 30+ days)\n3. Remove or downgrade inactive members\n4. Consider \"Viewer\" role for stakeholders who only need read access\n\nCost calculation:\n- 15 seats at $25/month = $375/month\n- Remove 4 inactive = $100/month savings = $1,200/year\n\nQuarterly seat review:\n- [ ] Export activity report\n- [ ] Remove members with 0 activity in 30 days\n- [ ] Downgrade read-only members to viewer\n- [ ] Document seat allocation decisions\n```\n\n### Step 6: Eliminate Idle Repls\n\n```markdown\nIn Replit Dashboard:\n1. View all Repls by last edited date\n2. Archive Repls not edited in 90+ days\n3. Delete old test/experiment Repls\n4. Convert \"Always On\" Repls to Deployments\n   (Always On is legacy and more expensive)\n\nDeployments to review:\n- Is this deployed and unused? \u2192 Undeploy\n- Is this Autoscale with zero traffic? \u2192 No cost (good)\n- Is this Reserved VM with zero traffic? \u2192 Undeploy or switch to Autoscale\n```\n\n### Step 7: Optimize PostgreSQL Usage\n\n```markdown\nPostgreSQL costs:\n- Included in plan credits\n- Separate dev and prod databases (charged separately)\n- Storage grows with data\n\nOptimization:\n- Delete old development databases\n- Vacuum and clean up unused tables\n- Archive old data to Object Storage\n- Use KV Database for simple key-value (included, no extra cost)\n```\n\n## Cost Monitoring Dashboard\n\n```typescript\n// Track resource usage in your app\napp.get('/admin/costs', requireAuth, (req, res) => {\n  const mem = process.memoryUsage();\n  res.json({\n    deployment: {\n      type: process.env.REPLIT_DEPLOYMENT_TYPE || 'unknown',\n      uptime: process.uptime(),\n      memoryMB: Math.round(mem.rss / 1024 / 1024),\n    },\n    database: {\n      poolSize: pool.totalCount,\n      activeConnections: pool.idleCount,\n    },\n    repl: {\n      slug: process.env.REPL_SLUG,\n      owner: process.env.REPL_OWNER,\n    },\n  });\n});\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Unexpected high bill | Reserved VM running unused | Undeploy or switch to Autoscale |\n| Egress overage | Serving large files from Repl | Move to CDN |\n| Seat costs growing | No quarterly audit | Schedule regular seat reviews |\n| Cold start complaints | Using Autoscale | Switch to Reserved VM for latency-sensitive apps |\n\n## Resources\n\n- [Replit Pricing](https://replit.com/pricing)\n- [Usage-Based Billing](https://docs.replit.com/billing/about-usage-based-billing)\n- [Deployment Types](https://docs.replit.com/hosting/deployments)\n\n## Next Steps\n\nFor architecture planning, see `replit-reference-architecture`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "replit-cost-tuning",
-    "description": "Optimize Replit costs: deployment sizing, seat audit, egress control,",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

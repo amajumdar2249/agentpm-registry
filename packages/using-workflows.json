@@ -1,11 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000025114",
   "name": "using-workflows",
   "slug": "using-workflows",
   "description": "Create and run durable workflows with steps, streaming, and agent execution. Covers starting, resuming, and persisting workflow results.",
   "content": "\n# Working with Workflows\n\nCreate and run durable workflows with steps, streaming, and agent execution. Covers starting, resuming, and persisting workflow results.\n\n## Working with Workflows\n\nCreate and run durable workflows with steps, streaming, and agent execution. Covers starting, resuming, and persisting workflow results.\n\n**See:**\n\n- Resource: `using-workflows` in Fullstack Recipes\n- URL: https://fullstackrecipes.com/recipes/using-workflows\n\n---\n\n### Workflow Folder Structure\n\nEach workflow has its own subfolder in `src/workflows/`:\n\n```\nsrc/workflows/\n  steps/           # Shared step functions\n    stream.ts      # UI message stream helpers\n  chat/\n    index.ts       # Workflow orchestration function (\"use workflow\")\n    steps/         # Workflow-specific steps (\"use step\")\n      history.ts\n      logger.ts\n      name-chat.ts\n    types.ts       # Workflow-specific types\n```\n\n- **`workflows/steps/`** - Shared step functions reusable across workflows (e.g., stream helpers).\n- **`index.ts`** - Contains the main workflow function with the `\"use workflow\"` directive. Orchestrates the workflow by calling step functions.\n- **`steps/`** - Contains individual step functions with the `\"use step\"` directive. Each step is a durable checkpoint.\n- **`types.ts`** - Type definitions for the workflow's UI messages.\n\n---\n\n### Creating a Workflow\n\nDefine workflows with the `\"use workflow\"` directive:\n\n```typescript\n// src/workflows/chat/index.ts\nimport { getWorkflowMetadata, getWritable } from \"workflow\";\nimport { startStream, finishStream } from \"../steps/stream\";\nimport { chatAgent } from \"@/lib/ai/chat-agent\";\n\nexport async function chatWorkflow({ chatId, userMessage }) {\n  \"use workflow\";\n\n  const { workflowRunId } = getWorkflowMetadata();\n\n  // Persist user message\n  await persistUserMessage({ chatId, message: userMessage });\n\n  // Create assistant placeholder with runId for resumption\n  const messageId = await createAssistantMessage({\n    chatId,\n    runId: workflowRunId,\n  });\n\n  // Get message history\n  const history = await getMessageHistory(chatId);\n\n  // Start the UI message stream\n  await startStream(messageId);\n\n  // Run agent with streaming\n  const { parts } = await chatAgent.run(history, {\n    maxSteps: 10,\n    writable: getWritable(),\n  });\n\n  // Persist and finalize\n  await persistMessageParts({ chatId, messageId, parts });\n\n  // Finish the UI message stream\n  await finishStream();\n\n  await removeRunId(messageId);\n}\n```\n\n### Starting a Workflow\n\nUse the `start` function from `workflow/api`:\n\n```typescript\nimport { start } from \"workflow/api\";\nimport { chatWorkflow } from \"@/workflows/chat\";\n\nconst run = await start(chatWorkflow, [{ chatId, userMessage }]);\n\n// run.runId - unique identifier for this run\n// run.readable - stream of UI message chunks\n```\n\n### Resuming a Workflow Stream\n\nUse `getRun` to reconnect to an in-progress or completed workflow:\n\n```typescript\nimport { getRun } from \"workflow/api\";\n\nconst run = await getRun(runId);\nconst readable = await run.getReadable({ startIndex });\n```\n\n### Using Steps\n\nSteps are durable checkpoints that persist their results:\n\n```typescript\nasync function getMessageHistory(chatId: string) {\n  \"use step\";\n\n  const dbMessages = await getChatMessages(chatId);\n  return convertDbMessagesToUIMessages(dbMessages);\n}\n```\n\n---\n\n### Streaming UIMessageChunks\n\nWhen streaming `UIMessageChunk` responses to clients (e.g., chat messages), you must signal the start and end of the stream. This is required for proper stream framing with `WorkflowChatTransport`.\n\n**Always call `startStream()` before `agent.run()` and `finishStream()` after:**\n\n```typescript\nimport { getWritable } from \"workflow\";\nimport { startStream, finishStream } from \"../steps/stream\";\nimport { chatAgent } from \"@/lib/ai/chat-agent\";\n\nexport async function chatWorkflow({ chatId, messageId }) {\n  \"use workflow\";\n\n  const history = await getMessageHistory(chatId);\n\n  // Signal stream start with the message ID\n  await startStream(messageId);\n\n  // Run agent - streams UIMessageChunks to the client\n  const { parts } = await chatAgent.run(history, {\n    maxSteps: 10,\n    writable: getWritable(),\n  });\n\n  await persistMessageParts({ chatId, messageId, parts });\n\n  // Signal stream end and close the writable\n  await finishStream();\n}\n```\n\nThe stream step functions write `UIMessageChunk` messages:\n\n- `startStream(messageId)` - Writes `{ type: \"start\", messageId }` to signal a new message\n- `finishStream()` - Writes `{ type: \"finish\", finishReason: \"stop\" }` and closes the stream\n\nWithout these signals, the client's `WorkflowChatTransport` cannot properly parse the streamed response.\n\n---\n\n### Getting Workflow Metadata\n\nAccess the current run's metadata:\n\n```typescript\nimport { getWorkflowMetadata } from \"workflow\";\n\nexport async function chatWorkflow({ chatId }) {\n  \"use workflow\";\n\n  const { workflowRunId } = getWorkflowMetadata();\n\n  // Store runId for resumption\n  await createAssistantMessage({ chatId, runId: workflowRunId });\n}\n```\n\n### Workflow-Safe Logging\n\nThe workflow runtime doesn't support Node.js modules. Wrap logger calls in steps:\n\n```typescript\n// src/workflows/chat/steps/logger.ts\nimport { logger } from \"@/lib/logging/logger\";\n\nexport async function log(\n  level: \"info\" | \"warn\" | \"error\" | \"debug\",\n  message: string,\n  data?: Record<string, unknown>,\n): Promise<void> {\n  \"use step\";\n\n  if (data) {\n    logger[level](data, message);\n  } else {\n    logger[level](message);\n  }\n}\n```\n\n### Running Agents in Workflows\n\nUse the custom `Agent` class for full streaming control:\n\n```typescript\nimport { getWritable } from \"workflow\";\nimport { startStream, finishStream } from \"../steps/stream\";\nimport { chatAgent } from \"@/lib/ai/chat-agent\";\n\nexport async function chatWorkflow({ chatId, userMessage }) {\n  \"use workflow\";\n\n  const messageId = await createAssistantMessage({ chatId, runId });\n  const history = await getMessageHistory(chatId);\n\n  await startStream(messageId);\n\n  const { parts } = await chatAgent.run(history, {\n    maxSteps: 10,\n    writable: getWritable(),\n  });\n\n  await persistMessageParts({ chatId, messageId, parts });\n  await finishStream();\n}\n```\n\n### Persisting Workflow Results\n\nSave agent output using step functions. The `assertChatAgentParts` function validates that generic `UIMessage[\"parts\"]` (returned by agents) match your application's specific tool and data types:\n\n```typescript\n// src/workflows/chat/steps/history.ts\nimport type { UIMessage } from \"ai\";\nimport { insertMessageParts } from \"@/lib/chat/queries\";\nimport { assertChatAgentParts, type ChatAgentUIMessage } from \"../types\";\n\nexport async function persistMessageParts({\n  chatId,\n  messageId,\n  parts,\n}: {\n  chatId: string;\n  messageId: string;\n  parts: UIMessage[\"parts\"];\n}): Promise<void> {\n  \"use step\";\n\n  assertChatAgentParts(parts);\n\n  await insertMessageParts(chatId, messageId, parts);\n\n  // Update chat timestamp\n  await db\n    .update(chats)\n    .set({ updatedAt: new Date() })\n    .where(eq(chats.id, chatId));\n}\n```\n\n---\n\n## References\n\n- [Workflow Development Kit](https://useworkflow.dev/docs)\n- [Workflow API Reference](https://useworkflow.dev/docs/api-reference)\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "using-workflows",
-    "description": "Create and run durable workflows with steps, streaming, and agent execution. Covers starting, resuming, and persisting workflow results."
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

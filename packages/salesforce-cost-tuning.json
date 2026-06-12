@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033117",
   "name": "salesforce-cost-tuning",
   "slug": "salesforce-cost-tuning",
   "description": "Optimize Salesforce costs through API call reduction, edition selection,",
   "content": "# Salesforce Cost Tuning\n\n## Overview\n\nOptimize Salesforce costs by reducing API call consumption, choosing the right edition, and monitoring API usage budgets. Salesforce charges per-user licenses (not per-API-call), but API limits are tied to edition + license count.\n\n## Prerequisites\n\n- Access to Salesforce Setup > Company Information\n- Understanding of current API usage patterns\n- Access to contract/license details\n\n## Instructions\n\n### Step 1: Understand Salesforce Pricing Model\n\n| Edition | Per-User/Month | API Calls/Day (Base) | Per-User API Calls |\n|---------|---------------|---------------------|-------------------|\n| Developer | Free | 15,000 | N/A (1 user) |\n| Essentials | ~$25 | 15,000 | +1,000/user |\n| Professional | ~$80 | 15,000 | +1,000/user |\n| Enterprise | ~$165 | 100,000 | +1,000/user |\n| Unlimited | ~$330 | 100,000 | +5,000/user |\n| API Add-on Pack | Varies | +200K-10M/day | Per org |\n\n**Key insight:** API calls are per-org, not per-user. A 50-user Enterprise org gets 100,000 + (50 * 1,000) = 150,000 daily API calls. All integrations share this pool.\n\n### Step 2: Monitor Current Usage\n\n```typescript\nconst conn = await getConnection();\nconst limits = await conn.request('/services/data/v59.0/limits/');\n\nconst apiUsage = {\n  daily: {\n    used: limits.DailyApiRequests.Max - limits.DailyApiRequests.Remaining,\n    remaining: limits.DailyApiRequests.Remaining,\n    max: limits.DailyApiRequests.Max,\n    percentUsed: ((limits.DailyApiRequests.Max - limits.DailyApiRequests.Remaining) / limits.DailyApiRequests.Max * 100).toFixed(1),\n  },\n  bulk: {\n    ingestJobs: limits.DailyBulkV2QueryJobs,\n    queryJobs: limits.DailyBulkV2QueryJobs,\n  },\n  storage: {\n    dataMB: `${limits.DataStorageMB.Max - limits.DataStorageMB.Remaining}/${limits.DataStorageMB.Max} MB`,\n    fileMB: `${limits.FileStorageMB.Max - limits.FileStorageMB.Remaining}/${limits.FileStorageMB.Max} MB`,\n  },\n};\n\nconsole.log('API Usage:', JSON.stringify(apiUsage, null, 2));\n```\n\n### Step 3: Reduce API Call Count (Biggest Cost Lever)\n\n```typescript\n// BEFORE: 1 API call per record = expensive\nfor (const contact of contacts) {\n  await conn.sobject('Contact').create(contact); // 1000 calls for 1000 records\n}\n\n// AFTER: Batch with sObject Collections = 5 calls for 1000 records\nfor (let i = 0; i < contacts.length; i += 200) {\n  const batch = contacts.slice(i, i + 200);\n  await conn.sobject('Contact').create(batch); // Max 200 per call\n}\n\n// AFTER: Use Bulk API for 10K+ records = 1 job regardless of count\nawait conn.bulk2.loadAndWaitForResults({\n  object: 'Contact',\n  operation: 'insert',\n  input: csvData, // Can be millions of rows\n});\n// Bulk API has its own separate daily limit (15,000 jobs)\n\n// Cache describe calls \u2014 saves 50+ calls/day if you describe objects frequently\nconst describeCache = new Map();\nasync function cachedDescribe(objectName: string) {\n  if (!describeCache.has(objectName)) {\n    describeCache.set(objectName, await conn.sobject(objectName).describe());\n  }\n  return describeCache.get(objectName);\n}\n```\n\n### Step 4: API Call Budget Tracking\n\n```typescript\nclass ApiCallBudget {\n  private dailyBudget: number;\n  private callsToday = 0;\n\n  constructor(dailyBudget: number) {\n    this.dailyBudget = dailyBudget;\n  }\n\n  async refreshFromOrg(conn: jsforce.Connection): Promise<void> {\n    const limits = await conn.request('/services/data/v59.0/limits/');\n    this.callsToday = limits.DailyApiRequests.Max - limits.DailyApiRequests.Remaining;\n    // Note: this call itself costs 1 API call \u2014 don't check too frequently\n  }\n\n  canSpend(estimatedCalls: number): { allowed: boolean; reason?: string } {\n    const projected = this.callsToday + estimatedCalls;\n\n    if (projected > this.dailyBudget * 0.95) {\n      return { allowed: false, reason: `Would exceed 95% of ${this.dailyBudget} daily budget` };\n    }\n\n    if (projected > this.dailyBudget * 0.80) {\n      console.warn(`API budget warning: ${this.callsToday}/${this.dailyBudget} used`);\n    }\n\n    return { allowed: true };\n  }\n}\n```\n\n### Step 5: Edition Right-Sizing\n\n```\nDecision tree for Salesforce edition:\n\nIf API calls/day < 15,000:\n  \u2192 Developer Edition (free) or Professional ($80/user/month)\n\nIf API calls/day 15,000-150,000:\n  \u2192 Enterprise Edition ($165/user/month)\n\nIf API calls/day > 150,000:\n  \u2192 Unlimited ($330/user/month) or API Add-on Pack\n  \u2192 OR reduce calls with batching/caching (usually cheaper)\n\nIf you need just data sync:\n  \u2192 Consider Heroku Connect ($$$) for automatic bi-directional sync\n  \u2192 Eliminates most API calls \u2014 data syncs via Change Data Capture\n```\n\n## Output\n\n- Current API usage analyzed\n- Cost reduction strategies applied (batching, caching, Bulk API)\n- API call budget tracking implemented\n- Edition recommendation based on usage\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Unexpected API call spike | Unoptimized loop/query | Use Collections or Bulk API |\n| Budget exceeded | Missing monitoring | Add budget tracking class |\n| Storage limit | Too many records/files | Archive old data, delete test data |\n| License overspend | Unused integration licenses | Audit active users quarterly |\n\n## Resources\n\n- [Salesforce Editions & Pricing](https://www.salesforce.com/editions-pricing/overview/)\n- [API Request Limits by Edition](https://developer.salesforce.com/docs/atlas.en-us.salesforce_app_limits_cheatsheet.meta/salesforce_app_limits_cheatsheet/salesforce_app_limits_platform_api.htm)\n- [Limits REST Resource](https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/resources_limits.htm)\n\n## Next Steps\n\nFor architecture patterns, see `salesforce-reference-architecture`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "salesforce-cost-tuning",
-    "description": "Optimize Salesforce costs through API call reduction, edition selection,",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

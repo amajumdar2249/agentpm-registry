@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031741",
   "name": "databricks-ci-integration",
   "slug": "databricks-ci-integration",
   "description": "Configure Databricks CI/CD integration with GitHub Actions and Asset",
   "content": "# Databricks CI Integration\n\n## Overview\n\nAutomate Databricks deployments with Declarative Automation Bundles (DABs) and GitHub Actions. Covers bundle validation, unit testing PySpark transforms locally, deploying to staging on PR, production on merge, and integration testing against live workspaces. Uses `databricks/setup-cli` action and OAuth M2M for secure CI auth.\n\n## Prerequisites\n\n- Databricks workspace with service principal (OAuth M2M)\n- Asset Bundle (`databricks.yml`) configured\n- GitHub repo with Actions enabled\n- GitHub environment secrets: `DATABRICKS_HOST`, `DATABRICKS_CLIENT_ID`, `DATABRICKS_CLIENT_SECRET`\n\n## Instructions\n\n### Step 1: GitHub Actions \u2014 Validate and Test on PR\n\n```yaml\n# .github/workflows/databricks-ci.yml\nname: Databricks CI\n\non:\n  pull_request:\n    paths: ['src/**', 'resources/**', 'databricks.yml', 'tests/**']\n\njobs:\n  validate-and-test:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n\n      - uses: actions/setup-python@v5\n        with:\n          python-version: '3.10'\n\n      - name: Install dependencies\n        run: |\n          pip install pytest pyspark delta-spark databricks-sdk\n          pip install -e .  # If using pyproject.toml\n\n      - name: Run unit tests (local Spark, no cluster needed)\n        run: pytest tests/unit/ -v --tb=short\n\n      - name: Install Databricks CLI\n        uses: databricks/setup-cli@main\n\n      - name: Validate bundle\n        env:\n          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}\n          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}\n          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}\n        run: databricks bundle validate -t staging\n\n  deploy-staging:\n    needs: validate-and-test\n    runs-on: ubuntu-latest\n    environment: staging\n    steps:\n      - uses: actions/checkout@v4\n      - uses: databricks/setup-cli@main\n\n      - name: Deploy to staging\n        env:\n          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}\n          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}\n          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}\n        run: databricks bundle deploy -t staging\n\n      - name: Run integration tests on staging\n        env:\n          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}\n          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}\n          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET }}\n        run: |\n          databricks bundle run integration_tests -t staging\n          # Verify output tables\n          databricks sql execute \\\n            --warehouse-id \"$WAREHOUSE_ID\" \\\n            --statement \"SELECT COUNT(*) AS rows FROM staging_catalog.silver.orders WHERE date >= current_date() - 1\"\n```\n\n### Step 2: Unit Tests for PySpark Transforms\n\n```python\n# tests/unit/test_transformations.py\nimport pytest\nfrom pyspark.sql import SparkSession\nfrom pyspark.sql.types import StructType, StructField, StringType, DoubleType\n\n@pytest.fixture(scope=\"session\")\ndef spark():\n    return SparkSession.builder.master(\"local[*]\").appName(\"tests\").getOrCreate()\n\ndef test_silver_dedup(spark):\n    \"\"\"Test deduplication logic in silver layer.\"\"\"\n    from src.pipelines.silver import dedup_orders\n\n    data = [\n        (\"order-1\", \"user-a\", 10.0),\n        (\"order-1\", \"user-a\", 10.0),  # duplicate\n        (\"order-2\", \"user-b\", 20.0),\n    ]\n    schema = StructType([\n        StructField(\"order_id\", StringType()),\n        StructField(\"user_id\", StringType()),\n        StructField(\"amount\", DoubleType()),\n    ])\n    df = spark.createDataFrame(data, schema)\n    result = dedup_orders(df)\n\n    assert result.count() == 2\n    assert set(r.order_id for r in result.collect()) == {\"order-1\", \"order-2\"}\n\ndef test_gold_aggregation(spark):\n    \"\"\"Test daily aggregation in gold layer.\"\"\"\n    from src.pipelines.gold import aggregate_daily_revenue\n    # ... test with sample data\n```\n\n### Step 3: Deploy to Production on Merge\n\n```yaml\n# .github/workflows/databricks-deploy.yml\nname: Databricks Deploy\n\non:\n  push:\n    branches: [main]\n    paths: ['src/**', 'resources/**', 'databricks.yml']\n\njobs:\n  deploy-production:\n    runs-on: ubuntu-latest\n    environment: production  # Requires approval if configured\n    concurrency:\n      group: databricks-prod-deploy\n      cancel-in-progress: false\n    steps:\n      - uses: actions/checkout@v4\n      - uses: databricks/setup-cli@main\n\n      - name: Validate production bundle\n        env:\n          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_PROD }}\n          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID_PROD }}\n          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET_PROD }}\n        run: databricks bundle validate -t prod\n\n      - name: Deploy to production\n        env:\n          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_PROD }}\n          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID_PROD }}\n          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET_PROD }}\n        run: |\n          databricks bundle deploy -t prod\n          echo \"## Deployment Summary\" >> $GITHUB_STEP_SUMMARY\n          databricks bundle summary -t prod >> $GITHUB_STEP_SUMMARY\n\n      - name: Trigger smoke test\n        env:\n          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST_PROD }}\n          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID_PROD }}\n          DATABRICKS_CLIENT_SECRET: ${{ secrets.DATABRICKS_CLIENT_SECRET_PROD }}\n        run: databricks bundle run prod_etl_pipeline -t prod --no-wait\n```\n\n### Step 4: OIDC Authentication (Keyless CI)\n\nEliminate long-lived secrets by using GitHub OIDC federation with Databricks.\n\n```yaml\n# In GitHub Actions \u2014 no client_secret needed\njobs:\n  deploy:\n    permissions:\n      id-token: write  # Required for OIDC\n      contents: read\n    steps:\n      - uses: actions/checkout@v4\n      - uses: databricks/setup-cli@main\n\n      - name: Deploy with OIDC\n        env:\n          DATABRICKS_HOST: ${{ secrets.DATABRICKS_HOST }}\n          DATABRICKS_CLIENT_ID: ${{ secrets.DATABRICKS_CLIENT_ID }}\n          # No DATABRICKS_CLIENT_SECRET \u2014 uses GitHub OIDC token\n          ARM_USE_OIDC: true\n        run: databricks bundle deploy -t prod\n```\n\n## Output\n\n- CI workflow validating bundles and running unit tests on every PR\n- Staging deployment with integration tests before merge\n- Production deployment on merge to main with approval gate\n- Concurrency control preventing parallel deployments\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Bundle validation fails | Invalid YAML or missing variables | Run `databricks bundle validate` locally first |\n| Auth error in CI | Client secret expired | Regenerate OAuth secret or switch to OIDC |\n| Integration test timeout | Cluster cold start | Use instance pools or increase timeout |\n| Deploy conflict | Concurrent CI runs | Use `concurrency` group in GitHub Actions |\n| PySpark import error | Missing `pyspark` in CI | Add to `pip install` step |\n\n## Examples\n\n### Local Validation Before Push\n\n```bash\n# Validate and dry-run before committing\ndatabricks bundle validate -t staging\ndatabricks bundle deploy -t staging --dry-run\npytest tests/unit/ -v\n```\n\n### Branch-Based Development Targets\n\n```yaml\n# databricks.yml \u2014 auto-name resources per developer\ntargets:\n  dev:\n    default: true\n    mode: development\n    # In dev mode, resources auto-prefixed with [dev username]\n    workspace:\n      root_path: /Users/${workspace.current_user.userName}/.bundle/${bundle.name}/dev\n```\n\n## Resources\n\n- [CI/CD with Bundles](https://docs.databricks.com/aws/en/dev-tools/bundles/ci-cd-bundles)\n- [databricks/setup-cli Action](https://github.com/databricks/setup-cli)\n- [OAuth M2M](https://docs.databricks.com/aws/en/dev-tools/auth/oauth-m2m)\n- [Bundle Configuration](https://docs.databricks.com/aws/en/dev-tools/bundles/settings)\n\n## Next Steps\n\nFor Asset Bundle deployment details, see `databricks-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "databricks-ci-integration",
-    "description": "Configure Databricks CI/CD integration with GitHub Actions and Asset",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*), Bash(databricks:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

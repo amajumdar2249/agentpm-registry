@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031655",
   "name": "cohere-performance-tuning",
   "slug": "cohere-performance-tuning",
   "description": "Optimize Cohere API performance with caching, batching, model selection,",
   "content": "# Cohere Performance Tuning\n\n## Overview\n\nOptimize Cohere API v2 performance through model selection, embedding batches, rerank pipelines, caching, and streaming for time-to-first-token.\n\n## Prerequisites\n\n- `cohere-ai` SDK installed\n- Understanding of Cohere endpoints (Chat, Embed, Rerank)\n- Redis or in-memory cache (optional)\n\n## Latency Benchmarks (Typical)\n\n| Operation | Model | P50 | P95 |\n|-----------|-------|-----|-----|\n| Chat (short) | `command-r7b-12-2024` | 500ms | 1.5s |\n| Chat (short) | `command-a-03-2025` | 800ms | 2.5s |\n| Chat (stream TTFT) | `command-a-03-2025` | 200ms | 600ms |\n| Embed (96 texts) | `embed-v4.0` | 150ms | 400ms |\n| Rerank (100 docs) | `rerank-v3.5` | 100ms | 300ms |\n| Classify (96 inputs) | `embed-english-v3.0` | 200ms | 500ms |\n\n## Instructions\n\n### Strategy 1: Model Selection by Latency Budget\n\n```typescript\n// Use smaller models for latency-sensitive paths\nfunction selectModel(latencyBudgetMs: number): string {\n  if (latencyBudgetMs < 1000) return 'command-r7b-12-2024';   // 7B, fastest\n  if (latencyBudgetMs < 3000) return 'command-r-08-2024';      // Mid-tier\n  return 'command-a-03-2025';                                    // Best quality\n}\n\n// Pair with maxTokens to control output length\nawait cohere.chat({\n  model: selectModel(1500),\n  messages: [{ role: 'user', content: query }],\n  maxTokens: 200,  // Shorter output = lower latency\n});\n```\n\n### Strategy 2: Streaming for Time-to-First-Token\n\n```typescript\n// Non-streaming: user waits for entire response (800ms-5s)\n// Streaming: first token arrives in ~200ms\n\nasync function streamForUI(message: string): Promise<string> {\n  const stream = await cohere.chatStream({\n    model: 'command-a-03-2025',\n    messages: [{ role: 'user', content: message }],\n  });\n\n  let fullText = '';\n  for await (const event of stream) {\n    if (event.type === 'content-delta') {\n      const text = event.delta?.message?.content?.text ?? '';\n      fullText += text;\n      // Emit to frontend immediately \u2014 perceived latency drops to ~200ms\n    }\n  }\n  return fullText;\n}\n```\n\n### Strategy 3: Batch Embeddings (96 per Call)\n\n```typescript\n// BAD: 1000 texts = 1000 API calls\nfor (const text of texts) {\n  await cohere.embed({ model: 'embed-v4.0', texts: [text], ... });\n}\n\n// GOOD: 1000 texts = 11 API calls (96 per batch)\nasync function batchEmbed(texts: string[]): Promise<number[][]> {\n  const BATCH = 96; // Cohere max per request\n  const results: number[][] = [];\n\n  const batches = [];\n  for (let i = 0; i < texts.length; i += BATCH) {\n    batches.push(texts.slice(i, i + BATCH));\n  }\n\n  // Parallel batches (respect rate limits)\n  const responses = await Promise.all(\n    batches.map(batch =>\n      cohere.embed({\n        model: 'embed-v4.0',\n        texts: batch,\n        inputType: 'search_document',\n        embeddingTypes: ['float'],\n      })\n    )\n  );\n\n  for (const resp of responses) {\n    results.push(...resp.embeddings.float);\n  }\n  return results;\n}\n```\n\n### Strategy 4: Compressed Embeddings\n\n```typescript\n// float: 1024 dims * 4 bytes = 4KB per vector\n// int8:  1024 dims * 1 byte  = 1KB per vector (75% smaller)\n// binary: 1024 dims / 8      = 128 bytes per vector (97% smaller)\n\nconst response = await cohere.embed({\n  model: 'embed-v4.0',\n  texts: documents,\n  inputType: 'search_document',\n  embeddingTypes: ['int8'],   // or ['binary'] for maximum compression\n});\n\n// Use int8 for storage, float for final scoring\nconst storageVectors = response.embeddings.int8;   // Store these\n```\n\n### Strategy 5: Rerank as a Pre-filter\n\n```typescript\n// Instead of embedding everything, use rerank as a fast pre-filter\nasync function efficientSearch(query: string, corpus: string[]) {\n  // Step 1: Rerank finds top candidates in ~100ms (up to 1000 docs)\n  const reranked = await cohere.rerank({\n    model: 'rerank-v3.5',\n    query,\n    documents: corpus,\n    topN: 5,\n  });\n\n  // Step 2: Only embed the top 5 for fine-grained scoring (optional)\n  const topDocs = reranked.results.map(r => ({\n    text: corpus[r.index],\n    score: r.relevanceScore,\n  }));\n\n  return topDocs;\n}\n```\n\n### Strategy 6: Embedding Cache\n\n```typescript\nimport { LRUCache } from 'lru-cache';\nimport crypto from 'crypto';\n\nconst embedCache = new LRUCache<string, number[]>({\n  max: 10_000,\n  ttl: 24 * 60 * 60 * 1000, // 24h \u2014 embeddings are deterministic\n});\n\nfunction hashText(text: string): string {\n  return crypto.createHash('sha256').update(text).digest('hex').slice(0, 16);\n}\n\nasync function cachedEmbed(texts: string[]): Promise<number[][]> {\n  const results: number[][] = new Array(texts.length);\n  const uncached: { index: number; text: string }[] = [];\n\n  // Check cache first\n  for (let i = 0; i < texts.length; i++) {\n    const key = hashText(texts[i]);\n    const cached = embedCache.get(key);\n    if (cached) {\n      results[i] = cached;\n    } else {\n      uncached.push({ index: i, text: texts[i] });\n    }\n  }\n\n  // Embed only uncached texts\n  if (uncached.length > 0) {\n    const vectors = await batchEmbed(uncached.map(u => u.text));\n    for (let j = 0; j < uncached.length; j++) {\n      results[uncached[j].index] = vectors[j];\n      embedCache.set(hashText(uncached[j].text), vectors[j]);\n    }\n  }\n\n  return results;\n}\n```\n\n### Strategy 7: Response Caching for Chat\n\n```typescript\nimport { LRUCache } from 'lru-cache';\n\n// Cache chat responses for deterministic queries\nconst chatCache = new LRUCache<string, string>({\n  max: 1000,\n  ttl: 5 * 60 * 1000, // 5 min TTL \u2014 chat responses can vary\n});\n\nasync function cachedChat(message: string, system?: string): Promise<string> {\n  const key = `${system ?? ''}:${message}`;\n  const cached = chatCache.get(key);\n  if (cached) return cached;\n\n  const response = await cohere.chat({\n    model: 'command-a-03-2025',\n    messages: [\n      ...(system ? [{ role: 'system' as const, content: system }] : []),\n      { role: 'user' as const, content: message },\n    ],\n    temperature: 0, // Deterministic for caching\n  });\n\n  const text = response.message?.content?.[0]?.text ?? '';\n  chatCache.set(key, text);\n  return text;\n}\n```\n\n## Performance Monitoring\n\n```typescript\nasync function timedCohereCall<T>(\n  endpoint: string,\n  fn: () => Promise<T>\n): Promise<T> {\n  const start = performance.now();\n  try {\n    const result = await fn();\n    const ms = performance.now() - start;\n    console.log(`[cohere] ${endpoint}: ${ms.toFixed(0)}ms`);\n    return result;\n  } catch (err) {\n    const ms = performance.now() - start;\n    console.error(`[cohere] ${endpoint} FAILED: ${ms.toFixed(0)}ms`, err);\n    throw err;\n  }\n}\n```\n\n## Output\n\n- Model selection by latency budget\n- Streaming for sub-200ms TTFT\n- Batch embedding (96x fewer API calls)\n- Compressed embeddings (75-97% storage savings)\n- Cache layer for deterministic queries\n- Rerank as fast pre-filter\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Chat > 5s | Long output + slow model | Use streaming, reduce maxTokens |\n| Embed timeout | Too many texts | Batch to 96 per call |\n| Cache stale | Long TTL | Reduce TTL for volatile data |\n| High costs | No caching | Cache embeddings (deterministic) |\n\n## Resources\n\n- [Cohere Models & Context](https://docs.cohere.com/docs/models)\n- [Embed Best Practices](https://docs.cohere.com/docs/cohere-embed)\n- [Rerank Best Practices](https://docs.cohere.com/docs/reranking-best-practices)\n\n## Next Steps\n\nFor cost optimization, see `cohere-cost-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "cohere-performance-tuning",
-    "description": "Optimize Cohere API performance with caching, batching, model selection,",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

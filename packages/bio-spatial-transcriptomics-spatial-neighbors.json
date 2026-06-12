@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009444",
   "name": "bio-spatial-transcriptomics-spatial-neighbors",
   "slug": "bio-spatial-transcriptomics-spatial-neighbors",
   "description": "Build spatial neighbor graphs for spatial transcriptomics data using Squidpy. Compute k-nearest neighbors, Delaunay triangulation, and radius-based connectivity for downstream spatial analyses. Use when building spatial neighborhood graphs.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: matplotlib 3.8+, numpy 1.26+, scanpy 1.10+, scikit-learn 1.4+, scipy 1.12+, squidpy 1.3+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Spatial Neighbor Graphs\n\n**\"Build a spatial neighborhood graph\"** \u2192 Construct spatial connectivity graphs using k-nearest neighbors, Delaunay triangulation, or radius-based methods for downstream spatial statistics.\n- Python: `squidpy.gr.spatial_neighbors(adata, coord_type='generic', n_neighs=6)`\n\nBuild spatial neighbor graphs for connectivity-based analyses.\n\n## Required Imports\n\n```python\nimport squidpy as sq\nimport scanpy as sc\nimport numpy as np\n```\n\n## Build K-Nearest Neighbors Graph\n\n**Goal:** Construct a spatial KNN graph connecting each spot to its nearest spatial neighbors.\n\n**Approach:** Use Squidpy's `spatial_neighbors` with k-nearest neighbors on coordinate distances.\n\n```python\n# Build spatial KNN graph\nsq.gr.spatial_neighbors(adata, n_neighs=6, coord_type='generic')\n\n# Check the graph\nprint(f\"Connectivities shape: {adata.obsp['spatial_connectivities'].shape}\")\nprint(f\"Distances shape: {adata.obsp['spatial_distances'].shape}\")\n```\n\n## Build Delaunay Triangulation Graph\n\n```python\n# Delaunay triangulation (natural neighbors)\nsq.gr.spatial_neighbors(adata, delaunay=True, coord_type='generic')\n```\n\n## Radius-Based Neighbors\n\n```python\n# Connect all spots within a radius\nsq.gr.spatial_neighbors(adata, radius=100, coord_type='generic')\n```\n\n## For Visium Data (Grid Structure)\n\n```python\n# For Visium hexagonal grid, use n_rings\nsq.gr.spatial_neighbors(adata, n_rings=1, coord_type='grid')  # 6 immediate neighbors\nsq.gr.spatial_neighbors(adata, n_rings=2, coord_type='grid')  # Extended neighborhood\n```\n\n## Access Neighbor Information\n\n```python\n# Get connectivities as sparse matrix\nconn = adata.obsp['spatial_connectivities']\nprint(f'Edges in graph: {conn.nnz}')\nprint(f'Mean neighbors per spot: {conn.nnz / adata.n_obs:.1f}')\n\n# Get distances\ndist = adata.obsp['spatial_distances']\nnonzero_dist = dist.data[dist.data > 0]\nprint(f'Mean neighbor distance: {nonzero_dist.mean():.1f}')\n```\n\n## Get Neighbors for a Specific Spot\n\n```python\nfrom scipy.sparse import csr_matrix\n\nspot_idx = 0\nconn = adata.obsp['spatial_connectivities']\n\n# Get neighbor indices\nneighbor_indices = conn[spot_idx].nonzero()[1]\nprint(f'Spot {spot_idx} has {len(neighbor_indices)} neighbors: {neighbor_indices}')\n\n# Get distances to neighbors\ndist = adata.obsp['spatial_distances']\nneighbor_distances = dist[spot_idx, neighbor_indices].toarray().flatten()\nprint(f'Distances: {neighbor_distances}')\n```\n\n## Build Expression-Based Neighbors\n\n```python\n# Standard expression-based neighbors (for comparison)\nsc.pp.neighbors(adata, n_neighbors=15, n_pcs=30)\n\n# Now adata has both:\n# - adata.obsp['spatial_connectivities'] (spatial)\n# - adata.obsp['connectivities'] (expression)\n```\n\n## Combine Spatial and Expression Neighbors\n\n**Goal:** Create a unified neighbor graph that balances spatial proximity with expression similarity.\n\n**Approach:** Build separate spatial and expression neighbor graphs, normalize each, then combine with a tunable weight parameter.\n\n```python\n# Build both graphs\nsq.gr.spatial_neighbors(adata, n_neighs=6, coord_type='generic')\nsc.pp.neighbors(adata, n_neighbors=15, n_pcs=30)\n\n# Weighted combination (manual)\nalpha = 0.5  # Weight for spatial vs expression\nspatial_conn = adata.obsp['spatial_connectivities']\nexpr_conn = adata.obsp['connectivities']\n\n# Normalize and combine\nfrom sklearn.preprocessing import normalize\nspatial_norm = normalize(spatial_conn, norm='l1', axis=1)\nexpr_norm = normalize(expr_conn, norm='l1', axis=1)\ncombined = alpha * spatial_norm + (1 - alpha) * expr_norm\n\nadata.obsp['combined_connectivities'] = combined\n```\n\n## Visualize Neighbor Graph\n\n**Goal:** Display the spatial neighbor graph overlaid on tissue coordinates for visual inspection.\n\n**Approach:** Draw edges between connected spots and scatter plot the spot positions.\n\n```python\nimport matplotlib.pyplot as plt\n\n# Get coordinates\ncoords = adata.obsm['spatial']\nconn = adata.obsp['spatial_connectivities']\n\nfig, ax = plt.subplots(figsize=(10, 10))\n\n# Draw edges\nrows, cols = conn.nonzero()\nfor i, j in zip(rows, cols):\n    if i < j:  # Avoid drawing twice\n        ax.plot([coords[i, 0], coords[j, 0]], [coords[i, 1], coords[j, 1]], 'k-', alpha=0.1, linewidth=0.5)\n\n# Draw nodes\nax.scatter(coords[:, 0], coords[:, 1], s=10, c='blue', alpha=0.5)\nax.set_aspect('equal')\nplt.title('Spatial neighbor graph')\n```\n\n## Compute Graph Statistics\n\n**Goal:** Calculate summary statistics of the spatial neighbor graph (nodes, edges, connectivity).\n\n**Approach:** Convert the sparse connectivity matrix to a NetworkX graph and compute standard graph metrics.\n\n```python\nimport networkx as nx\nfrom scipy.sparse import csr_matrix\n\nconn = adata.obsp['spatial_connectivities']\nG = nx.from_scipy_sparse_array(conn)\n\nprint(f'Nodes: {G.number_of_nodes()}')\nprint(f'Edges: {G.number_of_edges()}')\nprint(f'Average degree: {2 * G.number_of_edges() / G.number_of_nodes():.2f}')\nprint(f'Connected components: {nx.number_connected_components(G)}')\n```\n\n## Store Multiple Neighbor Graphs\n\n```python\n# Store different neighborhood sizes\nfor n_neighs in [4, 6, 10]:\n    sq.gr.spatial_neighbors(adata, n_neighs=n_neighs, coord_type='generic')\n    adata.obsp[f'spatial_conn_{n_neighs}'] = adata.obsp['spatial_connectivities'].copy()\n    adata.obsp[f'spatial_dist_{n_neighs}'] = adata.obsp['spatial_distances'].copy()\n```\n\n## Related Skills\n\n- spatial-statistics - Use neighbor graph for spatial statistics\n- spatial-domains - Identify domains using spatial graph\n- single-cell/clustering - Non-spatial neighbor graphs\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-spatial-transcriptomics-spatial-neighbors",
-    "description": "Build spatial neighbor graphs for spatial transcriptomics data using Squidpy. Compute k-nearest neighbors, Delaunay triangulation, and radius-based connectivity for downstream spatial analyses. Use when building spatial neighborhood graphs.",
-    "tool_type": "python",
-    "primary_tool": "squidpy"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

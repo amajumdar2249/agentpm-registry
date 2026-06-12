@@ -1,15 +1,47 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000010863",
   "name": "docker-sandbox",
   "slug": "docker-sandbox",
   "description": "Create, manage, and execute agent tools (claude, codex) inside Docker sandboxes for isolated code execution. Use when running agent loops, spawning tool subprocesses, or any task requiring process isolation. Triggers on \"sandbox\", \"isolated execution\", \"docker sandbox\", \"safe agent execution\", or when working on agent loop infrastructure.",
   "content": "\n# Docker Sandbox for Agent Tools\n\nIsolated execution of `claude`, `codex`, and other agent tools using Docker Desktop's `docker sandbox` (v0.11.0+). Uses existing Claude Max and ChatGPT Pro subscriptions \u2014 no API key billing.\n\n**ADR**: [ADR-0023](https://joelclaw.com/adrs/0023-docker-sandbox-for-agent-loops)\n\n## Prerequisites\n\n- Docker Desktop running (OrbStack works)\n- `docker sandbox version` returns \u22650.11.0\n- Auth secrets stored in `agent-secrets`:\n  - `claude_setup_token` \u2014 from `claude setup-token` (1-year token, Max subscription)\n  - `codex_auth_json` \u2014 contents of `~/.codex/auth.json` (ChatGPT Pro subscription)\n\n## Quick Reference\n\n```bash\n# Create a sandbox\ndocker sandbox create --name my-sandbox claude /path/to/project\n\n# Run a command in it\ndocker sandbox exec -e \"CLAUDE_CODE_OAUTH_TOKEN=...\" -w /path/to/project my-sandbox \\\n  claude -p \"implement the feature\" --output-format text --dangerously-skip-permissions\n\n# List sandboxes\ndocker sandbox ls\n\n# Remove\ndocker sandbox rm my-sandbox\n```\n\n## Auth Setup (One-Time)\n\n### Claude (Max subscription)\n\nRun interactively on the host (needs browser for OAuth):\n\n```bash\nclaude setup-token\n```\n\nThis opens a browser, completes OAuth, and prints a token like `sk-ant-oat01-...`. Valid for **1 year**.\n\nStore it:\n```bash\nsecrets add claude_setup_token --value \"sk-ant-oat01-...\"\n```\n\nUse in sandbox:\n```bash\nTOKEN=$(secrets lease claude_setup_token --ttl 1h --raw)\ndocker sandbox exec -e \"CLAUDE_CODE_OAUTH_TOKEN=$TOKEN\" my-sandbox claude auth status\n# \u2192 loggedIn: true, authMethod: oauth_token\n```\n\n### Codex (ChatGPT Pro subscription)\n\nAuthenticate codex locally (needs browser):\n```bash\ncodex  # Select \"Sign in with ChatGPT\", complete OAuth\n```\n\nThe auth file at `~/.codex/auth.json` is **portable** (not host-tied). Store it:\n```bash\nsecrets add codex_auth_json --value \"$(cat ~/.codex/auth.json)\"\n```\n\nInject into sandbox:\n```bash\nAUTH=$(secrets lease codex_auth_json --ttl 1h --raw)\ndocker sandbox exec my-sandbox bash -c \"mkdir -p ~/.codex && cat > ~/.codex/auth.json << 'EOF'\n${AUTH}\nEOF\"\n```\n\n### Token Refresh\n\n| Token | Lifetime | Refresh |\n|-------|----------|---------|\n| `claude_setup_token` | 1 year | Run `claude setup-token` again, update secret |\n| `codex_auth_json` | Until subscription change | Re-run `codex` login if auth fails, update secret |\n\n## Agent Loop Integration\n\n### Pre-warm Pattern\n\nCreate sandbox(es) at loop start, reuse for all stories, destroy at loop end.\n\n```\nPLANNER (loop start)\n  \u251c\u2500\u2500 docker sandbox create --name loop-{loopId}-claude claude {workDir}\n  \u251c\u2500\u2500 docker sandbox create --name loop-{loopId}-codex codex {workDir}  # if needed\n  \u2514\u2500\u2500 inject auth into both\n\nIMPLEMENTOR / TEST-WRITER / REVIEWER (per story)\n  \u2514\u2500\u2500 docker sandbox exec -w {workDir} -e CLAUDE_CODE_OAUTH_TOKEN=... loop-{loopId}-{tool} \\\n        {tool command}\n      # ~90ms overhead, workspace changes visible on host immediately\n\nCOMPLETE / CANCEL (loop end)\n  \u251c\u2500\u2500 docker sandbox rm loop-{loopId}-claude\n  \u2514\u2500\u2500 docker sandbox rm loop-{loopId}-codex\n```\n\n### Timing\n\n| Operation | Time |\n|-----------|------|\n| Create (cached image) | ~14s |\n| Exec (warm sandbox) | ~90ms |\n| Stop | ~11s |\n| Remove | ~150ms |\n\n**Net overhead per loop**: ~14s create + ~90ms \u00d7 N stories = negligible for loops running 5-10 stories at 5-15min each.\n\n### Workspace Mount\n\nThe workspace is **bidirectional** \u2014 same path on host and in sandbox:\n- File created in sandbox \u2192 visible on host at same path\n- File created on host \u2192 visible in sandbox\n- Git operations work normally (host sees sandbox changes, sandbox sees host commits)\n\n### Sandbox Templates\n\n| Template | Tools Included |\n|----------|---------------|\n| `claude` | claude 2.1.42, git, node 20, npm |\n| `codex` | codex 0.101.0, git, node 20, npm |\n\nNeither includes `bun`. If bun is needed, use host-mode fallback or install it post-create.\n\n### Env Vars\n\nPass via `docker sandbox exec -e`:\n\n```bash\ndocker sandbox exec \\\n  -e \"CLAUDE_CODE_OAUTH_TOKEN=$TOKEN\" \\\n  -e \"NODE_ENV=development\" \\\n  -w /path/to/project \\\n  my-sandbox \\\n  claude -p \"prompt\" --output-format text --dangerously-skip-permissions\n```\n\n### Network Control\n\nSandboxes have network access by default. Restrict with proxy rules:\n\n```bash\n# Allow only API endpoints\ndocker sandbox network proxy my-sandbox --policy deny\ndocker sandbox network proxy my-sandbox --allow-host api.anthropic.com\ndocker sandbox network proxy my-sandbox --allow-host api.openai.com\n```\n\n### Fallback to Host Mode\n\nIf Docker is unavailable:\n\n```bash\n# Check availability\ndocker info >/dev/null 2>&1 || echo \"Docker not available\"\n\n# Force host mode\nexport AGENT_LOOP_HOST=1\n```\n\n## Saving Custom Templates\n\nIf you install additional tools in a sandbox, save it as a template:\n\n```bash\n# Install tools\ndocker sandbox exec my-sandbox bash -c 'npm i -g @anthropic-ai/claude-code @openai/codex'\n\n# Save as template\ndocker sandbox save my-sandbox my-agent-template:v1\n\n# Use the template for future sandboxes\ndocker sandbox create --name fast-sandbox -t my-agent-template:v1 claude /path/to/project\n```\n\n## Implementation in utils.ts\n\n### New Functions (ADR-0023)\n\n```typescript\n// Create sandbox for a loop\nasync function createLoopSandbox(\n  loopId: string,\n  tool: \"claude\" | \"codex\",\n  workDir: string\n): Promise<string>  // returns sandbox name\n\n// Execute command in existing sandbox\nasync function execInSandbox(\n  sandboxName: string,\n  command: string[],\n  opts: { env?: Record<string, string>; workDir?: string; timeout?: number }\n): Promise<{ exitCode: number; output: string }>\n\n// Destroy loop sandbox(es)\nasync function destroyLoopSandbox(loopId: string): Promise<void>\n```\n\n### Replacing spawnTool()\n\nCurrent `spawnTool()` in implement.ts checks `AGENT_LOOP_HOST` and `isDockerAvailable()`. Update it to:\n\n1. Check if sandbox `loop-{loopId}-{tool}` exists (created by planner)\n2. If yes \u2192 `execInSandbox()` with auth env vars\n3. If no \u2192 fall back to `spawnToolHost()` (current host-mode behavior)\n\n## Troubleshooting\n\n### \"Not logged in\" in sandbox\nAuth not injected. Check:\n```bash\ndocker sandbox exec my-sandbox bash -c 'claude auth status'\ndocker sandbox exec my-sandbox bash -c 'cat ~/.codex/auth.json | head -3'\n```\n\n### Sandbox creation slow\nFirst pull downloads ~500MB image. Subsequent creates use cached image (~14s). Use `docker sandbox save` to create a pre-configured template.\n\n### File not visible between host and sandbox\nOnly the workspace path is mounted. Files outside the workspace directory are not shared.\n\n### \"docker sandbox: command not found\"\nDocker Desktop must be running. Check version: `docker sandbox version`. Requires Docker Desktop 4.40+ with sandbox extension.\n",
+  "author": "Joel Hooks",
   "version": "1.0.0",
-  "metadata": {
-    "name": "docker-sandbox",
-    "displayName": "Docker Sandbox",
-    "description": "Create, manage, and execute agent tools (claude, codex) inside Docker sandboxes for isolated code execution. Use when running agent loops, spawning tool subprocesses, or any task requiring process isolation. Triggers on \"sandbox\", \"isolated execution\", \"docker sandbox\", \"safe agent execution\", or when working on agent loop infrastructure.",
-    "version": "1.0.0",
-    "author": "Joel Hooks",
-    "tags": "[joelclaw, docker, sandbox, agents, isolation]"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "[joelclaw",
+    "docker",
+    "sandbox",
+    "agents",
+    "isolation]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

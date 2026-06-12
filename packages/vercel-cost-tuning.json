@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033489",
   "name": "vercel-cost-tuning",
   "slug": "vercel-cost-tuning",
   "description": "Optimize Vercel costs through plan selection, function efficiency, and",
   "content": "# Vercel Cost Tuning\n\n## Overview\n\nOptimize Vercel costs by understanding the Fluid Compute pricing model, reducing function execution time, leveraging edge caching to avoid function invocations, and configuring spend management. Covers plan comparison, cost drivers, and monitoring.\n\n## Prerequisites\n\n- Access to Vercel billing dashboard\n- Understanding of current deployment architecture\n- Access to Vercel Analytics for usage patterns\n\n## Instructions\n\n### Step 1: Understand the Pricing Model\n\nVercel uses **Fluid Compute** pricing (for new projects):\n\n| Resource | Hobby (Free) | Pro ($20/member/mo) | Enterprise |\n|----------|-------------|---------------------|------------|\n| Bandwidth | 100 GB | 1 TB included | Custom |\n| Serverless Execution | 100 GB-hrs | 1000 GB-hrs included | Custom |\n| Edge Function invocations | 500K | 1M included | Custom |\n| Edge Middleware invocations | 1M | 1M included | Custom |\n| Image Optimizations | 1000 | 5000 included | Custom |\n| Builds per day | 6000 | 6000 | Custom |\n| Concurrent builds | 1 | 1 (more available) | Custom |\n\n**Fluid Compute billing breakdown:**\n\n- **Active CPU time**: charged per ms of actual CPU usage\n- **Provisioned memory**: charged per GB-second of allocated memory\n- Benefit: you pay for actual work, not idle waiting (e.g., waiting for a database response)\n\n### Step 2: Identify Cost Drivers\n\n```bash\n# Check usage via API\ncurl -s -H \"Authorization: Bearer $VERCEL_TOKEN\" \\\n  \"https://api.vercel.com/v2/usage\" | jq .\n\n# Top cost drivers on Vercel:\n# 1. Serverless function execution time (CPU + memory)\n# 2. Bandwidth (large responses, unoptimized images)\n# 3. Edge Middleware invocations (runs on EVERY request)\n# 4. Image optimizations (each unique transform costs)\n# 5. Build minutes (frequent deploys or slow builds)\n```\n\n### Step 3: Reduce Function Execution Costs\n\n```typescript\n// 1. Right-size function memory \u2014 don't over-allocate\n// vercel.json\n{\n  \"functions\": {\n    \"api/lightweight.ts\": { \"memory\": 128 },    // Simple JSON responses\n    \"api/standard.ts\": { \"memory\": 512 },       // Database queries\n    \"api/heavy.ts\": { \"memory\": 1024 }          // Image processing\n  }\n}\n\n// 2. Move read-only endpoints to Edge Functions (cheaper, no cold starts)\n// api/config.ts\nexport const config = { runtime: 'edge' };\nexport default function handler() {\n  return Response.json({ features: ['a', 'b'] });\n}\n\n// 3. Cache function responses at the edge\n// Eliminates function invocations entirely for cached routes\nexport default function handler(req, res) {\n  res.setHeader('Cache-Control', 's-maxage=3600, stale-while-revalidate=86400');\n  res.json(data);\n}\n```\n\n### Step 4: Reduce Bandwidth Costs\n\n```json\n// vercel.json \u2014 compress and cache aggressively\n{\n  \"headers\": [\n    {\n      \"source\": \"/static/(.*)\",\n      \"headers\": [\n        { \"key\": \"Cache-Control\", \"value\": \"public, max-age=31536000, immutable\" }\n      ]\n    }\n  ],\n  \"images\": {\n    \"sizes\": [640, 750, 1080],\n    \"formats\": [\"image/avif\", \"image/webp\"],\n    \"minimumCacheTTL\": 86400\n  }\n}\n```\n\nKey bandwidth reducers:\n\n- Use Vercel's image optimization (auto WebP/AVIF conversion)\n- Set aggressive cache headers on static assets\n- Use ISR to serve static HTML instead of SSR\n- Compress API responses (Vercel auto-compresses with Brotli)\n\n### Step 5: Optimize Middleware Costs\n\nMiddleware runs on **every matched request**. Minimize its scope:\n\n```typescript\n// middleware.ts \u2014 scope to specific paths only\nexport const config = {\n  matcher: [\n    // Only run middleware on API routes and protected pages\n    '/api/:path*',\n    '/dashboard/:path*',\n    // Skip static files, images, and public assets\n    '/((?!_next/static|_next/image|favicon.ico|public).*)',\n  ],\n};\n\nexport function middleware(request) {\n  // Keep logic minimal \u2014 this runs on every matched request\n  // Avoid: database queries, external API calls, heavy computation\n  // Good: cookie checks, header modifications, redirects\n}\n```\n\n### Step 6: Configure Spend Management\n\nIn the Vercel dashboard under **Settings > Billing > Spend Management**:\n\n```\nDefault budget: $200/month on-demand usage\nOptions:\n- Set custom budget limit\n- Enable hard limit (pauses all projects when reached)\n- Configure email alerts at 50%, 75%, 90%, 100%\n```\n\n```bash\n# Check current usage against budget via API\ncurl -s -H \"Authorization: Bearer $VERCEL_TOKEN\" \\\n  \"https://api.vercel.com/v2/usage?teamId=team_xxx\" \\\n  | jq '{period: .period, bandwidth: .bandwidth, execution: .serverlessFunctionExecution}'\n```\n\n## Cost Optimization Checklist\n\n| Action | Impact | Effort |\n|--------|--------|--------|\n| Add `s-maxage` cache headers | High \u2014 eliminates function invocations | Low |\n| Use Edge Functions for simple endpoints | Medium \u2014 cheaper than serverless | Low |\n| Right-size function memory | Medium \u2014 reduces GB-hr cost | Low |\n| Scope middleware matcher | Medium \u2014 reduces edge invocations | Low |\n| Enable image optimization | Medium \u2014 reduces bandwidth | Low |\n| Use ISR instead of SSR | High \u2014 serves cached HTML | Medium |\n| Optimize build speed | Low \u2014 reduces build minutes | Medium |\n| Set spend management alerts | Safety \u2014 prevents surprise bills | Low |\n\n## Output\n\n- Function memory right-sized per endpoint\n- Edge caching reducing function invocations\n- Middleware scoped to minimize invocations\n- Spend management configured with budget alerts\n- Usage monitoring via API\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Unexpected bill spike | Uncached high-traffic endpoint | Add `s-maxage` to the response |\n| Projects paused | Hard spending limit reached | Increase limit or optimize usage |\n| Image optimization quota exceeded | Too many unique image transforms | Reduce `sizes` array, increase cache TTL |\n| Build minutes exceeded | Slow builds or too many deploys | Use `ignoreCommand` to skip non-code changes |\n\n## Resources\n\n- [Vercel Pricing](https://vercel.com/pricing)\n- [Fluid Compute Pricing](https://vercel.com/docs/functions/usage-and-pricing)\n- [Spend Management](https://vercel.com/docs/pricing#spend-management)\n- [Limits](https://vercel.com/docs/limits)\n- [Usage API](https://vercel.com/docs/rest-api)\n\n## Next Steps\n\nFor reference architecture, see `vercel-reference-architecture`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "vercel-cost-tuning",
-    "description": "Optimize Vercel costs through plan selection, function efficiency, and",
-    "allowed-tools": "Read, Write, Edit, Bash(vercel:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

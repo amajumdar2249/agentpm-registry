@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031924",
   "name": "figma-policy-guardrails",
   "slug": "figma-policy-guardrails",
   "description": "Enforce security policies and coding standards for Figma API integrations.",
   "content": "# Figma Policy & Guardrails\n\n## Overview\n\nAutomated guardrails for Figma API integrations: prevent token leaks, enforce scope minimization, validate webhook configurations, and catch common anti-patterns in CI.\n\n## Prerequisites\n\n- ESLint or similar linter\n- CI/CD pipeline (GitHub Actions)\n- Pre-commit hooks infrastructure\n\n## Instructions\n\n### Step 1: Token Leak Prevention\n\n```bash\n# .pre-commit-config.yaml -- catch Figma tokens before commit\nrepos:\n  - repo: local\n    hooks:\n      - id: no-figma-tokens\n        name: Check for Figma PAT leaks\n        entry: bash -c '\n          if git diff --cached --diff-filter=ACM -z -- . |\n             xargs -0 grep -lP \"figd_[a-zA-Z0-9_-]{20,}\" 2>/dev/null; then\n            echo \"ERROR: Figma PAT found in staged files\"\n            echo \"Store tokens in .env files (which should be in .gitignore)\"\n            exit 1\n          fi\n        '\n        language: system\n        pass_filenames: false\n```\n\n```yaml\n# GitHub Actions secret scanning\n# .github/workflows/figma-security.yml\nname: Figma Security Check\non: [push, pull_request]\n\njobs:\n  security:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n\n      - name: Scan for Figma tokens\n        run: |\n          if grep -rP \"figd_[a-zA-Z0-9_-]{20,}\" \\\n            --include=\"*.ts\" --include=\"*.js\" --include=\"*.json\" \\\n            --exclude-dir=node_modules .; then\n            echo \"::error::Figma PAT found in source code\"\n            exit 1\n          fi\n\n      - name: Check .env files not committed\n        run: |\n          if git ls-files --cached | grep -E '^\\.(env|env\\.local|env\\.production)$'; then\n            echo \"::error::.env file committed to repository\"\n            exit 1\n          fi\n```\n\n### Step 2: ESLint Rules for Figma\n\n```javascript\n// eslint-rules/no-figma-token-literal.js\nmodule.exports = {\n  meta: {\n    type: 'problem',\n    docs: { description: 'Disallow hardcoded Figma PATs' },\n  },\n  create(context) {\n    return {\n      Literal(node) {\n        if (typeof node.value === 'string' && /^figd_[a-zA-Z0-9_-]{20,}/.test(node.value)) {\n          context.report({\n            node,\n            message: 'Hardcoded Figma PAT detected. Use process.env.FIGMA_PAT instead.',\n          });\n        }\n      },\n      TemplateLiteral(node) {\n        for (const quasi of node.quasis) {\n          if (/figd_[a-zA-Z0-9_-]{20,}/.test(quasi.value.raw)) {\n            context.report({\n              node,\n              message: 'Hardcoded Figma PAT in template literal.',\n            });\n          }\n        }\n      },\n    };\n  },\n};\n```\n\n### Step 3: API Usage Policies\n\n```typescript\n// Runtime guardrails for Figma API usage\n\n// Policy 1: No full-file fetches without justification\nfunction validateFigmaRequest(path: string) {\n  // Block unoptimized full file fetches\n  if (path.match(/\\/v1\\/files\\/[^/]+$/) && !path.includes('depth=')) {\n    console.warn(\n      '[figma-policy] Full file fetch without depth parameter. ' +\n      'Use ?depth=1 or /nodes endpoint for better performance.'\n    );\n  }\n\n  // Block deprecated scope indicator\n  if (path.includes('files:read')) {\n    throw new Error(\n      '[figma-policy] files:read scope is deprecated. ' +\n      'Use file_content:read instead.'\n    );\n  }\n}\n\n// Policy 2: Enforce timeout on all Figma calls\nfunction validateTimeout(options: RequestInit) {\n  if (!options.signal) {\n    console.warn(\n      '[figma-policy] Figma request without AbortSignal. ' +\n      'Use AbortSignal.timeout() to prevent hung requests.'\n    );\n  }\n}\n\n// Policy 3: Rate limit safety margin\nconst MAX_REQUESTS_PER_MINUTE = 25; // Conservative limit\nlet requestsThisMinute = 0;\nlet minuteStart = Date.now();\n\nfunction enforceRatePolicy() {\n  if (Date.now() - minuteStart > 60_000) {\n    requestsThisMinute = 0;\n    minuteStart = Date.now();\n  }\n\n  requestsThisMinute++;\n  if (requestsThisMinute > MAX_REQUESTS_PER_MINUTE) {\n    throw new Error(\n      `[figma-policy] Rate limit safety: ${requestsThisMinute} requests/min ` +\n      `exceeds policy limit of ${MAX_REQUESTS_PER_MINUTE}`\n    );\n  }\n}\n```\n\n### Step 4: Configuration Validation\n\n```typescript\n// Validate Figma config at startup, fail fast if misconfigured\nfunction validateFigmaConfig() {\n  const errors: string[] = [];\n\n  // Token format\n  const pat = process.env.FIGMA_PAT;\n  if (!pat) {\n    errors.push('FIGMA_PAT is not set');\n  } else if (!pat.startsWith('figd_')) {\n    errors.push('FIGMA_PAT does not have expected figd_ prefix');\n  }\n\n  // File key format\n  const fileKey = process.env.FIGMA_FILE_KEY;\n  if (!fileKey) {\n    errors.push('FIGMA_FILE_KEY is not set');\n  } else if (fileKey.length < 10) {\n    errors.push('FIGMA_FILE_KEY seems too short');\n  }\n\n  // Webhook passcode (if webhooks are configured)\n  if (process.env.FIGMA_WEBHOOK_ENABLED === 'true') {\n    if (!process.env.FIGMA_WEBHOOK_PASSCODE) {\n      errors.push('FIGMA_WEBHOOK_PASSCODE required when webhooks are enabled');\n    } else if (process.env.FIGMA_WEBHOOK_PASSCODE.length < 16) {\n      errors.push('FIGMA_WEBHOOK_PASSCODE should be at least 16 characters');\n    }\n  }\n\n  if (errors.length > 0) {\n    console.error('[figma-policy] Configuration errors:');\n    errors.forEach(e => console.error(`  - ${e}`));\n    throw new Error(`Figma configuration invalid: ${errors.length} errors`);\n  }\n\n  console.log('[figma-policy] Configuration validated');\n}\n\n// Call at startup\nvalidateFigmaConfig();\n```\n\n### Step 5: Audit Logging\n\n```typescript\n// Log all Figma API operations for compliance\ninterface FigmaAuditEntry {\n  timestamp: string;\n  action: string;\n  endpoint: string;\n  fileKey?: string;\n  status: number;\n  userId?: string;\n}\n\nfunction auditFigmaCall(entry: Omit<FigmaAuditEntry, 'timestamp'>) {\n  const log: FigmaAuditEntry = {\n    ...entry,\n    timestamp: new Date().toISOString(),\n  };\n\n  // Structured log for aggregation\n  console.log(JSON.stringify({ type: 'figma_audit', ...log }));\n}\n```\n\n## Output\n\n- Pre-commit hooks catching token leaks\n- CI pipeline scanning for hardcoded credentials\n- Runtime policies enforcing performance best practices\n- Configuration validation at startup\n- Audit logging for compliance\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| False positive on token scan | Test fixture contains figd_ | Exclude test fixtures directory |\n| Policy blocks legitimate request | Too restrictive | Add exception list for specific paths |\n| Startup validation fails | Missing env vars | Check deployment config |\n| Audit log noise | Too many entries | Filter to write operations only |\n\n## Resources\n\n- [Figma API Scopes](https://developers.figma.com/docs/rest-api/scopes/)\n- [Pre-commit Framework](https://pre-commit.com/)\n- [ESLint Custom Rules](https://eslint.org/docs/latest/extend/custom-rules)\n\n## Next Steps\n\nFor architecture blueprints, see `figma-architecture-variants`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "figma-policy-guardrails",
-    "description": "Enforce security policies and coding standards for Figma API integrations.",
-    "allowed-tools": "Read, Write, Edit, Bash(npx:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

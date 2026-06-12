@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033500",
   "name": "vercel-load-scale",
   "slug": "vercel-load-scale",
   "description": "Load test and scale Vercel deployments with concurrency tuning and capacity",
   "content": "# Vercel Load & Scale\n\n## Overview\n\nLoad test Vercel deployments to identify scaling limits, cold start impact, and concurrency thresholds. Covers k6/autocannon test scripts, Vercel's auto-scaling model, Fluid Compute concurrency, and capacity planning.\n\n## Prerequisites\n\n- Load testing tool: k6, autocannon, or artillery\n- Test environment deployment (never load test production without approval)\n- Access to Vercel Analytics for monitoring during tests\n\n## Instructions\n\n### Step 1: Understand Vercel's Scaling Model\n\nVercel serverless functions scale automatically:\n\n| Behavior | Details |\n|----------|---------|\n| Scale-up | New function instances spawn on demand |\n| Scale-down | Idle instances shut down after ~15 minutes |\n| Cold starts | First request to a new instance pays initialization cost |\n| Concurrency | Each instance handles one request at a time (by default) |\n| Fluid Compute | Pro/Enterprise: multiple requests per instance |\n\n**Concurrency limits by plan:**\n\n| Plan | Max Concurrent Functions |\n|------|------------------------|\n| Hobby | 10 |\n| Pro | 1,000 |\n| Enterprise | 100,000 |\n\n### Step 2: Basic Load Test with autocannon\n\n```bash\n# Install autocannon\nnpm install -g autocannon\n\n# Test with 50 concurrent connections for 30 seconds\nautocannon -c 50 -d 30 https://my-app-preview.vercel.app/api/endpoint\n\n# Output includes:\n# Latency: avg, p50, p99, max\n# Requests/sec: avg, min, max\n# Errors: timeouts, non-2xx responses\n```\n\n### Step 3: k6 Load Test Script\n\n```javascript\n// load-test.js\nimport http from 'k6/http';\nimport { check, sleep } from 'k6';\nimport { Rate, Trend } from 'k6/metrics';\n\nconst errorRate = new Rate('errors');\nconst coldStartRate = new Rate('cold_starts');\nconst latency = new Trend('api_latency');\n\nexport const options = {\n  stages: [\n    { duration: '1m', target: 10 },   // Warm up\n    { duration: '3m', target: 50 },   // Ramp to 50 users\n    { duration: '2m', target: 100 },  // Peak load\n    { duration: '1m', target: 0 },    // Cool down\n  ],\n  thresholds: {\n    http_req_duration: ['p(95)<2000'],  // P95 < 2s\n    errors: ['rate<0.01'],              // Error rate < 1%\n  },\n};\n\nexport default function () {\n  const res = http.get('https://my-app-preview.vercel.app/api/endpoint');\n\n  check(res, {\n    'status is 200': (r) => r.status === 200,\n    'latency < 2s': (r) => r.timings.duration < 2000,\n  });\n\n  errorRate.add(res.status !== 200);\n  latency.add(res.timings.duration);\n\n  // Track cold starts if your API returns this header\n  if (res.headers['X-Cold-Start'] === 'true') {\n    coldStartRate.add(1);\n  }\n\n  sleep(1);\n}\n```\n\n```bash\n# Run the load test\nk6 run load-test.js\n\n# Run with output to JSON for analysis\nk6 run --out json=results.json load-test.js\n```\n\n### Step 4: Cold Start Stress Test\n\n```javascript\n// cold-start-test.js \u2014 specifically test cold start behavior\nimport http from 'k6/http';\nimport { sleep } from 'k6';\n\nexport const options = {\n  scenarios: {\n    // Scenario 1: Sustained load (warm instances)\n    sustained: {\n      executor: 'constant-arrival-rate',\n      rate: 10,\n      timeUnit: '1s',\n      duration: '2m',\n      preAllocatedVUs: 20,\n    },\n    // Scenario 2: Spike (forces new cold starts)\n    spike: {\n      executor: 'ramping-arrival-rate',\n      startRate: 10,\n      timeUnit: '1s',\n      stages: [\n        { target: 200, duration: '10s' },  // Sudden spike\n        { target: 10, duration: '1m' },     // Return to normal\n      ],\n      preAllocatedVUs: 300,\n      startTime: '2m',  // Start after sustained phase\n    },\n  },\n};\n\nexport default function () {\n  const res = http.get('https://my-app-preview.vercel.app/api/endpoint');\n  // Log cold start timing for analysis\n}\n```\n\n### Step 5: Fluid Compute Concurrency Tuning\n\n```json\n// vercel.json \u2014 configure concurrency for Fluid Compute (Pro/Enterprise)\n{\n  \"functions\": {\n    \"api/high-throughput.ts\": {\n      \"memory\": 1024,\n      \"maxDuration\": 30,\n      \"concurrency\": 10\n    }\n  }\n}\n```\n\nWith Fluid Compute concurrency, a single function instance handles multiple requests:\n\n- Reduces cold starts (fewer instances needed)\n- Reduces cost (shared memory across requests)\n- Best for I/O-bound functions (waiting on DB/API calls)\n- Not ideal for CPU-bound functions (computation blocks other requests)\n\n### Step 6: Capacity Planning\n\n```\nCapacity Planning Formula:\n\n  Required instances = Peak RPS * Avg Response Time (seconds)\n\n  Example:\n  - Peak: 500 requests/second\n  - Avg response: 200ms (0.2s)\n  - Required: 500 * 0.2 = 100 concurrent instances\n\n  With Fluid Compute (concurrency=10):\n  - Required: 500 * 0.2 / 10 = 10 concurrent instances\n\n  Plan check:\n  - Hobby (10 concurrent): NOT sufficient\n  - Pro (1000 concurrent): Sufficient with headroom\n```\n\n## Load Test Results Template\n\n```markdown\n## Load Test Report \u2014 [Date]\n\n### Configuration\n- Target: https://my-app-preview.vercel.app/api/endpoint\n- Tool: k6 v0.50\n- Duration: 7 minutes (ramp up \u2192 peak \u2192 cool down)\n- Peak concurrent users: 100\n\n### Results\n| Metric | Value |\n|--------|-------|\n| Total requests | 12,450 |\n| Success rate | 99.8% |\n| P50 latency | 45ms |\n| P95 latency | 320ms |\n| P99 latency | 1,200ms |\n| Max latency | 3,400ms |\n| Cold start % | 8% |\n| Avg cold start duration | 650ms |\n| Throttled (429) | 0 |\n\n### Recommendations\n1. Cold start: 650ms avg \u2014 consider Edge Functions for latency-critical paths\n2. P99 spike: caused by cold starts \u2014 Fluid Compute concurrency would help\n3. No throttling at 100 concurrent \u2014 Pro plan (1000 limit) is sufficient\n```\n\n## Output\n\n- Load test scripts for sustained and spike traffic scenarios\n- Cold start frequency and duration measured\n- Concurrency limits tested and validated\n- Capacity plan with scaling recommendations\n- Benchmark results documented\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `FUNCTION_THROTTLED` (429) | Exceeded concurrent limit | Reduce test concurrency or upgrade plan |\n| Vercel blocks load test | Not from approved IP | Contact Vercel support before load testing |\n| High P99 but low P50 | Cold starts on spikes | Use Fluid Compute concurrency or Edge Functions |\n| All requests timeout | Function region far from test origin | Set `regions` in vercel.json closer to test source |\n| Inconsistent results | Shared infrastructure variability | Run multiple test rounds, use median results |\n\n## Resources\n\n- [Vercel Function Limits](https://vercel.com/docs/functions/limitations)\n- [Concurrency Scaling](https://vercel.com/docs/functions/concurrency-scaling)\n- [Fluid Compute](https://vercel.com/docs/functions/usage-and-pricing)\n- [k6 Documentation](https://k6.io/docs/)\n- [Vercel Load Testing Policy](https://vercel.com/kb/guide/what-s-vercel-s-policy-regarding-load-testing-deployments)\n\n## Next Steps\n\nFor reliability patterns, see `vercel-reliability-patterns`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "vercel-load-scale",
-    "description": "Load test and scale Vercel deployments with concurrency tuning and capacity",
-    "allowed-tools": "Read, Write, Edit, Bash(npx:*), Bash(vercel:*), Bash(curl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

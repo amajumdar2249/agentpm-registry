@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032594",
   "name": "maintainx-observability",
   "slug": "maintainx-observability",
   "description": "Implement comprehensive observability for MaintainX integrations.",
   "content": "# MaintainX Observability\n\n## Overview\n\nImplement metrics, structured logging, and alerting for MaintainX integrations to ensure reliability and rapid issue detection.\n\n## Prerequisites\n\n- MaintainX integration deployed\n- Node.js 18+\n- Monitoring platform (Prometheus/Grafana, Datadog, or CloudWatch)\n\n## Instructions\n\n### Step 1: Prometheus Metrics\n\n```typescript\n// src/observability/metrics.ts\nimport { Counter, Histogram, Gauge, Registry } from 'prom-client';\n\nconst register = new Registry();\n\nexport const metrics = {\n  apiRequests: new Counter({\n    name: 'maintainx_api_requests_total',\n    help: 'Total MaintainX API requests',\n    labelNames: ['method', 'endpoint', 'status'],\n    registers: [register],\n  }),\n\n  apiLatency: new Histogram({\n    name: 'maintainx_api_latency_seconds',\n    help: 'MaintainX API request latency',\n    labelNames: ['method', 'endpoint'],\n    buckets: [0.1, 0.25, 0.5, 1, 2.5, 5, 10],\n    registers: [register],\n  }),\n\n  rateLimitHits: new Counter({\n    name: 'maintainx_rate_limit_hits_total',\n    help: 'Times rate limited by MaintainX API',\n    registers: [register],\n  }),\n\n  workOrdersProcessed: new Counter({\n    name: 'maintainx_work_orders_processed_total',\n    help: 'Work orders processed',\n    labelNames: ['action', 'status'],\n    registers: [register],\n  }),\n\n  syncLag: new Gauge({\n    name: 'maintainx_sync_lag_seconds',\n    help: 'Seconds since last successful sync',\n    registers: [register],\n  }),\n};\n\nexport { register };\n```\n\n### Step 2: Instrumented API Client\n\n```typescript\n// src/observability/instrumented-client.ts\nimport axios, { AxiosInstance } from 'axios';\nimport { metrics } from './metrics';\n\nexport function createInstrumentedClient(apiKey: string): AxiosInstance {\n  const client = axios.create({\n    baseURL: 'https://api.getmaintainx.com/v1',\n    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },\n    timeout: 30_000,\n  });\n\n  client.interceptors.request.use((config) => {\n    (config as any).__startTime = process.hrtime.bigint();\n    return config;\n  });\n\n  client.interceptors.response.use(\n    (response) => {\n      const elapsed = Number(process.hrtime.bigint() - (response.config as any).__startTime) / 1e9;\n      const endpoint = response.config.url?.split('?')[0] || 'unknown';\n\n      metrics.apiRequests.inc({\n        method: response.config.method?.toUpperCase() || 'GET',\n        endpoint,\n        status: String(response.status),\n      });\n      metrics.apiLatency.observe(\n        { method: response.config.method?.toUpperCase() || 'GET', endpoint },\n        elapsed,\n      );\n      return response;\n    },\n    (error) => {\n      const status = error.response?.status || 0;\n      const endpoint = error.config?.url?.split('?')[0] || 'unknown';\n\n      metrics.apiRequests.inc({\n        method: error.config?.method?.toUpperCase() || 'GET',\n        endpoint,\n        status: String(status),\n      });\n\n      if (status === 429) {\n        metrics.rateLimitHits.inc();\n      }\n      throw error;\n    },\n  );\n\n  return client;\n}\n```\n\n### Step 3: Structured Logging\n\n```typescript\n// src/observability/logger.ts\n\ntype LogLevel = 'debug' | 'info' | 'warn' | 'error';\n\ninterface LogEntry {\n  level: LogLevel;\n  message: string;\n  service: string;\n  timestamp: string;\n  [key: string]: any;\n}\n\nclass StructuredLogger {\n  private service: string;\n\n  constructor(service: string) {\n    this.service = service;\n  }\n\n  private log(level: LogLevel, message: string, data?: Record<string, any>) {\n    const entry: LogEntry = {\n      level,\n      message,\n      service: this.service,\n      timestamp: new Date().toISOString(),\n      ...data,\n    };\n    // JSON output for log aggregation (ELK, CloudWatch, Datadog)\n    console.log(JSON.stringify(entry));\n  }\n\n  info(message: string, data?: Record<string, any>) { this.log('info', message, data); }\n  warn(message: string, data?: Record<string, any>) { this.log('warn', message, data); }\n  error(message: string, data?: Record<string, any>) { this.log('error', message, data); }\n  debug(message: string, data?: Record<string, any>) { this.log('debug', message, data); }\n}\n\nexport const logger = new StructuredLogger('maintainx-integration');\n\n// Usage\nlogger.info('Work order created', { workOrderId: 12345, priority: 'HIGH' });\nlogger.error('API call failed', { endpoint: '/workorders', status: 500, retryCount: 2 });\n```\n\n### Step 4: Health and Metrics Endpoints\n\n```typescript\n// src/observability/server.ts\nimport express from 'express';\nimport { register, metrics } from './metrics';\n\nconst app = express();\n\n// Prometheus scrape endpoint\napp.get('/metrics', async (req, res) => {\n  res.set('Content-Type', register.contentType);\n  res.end(await register.metrics());\n});\n\n// Health check with metrics\napp.get('/health', async (req, res) => {\n  const health = {\n    status: 'healthy',\n    uptime: process.uptime(),\n    metrics: {\n      totalRequests: await metrics.apiRequests.get(),\n      rateLimitHits: await metrics.rateLimitHits.get(),\n      syncLagSeconds: (await metrics.syncLag.get()).values[0]?.value || 0,\n    },\n  };\n  res.json(health);\n});\n\napp.listen(9090, () => logger.info('Metrics server on :9090'));\n```\n\n### Step 5: Alerting Rules (Prometheus)\n\n```yaml\n# prometheus/alerts.yml\ngroups:\n  - name: maintainx\n    rules:\n      - alert: MaintainXHighErrorRate\n        expr: rate(maintainx_api_requests_total{status=~\"5..\"}[5m]) > 0.1\n        for: 5m\n        labels:\n          severity: critical\n        annotations:\n          summary: \"MaintainX API error rate > 10%\"\n\n      - alert: MaintainXHighLatency\n        expr: histogram_quantile(0.95, rate(maintainx_api_latency_seconds_bucket[5m])) > 5\n        for: 5m\n        labels:\n          severity: warning\n        annotations:\n          summary: \"MaintainX API p95 latency > 5s\"\n\n      - alert: MaintainXRateLimited\n        expr: rate(maintainx_rate_limit_hits_total[5m]) > 0\n        for: 1m\n        labels:\n          severity: warning\n        annotations:\n          summary: \"MaintainX API rate limiting detected\"\n\n      - alert: MaintainXSyncStale\n        expr: maintainx_sync_lag_seconds > 900\n        for: 5m\n        labels:\n          severity: critical\n        annotations:\n          summary: \"MaintainX sync lag > 15 minutes\"\n```\n\n## Output\n\n- Prometheus metrics (request count, latency histogram, rate limit counter, sync lag gauge)\n- Instrumented axios client automatically recording metrics on every API call\n- Structured JSON logging for all operations\n- `/metrics` endpoint for Prometheus scraping\n- Alerting rules for error rate, latency, rate limits, and sync staleness\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Metrics endpoint 500 | prom-client not initialized | Ensure `Registry` is created before metrics |\n| Missing labels | Metric name mismatch | Check `labelNames` match `inc()`/`observe()` calls |\n| Log volume too high | Debug logging in production | Set `LOG_LEVEL=info` in production |\n| Stale sync alert | Sync job stopped | Check cron schedule, restart sync process |\n\n## Resources\n\n- [MaintainX API Reference](https://developer.maintainx.com/reference)\n- [prom-client](https://github.com/siimon/prom-client) -- Prometheus metrics for Node.js\n- [Prometheus Alerting Rules](https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/)\n\n## Next Steps\n\nFor incident response, see `maintainx-incident-runbook`.\n\n## Examples\n\n**Datadog integration using DogStatsD**:\n\n```typescript\nimport StatsD from 'hot-shots';\n\nconst dogstatsd = new StatsD({ prefix: 'maintainx.' });\n\n// Record API call\ndogstatsd.increment('api.requests', 1, { endpoint: '/workorders', status: '200' });\ndogstatsd.histogram('api.latency', 0.45, { endpoint: '/workorders' });\n```\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "maintainx-observability",
-    "description": "Implement comprehensive observability for MaintainX integrations.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

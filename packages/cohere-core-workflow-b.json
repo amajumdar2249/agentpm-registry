@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031642",
   "name": "cohere-core-workflow-b",
   "slug": "cohere-core-workflow-b",
   "description": "Build tool-use agents and function calling with Cohere API v2.",
   "content": "# Cohere Tool Use & Agents (Core Workflow B)\n\n## Overview\n\nBuild multi-step tool-using agents with Cohere's Chat API v2. The model decides which tools to call, you execute them, and feed results back in a loop until the task is complete.\n\n## Prerequisites\n\n- Completed `cohere-install-auth` setup\n- Understanding of `cohere-core-workflow-a` (RAG)\n- Command R7B or newer model (required for tool use)\n\n## Instructions\n\n### Step 1: Define Tools\n\n```typescript\nimport { CohereClientV2 } from 'cohere-ai';\n\nconst cohere = new CohereClientV2();\n\n// Define tools the model can call\nconst tools = [\n  {\n    type: 'function' as const,\n    function: {\n      name: 'get_weather',\n      description: 'Get current weather for a city',\n      parameters: {\n        type: 'object' as const,\n        properties: {\n          city: { type: 'string', description: 'City name' },\n          unit: { type: 'string', enum: ['celsius', 'fahrenheit'], description: 'Temperature unit' },\n        },\n        required: ['city'],\n      },\n    },\n  },\n  {\n    type: 'function' as const,\n    function: {\n      name: 'search_database',\n      description: 'Search internal database for records',\n      parameters: {\n        type: 'object' as const,\n        properties: {\n          query: { type: 'string', description: 'Search query' },\n          limit: { type: 'number', description: 'Max results' },\n        },\n        required: ['query'],\n      },\n    },\n  },\n];\n```\n\n### Step 2: Implement Tool Executors\n\n```typescript\n// Map tool names to actual implementations\nconst toolExecutors: Record<string, (args: any) => Promise<string>> = {\n  get_weather: async ({ city, unit = 'celsius' }) => {\n    // Replace with real weather API call\n    return JSON.stringify({\n      city,\n      temperature: unit === 'celsius' ? 22 : 72,\n      unit,\n      condition: 'partly cloudy',\n    });\n  },\n\n  search_database: async ({ query, limit = 5 }) => {\n    // Replace with real database query\n    return JSON.stringify({\n      results: [\n        { id: 1, title: `Result for: ${query}`, relevance: 0.95 },\n      ],\n      total: 1,\n    });\n  },\n};\n```\n\n### Step 3: Single-Step Tool Use\n\n```typescript\nasync function singleStepToolUse(userMessage: string) {\n  // 1. Send message with tools\n  const response = await cohere.chat({\n    model: 'command-a-03-2025',\n    messages: [{ role: 'user', content: userMessage }],\n    tools,\n  });\n\n  // 2. Check if model wants to call tools\n  if (response.finishReason === 'TOOL_CALL') {\n    const toolCalls = response.message?.toolCalls ?? [];\n\n    // 3. Execute each tool call\n    const toolResults = await Promise.all(\n      toolCalls.map(async (tc) => {\n        const executor = toolExecutors[tc.function.name];\n        const args = JSON.parse(tc.function.arguments);\n        const result = await executor(args);\n        return {\n          call: tc,\n          outputs: [{ result }],\n        };\n      })\n    );\n\n    // 4. Send tool results back for final answer\n    const finalResponse = await cohere.chat({\n      model: 'command-a-03-2025',\n      messages: [\n        { role: 'user', content: userMessage },\n        { role: 'assistant', toolCalls },\n        { role: 'tool', toolCallId: toolCalls[0].id, content: toolResults[0].outputs[0].result },\n      ],\n      tools,\n    });\n\n    return finalResponse.message?.content?.[0]?.text ?? '';\n  }\n\n  // No tool call \u2014 direct response\n  return response.message?.content?.[0]?.text ?? '';\n}\n```\n\n### Step 4: Multi-Step Agent Loop\n\n```typescript\nasync function agentLoop(userMessage: string, maxSteps = 5) {\n  const messages: any[] = [{ role: 'user', content: userMessage }];\n\n  for (let step = 0; step < maxSteps; step++) {\n    const response = await cohere.chat({\n      model: 'command-a-03-2025',\n      messages,\n      tools,\n    });\n\n    // If model is done (no tool calls), return the answer\n    if (response.finishReason !== 'TOOL_CALL') {\n      return response.message?.content?.[0]?.text ?? '';\n    }\n\n    // Model wants to call tools\n    const toolCalls = response.message?.toolCalls ?? [];\n    messages.push({ role: 'assistant', toolCalls });\n\n    // Execute tools (parallel if multiple)\n    for (const tc of toolCalls) {\n      const executor = toolExecutors[tc.function.name];\n      if (!executor) {\n        messages.push({ role: 'tool', toolCallId: tc.id, content: `Error: Unknown tool ${tc.function.name}` });\n        continue;\n      }\n\n      try {\n        const args = JSON.parse(tc.function.arguments);\n        const result = await executor(args);\n        messages.push({ role: 'tool', toolCallId: tc.id, content: result });\n      } catch (err) {\n        messages.push({ role: 'tool', toolCallId: tc.id, content: `Error: ${(err as Error).message}` });\n      }\n    }\n\n    console.log(`Step ${step + 1}: executed ${toolCalls.length} tool(s)`);\n  }\n\n  return 'Agent reached max steps without completing.';\n}\n\n// Usage\nconst answer = await agentLoop(\"What's the weather in Tokyo and search for 'Tokyo events'?\");\nconsole.log(answer);\n```\n\n### Step 5: Force Tool Use\n\n```typescript\n// Force the model to use at least one tool\nconst response = await cohere.chat({\n  model: 'command-a-03-2025',\n  messages: [{ role: 'user', content: 'Look up the weather in Paris' }],\n  tools,\n  toolChoice: 'REQUIRED', // REQUIRED = must use tool, NONE = cannot use tools\n});\n\n// toolChoice options:\n// - omitted: model decides freely\n// - 'REQUIRED': must call at least one tool\n// - 'NONE': cannot call any tools (text-only response)\n```\n\n### Step 6: Streaming Tool Use\n\n```typescript\nasync function streamWithTools(userMessage: string) {\n  const stream = await cohere.chatStream({\n    model: 'command-a-03-2025',\n    messages: [{ role: 'user', content: userMessage }],\n    tools,\n  });\n\n  const toolCalls: any[] = [];\n\n  for await (const event of stream) {\n    switch (event.type) {\n      case 'tool-call-start':\n        console.log(`Tool call: ${event.delta?.message?.toolCalls?.function?.name}`);\n        break;\n      case 'tool-call-delta':\n        // Streaming tool arguments\n        break;\n      case 'content-delta':\n        process.stdout.write(event.delta?.message?.content?.text ?? '');\n        break;\n    }\n  }\n}\n```\n\n## Output\n\n- Single-step tool calls with automatic execution\n- Multi-step agent loop handling sequential reasoning\n- Parallel tool execution for independent calls\n- Streaming with tool-call events\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `tool not found` | Mismatched tool name | Verify `tools` array matches executors |\n| `invalid arguments` | Schema mismatch | Check tool parameter types |\n| Infinite loop | Model keeps calling tools | Set `maxSteps` limit |\n| `TOOL_CALL` with no toolCalls | Edge case | Check `response.message?.toolCalls` length |\n\n## Resources\n\n- [Tool Use Quickstart](https://docs.cohere.com/docs/tool-use-quickstart)\n- [Multi-Step Tool Use](https://docs.cohere.com/docs/multi-step-tool-use)\n- [Tool Use Streaming](https://docs.cohere.com/docs/tool-use-streaming)\n- [Tool Use Citations](https://docs.cohere.com/docs/tool-use-citations)\n\n## Next Steps\n\nFor common errors, see `cohere-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "cohere-core-workflow-b",
-    "description": "Build tool-use agents and function calling with Cohere API v2.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

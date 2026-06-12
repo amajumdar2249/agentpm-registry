@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031301",
   "name": "appfolio-ci-integration",
   "slug": "appfolio-ci-integration",
   "description": "Configure CI/CD pipeline for AppFolio property management integrations.",
   "content": "# AppFolio CI Integration\n\n## Overview\n\nConfigure CI pipelines that validate AppFolio property management API integrations using a two-tier strategy. Unit tests mock the AppFolio REST client to verify tenant lookup, work order creation, and property listing logic without consuming API quota. Integration tests run against the AppFolio sandbox environment on main-branch merges only, using Basic Auth credentials stored as GitHub secrets. This keeps PR feedback fast and free while catching real API contract drift before production deploys.\n\n## GitHub Actions Workflow\n\n```yaml\n# .github/workflows/appfolio-tests.yml\nname: AppFolio API Tests\non: [push, pull_request]\n\njobs:\n  unit-tests:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with: { node-version: '20' }\n      - run: npm ci\n      - run: npm run lint && npm run typecheck\n      - run: npm test -- --testPathPattern=unit  # No API credentials needed\n\n  integration-tests:\n    runs-on: ubuntu-latest\n    if: github.ref == 'refs/heads/main'\n    needs: unit-tests\n    steps:\n      - uses: actions/checkout@v4\n      - uses: actions/setup-node@v4\n        with: { node-version: '20' }\n      - run: npm ci\n      - run: npm test -- --testPathPattern=integration\n        env:\n          APPFOLIO_CLIENT_ID: ${{ secrets.APPFOLIO_CLIENT_ID }}\n          APPFOLIO_CLIENT_SECRET: ${{ secrets.APPFOLIO_CLIENT_SECRET }}\n          APPFOLIO_BASE_URL: ${{ secrets.APPFOLIO_SANDBOX_URL }}\n```\n\n## Mock-Based Unit Tests\n\n```typescript\n// tests/unit/work-order-service.test.ts\nimport { describe, it, expect, vi } from 'vitest';\nimport { createWorkOrder } from '../../src/services/work-order-service';\nimport * as appfolioClient from '../../src/lib/appfolio-client';\n\nvi.mock('../../src/lib/appfolio-client');\n\ndescribe('WorkOrderService', () => {\n  it('creates a maintenance work order for a property', async () => {\n    vi.mocked(appfolioClient.post).mockResolvedValue({\n      id: 'wo-4821',\n      property_id: 'prop-100',\n      category: 'Plumbing',\n      status: 'Open',\n    });\n\n    const result = await createWorkOrder('prop-100', 'Plumbing', 'Leaking faucet unit 3B');\n    expect(result.status).toBe('Open');\n    expect(appfolioClient.post).toHaveBeenCalledWith('/work_orders', {\n      property_id: 'prop-100',\n      category: 'Plumbing',\n      description: 'Leaking faucet unit 3B',\n    });\n  });\n});\n```\n\n## Integration Tests\n\n```typescript\n// tests/integration/tenant-lookup.test.ts\nimport { describe, it, expect } from 'vitest';\nimport { AppFolioClient } from '../../src/lib/appfolio-client';\n\nconst canRun = process.env.APPFOLIO_CLIENT_ID && process.env.APPFOLIO_CLIENT_SECRET;\n\ndescribe.skipIf(!canRun)('AppFolio Tenant Lookup (live sandbox)', () => {\n  const client = new AppFolioClient({\n    clientId: process.env.APPFOLIO_CLIENT_ID!,\n    clientSecret: process.env.APPFOLIO_CLIENT_SECRET!,\n    baseUrl: process.env.APPFOLIO_BASE_URL!,\n  });\n\n  it('lists tenants for a known property', async () => {\n    const tenants = await client.get('/tenants', { property_id: 'prop-100' });\n    expect(Array.isArray(tenants)).toBe(true);\n    expect(tenants[0]).toHaveProperty('lease_status');\n  });\n});\n```\n\n## CI Cost Management\n\n```typescript\n// tests/helpers/api-budget.ts\nlet callCount = 0;\nconst MAX_CALLS_PER_RUN = 25; // AppFolio sandbox has 100 req/min rate limit\n\nexport function trackApiCall(): void {\n  callCount++;\n  if (callCount > MAX_CALLS_PER_RUN) {\n    throw new Error(\n      `CI API budget exceeded: ${callCount}/${MAX_CALLS_PER_RUN} calls. ` +\n      'Reduce integration test scope or split across jobs.'\n    );\n  }\n}\n\nexport function getCallCount(): number { return callCount; }\n```\n\n## Error Handling\n\n| CI Issue | Cause | Fix |\n|----------|-------|-----|\n| 401 Unauthorized in integration job | Expired or rotated sandbox credentials | Regenerate `APPFOLIO_CLIENT_ID` and `APPFOLIO_CLIENT_SECRET` in GitHub Secrets |\n| 429 Too Many Requests | Sandbox rate limit (100 req/min) hit by parallel tests | Run integration tests with `--maxWorkers=1` |\n| Tenant list empty | Sandbox data periodically reset by AppFolio | Seed test property via `POST /properties` in a `beforeAll` hook |\n| Typecheck fails on API response | AppFolio schema updated without notice | Regenerate types from OpenAPI spec, update interfaces |\n| Integration job skipped | Branch protection rule not matching `refs/heads/main` | Verify workflow `if` condition matches your default branch name |\n\n## Resources\n\n- [AppFolio Stack API Documentation](https://www.appfolio.com/stack/partners/api)\n- [GitHub Actions Encrypted Secrets](https://docs.github.com/en/actions/security-guides/encrypted-secrets)\n\n## Next Steps\n\nSee `appfolio-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "appfolio-ci-integration",
-    "description": "Configure CI/CD pipeline for AppFolio property management integrations.",
-    "Trigger": "appfolio CI\".",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

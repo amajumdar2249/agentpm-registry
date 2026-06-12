@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032196",
   "name": "groq-local-dev-loop",
   "slug": "groq-local-dev-loop",
   "description": "Configure Groq local development with hot reload, mocking, and testing.",
   "content": "# Groq Local Dev Loop\n\n## Overview\n\nSet up a fast, reproducible local development workflow for Groq. Groq's sub-second response times make it uniquely suited for tight dev loops -- you get LLM responses fast enough to iterate without context-switching.\n\n## Prerequisites\n\n- `groq-sdk` installed\n- `GROQ_API_KEY` set (free tier is fine for development)\n- Node.js 18+ with tsx for TypeScript execution\n- vitest for testing\n\n## Instructions\n\n### Step 1: Project Structure\n\n```\nmy-groq-project/\n\u251c\u2500\u2500 src/\n\u2502   \u251c\u2500\u2500 groq/\n\u2502   \u2502   \u251c\u2500\u2500 client.ts       # Singleton Groq client\n\u2502   \u2502   \u251c\u2500\u2500 models.ts       # Model constants and selection\n\u2502   \u2502   \u2514\u2500\u2500 completions.ts  # Completion wrappers\n\u2502   \u2514\u2500\u2500 index.ts\n\u251c\u2500\u2500 tests/\n\u2502   \u251c\u2500\u2500 groq.test.ts         # Unit tests with mocks\n\u2502   \u2514\u2500\u2500 groq.integration.ts  # Live API tests (CI-only)\n\u251c\u2500\u2500 .env.local               # Local secrets (git-ignored)\n\u251c\u2500\u2500 .env.example              # Template for team\n\u2514\u2500\u2500 package.json\n```\n\n### Step 2: Package Setup\n\n```json\n{\n  \"scripts\": {\n    \"dev\": \"tsx watch src/index.ts\",\n    \"test\": \"vitest\",\n    \"test:watch\": \"vitest --watch\",\n    \"test:integration\": \"GROQ_INTEGRATION=1 vitest tests/groq.integration.ts\"\n  },\n  \"dependencies\": {\n    \"groq-sdk\": \"^0.12.0\"\n  },\n  \"devDependencies\": {\n    \"tsx\": \"^4.0.0\",\n    \"vitest\": \"^2.0.0\"\n  }\n}\n```\n\n### Step 3: Singleton Client\n\n```typescript\n// src/groq/client.ts\nimport Groq from \"groq-sdk\";\n\nlet _client: Groq | null = null;\n\nexport function getGroqClient(): Groq {\n  if (!_client) {\n    if (!process.env.GROQ_API_KEY) {\n      throw new Error(\"GROQ_API_KEY not set. Copy .env.example to .env.local\");\n    }\n    _client = new Groq({\n      apiKey: process.env.GROQ_API_KEY,\n      maxRetries: 2,\n      timeout: 30_000,\n    });\n  }\n  return _client;\n}\n\n// Reset for testing\nexport function resetClient(): void {\n  _client = null;\n}\n```\n\n### Step 4: Model Constants\n\n```typescript\n// src/groq/models.ts\nexport const MODELS = {\n  FAST: \"llama-3.1-8b-instant\",         // Dev default: cheapest, fastest\n  VERSATILE: \"llama-3.3-70b-versatile\",  // Production quality\n  SPECDEC: \"llama-3.3-70b-specdec\",      // Speculative decoding variant\n  SCOUT: \"meta-llama/llama-4-scout-17b-16e-instruct\",  // Vision\n} as const;\n\nexport const DEV_MODEL = MODELS.FAST;  // Use 8B for dev to save quota\n```\n\n### Step 5: Unit Tests with Mocking\n\n```typescript\n// tests/groq.test.ts\nimport { describe, it, expect, vi, beforeEach } from \"vitest\";\nimport Groq from \"groq-sdk\";\n\n// Mock the entire groq-sdk module\nvi.mock(\"groq-sdk\", () => {\n  const mockCreate = vi.fn().mockResolvedValue({\n    choices: [{ message: { content: \"mocked response\" }, finish_reason: \"stop\" }],\n    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },\n    model: \"llama-3.1-8b-instant\",\n  });\n\n  return {\n    default: vi.fn(() => ({\n      chat: { completions: { create: mockCreate } },\n      models: { list: vi.fn().mockResolvedValue({ data: [] }) },\n    })),\n  };\n});\n\ndescribe(\"Groq Completions\", () => {\n  it(\"should create a chat completion\", async () => {\n    const groq = new Groq();\n    const result = await groq.chat.completions.create({\n      model: \"llama-3.1-8b-instant\",\n      messages: [{ role: \"user\", content: \"test\" }],\n    });\n\n    expect(result.choices[0].message.content).toBe(\"mocked response\");\n    expect(result.usage.total_tokens).toBe(15);\n  });\n});\n```\n\n### Step 6: Integration Tests (Live API)\n\n```typescript\n// tests/groq.integration.ts\nimport { describe, it, expect } from \"vitest\";\nimport Groq from \"groq-sdk\";\n\nconst shouldRun = !!process.env.GROQ_INTEGRATION;\n\ndescribe.skipIf(!shouldRun)(\"Groq Integration\", () => {\n  const groq = new Groq();\n\n  it(\"should list available models\", async () => {\n    const models = await groq.models.list();\n    expect(models.data.length).toBeGreaterThan(0);\n    const ids = models.data.map((m) => m.id);\n    expect(ids).toContain(\"llama-3.1-8b-instant\");\n  }, 10_000);\n\n  it(\"should complete a chat request\", async () => {\n    const result = await groq.chat.completions.create({\n      model: \"llama-3.1-8b-instant\",\n      messages: [{ role: \"user\", content: \"Reply with exactly: PONG\" }],\n      temperature: 0,\n      max_tokens: 10,\n    });\n    expect(result.choices[0].message.content).toContain(\"PONG\");\n  }, 10_000);\n});\n```\n\n### Step 7: Environment Template\n\n```bash\n# .env.example\n# Get your key at https://console.groq.com/keys\nGROQ_API_KEY=gsk_your_key_here\n\n# Optional: override default dev model\nGROQ_MODEL=llama-3.1-8b-instant\n```\n\n## Dev Tips\n\n- Use `llama-3.1-8b-instant` during development (lowest quota usage, fastest)\n- Set `temperature: 0` for deterministic outputs during debugging\n- Set `max_tokens` conservatively to avoid burning through free tier\n- Groq free tier: 30 RPM for 70B models, 30 RPM for 8B -- plan your dev loops accordingly\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `GROQ_API_KEY not set` | Missing .env.local | Copy from .env.example |\n| Test timeout | Live API call in unit test | Mock groq-sdk in unit tests |\n| `429 rate_limit_exceeded` | Free tier RPM hit | Wait 60s or use `test:watch` with longer intervals |\n| Port already in use | Another tsx watch running | Kill process or change port |\n\n## Resources\n\n- [groq-sdk npm](https://www.npmjs.com/package/groq-sdk)\n- [Vitest Documentation](https://vitest.dev/)\n- [tsx Documentation](https://github.com/privatenumber/tsx)\n\n## Next Steps\n\nSee `groq-sdk-patterns` for production-ready code patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "groq-local-dev-loop",
-    "description": "Configure Groq local development with hot reload, mocking, and testing.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(pnpm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

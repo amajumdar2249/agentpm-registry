@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000029470",
   "name": "bio-population-genetics-linkage-disequilibrium",
   "slug": "bio-population-genetics-linkage-disequilibrium-2",
   "description": "Calculate linkage disequilibrium statistics (r\u00b2, D'), perform LD pruning for population structure analysis, identify haplotype blocks, and visualize LD patterns using PLINK, scikit-allel, and LDBlockShow. Use when calculating LD or pruning variants.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: matplotlib 3.8+, numpy 1.26+, pandas 2.2+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Linkage Disequilibrium\n\n**\"Calculate LD between my variants\"** \u2192 Compute pairwise LD statistics (r\u00b2, D'), prune correlated variants for independent sets, and identify haplotype blocks from genotype data.\n- CLI: `plink2 --r2` for LD calculation, `--indep-pairwise` for pruning\n- Python: `allel.rogers_huff_r()` for windowed LD in scikit-allel\n\nCalculate LD statistics, prune correlated variants, and identify haplotype blocks.\n\n## PLINK LD Calculations\n\n### Pairwise r\u00b2\n\n```bash\n# All pairs within window\nplink2 --bfile data --r2 --ld-window-kb 1000 --ld-window-r2 0.2 --out ld_results\n\n# With SNP names in output\nplink2 --bfile data --r2 inter-chr --ld-window-r2 0 --out all_pairs\n\n# Squared correlation matrix\nplink2 --bfile data --r2-phased square --out ld_matrix\n```\n\n### Output Format\n\n```\n# ld_results.ld contains:\nCHR_A  BP_A  SNP_A  CHR_B  BP_B  SNP_B  R2\n```\n\n### PLINK 1.9 Options\n\n```bash\n# r\u00b2 with D' statistics\nplink --bfile data --r2 dprime --ld-window-kb 500 --out ld_with_dprime\n\n# Inter-chromosome LD\nplink --bfile data --r2 inter-chr --ld-snp-list target_snps.txt --out target_ld\n```\n\n## LD Pruning\n\n### Standard Pruning\n\n```bash\n# Calculate pruning list\nplink2 --bfile data --indep-pairwise 50 10 0.1 --out prune\n\n# Output files:\n# prune.prune.in  - Variants to keep\n# prune.prune.out - Variants to remove\n\n# Extract pruned set\nplink2 --bfile data --extract prune.prune.in --make-bed --out data_pruned\n```\n\n### Pruning Parameters\n\n| Parameter | Description | Common Values |\n|-----------|-------------|---------------|\n| Window (50) | Variants per window | 50-200 |\n| Step (10) | Variants to shift | 5-50 |\n| r\u00b2 threshold (0.1) | Max LD allowed | 0.1-0.5 |\n\n### Use Cases\n\n```bash\n# Strict pruning for PCA/Admixture\nplink2 --bfile data --indep-pairwise 50 10 0.1 --out strict_prune\n\n# Moderate pruning for polygenic scores\nplink2 --bfile data --indep-pairwise 200 50 0.5 --out moderate_prune\n\n# Region-based pruning\nplink2 --bfile data --indep-pairwise 50 10 0.2 --chr 6 --from-mb 25 --to-mb 35 --out mhc_prune\n```\n\n## scikit-allel LD\n\n### Pairwise r\u00b2\n\n```python\nimport allel\nimport numpy as np\n\ncallset = allel.read_vcf('data.vcf.gz')\ngt = allel.GenotypeArray(callset['calldata/GT'])\npos = callset['variants/POS']\n\ngn = gt.to_n_alt()\n\nr2 = allel.rogers_huff_r(gn[:100]) ** 2\n```\n\n### LD Decay\n\n**Goal:** Plot LD decay as a function of physical distance to characterize the extent of linkage in the population.\n\n**Approach:** Compute pairwise r\u00b2 values between nearby variants using scikit-allel, bin by physical distance, and plot mean r\u00b2 per distance bin.\n\n```python\nimport allel\nimport numpy as np\nimport matplotlib.pyplot as plt\n\ngn = gt.to_n_alt()\n\nr2, dist = [], []\nn_variants = min(1000, gn.shape[0])\n\nfor i in range(n_variants):\n    for j in range(i + 1, min(i + 100, n_variants)):\n        r = allel.rogers_huff_r(gn[[i, j]])[0, 1] ** 2\n        d = pos[j] - pos[i]\n        r2.append(r)\n        dist.append(d)\n\nr2 = np.array(r2)\ndist = np.array(dist)\n\nbins = np.arange(0, 100001, 1000)\nbin_means = []\nfor i in range(len(bins) - 1):\n    mask = (dist >= bins[i]) & (dist < bins[i + 1])\n    if mask.sum() > 0:\n        bin_means.append(np.mean(r2[mask]))\n    else:\n        bin_means.append(np.nan)\n\nplt.figure(figsize=(10, 6))\nplt.plot(bins[:-1] / 1000, bin_means)\nplt.xlabel('Distance (kb)')\nplt.ylabel('Mean r\u00b2')\nplt.title('LD Decay')\nplt.savefig('ld_decay.png')\n```\n\n## Haplotype Blocks\n\n### PLINK\n\n```bash\n# Identify haplotype blocks (Gabriel et al.)\nplink --bfile data --blocks no-pheno-req --out blocks\n\n# Output: blocks.blocks (block boundaries)\n# Output: blocks.blocks.det (block details)\n```\n\n### Block Statistics\n\n```python\nimport pandas as pd\n\nblocks = pd.read_csv('blocks.blocks.det', sep='\\s+')\n\nprint(f'Number of blocks: {len(blocks)}')\nprint(f'Mean block size: {blocks[\"KB\"].mean():.1f} kb')\nprint(f'Mean SNPs per block: {blocks[\"NSNPS\"].mean():.1f}')\n```\n\n## LD Matrix Visualization\n\n```python\nimport allel\nimport numpy as np\nimport matplotlib.pyplot as plt\n\ngn = gt.to_n_alt()[:200]\n\nr = allel.rogers_huff_r(gn)\nr2_matrix = r ** 2\n\nplt.figure(figsize=(10, 10))\nplt.imshow(r2_matrix, cmap='hot', vmin=0, vmax=1)\nplt.colorbar(label='r\u00b2')\nplt.xlabel('Variant index')\nplt.ylabel('Variant index')\nplt.title('LD Matrix')\nplt.savefig('ld_matrix.png', dpi=150)\n```\n\n## LD-based Clumping (GWAS)\n\n```bash\n# Clump GWAS results by LD\nplink --bfile data \\\n    --clump gwas_results.txt \\\n    --clump-p1 5e-8 \\\n    --clump-p2 1e-5 \\\n    --clump-r2 0.1 \\\n    --clump-kb 250 \\\n    --out clumped\n\n# Output: clumped.clumped (independent signals)\n```\n\n### Clump Parameters\n\n| Parameter | Description |\n|-----------|-------------|\n| --clump-p1 | Index SNP p-value threshold |\n| --clump-p2 | Clumped SNP p-value threshold |\n| --clump-r2 | LD threshold for clumping |\n| --clump-kb | Physical distance threshold |\n\n## vcftools LD\n\n```bash\n# Pairwise LD for region\nvcftools --vcf data.vcf --geno-r2 --ld-window-bp 100000 --out ld_results\n\n# Output: ld_results.geno.ld\n\n# Haplotype-based r\u00b2\nvcftools --vcf data.vcf --hap-r2 --ld-window-bp 100000 --out hap_ld\n```\n\n## Complete Workflow\n\n```bash\n# 1. Calculate genome-wide LD\nplink2 --bfile data --r2 --ld-window-kb 500 --ld-window-r2 0.2 --out ld_genome\n\n# 2. Generate pruned set for PCA\nplink2 --bfile data --indep-pairwise 50 10 0.1 --out prune\nplink2 --bfile data --extract prune.prune.in --make-bed --out pruned\n\n# 3. Identify haplotype blocks\nplink --bfile data --blocks no-pheno-req --out blocks\n\n# 4. Visualize LD for specific region\nplink --bfile data --r2 dprime --chr 6 --from-mb 28 --to-mb 34 --out mhc_ld\n```\n\n## Related Skills\n\n- plink-basics - File format handling\n- population-structure - Use pruned data for PCA\n- association-testing - LD clumping for GWAS\n- selection-statistics - LD affects EHH statistics\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-population-genetics-linkage-disequilibrium",
-    "description": "Calculate linkage disequilibrium statistics (r\u00b2, D'), perform LD pruning for population structure analysis, identify haplotype blocks, and visualize LD patterns using PLINK, scikit-allel, and LDBlockShow. Use when calculating LD or pruning variants.",
-    "tool_type": "mixed",
-    "primary_tool": "plink2"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

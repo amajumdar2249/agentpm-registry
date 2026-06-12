@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032118",
   "name": "glean-debug-bundle",
   "slug": "glean-debug-bundle",
   "description": "Collect Glean diagnostic information for support including datasource",
   "content": "# Glean Debug Bundle\n\n## Overview\n\nThis debug bundle collects diagnostic evidence from Glean enterprise search integrations\nfor troubleshooting datasource configuration, document indexing pipelines, and search\nquality issues. It captures indexing token validation, datasource configuration state,\ncrawl status, search query test results, and permission model health. The resulting\ntarball provides the evidence needed to diagnose connector failures, stale index problems,\nmissing document results, and permission-based search gaps without requiring admin console access.\n\n## Prerequisites\n\n- `curl`, `jq`, `tar` installed\n- `GLEAN_DOMAIN` set to your Glean instance (e.g., `your-company-be.glean.com`)\n- `GLEAN_INDEXING_TOKEN` for datasource/indexing endpoints\n- `GLEAN_CLIENT_TOKEN` for search API endpoints\n\n## Debug Collection Script\n\n```bash\n#!/bin/bash\nset -euo pipefail\nBUNDLE=\"debug-glean-$(date +%Y%m%d-%H%M%S)\"\nmkdir -p \"$BUNDLE\"\n\n# Environment check\necho \"=== Environment ===\" > \"$BUNDLE/environment.txt\"\necho \"Glean Domain: ${GLEAN_DOMAIN:-NOT SET}\" >> \"$BUNDLE/environment.txt\"\necho \"Indexing Token: ${GLEAN_INDEXING_TOKEN:+SET (redacted)}\" >> \"$BUNDLE/environment.txt\"\necho \"Client Token: ${GLEAN_CLIENT_TOKEN:+SET (redacted)}\" >> \"$BUNDLE/environment.txt\"\necho \"Node: $(node -v 2>/dev/null || echo 'not installed')\" >> \"$BUNDLE/environment.txt\"\necho \"Timestamp: $(date -u)\" >> \"$BUNDLE/environment.txt\"\n\n# Datasource configuration\necho \"=== Datasource Config ===\" > \"$BUNDLE/datasource-config.json\"\ncurl -sf -X POST \"https://${GLEAN_DOMAIN}/api/index/v1/getdatasourceconfig\" \\\n  -H \"Authorization: Bearer ${GLEAN_INDEXING_TOKEN}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d \"{\\\"datasource\\\":\\\"${GLEAN_DATASOURCE:-custom}\\\"}\" \\\n  >> \"$BUNDLE/datasource-config.json\" 2>&1 || echo '{\"error\":\"UNREACHABLE\"}' > \"$BUNDLE/datasource-config.json\"\n\n# Indexing status check\necho \"=== Indexing Status ===\" > \"$BUNDLE/indexing-status.json\"\ncurl -sf -X POST \"https://${GLEAN_DOMAIN}/api/index/v1/getstatus\" \\\n  -H \"Authorization: Bearer ${GLEAN_INDEXING_TOKEN}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d \"{\\\"datasource\\\":\\\"${GLEAN_DATASOURCE:-custom}\\\"}\" \\\n  >> \"$BUNDLE/indexing-status.json\" 2>&1 || echo '{\"error\":\"FAILED\"}' > \"$BUNDLE/indexing-status.json\"\n\n# Search quality test\necho \"=== Search Test ===\" > \"$BUNDLE/search-test.json\"\ncurl -sf -X POST \"https://${GLEAN_DOMAIN}/api/client/v1/search\" \\\n  -H \"Authorization: Bearer ${GLEAN_CLIENT_TOKEN}\" \\\n  -H \"X-Glean-Auth-Type: BEARER\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"query\":\"test\",\"pageSize\":3}' \\\n  >> \"$BUNDLE/search-test.json\" 2>&1 || echo '{\"error\":\"SEARCH_FAILED\"}' > \"$BUNDLE/search-test.json\"\n\n# Recent indexing logs\necho \"=== Recent Logs ===\" > \"$BUNDLE/app-logs.txt\"\ntail -100 /var/log/glean-connector/*.log >> \"$BUNDLE/app-logs.txt\" 2>/dev/null || echo \"No connector logs found\" >> \"$BUNDLE/app-logs.txt\"\n\n# Rate limit status\necho \"=== Rate Limits ===\" > \"$BUNDLE/rate-limits.txt\"\ncurl -sI -X POST \"https://${GLEAN_DOMAIN}/api/index/v1/getdatasourceconfig\" \\\n  -H \"Authorization: Bearer ${GLEAN_INDEXING_TOKEN}\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{}' 2>/dev/null | grep -i \"x-rate\\|retry-after\\|x-ratelimit\" >> \"$BUNDLE/rate-limits.txt\" || echo \"No rate limit headers\" >> \"$BUNDLE/rate-limits.txt\"\n\n# Package versions\necho \"=== Dependencies ===\" > \"$BUNDLE/deps.txt\"\nnpm ls 2>/dev/null | grep -i glean >> \"$BUNDLE/deps.txt\" || echo \"No Glean npm packages found\" >> \"$BUNDLE/deps.txt\"\npip list 2>/dev/null | grep -i glean >> \"$BUNDLE/deps.txt\" || echo \"No Glean pip packages found\" >> \"$BUNDLE/deps.txt\"\n\ntar -czf \"$BUNDLE.tar.gz\" \"$BUNDLE\" && rm -rf \"$BUNDLE\"\necho \"Bundle: $BUNDLE.tar.gz\"\n```\n\n## Analyzing the Bundle\n\n```bash\ntar -xzf debug-glean-*.tar.gz\ncat debug-glean-*/environment.txt               # Verify tokens are set\njq '.objectType' debug-glean-*/datasource-config.json  # Check datasource type\njq '.status' debug-glean-*/indexing-status.json  # Verify crawl state\njq '.results | length' debug-glean-*/search-test.json  # Count search results\n```\n\n## Common Issues\n\n| Symptom | Check in Bundle | Fix |\n|---------|----------------|-----|\n| 401 on indexing API | `environment.txt` shows token NOT SET | Generate new indexing token in Glean admin under Datasources > API |\n| Datasource config returns empty | `datasource-config.json` has no fields | Set `GLEAN_DATASOURCE` env var to match your registered datasource name |\n| Search returns 0 results | `search-test.json` results array is empty | Check `indexing-status.json` for crawl completion; new datasources take 15-60 min to index |\n| 403 on search endpoint | `search-test.json` shows permission error | Client token needs search scope; regenerate with correct permissions in admin |\n| Stale documents in results | `indexing-status.json` shows old `lastCrawlTime` | Trigger a re-crawl via admin UI or POST to `/api/index/v1/bulkindexdocuments` |\n| Rate limited during bulk indexing | `rate-limits.txt` shows retry-after header | Batch documents in groups of 100; respect 10 req/sec indexing limit |\n\n## Automated Health Check\n\n```typescript\nasync function checkGleanHealth(): Promise<{\n  status: string;\n  latencyMs: number;\n  indexing: boolean;\n  searchWorking: boolean;\n}> {\n  const domain = process.env.GLEAN_DOMAIN;\n  const indexToken = process.env.GLEAN_INDEXING_TOKEN;\n  const clientToken = process.env.GLEAN_CLIENT_TOKEN;\n  const start = Date.now();\n\n  const indexRes = await fetch(`https://${domain}/api/index/v1/getdatasourceconfig`, {\n    method: \"POST\",\n    headers: { Authorization: `Bearer ${indexToken}`, \"Content-Type\": \"application/json\" },\n    body: JSON.stringify({ datasource: process.env.GLEAN_DATASOURCE || \"custom\" }),\n  });\n\n  const searchRes = await fetch(`https://${domain}/api/client/v1/search`, {\n    method: \"POST\",\n    headers: {\n      Authorization: `Bearer ${clientToken}`,\n      \"X-Glean-Auth-Type\": \"BEARER\",\n      \"Content-Type\": \"application/json\",\n    },\n    body: JSON.stringify({ query: \"test\", pageSize: 1 }),\n  });\n\n  return {\n    status: indexRes.ok && searchRes.ok ? \"healthy\" : \"degraded\",\n    latencyMs: Date.now() - start,\n    indexing: indexRes.ok,\n    searchWorking: searchRes.ok,\n  };\n}\n```\n\n## Resources\n\n- [Glean Developer Portal](https://developers.glean.com/)\n- [Glean Status Page](https://status.glean.com)\n- [Glean Indexing API Reference](https://developers.glean.com/indexing-api/)\n\n## Next Steps\n\nSee `glean-rate-limits`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "glean-debug-bundle",
-    "description": "Collect Glean diagnostic information for support including datasource",
-    "Trigger": "glean debug\", \"glean support\", \"glean diagnostic\".",
-    "allowed-tools": "Read, Bash(curl:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,31 +1,48 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000015947",
   "name": "moai-workflow-gan-loop",
   "slug": "moai-workflow-gan-loop-2",
   "description": ">",
   "content": "\n# moai-workflow-gan-loop\n\nImplements the Builder-Evaluator GAN loop for iterative design quality improvement. Absorbed from agency constitution Section 11 and Section 12. Integrates Sprint Contract Protocol, 4-dimension scoring, stagnation detection, and Evaluator Leniency Prevention.\n\nAll loop parameters are read from `.moai/config/sections/design.yaml`. Do not hardcode thresholds.\n\n---\n\n## Quick Reference\n\n### Loop Parameters (from design.yaml)\n\n```\ndesign.gan_loop:\n  max_iterations: 5          # Maximum Builder-Evaluator cycles\n  pass_threshold: 0.75       # Score >= this value to exit loop\n  escalation_after: 3        # Escalate to user after N iterations without passing\n  improvement_threshold: 0.05  # Minimum score delta per iteration\n  strict_mode: false         # If true, each dimension must pass individually\n  sprint_contract:\n    enabled: true\n    required_harness_levels: [thorough]\n    optional_harness_levels: [standard]\n    artifact_dir: \".moai/sprints\"\n    max_negotiation_rounds: 2\n```\n\n### 4-Dimension Scoring Weights\n\n| Dimension | Weight | Description |\n| --- | --- | --- |\n| Design Quality | 30% | Visual consistency, brand token compliance, WCAG AA |\n| Originality | 25% | Not generic, not AI-slop, unique brand expression |\n| Completeness | 25% | All BRIEF sections present, copy matches contract |\n| Functionality | 20% | Responsive, accessible, all interactions work |\n\nOverall score = weighted average of all four dimensions.\n\nPass condition: `overall_score >= pass_threshold` AND (if `strict_mode: true`) each dimension score >= `pass_threshold`.\n\n---\n\n## Implementation Guide\n\n### GAN Loop Execution Flow\n\n**Phase 1: Sprint Contract (when required by harness level)**\n\nRequired when `harness_level == thorough`.\nOptional when `harness_level == standard` and user opts in.\nSkipped when `harness_level == minimal`.\n\nSprint Contract generation:\n1. Evaluator analyzes the BRIEF document and current iteration scope.\n2. Evaluator produces the Sprint Contract document:\n   - `acceptance_checklist`: concrete, testable criteria for this iteration\n   - `priority_dimension`: which of the 4 dimensions to focus on\n   - `test_scenarios`: specific verification steps\n   - `pass_conditions`: minimum score per criterion\n3. Builder reviews the contract:\n   - Accept: proceed with implementation\n   - Request adjustment: propose alternatives (max `max_negotiation_rounds` rounds)\n4. Contract is saved to `design.gan_loop.sprint_contract.artifact_dir/sprint-N.json`\n\nConstraint: Evaluator must not score on criteria outside the Sprint Contract. Builder must not claim criteria as met without evidence.\n\n**Phase 2: Builder Execution**\n\nBuilder implements based on:\n- Accepted Sprint Contract (if present)\n- BRIEF document\n- Copy JSON from `moai-domain-copywriting`\n- Design tokens from `moai-domain-brand-design` or `moai-workflow-design` (Path A handler)\n\nBuilder outputs: code files, rendered previews (if Playwright available), implementation notes.\n\n**Phase 3: Evaluator Scoring**\n\nEvaluator scores against the 4 dimensions using the Evaluator Leniency Prevention mechanisms:\n\n1. **Rubric Anchoring**: Score each dimension against the rubric (0.25 increments) with explicit justification. Scores without rubric reference are invalid.\n2. **Evidence-Only Verdicts**: No PASS without concrete evidence (screenshot, test output, code reference).\n3. **Anti-Pattern Cross-check**: Check known anti-patterns before finalizing. Any detected anti-pattern caps the relevant dimension score at 0.50.\n4. **Must-Pass Firewall**: Copy integrity, mobile viewport, and WCAG AA are must-pass criteria. Failure in any must-pass = overall FAIL regardless of other scores.\n\nOutput: `evaluation-report-N.json` in `sprint_contract.artifact_dir`.\n\n**Phase 4: Loop Decision**\n\n```\nif overall_score >= pass_threshold:\n    EXIT LOOP \u2192 proceed to next phase\nelif iteration >= max_iterations:\n    ESCALATE \u2192 present failure report to user\nelif stagnation_detected:\n    ESCALATE \u2192 present stagnation options\nelse:\n    ITERATE \u2192 pass feedback to Builder, increment N\n```\n\n**Phase 5: Iteration Feedback**\n\nIf looping back:\n1. Evaluator generates targeted feedback per failed criterion.\n2. Builder receives the feedback and previous Sprint Contract.\n3. Previously passed criteria carry forward (no regression allowed).\n4. New Sprint Contract is generated for failed criteria only.\n\n---\n\n### Stagnation Detection\n\nStagnation is detected when the score improvement between consecutive iterations is below `improvement_threshold` for 2 or more iterations.\n\nTracking:\n- After each iteration, record `{iteration: N, score: X}` in the sprint artifact.\n- Calculate `delta = score[N] - score[N-1]`.\n- If `delta < improvement_threshold` for the last 2 iterations, flag stagnation.\n\nWhen stagnation is detected, escalate to user via AskUserQuestion with three options:\n1. Continue with current approach (Evaluator tries a different dimension focus)\n2. Adjust criteria (user provides guidance or relaxes constraints)\n3. Abort loop (accept current output as-is)\n\nThe escalation trigger at `escalation_after` iterations applies independently: if 3 iterations pass without a PASS score, escalate regardless of stagnation state.\n\n---\n\n### Evaluator Leniency Prevention Mechanisms\n\nThe following 5 mechanisms prevent score inflation and must be applied on every evaluation:\n\n**Mechanism 1: Rubric Anchoring**\n\nScore descriptions for each dimension:\n- 0.25: Major defects, fails most criteria\n- 0.50: Partial compliance, notable issues remain\n- 0.75: Solid compliance, minor issues only\n- 1.00: Full compliance, no issues found\n\nAlways state which rubric level applies and why before assigning a numeric score.\n\n**Mechanism 2: Must-Pass Firewall**\n\nThe following conditions cause immediate FAIL regardless of other scores:\n- Copy text differs from the original `copy.json` or BRIEF copy section\n- AI slop detected: purple gradient (#8B5CF6-#6D28D9) as primary visual element with generic white cards\n- Mobile viewport broken at 375px width (content overflow, unreadable text)\n- Any interactive element returns 404 or broken state\n- Lighthouse Accessibility < 80\n\n**Mechanism 3: Anti-Pattern Penalty**\n\nKnown anti-patterns that cap dimension score at 0.50:\n- Generic icon set without brand customization (Originality capped)\n- Hard-coded spacing values outside the design token scale (Design Quality capped)\n- Missing `alt` attributes on non-decorative images (Functionality capped)\n- Section copy that does not match the contracted copy (Completeness capped)\n\n**Mechanism 4: Evidence Requirement**\n\nEach dimension score must cite specific evidence:\n- Design Quality: Reference token file path and WCAG contrast ratio\n- Originality: Describe what makes the design non-generic\n- Completeness: List each BRIEF section and its implementation status\n- Functionality: Reference test result or Playwright output\n\n**Mechanism 5: Regression Baseline**\n\nIf a previous iteration passed a criterion, the current iteration must maintain that criterion. Regression from a previously passed criterion triggers an automatic score reduction in the relevant dimension.\n\n---\n\n### Sprint Contract Structure\n\nSprint Contract document format (`sprint-N.json`):\n\n```json\n{\n  \"sprint_id\": \"sprint-N\",\n  \"iteration\": N,\n  \"priority_dimension\": \"Design Quality | Originality | Completeness | Functionality\",\n  \"acceptance_checklist\": [\n    {\n      \"id\": \"AC-01\",\n      \"criterion\": \"Hero headline contrast ratio >= 4.5:1\",\n      \"verification\": \"Check color pair with contrast calculator\",\n      \"status\": \"pending | passed | failed\"\n    }\n  ],\n  \"test_scenarios\": [\n    {\n      \"id\": \"TS-01\",\n      \"description\": \"Mobile viewport renders without horizontal scroll\",\n      \"tool\": \"Playwright | visual inspection\",\n      \"command\": \"playwright test --viewport 375x667\"\n    }\n  ],\n  \"pass_conditions\": {\n    \"Design Quality\": 0.75,\n    \"Originality\": 0.70,\n    \"Completeness\": 0.80,\n    \"Functionality\": 0.75\n  },\n  \"negotiation_history\": [],\n  \"created_at\": \"ISO-8601\"\n}\n```\n\n---\n\n## Advanced Patterns\n\n### Strict Mode\n\nWhen `strict_mode: true` in `design.yaml`:\n- Each of the 4 dimension scores must individually meet `pass_threshold`.\n- The weighted average alone is not sufficient.\n- Minimum 2 iterations required even if the first iteration achieves a passing weighted average.\n- Strict mode is recommended for client-facing deliverables.\n\n### Independent Re-evaluation\n\nEvery 5th project triggers an independent re-evaluation:\n- The same build is scored twice with independent prompts.\n- If scores diverge by more than 0.10, a calibration warning is logged.\n- Calibration results are stored in `sprint_contract.artifact_dir/calibration-log.json`.\n\n### Playwright Integration\n\nWhen claude-in-chrome MCP or Playwright is available, the Evaluator uses automated testing:\n- Desktop screenshot (1280x720): full page\n- Mobile screenshot (375x667): full page\n- Interaction test: click all CTAs, verify no 404\n- Accessibility scan: automated WCAG check\n\nWhen testing tools are unavailable, fall back to static code analysis only, and note the limitation in the evaluation report.\n\n---\n\n## Works Well With\n\n- `moai-domain-brand-design`: Provides design tokens that Evaluator validates in Design Quality dimension\n- `moai-domain-copywriting`: Copy JSON is the reference for Completeness dimension\n- `evaluator-active`: The GAN loop orchestrates evaluator-active for each scoring pass\n- `moai-workflow-design`: Extracted tokens (Path A) serve as the design reference baseline\n\n---\n\nSource: Absorbed from agency constitution (Section 11 GAN Loop Contract, Section 12 Evaluator Leniency Prevention) on 2026-04-20.\nREQ coverage: REQ-SKILL-011, REQ-SKILL-012, REQ-SKILL-012a, REQ-SKILL-013, REQ-SKILL-014, REQ-CONST-004\nVersion: 1.0.0\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "moai-workflow-gan-loop",
-    "description": ">",
-    "license": "Apache-2.0",
-    "compatibility": "Designed for Claude Code",
-    "allowed-tools": "Read, Write, Edit, Grep, Glob, Bash",
-    "user-invocable": "false",
-    "metadata": "",
-    "version": "1.0.0",
-    "category": "workflow",
-    "status": "active",
-    "updated": "2026-04-20",
-    "tags": "gan loop, builder evaluator, sprint contract, scoring, quality, iterative",
-    "related-skills": "moai-domain-brand-design, moai-domain-copywriting, moai-foundation-quality",
-    "# MoAI Extension": "Triggers",
-    "progressive_disclosure": "",
-    "enabled": "true",
-    "level1_tokens": "100",
-    "level2_tokens": "5000",
-    "triggers": "",
-    "keywords": "[\"gan loop\", \"builder evaluator\", \"quality score\", \"pass threshold\", \"sprint contract\", \"iterative review\", \"design quality\"]",
-    "agents": "[\"evaluator-active\", \"expert-frontend\"]",
-    "phases": "[\"run\"]"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "Apache-2.0",
+  "category": "workflow",
+  "tags": [
+    "gan loop",
+    "builder evaluator",
+    "sprint contract",
+    "scoring",
+    "quality",
+    "iterative"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

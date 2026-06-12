@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032873",
   "name": "perplexity-advanced-troubleshooting",
   "slug": "perplexity-advanced-troubleshooting",
   "description": "Apply advanced debugging techniques for hard-to-diagnose Perplexity",
   "content": "# Perplexity Advanced Troubleshooting\n\n## Overview\n\nDeep debugging for Perplexity Sonar API issues that resist standard fixes. Common hard problems: inconsistent citations between identical queries, intermittent timeouts on sonar-pro, search results not matching recency filter, and response quality degradation.\n\n## Prerequisites\n\n- Access to production logs and metrics\n- `curl` for direct API testing\n- Understanding of Perplexity's search-augmented generation model\n\n## Diagnostic Tools\n\n### Layer-by-Layer Test\n\n```bash\n#!/bin/bash\nset -euo pipefail\necho \"=== Perplexity Layer Diagnostics ===\"\n\n# Layer 1: DNS\necho -n \"1. DNS: \"\ndig +short api.perplexity.ai || echo \"FAIL\"\n\n# Layer 2: TCP connectivity\necho -n \"2. TCP: \"\ntimeout 5 bash -c 'echo > /dev/tcp/api.perplexity.ai/443 && echo \"OK\"' 2>/dev/null || echo \"FAIL\"\n\n# Layer 3: TLS handshake\necho -n \"3. TLS: \"\necho | openssl s_client -connect api.perplexity.ai:443 2>/dev/null | grep -c \"Verify return code: 0\" | sed 's/1/OK/;s/0/FAIL/'\n\n# Layer 4: HTTP with auth\necho -n \"4. Auth: \"\ncurl -s -o /dev/null -w \"%{http_code}\" \\\n  -H \"Authorization: Bearer $PERPLEXITY_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"model\":\"sonar\",\"messages\":[{\"role\":\"user\",\"content\":\"test\"}],\"max_tokens\":5}' \\\n  https://api.perplexity.ai/chat/completions\n\necho \"\"\n\n# Layer 5: Response quality\necho \"5. Quality check:\"\nRESPONSE=$(curl -s \\\n  -H \"Authorization: Bearer $PERPLEXITY_API_KEY\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"model\":\"sonar\",\"messages\":[{\"role\":\"user\",\"content\":\"What is 2+2?\"}],\"max_tokens\":50}' \\\n  https://api.perplexity.ai/chat/completions)\n\necho \"   Model: $(echo $RESPONSE | jq -r '.model')\"\necho \"   Answer: $(echo $RESPONSE | jq -r '.choices[0].message.content' | head -c 100)\"\necho \"   Citations: $(echo $RESPONSE | jq -r '.citations | length')\"\necho \"   Tokens: $(echo $RESPONSE | jq -r '.usage.total_tokens')\"\n```\n\n### Inconsistent Citation Investigation\n\n```typescript\n// Same query can return different citations due to live web search\n// Run N times and compare to identify pattern vs randomness\n\nasync function citationStabilityTest(query: string, runs: number = 5) {\n  const results: Array<{ citations: string[]; answer: string }> = [];\n\n  for (let i = 0; i < runs; i++) {\n    const response = await perplexity.chat.completions.create({\n      model: \"sonar\",\n      messages: [{ role: \"user\", content: query }],\n      max_tokens: 500,\n    });\n\n    results.push({\n      answer: response.choices[0].message.content || \"\",\n      citations: (response as any).citations || [],\n    });\n\n    await new Promise((r) => setTimeout(r, 2000)); // Rate limit\n  }\n\n  // Analyze consistency\n  const allCitations = results.flatMap((r) => r.citations);\n  const citationFreq = allCitations.reduce((acc, url) => {\n    acc[url] = (acc[url] || 0) + 1;\n    return acc;\n  }, {} as Record<string, number>);\n\n  const stable = Object.entries(citationFreq)\n    .filter(([, count]) => count >= runs * 0.6)\n    .map(([url]) => url);\n\n  console.log(`Stable citations (>60% appearance): ${stable.length}/${Object.keys(citationFreq).length}`);\n  console.log(\"Stable:\", stable);\n  console.log(\"All unique:\", Object.keys(citationFreq).length);\n\n  return { results, citationFreq, stableCitations: stable };\n}\n```\n\n### Latency Profiling\n\n```typescript\nasync function profileLatency(\n  queries: string[],\n  models: string[] = [\"sonar\", \"sonar-pro\"]\n) {\n  const results: Array<{\n    query: string;\n    model: string;\n    latencyMs: number;\n    tokens: number;\n    citations: number;\n  }> = [];\n\n  for (const model of models) {\n    for (const query of queries) {\n      const start = performance.now();\n      try {\n        const response = await perplexity.chat.completions.create({\n          model,\n          messages: [{ role: \"user\", content: query }],\n          max_tokens: 500,\n        });\n\n        results.push({\n          query: query.slice(0, 50),\n          model,\n          latencyMs: Math.round(performance.now() - start),\n          tokens: response.usage?.total_tokens || 0,\n          citations: (response as any).citations?.length || 0,\n        });\n      } catch (err: any) {\n        results.push({\n          query: query.slice(0, 50),\n          model,\n          latencyMs: Math.round(performance.now() - start),\n          tokens: 0,\n          citations: 0,\n        });\n      }\n\n      await new Promise((r) => setTimeout(r, 1500));\n    }\n  }\n\n  // Print report\n  console.table(results);\n\n  const byModel = results.reduce((acc, r) => {\n    if (!acc[r.model]) acc[r.model] = [];\n    acc[r.model].push(r.latencyMs);\n    return acc;\n  }, {} as Record<string, number[]>);\n\n  for (const [model, latencies] of Object.entries(byModel)) {\n    const sorted = latencies.sort((a, b) => a - b);\n    console.log(`${model}: p50=${sorted[Math.floor(sorted.length * 0.5)]}ms p95=${sorted[Math.floor(sorted.length * 0.95)]}ms`);\n  }\n}\n```\n\n### Recency Filter Validation\n\n```typescript\n// Verify search_recency_filter is actually working\nasync function testRecencyFilter() {\n  const query = \"latest technology news\";\n  const filters: Array<\"hour\" | \"day\" | \"week\" | \"month\"> = [\"hour\", \"day\", \"week\", \"month\"];\n\n  for (const filter of filters) {\n    const response = await perplexity.chat.completions.create({\n      model: \"sonar\",\n      messages: [{ role: \"user\", content: query }],\n      search_recency_filter: filter,\n      max_tokens: 200,\n    } as any);\n\n    const citations = (response as any).citations || [];\n    console.log(`\\nRecency: ${filter}`);\n    console.log(`  Citations: ${citations.length}`);\n    console.log(`  Answer preview: ${(response.choices[0].message.content || \"\").slice(0, 100)}...`);\n\n    await new Promise((r) => setTimeout(r, 2000));\n  }\n}\n```\n\n## Support Escalation Template\n\n```markdown\n## Perplexity Support Escalation\n\n**Issue:** [Brief description]\n**Severity:** [P1-P4]\n**First observed:** [ISO 8601 timestamp]\n**Frequency:** [Always / Intermittent / Once]\n\n### Steps to Reproduce\n1. Call `POST https://api.perplexity.ai/chat/completions`\n2. Body: `{\"model\": \"sonar\", \"messages\": [{\"role\": \"user\", \"content\": \"...\"}]}`\n3. Observed: [What happened]\n4. Expected: [What should happen]\n\n### Evidence\n- Layer diagnostic results: [paste output]\n- Latency profile: [p50/p95 values]\n- Citation stability: [X/Y stable citations]\n- Response JSON: [attach]\n\n### Workarounds Attempted\n1. [Workaround] \u2014 Result: [outcome]\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Different citations per call | Web search is non-deterministic | Cache results; accept variability |\n| recency filter ignored | Query overrides filter context | Make query explicitly time-bounded |\n| sonar-pro timeout | Complex multi-source search | Set 30s timeout, fall back to sonar |\n| Answer quality varies | Different web sources found | Use `search_domain_filter` for consistency |\n\n## Output\n\n- Layer-by-layer diagnostic results\n- Citation stability analysis\n- Latency profiling by model\n- Support escalation package\n\n## Resources\n\n- [Perplexity Community Forum](https://community.perplexity.ai)\n- [Perplexity API Documentation](https://docs.perplexity.ai)\n\n## Next Steps\n\nFor load testing, see `perplexity-load-scale`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "perplexity-advanced-troubleshooting",
-    "description": "Apply advanced debugging techniques for hard-to-diagnose Perplexity",
-    "allowed-tools": "Read, Grep, Bash(kubectl:*), Bash(curl:*), Bash(tcpdump:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

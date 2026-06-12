@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032328",
   "name": "intercom-performance-tuning",
   "slug": "intercom-performance-tuning",
   "description": "Optimize Intercom API performance with caching, search optimization,",
   "content": "# Intercom Performance Tuning\n\n## Overview\n\nOptimize Intercom API performance through response caching, efficient search queries, cursor-based pagination, connection pooling, and request batching.\n\n## Prerequisites\n\n- `intercom-client` SDK installed\n- Understanding of Intercom data model\n- Redis or in-memory cache available (optional)\n\n## Intercom API Latency Baselines\n\n| Operation | Typical P50 | Typical P95 | Notes |\n|-----------|-------------|-------------|-------|\n| `GET /me` (health check) | 50ms | 150ms | Lightest endpoint |\n| `GET /contacts/{id}` | 80ms | 200ms | Single lookup |\n| `POST /contacts/search` | 120ms | 400ms | Depends on query complexity |\n| `GET /conversations/{id}` | 100ms | 300ms | Heavier with parts (up to 500) |\n| `POST /contacts` (create) | 150ms | 400ms | Write operation |\n| `GET /contacts` (list) | 100ms | 350ms | Paginated, 50 per page |\n| `POST /messages` | 200ms | 500ms | Triggers delivery pipeline |\n\n## Instructions\n\n### Step 1: Response Caching\n\nCache frequently accessed contacts and conversations to avoid repeated API calls.\n\n```typescript\nimport { LRUCache } from \"lru-cache\";\nimport { IntercomClient } from \"intercom-client\";\nimport { Intercom } from \"intercom-client\";\n\nconst contactCache = new LRUCache<string, Intercom.Contact>({\n  max: 5000,\n  ttl: 5 * 60 * 1000,  // 5 minutes\n});\n\nconst client = new IntercomClient({\n  token: process.env.INTERCOM_ACCESS_TOKEN!,\n});\n\nasync function getContact(contactId: string): Promise<Intercom.Contact> {\n  const cached = contactCache.get(contactId);\n  if (cached) return cached;\n\n  const contact = await client.contacts.find({ contactId });\n  contactCache.set(contactId, contact);\n  return contact;\n}\n\n// Invalidate on update\nasync function updateContact(\n  contactId: string,\n  data: Partial<Intercom.UpdateContactRequest>\n): Promise<Intercom.Contact> {\n  contactCache.delete(contactId);\n  const updated = await client.contacts.update({ contactId, ...data });\n  contactCache.set(contactId, updated);\n  return updated;\n}\n\n// Webhook-driven cache invalidation\nfunction handleContactWebhook(notification: any): void {\n  const contactId = notification.data?.item?.id;\n  if (contactId) {\n    contactCache.delete(contactId);\n  }\n}\n```\n\n### Step 2: Efficient Search Queries\n\nMinimize search latency by using selective queries and limiting fields.\n\n```typescript\n// BAD: Overly broad search, fetching too many results\nconst allUsers = await client.contacts.search({\n  query: { field: \"role\", operator: \"=\", value: \"user\" },\n  pagination: { per_page: 150 },  // Max is 150\n});\n\n// GOOD: Targeted search with specific filters\nconst recentPro = await client.contacts.search({\n  query: {\n    operator: \"AND\",\n    value: [\n      { field: \"role\", operator: \"=\", value: \"user\" },\n      { field: \"custom_attributes.plan\", operator: \"=\", value: \"pro\" },\n      { field: \"last_seen_at\", operator: \">\", value: Math.floor(Date.now() / 1000) - 86400 },\n    ],\n  },\n  pagination: { per_page: 25 },\n  sort: { field: \"last_seen_at\", order: \"descending\" },\n});\n```\n\n### Step 3: Optimized Pagination\n\n```typescript\n// Stream contacts with memory-efficient cursor pagination\nasync function* streamContacts(\n  client: IntercomClient,\n  perPage = 50\n): AsyncGenerator<Intercom.Contact> {\n  let startingAfter: string | undefined;\n\n  do {\n    const page = await client.contacts.list({ perPage, startingAfter });\n\n    for (const contact of page.data) {\n      yield contact;\n    }\n\n    startingAfter = page.pages?.next?.startingAfter ?? undefined;\n\n    // Small delay to avoid rate limits on large datasets\n    if (startingAfter) {\n      await new Promise(r => setTimeout(r, 100));\n    }\n  } while (startingAfter);\n}\n\n// Process contacts in batches for efficiency\nasync function processContactsInBatches(\n  client: IntercomClient,\n  processor: (contacts: Intercom.Contact[]) => Promise<void>,\n  batchSize = 100\n): Promise<number> {\n  let batch: Intercom.Contact[] = [];\n  let total = 0;\n\n  for await (const contact of streamContacts(client)) {\n    batch.push(contact);\n    if (batch.length >= batchSize) {\n      await processor(batch);\n      total += batch.length;\n      batch = [];\n    }\n  }\n\n  if (batch.length > 0) {\n    await processor(batch);\n    total += batch.length;\n  }\n\n  return total;\n}\n```\n\n### Step 4: Connection Pooling\n\n```typescript\nimport { Agent } from \"https\";\n\n// Reuse TCP connections (HTTP keep-alive)\nconst agent = new Agent({\n  keepAlive: true,\n  maxSockets: 10,       // Max concurrent connections\n  maxFreeSockets: 5,     // Keep idle connections warm\n  timeout: 30000,        // Connection timeout\n});\n\n// Apply to fetch calls if using raw API\nconst response = await fetch(\"https://api.intercom.io/contacts\", {\n  headers: { Authorization: `Bearer ${token}` },\n  agent,\n} as any);\n```\n\n### Step 5: Parallel Requests with Rate Awareness\n\n```typescript\nimport PQueue from \"p-queue\";\n\nconst queue = new PQueue({\n  concurrency: 5,        // Max parallel requests\n  interval: 1000,        // Per second\n  intervalCap: 100,      // Max per interval\n});\n\n// Batch-lookup contacts by ID\nasync function getContactsBatch(\n  client: IntercomClient,\n  contactIds: string[]\n): Promise<Map<string, Intercom.Contact>> {\n  const results = new Map<string, Intercom.Contact>();\n\n  await Promise.all(\n    contactIds.map(id =>\n      queue.add(async () => {\n        // Check cache first\n        const cached = contactCache.get(id);\n        if (cached) {\n          results.set(id, cached);\n          return;\n        }\n        try {\n          const contact = await client.contacts.find({ contactId: id });\n          contactCache.set(id, contact);\n          results.set(id, contact);\n        } catch {\n          // Skip not-found contacts\n        }\n      })\n    )\n  );\n\n  return results;\n}\n```\n\n### Step 6: Performance Monitoring\n\n```typescript\nasync function measuredCall<T>(\n  name: string,\n  operation: () => Promise<T>\n): Promise<T> {\n  const start = performance.now();\n  try {\n    const result = await operation();\n    const duration = performance.now() - start;\n    console.log(JSON.stringify({\n      metric: \"intercom.api.call\",\n      operation: name,\n      duration_ms: Math.round(duration),\n      status: \"success\",\n    }));\n    return result;\n  } catch (error) {\n    const duration = performance.now() - start;\n    console.error(JSON.stringify({\n      metric: \"intercom.api.call\",\n      operation: name,\n      duration_ms: Math.round(duration),\n      status: \"error\",\n      error: (error as Error).message,\n    }));\n    throw error;\n  }\n}\n\n// Usage\nconst contact = await measuredCall(\"contacts.find\", () =>\n  client.contacts.find({ contactId: \"abc123\" })\n);\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Cache stampede | Many concurrent cache misses | Use mutex/lock per key |\n| Memory pressure | Cache too large | Set `max` on LRUCache |\n| Stale data | TTL too long | Use webhook invalidation |\n| Pagination timeouts | Large data set + slow network | Reduce per_page, add delays |\n| Rate limit during batch | Too many parallel requests | Lower PQueue concurrency |\n\n## Resources\n\n- [Pagination](https://developers.intercom.com/docs/build-an-integration/learn-more/rest-apis/pagination)\n- [Search Contacts](https://developers.intercom.com/docs/references/rest-api/api.intercom.io/contacts/searchcontacts)\n- [LRU Cache](https://github.com/isaacs/node-lru-cache)\n- [p-queue](https://github.com/sindresorhus/p-queue)\n\n## Next Steps\n\nFor cost optimization, see `intercom-cost-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "intercom-performance-tuning",
-    "description": "Optimize Intercom API performance with caching, search optimization,",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

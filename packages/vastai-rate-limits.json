@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033455",
   "name": "vastai-rate-limits",
   "slug": "vastai-rate-limits",
   "description": "Handle Vast.ai API rate limits with backoff and request optimization.",
   "content": "# Vast.ai Rate Limits\n\n## Overview\n\nHandle Vast.ai REST API rate limits gracefully. The API at `cloud.vast.ai/api/v0` returns HTTP 429 when request limits are exceeded. Most operations (search, show) are read-heavy and rarely hit limits, but automated scripts doing rapid provisioning or polling can trigger throttling.\n\n## Prerequisites\n\n- Vast.ai CLI or REST API client\n- Understanding of exponential backoff\n\n## Instructions\n\n### Step 1: Rate-Limited HTTP Client\n\n```python\nimport requests\nimport time\n\nclass RateLimitedVastClient:\n    BASE_URL = \"https://cloud.vast.ai/api/v0\"\n\n    def __init__(self, api_key, min_delay=0.5, max_retries=5):\n        self.session = requests.Session()\n        self.session.headers[\"Authorization\"] = f\"Bearer {api_key}\"\n        self.min_delay = min_delay\n        self.max_retries = max_retries\n        self.last_request = 0\n\n    def request(self, method, endpoint, **kwargs):\n        # Enforce minimum delay between requests\n        elapsed = time.time() - self.last_request\n        if elapsed < self.min_delay:\n            time.sleep(self.min_delay - elapsed)\n\n        for attempt in range(self.max_retries):\n            self.last_request = time.time()\n            resp = self.session.request(method, f\"{self.BASE_URL}{endpoint}\", **kwargs)\n\n            if resp.status_code == 429:\n                retry_after = int(resp.headers.get(\"Retry-After\", 2 ** attempt))\n                print(f\"Rate limited. Waiting {retry_after}s (attempt {attempt+1})\")\n                time.sleep(retry_after)\n                continue\n\n            resp.raise_for_status()\n            return resp.json()\n\n        raise RuntimeError(\"Max retries exceeded due to rate limiting\")\n```\n\n### Step 2: Polling with Adaptive Backoff\n\n```python\ndef poll_instance_status(client, instance_id, target=\"running\", timeout=300):\n    \"\"\"Poll instance status with increasing intervals.\"\"\"\n    start = time.time()\n    interval = 5  # Start at 5s, increase to max 30s\n\n    while time.time() - start < timeout:\n        info = client.request(\"GET\", f\"/instances/{instance_id}/\")\n        status = info.get(\"actual_status\", \"unknown\")\n\n        if status == target:\n            return info\n        if status in (\"error\", \"offline\"):\n            raise RuntimeError(f\"Instance {instance_id} failed: {status}\")\n\n        time.sleep(interval)\n        interval = min(interval * 1.5, 30)\n\n    raise TimeoutError(f\"Instance did not reach '{target}' within {timeout}s\")\n```\n\n### Step 3: Batch Search with Throttling\n\n```python\ndef batch_search(client, gpu_configs):\n    \"\"\"Search for multiple GPU types with rate-limit-safe delays.\"\"\"\n    results = {}\n    for config in gpu_configs:\n        query = GPUQuery(**config).to_filter()\n        offers = client.request(\"GET\", \"/bundles/\", params={\"q\": str(query)})\n        results[config.get(\"gpu_name\", \"any\")] = offers.get(\"offers\", [])\n        time.sleep(1)  # Be polite between searches\n    return results\n\n# Usage\nconfigs = [\n    {\"gpu_name\": \"RTX_4090\", \"max_dph\": 0.30},\n    {\"gpu_name\": \"A100\", \"max_dph\": 2.00},\n    {\"gpu_name\": \"H100_SXM\", \"max_dph\": 4.00},\n]\nall_offers = batch_search(client, configs)\n```\n\n### Step 4: Request Optimization\n\nStrategies to reduce API calls:\n\n- **Cache search results**: Offers change slowly; cache for 60-120 seconds\n- **Use `--limit`**: Restrict search results to what you need\n- **Batch instance checks**: Use `show instances` (lists all) instead of individual `show instance ID` calls\n- **Avoid polling loops**: Use longer intervals (15-30s) for status checks\n\n## Output\n\n- Rate-limited HTTP client with automatic retry on 429\n- Adaptive polling for instance status changes\n- Batch search with inter-request delays\n- Request optimization strategies\n\n## Error Handling\n\n| Scenario | Response |\n|----------|----------|\n| First 429 | Wait `Retry-After` header value, then retry |\n| Repeated 429s | Double wait time between retries |\n| 429 during provisioning | Instance creation is idempotent; safe to retry |\n| 429 during search | Cache previous results and use them temporarily |\n\n## Resources\n\n- [Vast.ai REST API](https://vast.ai/developers/api)\n- [API Reference](https://docs.vast.ai/api-reference/introduction)\n\n## Next Steps\n\nFor security best practices, see `vastai-security-basics`.\n\n## Examples\n\n**Safe multi-instance provisioning**: Create 10 instances with 2-second delays between each `create instance` call to avoid triggering rate limits during cluster setup.\n\n**Efficient monitoring**: Poll all instances with a single `show instances` call every 30 seconds instead of individual calls per instance.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "vastai-rate-limits",
-    "description": "Handle Vast.ai API rate limits with backoff and request optimization.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

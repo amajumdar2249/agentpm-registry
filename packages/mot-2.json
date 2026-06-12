@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000040596",
   "name": "mot",
   "slug": "mot-2",
   "description": "System health check (MOT) for skills, agents, hooks, and memory",
   "content": "\n# MOT - System Health Check\n\nRun comprehensive health checks on all Claude Code components.\n\n## Usage\n\n```\n/mot              # Full audit (all categories)\n/mot skills       # Just skills\n/mot agents       # Just agents\n/mot hooks        # Just hooks\n/mot memory       # Just memory system\n/mot --fix        # Auto-fix simple issues\n/mot --quick      # P0 checks only (fast)\n```\n\n## Audit Process\n\n### Phase 1: Skills Audit\n```bash\n# Count skills\necho \"=== SKILLS ===\"\nSKILL_COUNT=$(find .claude/skills -name \"SKILL.md\" | wc -l | xargs)\necho \"Found $SKILL_COUNT skill files\"\n\n# Check frontmatter parsing\nFAIL=0\nfor skill in $(find .claude/skills -name \"SKILL.md\"); do\n  if ! head -1 \"$skill\" | grep -q \"^---$\"; then\n    echo \"FAIL: No frontmatter: $skill\"\n    FAIL=$((FAIL+1))\n  fi\ndone\necho \"Frontmatter: $((SKILL_COUNT - FAIL)) pass, $FAIL fail\"\n\n# Check name matches directory\nFAIL=0\nfor skill in $(find .claude/skills -name \"SKILL.md\"); do\n  dir=$(basename $(dirname \"$skill\"))\n  name=$(grep \"^name:\" \"$skill\" 2>/dev/null | head -1 | cut -d: -f2 | xargs)\n  if [ -n \"$name\" ] && [ \"$dir\" != \"$name\" ]; then\n    echo \"FAIL: Name mismatch $dir vs $name\"\n    FAIL=$((FAIL+1))\n  fi\ndone\necho \"Name consistency: $((SKILL_COUNT - FAIL)) pass, $FAIL fail\"\n```\n\n### Phase 2: Agents Audit\n```bash\necho \"=== AGENTS ===\"\nAGENT_COUNT=$(ls .claude/agents/*.md 2>/dev/null | wc -l | xargs)\necho \"Found $AGENT_COUNT agent files\"\n\n# Check required fields\nFAIL=0\nfor agent in .claude/agents/*.md; do\n  [ -f \"$agent\" ] || continue\n\n  # Check name field exists\n  if ! grep -q \"^name:\" \"$agent\"; then\n    echo \"FAIL: Missing name: $agent\"\n    FAIL=$((FAIL+1))\n    continue\n  fi\n\n  # Check model is valid\n  model=$(grep \"^model:\" \"$agent\" | head -1 | cut -d: -f2 | xargs)\n  case \"$model\" in\n    opus|sonnet|haiku) ;;\n    *) echo \"FAIL: Invalid model '$model': $agent\"; FAIL=$((FAIL+1)) ;;\n  esac\ndone\necho \"Agent validation: $((AGENT_COUNT - FAIL)) pass, $FAIL fail\"\n\n# Check for dangling references (agents that reference non-existent agents)\necho \"Checking agent cross-references...\"\nfor agent in .claude/agents/*.md; do\n  [ -f \"$agent\" ] || continue\n  # Find subagent_type references\n  refs=$(grep -oE 'subagent_type[=:][\"'\\'']*([a-z-]+)' \"$agent\" 2>/dev/null | sed 's/.*[\"'\\'']//' | sed 's/[\"'\\'']$//')\n  for ref in $refs; do\n    if [ ! -f \".claude/agents/$ref.md\" ]; then\n      echo \"WARN: $agent references non-existent agent: $ref\"\n    fi\n  done\ndone\n```\n\n### Phase 3: Hooks Audit\n```bash\necho \"=== HOOKS ===\"\n\n# Check TypeScript source count\nTS_COUNT=$(ls .claude/hooks/src/*.ts 2>/dev/null | wc -l | xargs)\necho \"Found $TS_COUNT TypeScript source files\"\n\n# Check bundles exist\nBUNDLE_COUNT=$(ls .claude/hooks/dist/*.mjs 2>/dev/null | wc -l | xargs)\necho \"Found $BUNDLE_COUNT built bundles\"\n\n# Check shell wrappers are executable\nFAIL=0\nfor sh in .claude/hooks/*.sh; do\n  [ -f \"$sh\" ] || continue\n  if [ ! -x \"$sh\" ]; then\n    echo \"FAIL: Not executable: $sh\"\n    FAIL=$((FAIL+1))\n  fi\ndone\nSH_COUNT=$(ls .claude/hooks/*.sh 2>/dev/null | wc -l | xargs)\necho \"Shell wrappers: $((SH_COUNT - FAIL)) executable, $FAIL need chmod +x\"\n\n# Check hooks registered in settings.json exist\necho \"Checking registered hooks...\"\nFAIL=0\n# Extract hook commands from settings.json and verify files exist\ngrep -oE '\"command\":\\s*\"[^\"]*\\.sh\"' .claude/settings.json 2>/dev/null | \\\n  sed 's/.*\"\\([^\"]*\\.sh\\)\".*/\\1/' | \\\n  sed 's|\\$CLAUDE_PROJECT_DIR|.claude|g' | \\\n  sed \"s|\\$HOME|$HOME|g\" | \\\n  sort -u | while read hook; do\n    # Resolve to actual path\n    resolved=$(echo \"$hook\" | sed 's|^\\./||')\n    if [ ! -f \"$resolved\" ] && [ ! -f \"./$resolved\" ]; then\n      echo \"WARN: Registered hook not found: $hook\"\n    fi\n  done\n```\n\n### Phase 4: Memory Audit\n```bash\necho \"=== MEMORY SYSTEM ===\"\n\n# Check DATABASE_URL\nif [ -z \"$DATABASE_URL\" ]; then\n  echo \"FAIL: DATABASE_URL not set\"\nelse\n  echo \"PASS: DATABASE_URL is set\"\n\n  # Test connection\n  if psql \"$DATABASE_URL\" -c \"SELECT 1\" > /dev/null 2>&1; then\n    echo \"PASS: PostgreSQL reachable\"\n\n    # Check pgvector\n    if psql \"$DATABASE_URL\" -c \"SELECT extname FROM pg_extension WHERE extname='vector'\" 2>/dev/null | grep -q vector; then\n      echo \"PASS: pgvector extension installed\"\n    else\n      echo \"FAIL: pgvector extension not installed\"\n    fi\n\n    # Check table exists\n    if psql \"$DATABASE_URL\" -c \"\\d archival_memory\" > /dev/null 2>&1; then\n      echo \"PASS: archival_memory table exists\"\n\n      # Count learnings\n      COUNT=$(psql \"$DATABASE_URL\" -t -c \"SELECT COUNT(*) FROM archival_memory\" 2>/dev/null | xargs)\n      echo \"INFO: $COUNT learnings stored\"\n    else\n      echo \"FAIL: archival_memory table missing\"\n    fi\n  else\n    echo \"FAIL: PostgreSQL not reachable\"\n  fi\nfi\n\n# Check Python dependencies\necho \"Checking Python dependencies...\"\n(cd opc && uv run python -c \"import psycopg2; import pgvector; import sentence_transformers\" 2>/dev/null) && \\\n  echo \"PASS: Python dependencies available\" || \\\n  echo \"WARN: Some Python dependencies missing\"\n```\n\n### Phase 5: Cross-Reference Audit\n```bash\necho \"=== CROSS-REFERENCES ===\"\n\n# Check skills reference valid agents\necho \"Checking skill \u2192 agent references...\"\nFAIL=0\nfor skill in $(find .claude/skills -name \"SKILL.md\"); do\n  refs=$(grep -oE 'subagent_type[=:][\"'\\'']*([a-z-]+)' \"$skill\" 2>/dev/null | sed 's/.*[\"'\\'']//' | sed 's/[\"'\\'']$//')\n  for ref in $refs; do\n    if [ -n \"$ref\" ] && [ ! -f \".claude/agents/$ref.md\" ]; then\n      echo \"FAIL: $skill references missing agent: $ref\"\n      FAIL=$((FAIL+1))\n    fi\n  done\ndone\necho \"Skill\u2192Agent refs: $FAIL broken\"\n```\n\n## Auto-Fix (--fix flag)\n\nIf `--fix` is specified, automatically fix:\n\n1. **Make shell wrappers executable**\n   ```bash\n   chmod +x .claude/hooks/*.sh\n   ```\n\n2. **Rebuild hooks if TypeScript newer than bundles**\n   ```bash\n   cd .claude/hooks && npm run build\n   ```\n\n3. **Create missing cache directories**\n   ```bash\n   mkdir -p .claude/cache/agents/{scout,kraken,oracle,spark}\n   mkdir -p .claude/cache/mot\n   ```\n\n## Output Format\n\nWrite full report to `.claude/cache/mot/report-{timestamp}.md`:\n\n```markdown\n# MOT Health Report\nGenerated: {timestamp}\n\n## Summary\n| Category | Pass | Fail | Warn |\n|----------|------|------|------|\n| Skills   | 204  | 2    | 0    |\n| Agents   | 47   | 1    | 3    |\n| Hooks    | 58   | 2    | 1    |\n| Memory   | 4    | 0    | 1    |\n| X-Refs   | 0    | 0    | 2    |\n\n## Issues Found\n\n### P0 - Critical\n- [FAIL] Hook build failed: tldr-context-inject.ts\n\n### P1 - High\n- [FAIL] Agent references missing: scot \u2192 scout (typo)\n\n### P2 - Medium\n- [WARN] 3 hooks need rebuild (dist older than src)\n\n### P3 - Low\n- [INFO] VOYAGE_API_KEY not set (using local BGE)\n```\n\n## Exit Codes\n\n- `0` - All P0/P1 checks pass\n- `1` - Any P0/P1 failure\n- `2` - Only P2/P3 warnings\n\n## Quick Mode (--quick)\n\nOnly run P0 checks:\n1. Frontmatter parses\n2. Hooks build\n3. Shell wrappers executable\n4. PostgreSQL reachable\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "mot",
-    "description": "System health check (MOT) for skills, agents, hooks, and memory",
-    "model": "sonnet",
-    "allowed-tools": "[Read, Bash, Glob, Grep]"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

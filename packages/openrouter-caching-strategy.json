@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032794",
   "name": "openrouter-caching-strategy",
   "slug": "openrouter-caching-strategy",
   "description": "Implement caching for OpenRouter API responses to reduce cost and latency.",
   "content": "# OpenRouter Caching Strategy\n\n## Overview\n\nOpenRouter charges per token, so caching identical or similar requests can dramatically cut costs. Deterministic requests (`temperature=0`) with the same model and messages produce identical outputs -- these are safe to cache. This skill covers in-memory caching, persistent caching with TTL, and Anthropic prompt caching via OpenRouter.\n\n## In-Memory Cache\n\n```python\nimport os, hashlib, json, time\nfrom typing import Optional\nfrom openai import OpenAI\n\nclient = OpenAI(\n    base_url=\"https://openrouter.ai/api/v1\",\n    api_key=os.environ[\"OPENROUTER_API_KEY\"],\n    default_headers={\"HTTP-Referer\": \"https://my-app.com\", \"X-Title\": \"my-app\"},\n)\n\nclass LLMCache:\n    def __init__(self, ttl_seconds: int = 3600):\n        self._cache: dict[str, tuple[dict, float]] = {}\n        self._ttl = ttl_seconds\n        self.hits = 0\n        self.misses = 0\n\n    def _key(self, model: str, messages: list, **kwargs) -> str:\n        blob = json.dumps({\"model\": model, \"messages\": messages, **kwargs}, sort_keys=True)\n        return hashlib.sha256(blob.encode()).hexdigest()\n\n    def get(self, model: str, messages: list, **kwargs) -> Optional[dict]:\n        k = self._key(model, messages, **kwargs)\n        if k in self._cache:\n            data, ts = self._cache[k]\n            if time.time() - ts < self._ttl:\n                self.hits += 1\n                return data\n            del self._cache[k]\n        self.misses += 1\n        return None\n\n    def set(self, model: str, messages: list, response: dict, **kwargs):\n        k = self._key(model, messages, **kwargs)\n        self._cache[k] = (response, time.time())\n\ncache = LLMCache(ttl_seconds=1800)\n\ndef cached_completion(messages, model=\"anthropic/claude-3.5-sonnet\", **kwargs):\n    \"\"\"Only cache deterministic requests (temperature=0).\"\"\"\n    kwargs.setdefault(\"temperature\", 0)\n    kwargs.setdefault(\"max_tokens\", 1024)\n\n    cached = cache.get(model, messages, **kwargs)\n    if cached:\n        return cached\n\n    response = client.chat.completions.create(model=model, messages=messages, **kwargs)\n    result = {\n        \"content\": response.choices[0].message.content,\n        \"model\": response.model,\n        \"usage\": {\"prompt\": response.usage.prompt_tokens, \"completion\": response.usage.completion_tokens},\n    }\n    cache.set(model, messages, result, **kwargs)\n    return result\n```\n\n## Persistent Cache with Redis\n\n```python\nimport redis, json, hashlib\n\nr = redis.Redis(host=\"localhost\", port=6379, db=0)\n\ndef redis_cached_completion(messages, model=\"openai/gpt-4o-mini\", ttl=3600, **kwargs):\n    \"\"\"Cache in Redis with automatic TTL expiry.\"\"\"\n    kwargs[\"temperature\"] = 0  # Must be deterministic\n    key = f\"or:{hashlib.sha256(json.dumps({'m': model, 'msgs': messages, **kwargs}, sort_keys=True).encode()).hexdigest()}\"\n\n    cached = r.get(key)\n    if cached:\n        return json.loads(cached)\n\n    response = client.chat.completions.create(model=model, messages=messages, **kwargs)\n    result = {\n        \"content\": response.choices[0].message.content,\n        \"model\": response.model,\n        \"tokens\": response.usage.prompt_tokens + response.usage.completion_tokens,\n    }\n    r.setex(key, ttl, json.dumps(result))\n    return result\n```\n\n## Anthropic Prompt Caching via OpenRouter\n\nAnthropic models on OpenRouter support prompt caching -- large system prompts are cached server-side, reducing input cost by 90% on cache hits.\n\n```python\n# Mark large static content blocks with cache_control\nresponse = client.chat.completions.create(\n    model=\"anthropic/claude-3.5-sonnet\",\n    messages=[\n        {\n            \"role\": \"system\",\n            \"content\": [\n                {\n                    \"type\": \"text\",\n                    \"text\": \"You are an expert. Here is the full source:\\n\" + large_context,\n                    \"cache_control\": {\"type\": \"ephemeral\"},  # Cache this block\n                }\n            ],\n        },\n        {\"role\": \"user\", \"content\": \"What does the main() function do?\"},\n    ],\n    max_tokens=1024,\n)\n# First call: cache_creation_input_tokens charged at 1.25x\n# Subsequent: cache_read_input_tokens charged at 0.1x (90% savings)\n```\n\n## Cache Key Design\n\n```python\ndef cache_key(model: str, messages: list, **params) -> str:\n    \"\"\"Deterministic cache key. Include everything that affects output.\n\n    Include: model ID (with variant like :floor), messages, temperature,\n    max_tokens, top_p, transforms, provider routing.\n    Exclude: stream (doesn't affect content), HTTP-Referer, X-Title.\n    \"\"\"\n    canonical = json.dumps({\n        \"model\": model, \"messages\": messages,\n        \"temperature\": params.get(\"temperature\", 0),\n        \"max_tokens\": params.get(\"max_tokens\"),\n        \"top_p\": params.get(\"top_p\"),\n    }, sort_keys=True)\n    return hashlib.sha256(canonical.encode()).hexdigest()\n```\n\n## Cache Invalidation\n\n| Trigger | Action | Why |\n|---------|--------|-----|\n| Model version update | Flush keys for that model | New version may give different outputs |\n| System prompt change | Flush all keys | Output semantics changed |\n| TTL expiry | Automatic eviction | Prevents stale data |\n| Manual purge | `r.delete(key)` or clear by prefix | Debugging or policy change |\n\n## Error Handling\n\n| Error | Cause | Fix |\n|-------|-------|-----|\n| Stale cache response | TTL too long | Reduce TTL or version cache keys |\n| Cache miss storm | Cold start or invalidation | Warm cache with common queries at deploy |\n| Redis connection error | Redis down | Fall through to direct API call |\n| Non-deterministic cache | `temperature > 0` cached | Only cache when `temperature=0` |\n\n## Enterprise Considerations\n\n- Only cache deterministic requests (`temperature=0`) -- non-zero temperatures produce different outputs each time\n- Use Anthropic prompt caching for large system prompts (RAG context) -- 90% cost reduction on cache hits\n- Set TTL based on content freshness needs (30 min for dynamic, 24h for reference data)\n- Track cache hit rate to justify caching infrastructure cost\n- Use Redis or Memcached for multi-instance deployments; in-memory only works for single-process\n- Version cache keys when updating system prompts or switching model versions\n\n## References\n\n- [Examples](${CLAUDE_SKILL_DIR}/references/examples.md) | [Errors](${CLAUDE_SKILL_DIR}/references/errors.md)\n- [Prompt Caching](https://openrouter.ai/docs/features/prompt-caching) | [Models API](https://openrouter.ai/docs/api/api-reference/models/get-models)\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "openrouter-caching-strategy",
-    "description": "Implement caching for OpenRouter API responses to reduce cost and latency.",
-    "Triggers": "openrouter cache'', ''cache llm responses'', ''openrouter caching'',",
-    "allowed-tools": "Read, Write, Edit, Bash, Grep",
-    "version": "2.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
+  "version": "2.0.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

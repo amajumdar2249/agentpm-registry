@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032512",
   "name": "linear-prod-checklist",
   "slug": "linear-prod-checklist",
   "description": "Production readiness checklist for Linear integrations.",
   "content": "# Linear Production Checklist\n\n## Overview\n\nComprehensive checklist and implementation patterns for deploying Linear integrations to production. Covers authentication, error handling, rate limiting, monitoring, data handling, and deployment verification.\n\n## Prerequisites\n\n- Working development integration passing all tests\n- Production Linear workspace (or production API key)\n- Deployment infrastructure (Vercel, Cloud Run, etc.)\n- Secret management solution (not `.env` files in production)\n\n## Pre-Production Checklist\n\n### 1. Authentication & Security\n\n```\n[ ] Production API key generated (separate from dev)\n[ ] API key stored in secret manager (Vault, AWS SM, GCP SM)\n[ ] OAuth redirect URIs updated for production domain\n[ ] Webhook secrets are unique per environment\n[ ] All dev secrets rotated before launch\n[ ] HTTPS enforced on all endpoints\n[ ] Webhook HMAC-SHA256 verification implemented\n[ ] Webhook timestamp validation (< 60s age)\n[ ] Token refresh flow implemented (mandatory since Oct 2025)\n```\n\n### 2. Error Handling & Resilience\n\n```\n[ ] All Linear API calls wrapped in try/catch\n[ ] Rate limit retry with exponential backoff (max 5 retries)\n[ ] 30s timeout on all API calls\n[ ] Graceful degradation when Linear API is down\n[ ] Error logging includes context (no secrets in logs)\n[ ] InvalidInputLinearError caught separately from network errors\n[ ] Alerts configured for auth failures and error rate spikes\n```\n\n### 3. Performance & Rate Limits\n\n```\n[ ] Pagination with first:50 for all list queries\n[ ] Caching for static data (teams, states, labels) \u2014 10-30 min TTL\n[ ] Request batching for bulk operations (20 mutations per batch)\n[ ] Query complexity stays under 5,000 pts per request\n[ ] No polling \u2014 webhooks for real-time updates\n[ ] N+1 query patterns eliminated (use rawRequest for joins)\n[ ] Response times monitored with p95 alerting\n```\n\n### 4. Monitoring & Observability\n\n```\n[ ] Health check endpoint hitting Linear API\n[ ] API latency metrics collected per operation\n[ ] Error rate monitoring with alerting (>1% = alert)\n[ ] Rate limit remaining tracked (alert if < 100 requests)\n[ ] Structured JSON logging for API calls and webhooks\n[ ] Webhook delivery tracking via Linear-Delivery header\n```\n\n### 5. Data Handling\n\n```\n[ ] No PII logged or stored unnecessarily\n[ ] Webhook event idempotency (deduplicate by Linear-Delivery)\n[ ] Data retention policy defined for synced data\n[ ] Stale data detection with periodic consistency checks\n```\n\n## Production Configuration\n\n```typescript\nimport { LinearClient } from \"@linear/sdk\";\n\ninterface ProdConfig {\n  linear: { apiKey: string; webhookSecret: string };\n  rateLimit: { maxRetries: number; baseDelayMs: number; maxDelayMs: number };\n  cache: { teamsTtl: number; statesTtl: number; labelsTtl: number };\n  timeouts: { requestMs: number; webhookProcessMs: number };\n}\n\nconst config: ProdConfig = {\n  linear: {\n    apiKey: await getSecret(\"linear-api-key-prod\"),\n    webhookSecret: await getSecret(\"linear-webhook-secret-prod\"),\n  },\n  rateLimit: { maxRetries: 5, baseDelayMs: 1000, maxDelayMs: 30000 },\n  cache: { teamsTtl: 600, statesTtl: 1800, labelsTtl: 600 },\n  timeouts: { requestMs: 30000, webhookProcessMs: 5000 },\n};\n\nfunction createProductionClient(): LinearClient {\n  return new LinearClient({ apiKey: config.linear.apiKey });\n}\n```\n\n## Health Check Implementation\n\n```typescript\ninterface HealthStatus {\n  status: \"healthy\" | \"degraded\" | \"unhealthy\";\n  latencyMs: number;\n  details: {\n    authentication: boolean;\n    apiReachable: boolean;\n    rateLimitOk: boolean;\n  };\n  timestamp: string;\n}\n\nasync function checkHealth(client: LinearClient): Promise<HealthStatus> {\n  const start = Date.now();\n  const details = { authentication: false, apiReachable: false, rateLimitOk: true };\n\n  try {\n    const viewer = await client.viewer;\n    details.authentication = true;\n    details.apiReachable = true;\n\n    const latencyMs = Date.now() - start;\n    return {\n      status: latencyMs > 3000 ? \"degraded\" : \"healthy\",\n      latencyMs,\n      details,\n      timestamp: new Date().toISOString(),\n    };\n  } catch (error: any) {\n    details.apiReachable = !error.message?.includes(\"ENOTFOUND\");\n    return {\n      status: \"unhealthy\",\n      latencyMs: Date.now() - start,\n      details,\n      timestamp: new Date().toISOString(),\n    };\n  }\n}\n\n// Express endpoint\napp.get(\"/health/linear\", async (req, res) => {\n  const health = await checkHealth(client);\n  res.status(health.status === \"unhealthy\" ? 503 : 200).json(health);\n});\n```\n\n## Deployment Verification Script\n\n```typescript\n// scripts/verify-deployment.ts\nimport { LinearClient } from \"@linear/sdk\";\n\nasync function verify(): Promise<void> {\n  console.log(\"Verifying Linear integration...\\n\");\n\n  const checks = [\n    {\n      name: \"Environment variables\",\n      check: async () => !!(process.env.LINEAR_API_KEY && process.env.LINEAR_WEBHOOK_SECRET),\n    },\n    {\n      name: \"API authentication\",\n      check: async () => { await new LinearClient({ apiKey: process.env.LINEAR_API_KEY! }).viewer; return true; },\n    },\n    {\n      name: \"Team access\",\n      check: async () => {\n        const client = new LinearClient({ apiKey: process.env.LINEAR_API_KEY! });\n        const teams = await client.teams();\n        return teams.nodes.length > 0;\n      },\n    },\n    {\n      name: \"Write capability\",\n      check: async () => {\n        const client = new LinearClient({ apiKey: process.env.LINEAR_API_KEY! });\n        const teams = await client.teams();\n        const r = await client.createIssue({\n          teamId: teams.nodes[0].id,\n          title: \"[DEPLOY-CHECK] Safe to delete\",\n        });\n        if (r.success) {\n          const issue = await r.issue;\n          await issue?.delete();\n        }\n        return r.success;\n      },\n    },\n  ];\n\n  let passed = 0;\n  let failed = 0;\n\n  for (const { name, check } of checks) {\n    try {\n      const ok = await check();\n      console.log(ok ? `  PASS: ${name}` : `  FAIL: ${name}`);\n      ok ? passed++ : failed++;\n    } catch (error: any) {\n      console.log(`  FAIL: ${name} \u2014 ${error.message}`);\n      failed++;\n    }\n  }\n\n  console.log(`\\nResults: ${passed} passed, ${failed} failed`);\n  if (failed > 0) process.exit(1);\n}\n\nverify();\n```\n\n## Post-Deployment Monitoring\n\n```typescript\n// Key metrics to track after deploy\nconst ALERT_THRESHOLDS = {\n  errorRate: 0.01,        // Alert if >1% of requests fail\n  p99LatencyMs: 3000,     // Alert if p99 > 3 seconds\n  rateLimitRemaining: 100, // Alert if remaining requests < 100\n};\n\n// First 30 minutes after deploy: watch for\n// - Auth failures (key mismatch between environments)\n// - Rate limit spikes (init burst fetching too much data)\n// - Webhook signature failures (secret not updated in new env)\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Health check `unhealthy` | API key invalid/expired | Regenerate key, update secret manager |\n| Webhook sig fails in prod | Secret mismatch | Verify `LINEAR_WEBHOOK_SECRET` matches Linear webhook config |\n| Rate limit burst on deploy | Startup fetches too much | Add request queue, cache static data |\n| Deploy verification fails | Missing env vars | Run verification locally first |\n\n## Resources\n\n- [Linear API Status](https://status.linear.app)\n- [Linear Security](https://linear.app/security)\n- [API Changelog](https://linear.app/changelog)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "linear-prod-checklist",
-    "description": "Production readiness checklist for Linear integrations.",
-    "Trigger": "linear production checklist\", \"deploy linear\",",
-    "allowed-tools": "Read, Write, Edit, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

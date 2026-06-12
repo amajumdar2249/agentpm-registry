@@ -1,18 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031124",
   "name": "abridge-core-workflow-b",
   "slug": "abridge-core-workflow-b",
   "description": "Implement Abridge patient-facing documentation and after-visit summary",
   "content": "# Abridge Core Workflow B \u2014 Patient-Facing Documentation\n\n## Overview\n\nSecondary workflow: generating plain-language patient summaries from the same clinical encounter captured in Workflow A. Abridge produces both clinician notes and patient-friendly after-visit summaries (AVS), supporting 28+ languages and multiple reading levels.\n\n## Prerequisites\n\n- Completed `abridge-core-workflow-a` (encounter-to-note pipeline)\n- Patient portal integration configured (Epic MyChart, Athena Patient Portal)\n- Understanding of health literacy requirements\n\n## Instructions\n\n### Step 1: Request Patient Summary from Completed Session\n\n```typescript\n// src/workflows/patient-summary.ts\nimport axios, { AxiosInstance } from 'axios';\n\ninterface PatientSummary {\n  summary_id: string;\n  session_id: string;\n  language: string;                    // ISO 639-1 code\n  reading_level: 'basic' | 'intermediate' | 'advanced';\n  sections: {\n    visit_reason: string;              // Plain-language chief complaint\n    what_we_discussed: string;         // Key discussion points\n    your_diagnosis: string;            // Explained at target reading level\n    next_steps: string;                // Action items for patient\n    medications: Array<{\n      name: string;\n      instructions: string;           // \"Take 1 pill by mouth twice daily\"\n      warnings: string;\n    }>;\n    follow_up: {\n      when: string;                    // \"Come back in 2 weeks\"\n      why: string;                     // \"To check if your cough improved\"\n      scheduling_instructions: string;\n    };\n    questions_to_ask: string[];        // AI-suggested questions for next visit\n  };\n  source_encounter: {\n    date: string;\n    provider_name: string;\n    department: string;\n  };\n}\n\nasync function generatePatientSummary(\n  api: AxiosInstance,\n  sessionId: string,\n  language: string = 'en',\n  readingLevel: PatientSummary['reading_level'] = 'basic'\n): Promise<PatientSummary> {\n  const { data } = await api.post(`/encounters/sessions/${sessionId}/patient-summary`, {\n    language,\n    reading_level: readingLevel,\n    include_medications: true,\n    include_follow_up: true,\n    include_suggested_questions: true,\n  });\n\n  return data;\n}\n```\n\n### Step 2: Push to Patient Portal via FHIR\n\n```typescript\n// src/workflows/patient-portal-push.ts\ninterface FhirCommunication {\n  resourceType: 'Communication';\n  status: 'completed';\n  category: Array<{ coding: Array<{ system: string; code: string }> }>;\n  subject: { reference: string };\n  encounter: { reference: string };\n  payload: Array<{ contentString: string }>;\n  sent: string;\n}\n\nasync function pushToMyChart(\n  fhirBaseUrl: string,\n  accessToken: string,\n  summary: {\n    patient_id: string;\n    encounter_id: string;\n    content: string;\n    language: string;\n  }\n): Promise<string> {\n  const communication: FhirCommunication = {\n    resourceType: 'Communication',\n    status: 'completed',\n    category: [{\n      coding: [{\n        system: 'http://terminology.hl7.org/CodeSystem/communication-category',\n        code: 'notification',\n      }],\n    }],\n    subject: { reference: `Patient/${summary.patient_id}` },\n    encounter: { reference: `Encounter/${summary.encounter_id}` },\n    payload: [{ contentString: summary.content }],\n    sent: new Date().toISOString(),\n  };\n\n  const response = await axios.post(\n    `${fhirBaseUrl}/Communication`,\n    communication,\n    { headers: { Authorization: `Bearer ${accessToken}` } }\n  );\n\n  return response.data.id;\n}\n```\n\n### Step 3: Multi-Language Translation\n\n```typescript\n// src/workflows/translation.ts\n// Abridge supports 28+ languages natively \u2014 no external translation service needed\n\nconst SUPPORTED_LANGUAGES = [\n  'en', 'es', 'zh', 'ar', 'vi', 'ko', 'tl', 'ru', 'fr', 'pt',\n  'hi', 'de', 'ja', 'it', 'pl', 'ur', 'fa', 'bn', 'pa', 'gu',\n  'ha', 'yo', 'am', 'so', 'sw', 'ne', 'my', 'th',\n] as const;\n\nasync function generateMultiLanguageSummaries(\n  api: AxiosInstance,\n  sessionId: string,\n  languages: string[]\n): Promise<Map<string, PatientSummary>> {\n  const summaries = new Map<string, PatientSummary>();\n\n  // Generate summaries in parallel for requested languages\n  const results = await Promise.allSettled(\n    languages.map(lang =>\n      generatePatientSummary(api, sessionId, lang, 'basic')\n    )\n  );\n\n  results.forEach((result, index) => {\n    if (result.status === 'fulfilled') {\n      summaries.set(languages[index], result.value);\n    } else {\n      console.error(`Translation failed for ${languages[index]}:`, result.reason);\n    }\n  });\n\n  return summaries;\n}\n```\n\n### Step 4: Format After-Visit Summary (AVS)\n\n```typescript\n// src/workflows/avs-formatter.ts\nfunction formatAfterVisitSummary(summary: PatientSummary): string {\n  const lines: string[] = [\n    `AFTER-VISIT SUMMARY`,\n    `Date: ${summary.source_encounter.date}`,\n    `Provider: ${summary.source_encounter.provider_name}`,\n    `Department: ${summary.source_encounter.department}`,\n    '',\n    `WHY YOU CAME IN`,\n    summary.sections.visit_reason,\n    '',\n    `WHAT WE DISCUSSED`,\n    summary.sections.what_we_discussed,\n    '',\n    `YOUR DIAGNOSIS`,\n    summary.sections.your_diagnosis,\n    '',\n    `WHAT TO DO NEXT`,\n    summary.sections.next_steps,\n  ];\n\n  if (summary.sections.medications.length > 0) {\n    lines.push('', 'YOUR MEDICATIONS');\n    for (const med of summary.sections.medications) {\n      lines.push(`  ${med.name}: ${med.instructions}`);\n      if (med.warnings) lines.push(`    Important: ${med.warnings}`);\n    }\n  }\n\n  lines.push(\n    '',\n    'FOLLOW-UP',\n    `When: ${summary.sections.follow_up.when}`,\n    `Why: ${summary.sections.follow_up.why}`,\n    summary.sections.follow_up.scheduling_instructions,\n  );\n\n  return lines.join('\\n');\n}\n```\n\n## Output\n\n- Patient-friendly after-visit summary at target reading level\n- Multi-language translations (28+ languages supported)\n- FHIR Communication resource pushed to patient portal\n- Formatted AVS document with medications, follow-up, and next steps\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| Unsupported language | Language not in Abridge's 28+ set | Check `SUPPORTED_LANGUAGES` list |\n| Summary too vague | Encounter transcript was short | Ensure encounter has enough clinical detail |\n| MyChart push `403` | Patient portal not linked | Verify patient has active MyChart account |\n| Missing medications | Provider didn't discuss meds | Medications only included if mentioned in encounter |\n\n## Resources\n\n- [Abridge Platform](https://www.abridge.com/product)\n- [FHIR R4 Communication Resource](https://hl7.org/fhir/R4/communication.html)\n- [Health Literacy Guidelines (CDC)](https://www.cdc.gov/healthliteracy/)\n- [Epic MyChart Integration](https://mychart.epic.com/)\n\n## Next Steps\n\nFor common integration errors, see `abridge-common-errors`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "abridge-core-workflow-b",
-    "description": "Implement Abridge patient-facing documentation and after-visit summary",
-    "Trigger": "abridge patient summary\", \"after-visit summary\", \"patient portal abridge\",",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

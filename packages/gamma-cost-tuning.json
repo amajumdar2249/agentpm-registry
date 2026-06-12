@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032092",
   "name": "gamma-cost-tuning",
   "slug": "gamma-cost-tuning",
   "description": "Optimize Gamma usage costs and manage API spending.",
   "content": "# Gamma Cost Tuning\n\n## Overview\n\nOptimize Gamma API usage to minimize credit consumption. Gamma uses a credit-based billing system where costs are driven by image generation model tier and content complexity. API access requires Pro or higher subscription.\n\n## Prerequisites\n\n- Active Gamma Pro/Ultra/Teams/Business subscription\n- Understanding of credit system\n- Completed `gamma-install-auth` setup\n\n## Gamma Credit System\n\n### Image Model Tiers\n\n| Tier | Credits per Image | Quality Level |\n|------|-------------------|---------------|\n| Standard | 2-15 | Good for internal/draft presentations |\n| Advanced | 20-33 | Higher quality, more detail |\n| Premium | 34-75 | Best quality images |\n| Ultra | 30-125 | Highest fidelity, photorealistic |\n\nCard text generation also costs credits based on the AI model used.\n\n### Plan Comparison\n\n| Feature | Pro | Ultra | Teams | Business |\n|---------|-----|-------|-------|----------|\n| Monthly credits | Included | More credits | Team pool | Custom |\n| API access | Yes | Yes | Yes | Yes |\n| Max cards | Standard | Up to 75 | Standard | Custom |\n| Ad-hoc credit purchase | Yes | Yes | Yes | Yes |\n| Auto-recharge | Yes | Yes | Yes | Yes |\n\n## Instructions\n\n### Step 1: Track Credit Usage\n\n```typescript\n// src/gamma/cost-tracker.ts\ninterface UsageEntry {\n  generationId: string;\n  creditsUsed: number;\n  outputFormat: string;\n  timestamp: Date;\n}\n\nclass CreditTracker {\n  private usage: UsageEntry[] = [];\n\n  record(entry: UsageEntry) {\n    this.usage.push(entry);\n  }\n\n  getDaily(): { total: number; count: number; avg: number } {\n    const today = new Date().toDateString();\n    const todayUsage = this.usage.filter(\n      (u) => u.timestamp.toDateString() === today\n    );\n    const total = todayUsage.reduce((sum, u) => sum + u.creditsUsed, 0);\n    return {\n      total,\n      count: todayUsage.length,\n      avg: todayUsage.length > 0 ? Math.round(total / todayUsage.length) : 0,\n    };\n  }\n\n  getMonthly(): { total: number; count: number } {\n    const thisMonth = new Date().getMonth();\n    const monthUsage = this.usage.filter(\n      (u) => u.timestamp.getMonth() === thisMonth\n    );\n    return {\n      total: monthUsage.reduce((sum, u) => sum + u.creditsUsed, 0),\n      count: monthUsage.length,\n    };\n  }\n}\n\n// Track after each generation\nconst tracker = new CreditTracker();\n\nasync function generateTracked(gamma: GammaClient, request: GenerateRequest) {\n  const { generationId } = await gamma.generate(request);\n  const result = await pollUntilDone(gamma, generationId);\n\n  tracker.record({\n    generationId,\n    creditsUsed: result.creditsUsed ?? 0,\n    outputFormat: request.outputFormat ?? \"presentation\",\n    timestamp: new Date(),\n  });\n\n  return result;\n}\n```\n\n### Step 2: Optimize Image Costs\n\nThe biggest cost driver is image generation tier. Reduce costs by:\n\n```typescript\n// EXPENSIVE: default image settings (may use Advanced/Premium tier)\nawait gamma.generate({\n  content: \"Company quarterly review\",\n  outputFormat: \"presentation\",\n  // No imageOptions = AI chooses model tier\n});\n\n// CHEAPER: explicitly use standard tier when quality isn't critical\nawait gamma.generate({\n  content: \"Company quarterly review\",\n  outputFormat: \"presentation\",\n  imageOptions: {\n    style: \"simple flat illustration\", // Simpler styles use fewer credits\n  },\n});\n\n// CHEAPEST: text-focused, minimal images\nawait gamma.generate({\n  content: \"Company quarterly review\",\n  outputFormat: \"document\", // Documents typically use fewer images\n  textAmount: \"detailed\",   // Focus on text, not visuals\n});\n```\n\n### Step 3: Use Templates to Reduce Regeneration\n\n```typescript\n// WASTEFUL: regenerating entire presentations for minor content changes\nfor (const client of clients) {\n  await gamma.generate({\n    content: `Proposal for ${client.name}: ${fullProposalText}`,\n    outputFormat: \"presentation\",\n  });\n  // Each generation costs full credits\n}\n\n// EFFICIENT: use templates for repeated structures\n// Create a one-page template gamma in the app\n// Then generate variations with targeted prompts\nfor (const client of clients) {\n  await gamma.generateFromTemplate({\n    gammaId: \"template_proposal_id\",\n    prompt: `Customize for ${client.name}. Focus on ${client.industry}.`,\n    exportAs: \"pdf\",\n  });\n  // Template generations can be more cost-effective\n}\n```\n\n### Step 4: Budget Alerts\n\n```typescript\n// src/gamma/budget.ts\nconst MONTHLY_BUDGET = 5000; // credits\nconst ALERT_THRESHOLDS = [0.5, 0.75, 0.9, 1.0]; // 50%, 75%, 90%, 100%\n\nasync function checkBudget(tracker: CreditTracker) {\n  const { total } = tracker.getMonthly();\n  const percentUsed = total / MONTHLY_BUDGET;\n\n  for (const threshold of ALERT_THRESHOLDS) {\n    if (percentUsed >= threshold) {\n      await sendAlert(\n        `Gamma budget ${(threshold * 100)}% used: ${total}/${MONTHLY_BUDGET} credits`\n      );\n    }\n  }\n\n  // Hard stop at 100%\n  if (percentUsed >= 1.0) {\n    throw new Error(`Monthly Gamma budget exceeded: ${total}/${MONTHLY_BUDGET} credits`);\n  }\n}\n```\n\n### Step 5: Caching to Avoid Regeneration\n\n```typescript\n// Cache generation results to avoid paying twice for same content\nimport NodeCache from \"node-cache\";\n\nconst generationCache = new NodeCache({ stdTTL: 86400 }); // 24 hour TTL\n\nasync function generateCached(\n  gamma: GammaClient,\n  request: GenerateRequest\n): Promise<GenerateResult> {\n  // Create cache key from request parameters\n  const key = JSON.stringify({\n    content: request.content,\n    outputFormat: request.outputFormat,\n    themeId: request.themeId,\n    textMode: request.textMode,\n  });\n\n  const cached = generationCache.get<GenerateResult>(key);\n  if (cached) {\n    console.log(\"Cache hit \u2014 skipping generation\");\n    return cached;\n  }\n\n  const result = await generateAndWait(gamma, request);\n  generationCache.set(key, result);\n  return result;\n}\n```\n\n## Cost Reduction Summary\n\n| Strategy | Credit Savings | Implementation |\n|----------|---------------|----------------|\n| Standard image tier | 50-80% on images | Set `imageOptions.style` to simpler styles |\n| Templates over ad-hoc | 20-40% | Use `generateFromTemplate` for repeated content |\n| Caching results | 100% on duplicates | Cache by content hash |\n| Text-focused output | 30-50% | Use `document` format, `textAmount: \"detailed\"` |\n| Budget caps | Prevents overrun | Track credits, alert at thresholds |\n| Auto-recharge | Avoids disruption | Enable at gamma.app/settings/billing |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Credits exhausted | Over budget | Purchase ad-hoc credits or enable auto-recharge |\n| Unexpected high cost | Premium image tier | Specify `imageOptions.style` explicitly |\n| Budget alert missed | Tracker not running | Verify tracking on all generation paths |\n\n## Resources\n\n- [Gamma Pricing](https://gamma.app/pricing)\n- [API Access and Pricing](https://developers.gamma.app/docs/get-access)\n- [Credit System Explained](https://developers.gamma.app/get-started/access-and-pricing)\n\n## Next Steps\n\nProceed to `gamma-reference-architecture` for architecture patterns.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "gamma-cost-tuning",
-    "description": "Optimize Gamma usage costs and manage API spending.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

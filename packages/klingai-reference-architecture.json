@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032404",
   "name": "klingai-reference-architecture",
   "slug": "klingai-reference-architecture",
   "description": "Production reference architecture for Kling AI video generation platforms.",
   "content": "# Kling AI Reference Architecture\n\n## Overview\n\nProduction architecture for video generation platforms built on Kling AI. Covers API gateway, job queue, worker pool, storage, and monitoring layers.\n\n## Architecture Diagram\n\n```\nUser Request\n    |\n[API Gateway / Load Balancer]\n    |\n[Application Server]\n    |--- validate prompt & estimate cost\n    |--- enqueue job to Redis/SQS\n    |\n[Job Queue (Redis / SQS / Pub/Sub)]\n    |\n[Worker Pool (N workers)]\n    |--- generate JWT token\n    |--- POST https://api.klingai.com/v1/videos/text2video\n    |--- receive task_id\n    |--- register callback_url OR poll\n    |\n[Webhook Receiver / Poller]\n    |--- receive completion callback\n    |--- download video from Kling CDN\n    |--- upload to S3/GCS\n    |--- update job status in DB\n    |--- notify user\n    |\n[Object Storage (S3 / GCS)]\n    |\n[CDN (CloudFront / Cloud CDN)]\n    |\nUser views video\n```\n\n## Component Details\n\n### API Layer\n\n```python\nfrom fastapi import FastAPI, HTTPException\nfrom pydantic import BaseModel\n\napp = FastAPI()\n\nclass VideoRequest(BaseModel):\n    prompt: str\n    model: str = \"kling-v2-master\"\n    duration: int = 5\n    mode: str = \"standard\"\n\n@app.post(\"/api/videos\")\nasync def create_video(req: VideoRequest):\n    # 1. Validate\n    if len(req.prompt) > 2500:\n        raise HTTPException(400, \"Prompt exceeds 2500 chars\")\n\n    # 2. Estimate cost\n    credits = estimate_credits(req.duration, req.mode)\n    if not budget_guard.check(credits):\n        raise HTTPException(402, \"Budget exceeded\")\n\n    # 3. Enqueue\n    job_id = await queue.enqueue({\n        \"prompt\": req.prompt,\n        \"model\": req.model,\n        \"duration\": str(req.duration),\n        \"mode\": req.mode,\n    })\n\n    return {\"job_id\": job_id, \"status\": \"queued\", \"estimated_credits\": credits}\n```\n\n### Worker Service\n\n```python\nimport redis\nimport json\n\nclass VideoWorker:\n    def __init__(self, kling_client, storage_client, redis_url=\"redis://localhost\"):\n        self.kling = kling_client\n        self.storage = storage_client\n        self.redis = redis.Redis.from_url(redis_url)\n\n    def process_loop(self):\n        while True:\n            raw = self.redis.brpop(\"kling:jobs:pending\", timeout=5)\n            if not raw:\n                continue\n\n            job = json.loads(raw[1])\n            try:\n                # Submit to Kling API\n                result = self.kling.text_to_video(\n                    job[\"prompt\"],\n                    model=job[\"model\"],\n                    duration=int(job[\"duration\"]),\n                    mode=job[\"mode\"],\n                    callback_url=os.environ.get(\"WEBHOOK_URL\"),\n                )\n\n                # If using polling (no callback)\n                if isinstance(result, dict) and \"videos\" in result:\n                    video_url = result[\"videos\"][0][\"url\"]\n                    stored_url = self.storage.download_and_upload(video_url, job[\"id\"])\n                    self.redis.publish(\"kling:events\", json.dumps({\n                        \"type\": \"completed\",\n                        \"job_id\": job[\"id\"],\n                        \"video_url\": stored_url,\n                    }))\n\n            except Exception as e:\n                self.redis.lpush(\"kling:jobs:failed\", json.dumps({\n                    **job, \"error\": str(e)\n                }))\n```\n\n### Scaling Guidelines\n\n| Component | Scaling Strategy |\n|-----------|-----------------|\n| Workers | Scale by queue depth (1 worker per 3 concurrent API tasks) |\n| API servers | Horizontal, behind load balancer |\n| Redis | Single instance for <1K jobs/day, cluster for more |\n| Storage | S3/GCS scales automatically |\n| CDN | CloudFront/Cloud CDN for global delivery |\n\n### Concurrency Limits by Tier\n\n| Tier | Max Concurrent Tasks | Workers Needed |\n|------|---------------------|----------------|\n| Free | 1 | 1 |\n| Standard | 3 | 1 |\n| Pro | 5 | 2 |\n| Enterprise | 10+ | 3-4 |\n\n## Docker Compose Setup\n\n```yaml\n# docker-compose.yml\nservices:\n  api:\n    build: ./api\n    ports: [\"8000:8000\"]\n    environment:\n      - REDIS_URL=redis://redis:6379\n      - KLING_ACCESS_KEY=${KLING_ACCESS_KEY}\n      - KLING_SECRET_KEY=${KLING_SECRET_KEY}\n\n  worker:\n    build: ./worker\n    deploy:\n      replicas: 2\n    environment:\n      - REDIS_URL=redis://redis:6379\n      - KLING_ACCESS_KEY=${KLING_ACCESS_KEY}\n      - KLING_SECRET_KEY=${KLING_SECRET_KEY}\n      - S3_BUCKET=${S3_BUCKET}\n\n  webhook:\n    build: ./webhook\n    ports: [\"8001:8001\"]\n    environment:\n      - REDIS_URL=redis://redis:6379\n\n  redis:\n    image: redis:7-alpine\n    volumes: [\"redis-data:/data\"]\n\nvolumes:\n  redis-data:\n```\n\n## Resources\n\n- [API Reference](https://app.klingai.com/global/dev/document-api/apiReference/model/textToVideo)\n- [Developer Portal](https://app.klingai.com/global/dev)\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "klingai-reference-architecture",
-    "description": "Production reference architecture for Kling AI video generation platforms.",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033126",
   "name": "salesforce-load-scale",
   "slug": "salesforce-load-scale",
   "description": "Implement Salesforce load testing, API limit capacity planning, and",
   "content": "# Salesforce Load & Scale\n\n## Overview\n\nLoad testing, scaling strategies, and capacity planning for Salesforce integrations. Focus on API limit budgeting, Bulk API throughput, and handling Salesforce's unique constraint: org-wide shared limits.\n\n## Prerequisites\n\n- k6 or Artillery load testing tool\n- Sandbox or Developer org for testing (never load test production)\n- Understanding of your org's API limit allocation\n- Monitoring configured (see `salesforce-observability`)\n\n## Instructions\n\n### Step 1: Calculate API Limit Budget\n\n```typescript\nconst conn = await getConnection();\nconst limits = await conn.request('/services/data/v59.0/limits/');\n\nconst budget = {\n  dailyMax: limits.DailyApiRequests.Max,\n  currentlyUsed: limits.DailyApiRequests.Max - limits.DailyApiRequests.Remaining,\n  remaining: limits.DailyApiRequests.Remaining,\n  // Budget allocation\n  integrationA: Math.floor(limits.DailyApiRequests.Max * 0.40), // 40% for primary sync\n  integrationB: Math.floor(limits.DailyApiRequests.Max * 0.20), // 20% for secondary\n  salesUsers: Math.floor(limits.DailyApiRequests.Max * 0.30),   // 30% for Salesforce UI users\n  headroom: Math.floor(limits.DailyApiRequests.Max * 0.10),     // 10% buffer\n};\n\nconsole.table(budget);\n// Example (Enterprise, 50 users): 150,000 daily calls\n// Integration A: 60,000 | Integration B: 30,000 | Users: 45,000 | Buffer: 15,000\n```\n\n### Step 2: Load Test with k6 (against Sandbox)\n\n```javascript\n// salesforce-load-test.js\nimport http from 'k6/http';\nimport { check, sleep } from 'k6';\n\nconst SF_TOKEN = __ENV.SF_ACCESS_TOKEN;\nconst SF_INSTANCE = __ENV.SF_INSTANCE_URL;\n\nexport const options = {\n  stages: [\n    { duration: '1m', target: 5 },    // Ramp up\n    { duration: '3m', target: 5 },    // Steady state\n    { duration: '1m', target: 20 },   // Peak load\n    { duration: '3m', target: 20 },   // Sustained peak\n    { duration: '1m', target: 0 },    // Ramp down\n  ],\n  thresholds: {\n    http_req_duration: ['p(95)<3000'],  // SF API calls are slower than typical SaaS\n    http_req_failed: ['rate<0.01'],\n  },\n};\n\nexport default function () {\n  // SOQL query\n  const queryRes = http.get(\n    `${SF_INSTANCE}/services/data/v59.0/query/?q=SELECT+Id,Name+FROM+Account+LIMIT+10`,\n    { headers: { Authorization: `Bearer ${SF_TOKEN}` } }\n  );\n  check(queryRes, { 'query 200': (r) => r.status === 200 });\n\n  // sObject retrieve\n  const retrieveRes = http.get(\n    `${SF_INSTANCE}/services/data/v59.0/sobjects/Account/describe`,\n    { headers: { Authorization: `Bearer ${SF_TOKEN}` } }\n  );\n  check(retrieveRes, { 'describe 200': (r) => r.status === 200 });\n\n  // Check rate limit headers\n  const limitInfo = queryRes.headers['Sforce-Limit-Info'];\n  if (limitInfo) {\n    const [used, max] = limitInfo.replace('api-usage=', '').split('/');\n    if (parseInt(used) / parseInt(max) > 0.8) {\n      console.warn(`API usage at ${used}/${max}`);\n    }\n  }\n\n  sleep(1); // Respect rate limits\n}\n```\n\n```bash\n# Get access token for load test\nSF_ACCESS_TOKEN=$(sf org display --target-org my-sandbox --json | jq -r '.result.accessToken')\nSF_INSTANCE_URL=$(sf org display --target-org my-sandbox --json | jq -r '.result.instanceUrl')\n\n# Run load test (ONLY against sandbox)\nk6 run \\\n  --env SF_ACCESS_TOKEN=$SF_ACCESS_TOKEN \\\n  --env SF_INSTANCE_URL=$SF_INSTANCE_URL \\\n  salesforce-load-test.js\n```\n\n### Step 3: Bulk API Throughput Testing\n\n```typescript\n// Bulk API 2.0 can process millions of records per job\n// Key limits:\n// - 15,000 Bulk API jobs/day\n// - 150,000,000 records per 24hr rolling period\n// - 10 concurrent Bulk API jobs\n\n// Generate test data\nfunction generateTestCsv(count: number): string {\n  const lines = ['FirstName,LastName,Email,External_ID__c'];\n  for (let i = 0; i < count; i++) {\n    lines.push(`Test${i},User${i},test${i}@loadtest.example.com,LOAD-${i}`);\n  }\n  return lines.join('\\n');\n}\n\n// Measure Bulk API throughput\nconst startTime = Date.now();\nconst results = await conn.bulk2.loadAndWaitForResults({\n  object: 'Contact',\n  operation: 'upsert',\n  externalIdFieldName: 'External_ID__c',\n  input: generateTestCsv(50000),\n  pollInterval: 5000,\n});\n\nconst duration = (Date.now() - startTime) / 1000;\nconst throughput = results.successfulResults.length / duration;\n\nconsole.log({\n  records: results.successfulResults.length,\n  failures: results.failedResults.length,\n  durationSeconds: duration.toFixed(1),\n  recordsPerSecond: throughput.toFixed(1),\n});\n// Typical: 1,000-5,000 records/second depending on triggers and validation rules\n```\n\n### Step 4: Scaling Strategies\n\n```typescript\n// Strategy 1: Use Bulk API for large datasets (separate limit pool)\n// Regular API: shared daily limit\n// Bulk API: 15,000 jobs/day, unlimited records per job\n\n// Strategy 2: Batch with sObject Collections (200 records/call)\n// 100,000 API calls * 200 records/call = 20M records/day via REST\n\n// Strategy 3: Reduce describe/metadata calls (cache aggressively)\n// A single describe call can return 500+ fields \u2014 cache for hours\n\n// Strategy 4: Use Composite API (25 operations per call)\n// Replaces 25 individual calls with 1\n\n// Strategy 5: Off-peak scheduling\n// Run bulk jobs during business hours when sales users are active\n// This ensures API limit usage is spread across the day\n```\n\n### Step 5: Capacity Planning Table\n\n| Operation | Records/Day | API Calls Required | Strategy |\n|-----------|------------|-------------------|----------|\n| Account sync | 10,000 | 50 (Collections) | sObject Collections, 200/call |\n| Contact sync | 100,000 | 1 (Bulk job) | Bulk API 2.0 |\n| Opportunity queries | 5,000 | 25 (SOQL) | Relationship queries, cache |\n| Real-time updates | 500 | 500 | REST API, individual calls |\n| Metadata/describe | Constant | 10 (cached) | Cache with 1-hour TTL |\n| **Total** | **115,500** | **586** | **Well within limits** |\n\n## Output\n\n- API limit budget allocated across integrations\n- Load test script targeting sandbox\n- Bulk API throughput benchmarked\n- Scaling strategies documented\n- Capacity planning table for production\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| `REQUEST_LIMIT_EXCEEDED` during test | Wrong org (testing production) | ONLY test against sandbox |\n| Bulk job timeout | Too many triggers firing | Disable non-essential triggers in sandbox |\n| Low throughput | Validation rules, workflows | Test with rules disabled, then enabled |\n| Inconsistent results | Concurrent jobs contending | Run one test at a time |\n\n## Resources\n\n- [API Limits by Edition](https://developer.salesforce.com/docs/atlas.en-us.salesforce_app_limits_cheatsheet.meta/salesforce_app_limits_cheatsheet/salesforce_app_limits_platform_api.htm)\n- [Bulk API 2.0 Limits](https://developer.salesforce.com/docs/atlas.en-us.api_asynch.meta/api_asynch/bulk_api_2_0.htm)\n- [k6 Documentation](https://k6.io/docs/)\n\n## Next Steps\n\nFor reliability patterns, see `salesforce-reliability-patterns`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "salesforce-load-scale",
-    "description": "Implement Salesforce load testing, API limit capacity planning, and",
-    "allowed-tools": "Read, Write, Edit, Bash(k6:*), Bash(sf:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

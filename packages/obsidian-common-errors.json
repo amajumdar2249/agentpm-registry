@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032728",
   "name": "obsidian-common-errors",
   "slug": "obsidian-common-errors",
   "description": "Diagnose and fix common Obsidian plugin errors and exceptions.",
   "content": "# Obsidian Common Errors\n\n## Overview\n\nDiagnostic guide for the six most frequent Obsidian plugin development errors, with root causes and copy-paste fixes.\n\n## Prerequisites\n\n- Obsidian plugin development environment set up\n- Access to Developer Console (Ctrl/Cmd+Shift+I)\n- Plugin source code access\n\n## Instructions\n\n### Step 1: \"Cannot read properties of null\" \u2014 Workspace Not Ready\n\nAccessing `app.workspace.activeLeaf` or `app.workspace.getActiveViewOfType()` before the layout is initialized returns `null`.\n\n```typescript\n// BROKEN: accessing workspace immediately in onload\nasync onload() {\n  const view = this.app.workspace.getActiveViewOfType(MarkdownView);\n  // TypeError: Cannot read properties of null (reading 'editor')\n  view.editor.replaceSelection('hello');\n}\n\n// FIXED: wait for layout-ready event\nasync onload() {\n  this.app.workspace.onLayoutReady(() => {\n    const view = this.app.workspace.getActiveViewOfType(MarkdownView);\n    if (view) {\n      view.editor.replaceSelection('hello');\n    }\n  });\n}\n```\n\nFor commands that need workspace access later (not at load time), guard with a null check:\n\n```typescript\nthis.addCommand({\n  id: 'my-command',\n  name: 'Do Something',\n  checkCallback: (checking: boolean) => {\n    const view = this.app.workspace.getActiveViewOfType(MarkdownView);\n    if (view) {\n      if (!checking) {\n        // safe to use view.editor here\n        view.editor.replaceSelection('inserted');\n      }\n      return true;\n    }\n    return false;\n  }\n});\n```\n\n### Step 2: \"Plugin failed to load\" \u2014 Syntax or Manifest Errors\n\nThis error appears in the console when Obsidian cannot parse your built `main.js` or your `manifest.json` is invalid.\n\n**Check 1: Build output exists and compiles cleanly**\n\n```bash\nset -euo pipefail\nnpm run build 2>&1\n# Look for TypeScript errors in output\nls -la main.js  # Must exist in plugin root\n```\n\n**Check 2: manifest.json has all required fields**\n\n```json\n{\n  \"id\": \"my-plugin\",\n  \"name\": \"My Plugin\",\n  \"version\": \"1.0.0\",\n  \"minAppVersion\": \"0.15.0\",\n  \"description\": \"Does something useful\",\n  \"author\": \"Your Name\",\n  \"isDesktopOnly\": false\n}\n```\n\nMissing `id`, `name`, `version`, or `minAppVersion` causes a silent load failure. The `id` must match the folder name under `.obsidian/plugins/`.\n\n**Check 3: Default export**\n\n```typescript\n// BROKEN: named export\nexport class MyPlugin extends Plugin { ... }\n\n// FIXED: default export required\nexport default class MyPlugin extends Plugin { ... }\n```\n\n### Step 3: CSS Not Loading \u2014 Wrong styles.css Path\n\nObsidian auto-loads `styles.css` from the plugin root directory. It must be named exactly `styles.css` (not `style.css`, not in a subdirectory).\n\n```bash\nset -euo pipefail\n# Verify all three required files exist in plugin root\nls -la styles.css manifest.json main.js\n```\n\nIf you use a CSS preprocessor, ensure the build outputs to `./styles.css`:\n\n```json\n{\n  \"scripts\": {\n    \"build:css\": \"sass src/styles.scss styles.css\",\n    \"build\": \"npm run build:css && node esbuild.config.mjs\"\n  }\n}\n```\n\nCommon gotcha: the file must be `styles.css` (plural), not `style.css`.\n\n### Step 4: Commands Not Showing in Palette\n\nCommands registered outside `onload()` or after the plugin is enabled won't appear in the command palette.\n\n```typescript\n// BROKEN: adding command in a separate method called conditionally\nasync onload() {\n  await this.loadSettings();\n  // command never added because registerCommands is not called\n}\n\nregisterCommands() {\n  this.addCommand({ id: 'test', name: 'Test', callback: () => {} });\n}\n\n// FIXED: add all commands directly in onload\nasync onload() {\n  await this.loadSettings();\n\n  this.addCommand({\n    id: 'test',\n    name: 'Test',\n    callback: () => {\n      new Notice('Working!');\n    }\n  });\n}\n```\n\nIf a command should only be available when a markdown file is open, use `editorCallback` instead of `callback` \u2014 Obsidian automatically hides it when no editor is active:\n\n```typescript\nthis.addCommand({\n  id: 'editor-only',\n  name: 'Editor Only Command',\n  editorCallback: (editor: Editor) => {\n    editor.replaceSelection('inserted text');\n  }\n});\n```\n\n### Step 5: Vault Read Errors \u2014 File Doesn't Exist\n\n`vault.read()` and `vault.cachedRead()` throw if the file doesn't exist. Always check first.\n\n```typescript\n// BROKEN: assumes file exists\nasync readConfig() {\n  const content = await this.app.vault.adapter.read('config.json');\n  return JSON.parse(content);\n}\n\n// FIXED: check existence, handle missing file\nasync readConfig(): Promise<MyConfig> {\n  const path = 'config.json';\n  const exists = await this.app.vault.adapter.exists(path);\n  if (!exists) {\n    return { ...DEFAULT_CONFIG };\n  }\n\n  try {\n    const content = await this.app.vault.adapter.read(path);\n    return JSON.parse(content);\n  } catch (e) {\n    console.error('Failed to parse config:', e);\n    return { ...DEFAULT_CONFIG };\n  }\n}\n```\n\nFor vault files (TFile objects), use `getAbstractFileByPath`:\n\n```typescript\nconst file = this.app.vault.getAbstractFileByPath('notes/target.md');\nif (file instanceof TFile) {\n  const content = await this.app.vault.read(file);\n  // process content\n} else {\n  new Notice('File not found: notes/target.md');\n}\n```\n\n### Step 6: Settings Not Persisting \u2014 Missing saveData Call\n\nThe most common settings bug: modifying the settings object without calling `saveData`.\n\n```typescript\n// BROKEN: settings change lost on restart\nthis.settings.theme = 'dark';\n// forgot to call saveData!\n\n// FIXED: always save after modifying\nthis.settings.theme = 'dark';\nawait this.saveData(this.settings);\n```\n\nIn settings tabs, save on every change:\n\n```typescript\nnew Setting(containerEl)\n  .setName('Theme')\n  .addDropdown(dropdown => dropdown\n    .addOption('light', 'Light')\n    .addOption('dark', 'Dark')\n    .setValue(this.plugin.settings.theme)\n    .onChange(async (value) => {\n      this.plugin.settings.theme = value;\n      await this.plugin.saveSettings();  // calls this.saveData(this.settings)\n    }));\n```\n\nLoad settings with defaults to prevent undefined fields after plugin updates:\n\n```typescript\nasync loadSettings() {\n  // loadData() returns null on first run \u2014 Object.assign handles this safely\n  this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());\n}\n```\n\n`Object.assign` merges saved data over defaults, so new fields added in later versions get their default value instead of `undefined`.\n\n## Output\n\n- Identified error matched to one of the six categories\n- Root cause explanation\n- Working code fix applied to plugin source\n\n## Error Handling\n\n| Error | Cause | Solution |\n|-------|-------|----------|\n| `TypeError: Cannot read properties of null` | Workspace not ready | Use `onLayoutReady` or null-check |\n| `Plugin failed to load` | Build error or bad manifest | Check console, verify `manifest.json` fields |\n| CSS has no effect | Wrong filename or path | Must be `styles.css` in plugin root |\n| Command missing from palette | Not added in `onload()` | Move `addCommand` into `onload` |\n| `Error: ENOENT` on vault read | File doesn't exist | Check with `adapter.exists()` first |\n| Settings reset on restart | Missing `saveData` call | Call `saveData` after every mutation |\n\n## Examples\n\n### Quick Diagnostic Checklist\n\nWhen a plugin fails to load, check these in order:\n\n1. Open Developer Console (Ctrl/Cmd+Shift+I) and look for red errors\n2. Verify `main.js`, `manifest.json`, and `styles.css` exist in plugin folder\n3. Confirm `manifest.json` has `id`, `name`, `version`, `minAppVersion`\n4. Confirm `main.ts` uses `export default class`\n5. Rebuild with `npm run build` and reload Obsidian (Ctrl/Cmd+R)\n\n### Debug Logging Pattern\n\n```typescript\n// Add to your plugin class for temporary debugging\nprivate debug(msg: string, ...args: any[]) {\n  if (this.settings.debugMode) {\n    console.log(`[${this.manifest.id}] ${msg}`, ...args);\n  }\n}\n```\n\n## Resources\n\n- [Obsidian Developer Docs](https://docs.obsidian.md/Plugins)\n- [Obsidian Forum - Developers](https://forum.obsidian.md/c/developers/14)\n- [Obsidian Plugin Guidelines](https://docs.obsidian.md/Plugins/Releasing/Plugin+guidelines)\n\n## Next Steps\n\nFor comprehensive debugging workflows, see `obsidian-debug-bundle`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "obsidian-common-errors",
-    "description": "Diagnose and fix common Obsidian plugin errors and exceptions.",
-    "allowed-tools": "Read, Grep, Bash(node:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

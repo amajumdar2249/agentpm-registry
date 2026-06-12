@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031622",
   "name": "coderabbit-deploy-integration",
   "slug": "coderabbit-deploy-integration",
   "description": "Roll out CodeRabbit across an organization: multi-repo deployment, org-level",
   "content": "# CodeRabbit Deploy Integration\n\n## Overview\n\nRoll out CodeRabbit AI code review across an organization. Covers multi-repo deployment strategy, organization-level configuration, team-specific customization, and developer onboarding. CodeRabbit is a GitHub/GitLab App -- deployment means configuring the App installation, customizing review behavior, and integrating review status into merge workflows.\n\n## Prerequisites\n\n- GitHub Organization admin access\n- CodeRabbit GitHub App installed (https://github.com/apps/coderabbitai)\n- CodeRabbit Pro or Enterprise plan for private repos\n- List of target repositories\n\n## Instructions\n\n### Step 1: Plan the Rollout\n\n```markdown\n# Phase 1 (Week 1): Pilot\n- Pick 2-3 high-activity repos with receptive teams\n- Use \"chill\" profile to minimize disruption\n- Collect feedback from pilot teams\n\n# Phase 2 (Week 2-3): Expand\n- Roll out to remaining backend/frontend repos\n- Apply learnings from pilot (path instructions, exclusions)\n- Switch to \"assertive\" profile\n\n# Phase 3 (Week 4+): Enforce\n- Add CodeRabbit as required status check on protected branches\n- Set up org-level defaults\n- Monitor adoption metrics\n```\n\n### Step 2: Create Organization-Level Configuration\n\n```yaml\n# .github/.coderabbit.yaml (in the .github repository)\n# This is the org-level default applied to ALL repos in the org\n# Individual repos can override by adding their own .coderabbit.yaml\n\nlanguage: \"en-US\"\nearly_access: false\n\nreviews:\n  profile: \"assertive\"\n  request_changes_workflow: false    # Start with comments-only (non-blocking)\n  high_level_summary: true\n  high_level_summary_in_walkthrough: true\n  review_status: true\n  collapse_walkthrough: false\n  sequence_diagrams: true\n  poem: false\n\n  auto_review:\n    enabled: true\n    drafts: false\n    ignore_title_keywords:\n      - \"WIP\"\n      - \"DO NOT MERGE\"\n      - \"chore: bump\"\n      - \"chore(deps)\"\n\n  path_filters:\n    - \"!**/*.lock\"\n    - \"!**/package-lock.json\"\n    - \"!**/pnpm-lock.yaml\"\n    - \"!**/*.snap\"\n    - \"!**/*.generated.*\"\n    - \"!dist/**\"\n    - \"!vendor/**\"\n\nchat:\n  auto_reply: true\n```\n\n### Step 3: Create Team-Specific Repo Configs\n\n```yaml\n# .coderabbit.yaml for a backend API repo\n# Inherits org defaults, adds API-specific instructions\nreviews:\n  profile: \"assertive\"\n  auto_review:\n    enabled: true\n    base_branches: [main, develop]\n  path_instructions:\n    - path: \"src/api/**\"\n      instructions: |\n        Review for: input validation, proper HTTP status codes, auth middleware.\n        Flag missing error handling and unvalidated request bodies.\n    - path: \"src/db/**\"\n      instructions: |\n        Review for: parameterized queries, transaction boundaries, N+1 patterns.\n        Flag string concatenation in SQL.\n    - path: \"src/auth/**\"\n      instructions: |\n        SECURITY-CRITICAL. Review for: token validation, password hashing (bcrypt/argon2),\n        session management, CSRF protection. Flag any security bypass.\n    - path: \".github/workflows/**\"\n      instructions: |\n        Review for: pinned action versions (SHA not tag), no secrets in logs,\n        timeout-minutes on all jobs.\n```\n\n```yaml\n# .coderabbit.yaml for a frontend React repo\nreviews:\n  profile: \"assertive\"\n  path_instructions:\n    - path: \"src/components/**\"\n      instructions: |\n        Review for: accessibility (aria labels, keyboard nav), performance\n        (no inline styles, memo for expensive renders), proper prop types.\n    - path: \"src/hooks/**\"\n      instructions: |\n        Review for: cleanup in useEffect, dependency arrays, race conditions.\n    - path: \"**/*.test.*\"\n      instructions: |\n        Review for: edge cases, async handling, user interaction testing.\n        Do NOT comment on import order or test naming conventions.\n```\n\n### Step 4: Script Multi-Repo Config Deployment\n\n```bash\n#!/bin/bash\n# deploy-coderabbit-config.sh - Deploy .coderabbit.yaml to multiple repos\nset -euo pipefail\n\nORG=\"your-org\"\nCONFIG_TEMPLATE=\".coderabbit.yaml\"\nREPOS=(\"backend-api\" \"frontend-app\" \"mobile-api\" \"infrastructure\")\n\nfor REPO in \"${REPOS[@]}\"; do\n  echo \"Deploying to $ORG/$REPO...\"\n\n  # Clone, add config, create PR\n  TMPDIR=$(mktemp -d)\n  gh repo clone \"$ORG/$REPO\" \"$TMPDIR\" -- --depth 1\n  cp \"$CONFIG_TEMPLATE\" \"$TMPDIR/.coderabbit.yaml\"\n\n  cd \"$TMPDIR\"\n  git checkout -b feat/add-coderabbit-config\n  git add .coderabbit.yaml\n  git commit -m \"feat: add CodeRabbit AI code review configuration\"\n  git push -u origin feat/add-coderabbit-config\n  gh pr create \\\n    --title \"feat: enable CodeRabbit AI code review\" \\\n    --body \"Adding .coderabbit.yaml for automated AI code reviews. See CodeRabbit docs: https://docs.coderabbit.ai\"\n  cd -\n  rm -rf \"$TMPDIR\"\n\n  echo \"PR created for $ORG/$REPO\"\ndone\n```\n\n### Step 5: Set Up Branch Protection with CodeRabbit\n\n```bash\nset -euo pipefail\nORG=\"your-org\"\nREPOS=(\"backend-api\" \"frontend-app\")\n\nfor REPO in \"${REPOS[@]}\"; do\n  echo \"Setting branch protection for $ORG/$REPO...\"\n\n  gh api \"repos/$ORG/$REPO/branches/main/protection\" \\\n    --method PUT \\\n    --field 'required_status_checks={\"strict\":true,\"contexts\":[\"coderabbitai\"]}' \\\n    --field 'required_pull_request_reviews={\"required_approving_review_count\":1}' \\\n    --field 'enforce_admins=false' \\\n    --field 'restrictions=null'\n\n  echo \"Branch protection set: CodeRabbit required for $ORG/$REPO\"\ndone\n```\n\n### Step 6: Developer Onboarding Guide\n\n```markdown\n# Share with your team:\n\n## CodeRabbit Quick Reference\n\nCodeRabbit automatically reviews your PRs. No action needed on your part.\n\n### What to expect:\n1. Open a PR \u2192 CodeRabbit posts a review in 2-5 minutes\n2. Walkthrough comment summarizes all changes\n3. Line-level comments suggest improvements\n4. Reply to any comment to discuss with the AI\n\n### Useful commands (post as PR comment):\n@coderabbitai full review     \u2192 Re-review all files from scratch\n@coderabbitai summary         \u2192 Regenerate the walkthrough summary\n@coderabbitai resolve         \u2192 Mark all CodeRabbit comments as resolved\n@coderabbitai configuration   \u2192 Show current active config\n@coderabbitai help            \u2192 List all available commands\n\n### Tips:\n- Keep PRs under 500 lines for best review quality\n- Reply to CodeRabbit comments to teach it your preferences\n- Add \"WIP\" to PR title to skip review on work-in-progress\n```\n\n## Output\n\n- Organization-level CodeRabbit configuration deployed\n- Team-specific repo configs with path instructions\n- Multi-repo deployment script\n- Branch protection with CodeRabbit as required check\n- Developer onboarding guide\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Org config not applied | No `.github` repo | Create `.github` repo with `.coderabbit.yaml` |\n| Repo config ignored | YAML syntax error | Validate YAML, run `@coderabbitai configuration` |\n| Team resistance | Too many comments | Switch to `chill` profile initially |\n| PRs blocked by review | `request_changes_workflow: true` | Start with `false` until team is comfortable |\n| Bot accounts consuming seats | Bots opening PRs | Exclude bot accounts in seat management |\n\n## Resources\n\n- [CodeRabbit Getting Started](https://docs.coderabbit.ai/getting-started/yaml-configuration)\n- [CodeRabbit Configuration Reference](https://docs.coderabbit.ai/reference/configuration)\n- [Organization-Level Config](https://docs.coderabbit.ai/guides/organization-level-config)\n\n## Next Steps\n\nFor multi-environment configuration, see `coderabbit-multi-env-setup`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "coderabbit-deploy-integration",
-    "description": "Roll out CodeRabbit across an organization: multi-repo deployment, org-level",
-    "allowed-tools": "Read, Write, Edit, Bash(gh:*), Bash(git:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

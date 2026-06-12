@@ -1,17 +1,47 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000040085",
   "name": "qa-game",
   "slug": "qa-game-2",
   "description": "Add Playwright QA tests to a game \u2014 visual regression, gameplay verification, and performance. Use when the user says \"add tests\", \"test my game\", \"add QA\", \"check for bugs\", or \"add visual regression tests\". Do NOT use for manual playtesting or gameplay design.",
   "content": "\n# QA Game\n\nAdd automated QA testing with Playwright to an existing game project. Tests verify your game boots, scenes work, scoring functions, and visuals haven't broken \u2014 like a safety net for your game.\n\n## Instructions\n\nAnalyze the game at `$ARGUMENTS` (or the current directory if no path given).\n\nFirst, load the game-qa skill to get the full testing patterns and fixtures.\n\n### Step 1: Audit testability\n\n- Read `package.json` to identify the engine and dev server port\n- Read `vite.config.js` for the server port\n- Read `src/main.js` to check if `window.__GAME__`, `window.__GAME_STATE__`, `window.__EVENT_BUS__` are exposed\n- Read `src/core/GameState.js` to understand what state is available\n- Read `src/core/EventBus.js` to understand what events exist\n- Read `src/core/Constants.js` to understand game parameters (rates, speeds, durations, max values)\n- Read all scene files to understand the game flow\n- Read `design-brief.md` if it exists \u2014 it documents expected mechanics, magnitudes, and win/lose reachability\n\n### Step 2: Setup Playwright\n\n1. Install dependencies: `npm install -D @playwright/test @axe-core/playwright && npx playwright install chromium`\n2. Create `playwright.config.js` with the correct dev server port and webServer config\n3. Expose `window.__GAME__`, `window.__GAME_STATE__`, `window.__EVENT_BUS__`, `window.__EVENTS__` in `src/main.js` if not already present\n4. Create the test directory structure:\n   ```\n   tests/\n   \u251c\u2500\u2500 e2e/\n   \u2502   \u251c\u2500\u2500 game.spec.js\n   \u2502   \u251c\u2500\u2500 visual.spec.js\n   \u2502   \u2514\u2500\u2500 perf.spec.js\n   \u251c\u2500\u2500 fixtures/\n   \u2502   \u2514\u2500\u2500 game-test.js\n   \u2514\u2500\u2500 helpers/\n       \u2514\u2500\u2500 seed-random.js\n   ```\n5. Add npm scripts: `test`, `test:ui`, `test:headed`, `test:update-snapshots`\n\n### Step 3: Generate tests\n\nWrite tests based on what the game actually does:\n\n- **game.spec.js**: Boot test, scene transitions, input handling, scoring, game over, restart\n- **visual.spec.js**: Screenshot regression for stable scenes (gameplay initial state, game over). Skip active gameplay screenshots \u2014 moving objects make them unstable.\n- **perf.spec.js**: Load time budget, FPS during gameplay, canvas dimensions\n\nFollow the game-qa skill patterns. Use `gamePage` fixture. Use `page.evaluate()` to read game state. Use `page.keyboard.press()` for input.\n\n### Step 4: Design-intent tests\n\nAdd a `test.describe('Design Intent')` block to game.spec.js. These tests catch\nmechanics that technically exist but are too weak to matter.\n\n1. **Lose condition**: Detect deterministically whether the game has a lose state.\n   Read `GameState.js` \u2014 if it has a `won`, `result`, or similar boolean/enum\n   field, the game distinguishes win from loss. Also check `render_game_to_text()`\n   in `main.js` \u2014 if it returns distinct outcome modes (e.g., `'win'` vs\n   `'game_over'`), the game has a lose state.\n\n   If a lose state exists: start the game, provide NO input, let it run to\n   completion (use `page.waitForFunction` with the round duration from\n   Constants.js). Assert the outcome is the losing one (e.g., `won === false`,\n   `mode === 'game_over'`).\n\n   **This assertion is non-negotiable.** Do NOT write a test that passes when the\n   player wins by doing nothing. If the current game behavior is \"player wins\n   with no input,\" that is a bug \u2014 write the test to catch it.\n\n2. **Opponent/AI pressure**: If an AI-driven mechanic exists (auto-climbing bar,\n   enemy spawning, difficulty ramp), test that it produces substantial state\n   changes. Run the game for half its duration without player input. Assert the\n   opponent's state reaches at least 25% of its maximum. If `design-brief.md`\n   exists, use its expected magnitudes for thresholds. Otherwise, derive from\n   Constants.js: calculate `rate * duration` and assert it reaches meaningful\n   levels.\n\n3. **Win condition**: Test that active player input leads to a win. Provide rapid\n   input throughout the round and assert the outcome is a win.\n\n### Step 5: Entity interaction audit\n\nAudit collision and interaction logic for asymmetries that would confuse a\nfirst-time player.\n\nIf `design-brief.md` has an \"Entity Interactions\" section, use it as the\nchecklist. Otherwise, audit `GameScene.js` directly:\n\n1. Find all collision handlers, overlap checks, or distance-based interactions\n2. Map which entities interact with which others\n3. Flag any visible moving entity that interacts with one side (player OR\n   opponent) but not the other \u2014 add a `// QA FLAG: asymmetric interaction`\n   comment in the test file noting the entity name and the asymmetry\n\nThis is a flag, not a hard fail. Some asymmetries are intentional (e.g.,\nhazards that only affect the player). The flag ensures the asymmetry is a\nconscious design choice, not an oversight.\n\n### Step 6: Run and verify\n\n1. Run `npx playwright test` to execute all tests\n2. If visual tests fail on first run, that's expected \u2014 generate baselines with `npx playwright test --update-snapshots`\n3. Run again to verify all tests pass\n4. Summarize results\n\n### Step 7: Report\n\nTell the user in plain English:\n\n- How many tests were created and what they check\n- How to run them: `npm test` (headless), `npm run test:headed` (see the browser), `npm run test:ui` (interactive dashboard)\n- \"These tests are your safety net. Run them after making changes to make sure nothing broke.\"\n\n## Example Usage\n\n```\n/qa-game examples/flappy-bird\n```\nResult: Installs Playwright \u2192 creates 15 tests (boot, scene transitions, input, scoring, restart, game-over, visual regression, FPS, load time) \u2192 generates `tests/` directory with fixtures and helpers \u2192 all tests pass. Run `npm test` anytime after changes.\n\n## Next Step\n\nTell the user:\n\n> Your game now has automated tests! Finally, run `/game-creator:review-game` for a full architecture review \u2014 it checks your code structure, performance patterns, and gives you a score with specific improvement suggestions.\n>\n> **Pipeline progress:** ~~/viral-game~~ \u2192 ~~/design-game~~ \u2192 ~~/add-audio~~ \u2192 ~~/qa-game~~ \u2192 `/review-game`\n>\n> *(This is the `/viral-game` one-shot pipeline \u2014 not the `/make-game` multi-session, milestone-driven workflow.)*\n",
-  "version": "1.0.0",
-  "metadata": {
-    "name": "qa-game",
-    "description": "Add Playwright QA tests to a game \u2014 visual regression, gameplay verification, and performance. Use when the user says \"add tests\", \"test my game\", \"add QA\", \"check for bugs\", or \"add visual regression tests\". Do NOT use for manual playtesting or gameplay design.",
-    "argument-hint": "[path-to-game]",
-    "license": "MIT",
-    "metadata": "",
-    "author": "OpusGameLabs",
-    "version": "1.3.0",
-    "tags": "[game, qa, testing, playwright, visual-regression]"
+  "author": "OpusGameLabs",
+  "version": "1.3.0",
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "[game",
+    "qa",
+    "testing",
+    "playwright",
+    "visual-regression]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032597",
   "name": "maintainx-rate-limits",
   "slug": "maintainx-rate-limits",
   "description": "Implement MaintainX API rate limiting, pagination, and backoff patterns.",
   "content": "# MaintainX Rate Limits\n\n## Overview\n\nHandle MaintainX API rate limits gracefully with exponential backoff, cursor-based pagination, and request queuing to maximize throughput without triggering 429 errors.\n\n## Prerequisites\n\n- MaintainX API access configured\n- Node.js 18+ with `axios`\n- Understanding of async/await patterns\n\n## Instructions\n\n### Step 1: Rate-Limited Client Wrapper\n\n```typescript\n// src/rate-limited-client.ts\nimport axios, { AxiosInstance, AxiosError } from 'axios';\n\nexport class RateLimitedClient {\n  private http: AxiosInstance;\n  private requestQueue: Array<() => void> = [];\n  private activeRequests = 0;\n  private maxConcurrent = 5;\n  private minDelayMs = 100;  // 10 requests/second max\n\n  constructor(apiKey?: string) {\n    const key = apiKey || process.env.MAINTAINX_API_KEY;\n    if (!key) throw new Error('MAINTAINX_API_KEY required');\n\n    this.http = axios.create({\n      baseURL: 'https://api.getmaintainx.com/v1',\n      headers: {\n        Authorization: `Bearer ${key}`,\n        'Content-Type': 'application/json',\n      },\n      timeout: 30_000,\n    });\n  }\n\n  private async throttle(): Promise<void> {\n    if (this.activeRequests >= this.maxConcurrent) {\n      await new Promise<void>((resolve) => this.requestQueue.push(resolve));\n    }\n    this.activeRequests++;\n    await new Promise((r) => setTimeout(r, this.minDelayMs));\n  }\n\n  private release() {\n    this.activeRequests--;\n    const next = this.requestQueue.shift();\n    if (next) next();\n  }\n\n  async request<T>(method: string, url: string, data?: any, params?: any): Promise<T> {\n    await this.throttle();\n    try {\n      const response = await this.retryWithBackoff(\n        () => this.http.request<T>({ method, url, data, params }),\n      );\n      return response.data;\n    } finally {\n      this.release();\n    }\n  }\n\n  private async retryWithBackoff<T>(\n    fn: () => Promise<T>,\n    maxRetries = 3,\n    baseDelay = 1000, // 1 second initial backoff delay\n  ): Promise<T> {\n    for (let attempt = 0; attempt <= maxRetries; attempt++) {\n      try {\n        return await fn();\n      } catch (err) {\n        const axiosErr = err as AxiosError;\n        const status = axiosErr.response?.status;\n\n        if (status !== 429 && !(status && status >= 500) || attempt === maxRetries) {\n          throw err;\n        }\n\n        // Honor Retry-After header\n        const retryAfter = axiosErr.response?.headers?.['retry-after'];\n        const delayMs = retryAfter\n          ? parseInt(retryAfter) * 1000\n          : baseDelay * Math.pow(2, attempt) + Math.random() * 500;\n\n        console.warn(\n          `Rate limited (HTTP ${status}). Retry ${attempt + 1}/${maxRetries} in ${Math.round(delayMs)}ms`,\n        );\n        await new Promise((r) => setTimeout(r, delayMs));\n      }\n    }\n    throw new Error('Unreachable');\n  }\n}\n```\n\n### Step 2: Cursor-Based Pagination\n\nMaintainX returns a `cursor` field in list responses. Pass it as a query parameter to fetch the next page.\n\n```typescript\nasync function paginateAll<T>(\n  client: RateLimitedClient,\n  endpoint: string,\n  resultKey: string,\n  params?: Record<string, any>,\n): Promise<T[]> {\n  const allItems: T[] = [];\n  let cursor: string | undefined;\n\n  do {\n    const response: any = await client.request('GET', endpoint, undefined, {\n      ...params,\n      limit: 100,\n      cursor,\n    });\n    const items = response[resultKey] as T[];\n    allItems.push(...items);\n    cursor = response.cursor ?? undefined;\n\n    // Log progress for long-running operations\n    if (allItems.length % 500 === 0) {\n      console.log(`  Fetched ${allItems.length} items so far...`);\n    }\n  } while (cursor);\n\n  return allItems;\n}\n\n// Usage\nconst allWorkOrders = await paginateAll(client, '/workorders', 'workOrders', {\n  status: 'OPEN',\n});\nconsole.log(`Total: ${allWorkOrders.length} open work orders`);\n```\n\n### Step 3: Batch Operations with p-queue\n\n```typescript\nimport PQueue from 'p-queue';\n\n// 5 concurrent requests, max 10 per second\nconst queue = new PQueue({\n  concurrency: 5,\n  interval: 1000, // 1 second window for rate cap\n  intervalCap: 10,\n});\n\nasync function batchUpdate(\n  client: RateLimitedClient,\n  updates: Array<{ id: number; data: any }>,\n) {\n  const results = await Promise.allSettled(\n    updates.map((update) =>\n      queue.add(() =>\n        client.request('PATCH', `/workorders/${update.id}`, update.data),\n      ),\n    ),\n  );\n\n  const succeeded = results.filter((r) => r.status === 'fulfilled').length;\n  const failed = results.filter((r) => r.status === 'rejected').length;\n  console.log(`Batch update: ${succeeded} succeeded, ${failed} failed`);\n  return results;\n}\n\n// Close 100 completed work orders\nconst completedOrders = await paginateAll(\n  client, '/workorders', 'workOrders', { status: 'COMPLETED' },\n);\n\nawait batchUpdate(\n  client,\n  completedOrders.map((wo: any) => ({ id: wo.id, data: { status: 'CLOSED' } })),\n);\n```\n\n### Step 4: Rate Limit Monitoring\n\n```typescript\n// src/rate-monitor.ts\nclass RateMonitor {\n  private requests: number[] = [];\n  private windowMs = 60_000; // 1 minute window\n\n  record() {\n    this.requests.push(Date.now());\n    this.cleanup();\n  }\n\n  cleanup() {\n    const cutoff = Date.now() - this.windowMs;\n    this.requests = this.requests.filter((t) => t > cutoff);\n  }\n\n  getRate(): number {\n    this.cleanup();\n    return this.requests.length;\n  }\n\n  report() {\n    const rate = this.getRate();\n    const status = rate > 50 ? 'WARNING' : 'OK';\n    console.log(`[RateMonitor] ${rate} req/min - ${status}`);\n    return { rate, status };\n  }\n}\n```\n\n## Output\n\n- Rate-limited client wrapper with built-in throttling and retry\n- Cursor-based pagination utility collecting all results\n- Batch operations with controlled concurrency via `p-queue`\n- Rate monitoring to track and alert on API usage\n\n## Error Handling\n\n| Scenario | Strategy |\n|----------|----------|\n| 429 Too Many Requests | Exponential backoff with jitter, honor `Retry-After` header |\n| `Retry-After` header present | Wait the specified number of seconds before retrying |\n| Burst of requests | Queue with `p-queue` (concurrency: 5, intervalCap: 10/sec) |\n| Large data sets (1000+ items) | Paginate with `limit: 100`, delay between pages |\n\n## Resources\n\n- [MaintainX API Reference](https://developer.maintainx.com/reference)\n- [p-queue](https://github.com/sindresorhus/p-queue) -- Promise queue with concurrency control\n- [Exponential Backoff](https://cloud.google.com/storage/docs/exponential-backoff)\n\n## Next Steps\n\nFor security configuration, see `maintainx-security-basics`.\n\n## Examples\n\n**Adaptive rate limiting based on response headers**:\n\n```typescript\n// Adjust concurrency dynamically based on remaining quota\nfunction adaptRate(headers: Record<string, string>, queue: PQueue) {\n  const remaining = parseInt(headers['x-ratelimit-remaining'] || '100');\n  if (remaining < 10) {\n    queue.concurrency = 1;\n    console.warn('Approaching rate limit, reducing concurrency to 1');\n  } else if (remaining < 50) {\n    queue.concurrency = 3;\n  } else {\n    queue.concurrency = 5;\n  }\n}\n```\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "maintainx-rate-limits",
-    "description": "Implement MaintainX API rate limiting, pagination, and backoff patterns.",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

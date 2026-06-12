@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031952",
   "name": "firecrawl-architecture-variants",
   "slug": "firecrawl-architecture-variants",
   "description": "Choose and implement Firecrawl architecture patterns for different scales",
   "content": "# Firecrawl Architecture Variants\n\n## Overview\n\nThree deployment architectures for Firecrawl at different scales: on-demand scraping for simple use cases, scheduled crawl pipelines for content monitoring, and real-time ingestion pipelines for AI/RAG applications. Choose based on volume, latency requirements, and cost budget.\n\n## Decision Matrix\n\n| Factor | On-Demand | Scheduled Pipeline | Real-Time Pipeline |\n|--------|-----------|-------------------|-------------------|\n| Volume | < 500/day | 500-10K/day | 10K+/day |\n| Latency | Sync (2-10s) | Async (hours) | Async (minutes) |\n| Use Case | Single page lookup | Site monitoring | Knowledge base, RAG |\n| Credit Control | Per-request | Per-crawl budget | Credit pipeline |\n| Complexity | Low | Medium | High |\n\n## Instructions\n\n### Architecture 1: On-Demand Scraping\n\n```\nUser Request \u2192 Backend API \u2192 firecrawl.scrapeUrl \u2192 Clean Content \u2192 Response\n```\n\nBest for: chatbots, content preview, single-page extraction.\n\n```typescript\nimport FirecrawlApp from \"@mendable/firecrawl-js\";\n\nconst firecrawl = new FirecrawlApp({\n  apiKey: process.env.FIRECRAWL_API_KEY!,\n});\n\n// Simple API endpoint\napp.post(\"/api/scrape\", async (req, res) => {\n  const { url } = req.body;\n\n  const result = await firecrawl.scrapeUrl(url, {\n    formats: [\"markdown\"],\n    onlyMainContent: true,\n    waitFor: 3000,\n  });\n\n  res.json({\n    title: result.metadata?.title,\n    content: result.markdown,\n    url: result.metadata?.sourceURL,\n  });\n});\n\n// With LLM extraction\napp.post(\"/api/extract\", async (req, res) => {\n  const { url, schema } = req.body;\n\n  const result = await firecrawl.scrapeUrl(url, {\n    formats: [\"extract\"],\n    extract: { schema },\n  });\n\n  res.json({ data: result.extract });\n});\n```\n\n### Architecture 2: Scheduled Crawl Pipeline\n\n```\nScheduler (cron) \u2192 Crawl Queue \u2192 firecrawl.asyncCrawlUrl \u2192 Result Store\n                                                                  \u2502\n                                                                  \u25bc\n                                                        Content Processor \u2192 Search Index\n```\n\nBest for: documentation monitoring, content indexing, competitive analysis.\n\n```typescript\nimport cron from \"node-cron\";\n\ninterface CrawlTarget {\n  id: string;\n  url: string;\n  maxPages: number;\n  paths?: string[];\n  schedule: string; // cron expression\n}\n\nconst targets: CrawlTarget[] = [\n  { id: \"docs\", url: \"https://docs.example.com\", maxPages: 100, paths: [\"/docs/*\"], schedule: \"0 2 * * *\" },\n  { id: \"blog\", url: \"https://blog.example.com\", maxPages: 50, schedule: \"0 4 * * 1\" },\n];\n\n// Schedule crawls\nfor (const target of targets) {\n  cron.schedule(target.schedule, async () => {\n    console.log(`Starting scheduled crawl: ${target.id}`);\n    const job = await firecrawl.asyncCrawlUrl(target.url, {\n      limit: target.maxPages,\n      includePaths: target.paths,\n      scrapeOptions: { formats: [\"markdown\"], onlyMainContent: true },\n    });\n    await db.saveCrawlJob({ targetId: target.id, jobId: job.id, startedAt: new Date() });\n  });\n}\n\n// Separate worker polls for results\nasync function processPendingCrawls() {\n  const pending = await db.getPendingCrawlJobs();\n  for (const job of pending) {\n    const status = await firecrawl.checkCrawlStatus(job.jobId);\n    if (status.status === \"completed\") {\n      await indexPages(job.targetId, status.data || []);\n      await db.markComplete(job.id, status.data?.length || 0);\n      console.log(`Crawl ${job.targetId} complete: ${status.data?.length} pages indexed`);\n    }\n  }\n}\nsetInterval(processPendingCrawls, 30000);\n```\n\n### Architecture 3: Real-Time Content Pipeline\n\n```\nURL Sources \u2192 Priority Queue \u2192 Firecrawl Workers \u2192 Content Validation\n                                                          \u2502\n                                                          \u25bc\n                                                   Vector DB + Search Index\n                                                          \u2502\n                                                          \u25bc\n                                                    RAG / AI Pipeline\n```\n\nBest for: AI training data, knowledge base, enterprise content platform.\n\n```typescript\nimport PQueue from \"p-queue\";\n\nclass ContentPipeline {\n  private queue: PQueue;\n  private firecrawl: FirecrawlApp;\n  private creditBudget: number;\n  private creditsUsed = 0;\n\n  constructor(concurrency = 5, dailyBudget = 10000) {\n    this.queue = new PQueue({ concurrency, interval: 1000, intervalCap: 10 });\n    this.firecrawl = new FirecrawlApp({ apiKey: process.env.FIRECRAWL_API_KEY! });\n    this.creditBudget = dailyBudget;\n  }\n\n  async ingest(urls: string[]) {\n    if (this.creditsUsed + urls.length > this.creditBudget) {\n      throw new Error(\"Daily credit budget exceeded\");\n    }\n\n    // Use batch scrape for efficiency\n    const result = await this.queue.add(() =>\n      this.firecrawl.batchScrapeUrls(urls, {\n        formats: [\"markdown\"],\n        onlyMainContent: true,\n      })\n    );\n\n    this.creditsUsed += urls.length;\n\n    // Validate and process\n    const pages = (result?.data || []).filter(page => {\n      const md = page.markdown || \"\";\n      return md.length > 100 && !/captcha|access denied/i.test(md);\n    });\n\n    // Store in vector DB\n    for (const page of pages) {\n      await vectorStore.upsert({\n        id: page.metadata?.sourceURL,\n        content: page.markdown,\n        metadata: { title: page.metadata?.title, url: page.metadata?.sourceURL },\n      });\n    }\n\n    return { ingested: pages.length, rejected: urls.length - pages.length };\n  }\n\n  async discover(siteUrl: string, pathFilter: string) {\n    const map = await this.firecrawl.mapUrl(siteUrl);\n    return (map.links || []).filter(url => url.includes(pathFilter));\n  }\n}\n\n// Usage\nconst pipeline = new ContentPipeline(5, 10000);\nconst urls = await pipeline.discover(\"https://docs.example.com\", \"/api/\");\nconst result = await pipeline.ingest(urls.slice(0, 100));\nconsole.log(`Ingested ${result.ingested} pages into vector store`);\n```\n\n## Choosing Your Architecture\n\n```\nNeed real-time, user-facing response?\n\u251c\u2500\u2500 YES \u2192 On-Demand (Architecture 1)\n\u2514\u2500\u2500 NO \u2192 How many pages/day?\n    \u251c\u2500\u2500 < 500 \u2192 On-Demand with caching\n    \u251c\u2500\u2500 500-10K \u2192 Scheduled Pipeline (Architecture 2)\n    \u2514\u2500\u2500 10K+ \u2192 Real-Time Pipeline (Architecture 3)\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Slow on-demand response | JS-heavy target page | Add caching layer, reduce waitFor |\n| Stale indexed content | Crawl schedule too infrequent | Increase frequency for critical sources |\n| Credit overrun | Pipeline ingesting too aggressively | Implement daily budget with hard cap |\n| Duplicate content | Re-crawling same pages | Deduplicate by content hash before indexing |\n\n## Resources\n\n- [Firecrawl API Reference](https://docs.firecrawl.dev/api-reference/introduction)\n- [Batch Scrape](https://docs.firecrawl.dev/features/batch-scrape)\n- [Crawl Endpoint](https://docs.firecrawl.dev/features/crawl)\n\n## Next Steps\n\nFor common pitfalls, see `firecrawl-known-pitfalls`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "firecrawl-architecture-variants",
-    "description": "Choose and implement Firecrawl architecture patterns for different scales",
-    "allowed-tools": "Read, Grep",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

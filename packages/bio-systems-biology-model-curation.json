@@ -1,13 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000009459",
   "name": "bio-systems-biology-model-curation",
   "slug": "bio-systems-biology-model-curation",
   "description": "Validate, gap-fill, and curate genome-scale metabolic models using memote for quality scores and COBRApy for manual curation. Ensure models meet SBML standards and produce biologically meaningful predictions. Use when improving draft models or preparing models for publication.",
   "content": "\n## Version Compatibility\n\nReference examples tested with: COBRApy 0.29+\n\nBefore using code patterns, verify installed versions match. If versions differ:\n- Python: `pip show <package>` then `help(module.function)` to check signatures\n- CLI: `<tool> --version` then `<tool> --help` to confirm flags\n\nIf code throws ImportError, AttributeError, or TypeError, introspect the installed\npackage and adapt the example to match the actual API rather than retrying.\n\n# Model Curation\n\n**\"Validate and improve the quality of my metabolic model\"** \u2192 Score a genome-scale model against SBML community standards using memote, then gap-fill blocked reactions and fix stoichiometric inconsistencies using COBRApy to ensure biologically meaningful predictions.\n- CLI: `memote report snapshot` for quality scoring\n- Python: `cobra.flux_analysis.gapfilling.gapfill()` for gap-filling\n\n## Memote Quality Assessment\n\n**Goal:** Evaluate the quality and standards compliance of a genome-scale metabolic model to identify areas needing curation.\n\n**Approach:** Run memote snapshot to score the model against SBML community standards, then use the Python API to inspect individual test failures and guide manual fixes.\n\n```bash\n# Install memote\npip install memote\n\n# Run full quality report\nmemote report snapshot model.xml --filename report.html\n\n# Quick score\nmemote run model.xml\n\n# Continuous integration testing\nmemote run --pytest-args \"--tb=short\" model.xml\n```\n\n## Memote Python API\n\n```python\nimport memote\nimport cobra\n\nmodel = cobra.io.read_sbml_model('model.xml')\n\n# Run all tests\nresult = memote.suite.api.run(model)\n\n# Get score breakdown\nscores = memote.suite.api.snapshot(model)\nprint(f\"Total score: {scores['score']['total_score']:.2%}\")\n\n# Detailed test results\nfor test_name, test_result in scores['tests'].items():\n    if not test_result['passed']:\n        print(f\"Failed: {test_name}\")\n```\n\n## Gap-Filling\n\n```python\nimport cobra\nfrom cobra.flux_analysis import gapfill\n\nmodel = cobra.io.read_sbml_model('model.xml')\n\n# Load universal reaction database\nuniversal = cobra.io.read_sbml_model('universal_model.xml')\n\n# Find reactions to add for growth\n# demand: reaction to optimize (usually biomass exchange)\n# iterations: number of alternative solutions\nsolution = gapfill(model, universal,\n                   demand=model.reactions.BIOMASS,\n                   iterations=5)\n\n# solution contains list of reaction sets to add\nfor i, rxn_set in enumerate(solution):\n    print(f'Solution {i+1}: {[r.id for r in rxn_set]}')\n\n# Add first solution\nfor rxn in solution[0]:\n    model.add_reactions([rxn])\n```\n\n## Identify Dead-End Metabolites\n\n```python\ndef find_dead_end_metabolites(model):\n    '''Find metabolites that cannot be produced or consumed\n\n    Dead-end metabolites indicate:\n    - Missing reactions in the network\n    - Incorrect reaction stoichiometry\n    - Incomplete pathways\n    '''\n    dead_ends = []\n\n    for met in model.metabolites:\n        producing = [r for r in met.reactions if r.get_coefficient(met) > 0]\n        consuming = [r for r in met.reactions if r.get_coefficient(met) < 0]\n\n        if not producing or not consuming:\n            dead_ends.append({\n                'metabolite': met.id,\n                'name': met.name,\n                'producers': len(producing),\n                'consumers': len(consuming)\n            })\n\n    return dead_ends\n\n\ndead_ends = find_dead_end_metabolites(model)\nprint(f'Found {len(dead_ends)} dead-end metabolites')\n```\n\n## Check Mass and Charge Balance\n\n```python\ndef check_reaction_balance(reaction):\n    '''Check if reaction is mass and charge balanced\n\n    Unbalanced reactions indicate:\n    - Missing metabolites\n    - Wrong stoichiometry\n    - Proton accounting issues\n    '''\n    mass_balance = {}\n    charge_balance = 0\n\n    for met, coef in reaction.metabolites.items():\n        # Check mass\n        if met.formula:\n            for element, count in met.elements.items():\n                mass_balance[element] = mass_balance.get(element, 0) + coef * count\n\n        # Check charge\n        if met.charge is not None:\n            charge_balance += coef * met.charge\n\n    is_balanced = all(abs(v) < 1e-6 for v in mass_balance.values())\n    is_charge_balanced = abs(charge_balance) < 1e-6\n\n    return {\n        'mass_balanced': is_balanced,\n        'charge_balanced': is_charge_balanced,\n        'mass_imbalance': {k: v for k, v in mass_balance.items() if abs(v) > 1e-6}\n    }\n\n\n# Check all reactions\nunbalanced = []\nfor rxn in model.reactions:\n    result = check_reaction_balance(rxn)\n    if not result['mass_balanced']:\n        unbalanced.append((rxn.id, result['mass_imbalance']))\n```\n\n## Fix Gene-Protein-Reaction Rules\n\n```python\ndef standardize_gpr(model):\n    '''Standardize gene-protein-reaction rules\n\n    GPR format: (gene1 and gene2) or gene3\n    - 'and' = protein complex (all genes required)\n    - 'or' = isozymes (any gene sufficient)\n    '''\n    for rxn in model.reactions:\n        if rxn.gene_reaction_rule:\n            # Standardize formatting\n            rule = rxn.gene_reaction_rule\n            rule = rule.replace(' AND ', ' and ')\n            rule = rule.replace(' OR ', ' or ')\n            rxn.gene_reaction_rule = rule\n\n\ndef identify_orphan_reactions(model):\n    '''Find reactions without gene associations\n\n    Orphan reactions may be:\n    - Spontaneous reactions\n    - Unannotated genes\n    - Transport reactions (often orphan)\n    '''\n    orphans = [r for r in model.reactions if not r.genes]\n\n    # Classify orphans\n    exchange = [r for r in orphans if r in model.exchanges]\n    transport = [r for r in orphans if 'transport' in r.name.lower() or 't_' in r.id.lower()]\n    other = [r for r in orphans if r not in exchange and r not in transport]\n\n    return {\n        'exchange': len(exchange),\n        'transport': len(transport),\n        'other': len(other),\n        'total': len(orphans)\n    }\n```\n\n## Annotation Standards\n\n```python\ndef add_standard_annotations(model):\n    '''Add standard database annotations\n\n    Required annotations for SBML compliance:\n    - KEGG IDs for reactions and metabolites\n    - ChEBI IDs for metabolites\n    - BiGG IDs if applicable\n    '''\n    for met in model.metabolites:\n        if not hasattr(met, 'annotation'):\n            met.annotation = {}\n\n        # Add SBO term for metabolite\n        met.annotation['sbo'] = 'SBO:0000247'  # Simple chemical\n\n    for rxn in model.reactions:\n        if not hasattr(rxn, 'annotation'):\n            rxn.annotation = {}\n\n        # Add SBO term based on reaction type\n        if rxn in model.exchanges:\n            rxn.annotation['sbo'] = 'SBO:0000627'  # Exchange\n        else:\n            rxn.annotation['sbo'] = 'SBO:0000176'  # Biochemical reaction\n```\n\n## Related Skills\n\n- systems-biology/metabolic-reconstruction - Generate draft models\n- systems-biology/flux-balance-analysis - Test curated models\n- pathway-analysis/kegg-pathways - Add KEGG annotations\n",
+  "author": "agentpm",
   "version": "1.0.0",
-  "metadata": {
-    "name": "bio-systems-biology-model-curation",
-    "description": "Validate, gap-fill, and curate genome-scale metabolic models using memote for quality scores and COBRApy for manual curation. Ensure models meet SBML standards and produce biologically meaningful predictions. Use when improving draft models or preparing models for publication.",
-    "tool_type": "python",
-    "primary_tool": "memote"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

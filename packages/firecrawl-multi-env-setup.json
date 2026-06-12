@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031969",
   "name": "firecrawl-multi-env-setup",
   "slug": "firecrawl-multi-env-setup",
   "description": "Configure Firecrawl across development, staging, and production environments.",
   "content": "# Firecrawl Multi-Environment Setup\n\n## Overview\n\nFirecrawl's credit-based pricing makes environment separation critical. Development should use self-hosted Firecrawl or strict limits to avoid burning production credits during testing. This skill covers per-environment config, self-hosted Docker for dev, and credit budget enforcement.\n\n## Environment Strategy\n\n| Environment | API Source | Crawl Limit | Concurrency | Credits |\n|-------------|-----------|-------------|-------------|---------|\n| Development | Self-hosted Docker | 10 pages | 1 | Zero (local) |\n| Staging | Cloud API (test key) | 50 pages | 2 | Limited |\n| Production | Cloud API (prod key) | Per-task | Full plan | Monitored |\n\n## Instructions\n\n### Step 1: Environment-Aware Configuration\n\n```typescript\n// config/firecrawl.ts\nimport FirecrawlApp from \"@mendable/firecrawl-js\";\n\ntype Env = \"development\" | \"staging\" | \"production\";\n\ninterface FirecrawlConfig {\n  apiKey: string;\n  apiUrl?: string;\n  maxPagesPerCrawl: number;\n  maxDepth: number;\n  concurrency: number;\n  waitFor: number;\n}\n\nconst configs: Record<Env, FirecrawlConfig> = {\n  development: {\n    apiKey: process.env.FIRECRAWL_API_KEY_DEV || \"fc-localdev\",\n    apiUrl: process.env.FIRECRAWL_API_URL_DEV || \"http://localhost:3002\",\n    maxPagesPerCrawl: 10,\n    maxDepth: 2,\n    concurrency: 1,\n    waitFor: 2000,\n  },\n  staging: {\n    apiKey: process.env.FIRECRAWL_API_KEY_STAGING!,\n    maxPagesPerCrawl: 50,\n    maxDepth: 3,\n    concurrency: 2,\n    waitFor: 3000,\n  },\n  production: {\n    apiKey: process.env.FIRECRAWL_API_KEY_PROD!,\n    maxPagesPerCrawl: 500,\n    maxDepth: 5,\n    concurrency: 5,\n    waitFor: 3000,\n  },\n};\n\nexport function getConfig(): FirecrawlConfig {\n  const env = (process.env.NODE_ENV || \"development\") as Env;\n  return configs[env] || configs.development;\n}\n\nexport function getFirecrawl(): FirecrawlApp {\n  const cfg = getConfig();\n  return new FirecrawlApp({\n    apiKey: cfg.apiKey,\n    ...(cfg.apiUrl ? { apiUrl: cfg.apiUrl } : {}),\n  });\n}\n```\n\n### Step 2: Self-Hosted Firecrawl for Development\n\n```yaml\n# docker-compose.dev.yml\nservices:\n  firecrawl:\n    image: mendableai/firecrawl:latest\n    ports:\n      - \"3002:3002\"\n    environment:\n      - PORT=3002\n      - USE_DB_AUTHENTICATION=false\n      - REDIS_URL=redis://redis:6379\n      - NUM_WORKERS_PER_QUEUE=1\n      - BULL_AUTH_KEY=devonly\n    depends_on:\n      redis:\n        condition: service_healthy\n\n  redis:\n    image: redis:7-alpine\n    healthcheck:\n      test: [\"CMD\", \"redis-cli\", \"ping\"]\n      interval: 5s\n      timeout: 3s\n      retries: 5\n```\n\n```bash\nset -euo pipefail\ndocker compose -f docker-compose.dev.yml up -d\n# Verify: curl http://localhost:3002/health\n```\n\n### Step 3: Credit-Safe Scraping Wrapper\n\n```typescript\n// lib/firecrawl-service.ts\nimport { getFirecrawl, getConfig } from \"../config/firecrawl\";\n\nexport async function safeScrape(url: string, options?: any) {\n  const firecrawl = getFirecrawl();\n  return firecrawl.scrapeUrl(url, {\n    formats: [\"markdown\"],\n    onlyMainContent: true,\n    waitFor: getConfig().waitFor,\n    ...options,\n  });\n}\n\nexport async function safeCrawl(url: string, customLimit?: number) {\n  const firecrawl = getFirecrawl();\n  const cfg = getConfig();\n  const limit = Math.min(customLimit ?? cfg.maxPagesPerCrawl, cfg.maxPagesPerCrawl);\n\n  return firecrawl.crawlUrl(url, {\n    limit,\n    maxDepth: cfg.maxDepth,\n    scrapeOptions: { formats: [\"markdown\"], onlyMainContent: true },\n  });\n}\n```\n\n### Step 4: Environment Variables\n\n```bash\n# .env.local (development \u2014 uses self-hosted, zero credits)\nFIRECRAWL_API_KEY_DEV=fc-localdev\nFIRECRAWL_API_URL_DEV=http://localhost:3002\nNODE_ENV=development\n\n# CI / Staging\nFIRECRAWL_API_KEY_STAGING=fc-staging-xxx\n\n# Production\nFIRECRAWL_API_KEY_PROD=fc-prod-xxx\n```\n\n### Step 5: CI/CD Pipeline\n\n```yaml\n# .github/workflows/deploy.yml\njobs:\n  test:\n    environment: staging\n    env:\n      FIRECRAWL_API_KEY_STAGING: ${{ secrets.FIRECRAWL_API_KEY_STAGING }}\n      NODE_ENV: staging\n    steps:\n      - run: npm ci && npm test\n      - run: npm run test:integration\n        # Uses staging config: 50-page limit, staging API key\n\n  deploy:\n    needs: test\n    environment: production\n    env:\n      FIRECRAWL_API_KEY_PROD: ${{ secrets.FIRECRAWL_API_KEY_PROD }}\n      NODE_ENV: production\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Dev credits drained | Using cloud API in dev | Point to self-hosted at localhost:3002 |\n| Self-hosted not responding | Docker container down | `docker compose up -d firecrawl` |\n| `402 Payment Required` | Prod credits exhausted | Monitor balance, set budget alerts |\n| Different results per env | `waitFor` mismatch | Standardize wait time across envs |\n\n## Examples\n\n### Check Active Configuration\n\n```typescript\nimport { getConfig } from \"./config/firecrawl\";\n\nconst cfg = getConfig();\nconsole.log(`Env: ${process.env.NODE_ENV}`);\nconsole.log(`Max pages: ${cfg.maxPagesPerCrawl}`);\nconsole.log(`API: ${cfg.apiUrl || \"https://api.firecrawl.dev\"}`);\n```\n\n## Resources\n\n- [Firecrawl Self-Hosting](https://docs.firecrawl.dev/contributing/self-host)\n- [Firecrawl Pricing](https://firecrawl.dev/pricing)\n- [Docker Compose](https://github.com/mendableai/firecrawl/blob/main/docker-compose.yaml)\n\n## Next Steps\n\nFor deployment configuration, see `firecrawl-deploy-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "firecrawl-multi-env-setup",
-    "description": "Configure Firecrawl across development, staging, and production environments.",
-    "allowed-tools": "Read, Write, Edit, Bash(docker:*), Bash(gcloud:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code, also compatible with Codex and OpenClaw"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

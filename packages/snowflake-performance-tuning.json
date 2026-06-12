@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000033295",
   "name": "snowflake-performance-tuning",
   "slug": "snowflake-performance-tuning",
   "description": "Optimize Snowflake query performance with clustering, materialized views,",
   "content": "# Snowflake Performance Tuning\n\n## Overview\n\nOptimize Snowflake query performance using clustering keys, materialized views, result caching, query profiling, and warehouse tuning.\n\n## Prerequisites\n\n- Access to `SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY`\n- Understanding of micro-partitions and pruning\n- Role with `MONITOR` privilege on warehouses\n\n## Instructions\n\n### Step 1: Identify Slow Queries\n\n```sql\n-- Top 20 slowest queries in last 24 hours\nSELECT query_id, query_text, total_elapsed_time / 1000 AS seconds,\n       bytes_scanned / 1e9 AS gb_scanned,\n       partitions_scanned, partitions_total,\n       ROUND(partitions_scanned / NULLIF(partitions_total, 0) * 100, 1) AS pct_scanned,\n       warehouse_name, warehouse_size\nFROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY\nWHERE execution_status = 'SUCCESS'\n  AND start_time >= DATEADD(hours, -24, CURRENT_TIMESTAMP())\n  AND query_type = 'SELECT'\nORDER BY total_elapsed_time DESC\nLIMIT 20;\n\n-- Queries scanning too many partitions (poor pruning)\nSELECT query_id, query_text,\n       partitions_scanned, partitions_total,\n       bytes_scanned / 1e9 AS gb_scanned\nFROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY\nWHERE partitions_scanned > partitions_total * 0.5\n  AND partitions_total > 100\n  AND start_time >= DATEADD(hours, -24, CURRENT_TIMESTAMP())\nORDER BY partitions_scanned DESC\nLIMIT 10;\n```\n\n### Step 2: Add Clustering Keys\n\n```sql\n-- Clustering improves pruning for large tables (> 1TB)\n-- Choose columns used in WHERE and JOIN clauses\n\n-- Cluster by date (most common filter)\nALTER TABLE orders CLUSTER BY (order_date);\n\n-- Multi-column clustering\nALTER TABLE events CLUSTER BY (event_date, event_type);\n\n-- Check clustering depth (lower = better)\nSELECT SYSTEM$CLUSTERING_INFORMATION('orders', '(order_date)');\n\n-- Monitor automatic reclustering\nSELECT table_name, num_rows, bytes,\n       SYSTEM$CLUSTERING_DEPTH('orders') AS clustering_depth\nFROM INFORMATION_SCHEMA.TABLES\nWHERE table_name = 'ORDERS';\n```\n\n### Step 3: Use Materialized Views\n\n```sql\n-- Pre-compute expensive aggregations\nCREATE OR REPLACE MATERIALIZED VIEW daily_revenue_mv\n  CLUSTER BY (metric_date)\nAS\n  SELECT\n    DATE_TRUNC('day', order_date) AS metric_date,\n    COUNT(*) AS order_count,\n    SUM(amount) AS total_revenue,\n    AVG(amount) AS avg_order_value\n  FROM orders\n  GROUP BY DATE_TRUNC('day', order_date);\n\n-- Query the MV instead of base table \u2014 automatic rewrite may also apply\nSELECT * FROM daily_revenue_mv\nWHERE metric_date >= DATEADD(days, -30, CURRENT_DATE());\n\n-- Check MV freshness\nSELECT name, is_secure, text, refresh_on\nFROM INFORMATION_SCHEMA.MATERIALIZED_VIEWS\nWHERE name = 'DAILY_REVENUE_MV';\n```\n\n### Step 4: Leverage Result Caching\n\n```sql\n-- Result cache is ON by default \u2014 same query returns instantly\n-- Cache is valid for 24 hours if underlying data hasn't changed\n\n-- Check if a query used cache\nSELECT query_id, query_text,\n       CASE WHEN bytes_scanned = 0 AND rows_produced > 0\n            THEN 'CACHE HIT' ELSE 'CACHE MISS' END AS cache_status,\n       total_elapsed_time\nFROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY\nWHERE start_time >= DATEADD(hours, -1, CURRENT_TIMESTAMP())\nORDER BY start_time DESC;\n\n-- Disable cache for benchmarking\nALTER SESSION SET USE_CACHED_RESULT = FALSE;\n-- Re-enable\nALTER SESSION SET USE_CACHED_RESULT = TRUE;\n```\n\n### Step 5: Optimize Common Query Patterns\n\n```sql\n-- ANTI-PATTERN: SELECT * on wide tables\n-- SELECT * FROM events;  -- Scans all columns\n\n-- BETTER: Select only needed columns\nSELECT event_id, event_type, event_date FROM events WHERE event_date = CURRENT_DATE();\n\n-- ANTI-PATTERN: Cartesian joins\n-- SELECT * FROM a, b WHERE a.id = b.id;\n\n-- BETTER: Explicit JOIN with filter pushdown\nSELECT a.id, a.name, b.amount\nFROM customers a\nINNER JOIN orders b ON a.id = b.customer_id\nWHERE b.order_date >= '2026-01-01';\n\n-- ANTI-PATTERN: LIKE with leading wildcard\n-- WHERE name LIKE '%smith%'  -- Full scan\n\n-- BETTER: Use search optimization service for LIKE queries\nALTER TABLE customers ADD SEARCH OPTIMIZATION ON EQUALITY(name), SUBSTRING(name);\n\n-- ANTI-PATTERN: Many small queries in a loop\n-- for row in rows: execute(f\"INSERT INTO t VALUES ({row})\")\n\n-- BETTER: Batch inserts\nINSERT INTO target_table\nSELECT * FROM source_table WHERE condition;\n```\n\n### Step 6: Query Profile Analysis\n\n```sql\n-- Use EXPLAIN to see execution plan\nEXPLAIN SELECT * FROM orders WHERE order_date = CURRENT_DATE();\n\n-- Get query profile data programmatically\nSELECT *\nFROM TABLE(GET_QUERY_OPERATOR_STATS('<query_id>'));\n\n-- Key metrics to watch:\n-- TableScan: partitions_scanned vs partitions_total\n-- Filter: if filter is AFTER scan, consider clustering\n-- Sort: high spilling_to_remote_storage = needs bigger warehouse\n-- Join: broadcast vs hash, skew detection\n```\n\n### Step 7: Warehouse Tuning\n\n```sql\n-- Match warehouse size to workload\n-- Small: simple queries, < 100GB scans\n-- Medium: moderate joins, 100GB-1TB\n-- Large: complex analytics, > 1TB scans\n\n-- Scale up for single-query performance\nALTER WAREHOUSE ANALYTICS_WH SET WAREHOUSE_SIZE = 'LARGE';\n\n-- Scale out for concurrent queries (multi-cluster)\nALTER WAREHOUSE ANALYTICS_WH SET\n  MIN_CLUSTER_COUNT = 1\n  MAX_CLUSTER_COUNT = 4\n  SCALING_POLICY = 'STANDARD';\n\n-- Monitor warehouse efficiency\nSELECT warehouse_name,\n       SUM(credits_used) AS total_credits,\n       COUNT(DISTINCT query_id) AS total_queries,\n       SUM(credits_used) / NULLIF(COUNT(DISTINCT query_id), 0) AS credits_per_query\nFROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q\nJOIN SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY w\n  ON q.warehouse_name = w.warehouse_name\n  AND DATE_TRUNC('hour', q.start_time) = w.start_time\nWHERE q.start_time >= DATEADD(days, -7, CURRENT_TIMESTAMP())\nGROUP BY warehouse_name\nORDER BY total_credits DESC;\n```\n\n## Performance Benchmarks\n\n| Optimization | Typical Improvement |\n|-------------|-------------------|\n| Clustering key on filter column | 10-100x fewer partitions scanned |\n| Materialized view | 10-1000x for aggregation queries |\n| Result cache hit | Instant (0ms scan) |\n| Column pruning (SELECT specific cols) | 2-10x less data scanned |\n| Search optimization service | 10-100x for point lookups |\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| Spilling to disk | Warehouse too small for query | Scale up warehouse size |\n| High partition scan ratio | No clustering on filter column | Add clustering key |\n| MV stale | Background refresh delayed | Check MV refresh status |\n| Cache miss on same query | Data changed or session setting | Verify `USE_CACHED_RESULT = TRUE` |\n\n## Resources\n\n- [Query Performance](https://docs.snowflake.com/en/user-guide/performance-query-exploring)\n- [Clustering Keys](https://docs.snowflake.com/en/user-guide/tables-clustering-keys)\n- [Materialized Views](https://docs.snowflake.com/en/user-guide/views-materialized)\n- [Search Optimization](https://docs.snowflake.com/en/user-guide/search-optimization-service)\n\n## Next Steps\n\nFor cost optimization, see `snowflake-cost-tuning`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "snowflake-performance-tuning",
-    "description": "Optimize Snowflake query performance with clustering, materialized views,",
-    "allowed-tools": "Read, Write, Edit",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000032643",
   "name": "miro-upgrade-migration",
   "slug": "miro-upgrade-migration",
   "description": "Migrate Miro integrations from REST API v1 to v2 and upgrade @mirohq/miro-api",
   "content": "# Miro Upgrade & Migration\n\n## Overview\n\nGuide for migrating from Miro REST API v1 to v2, upgrading the `@mirohq/miro-api` SDK, and handling the key breaking changes between versions.\n\n## Key Breaking Changes: v1 to v2\n\n### Terminology Changes\n\n| v1 Term | v2 Term | Notes |\n|---------|---------|-------|\n| Widget | Item | All board elements renamed |\n| Line | Connector | Lines renamed, gained captions and snapTo |\n| Sticker | Sticky Note | Type value: `sticky_note` |\n| Widget API (polymorphic) | Per-type endpoints | No more universal create endpoint |\n| `text` property | `content` property | In data objects |\n| `shapeType` | `shape` (in `data`) | Moved from style to data object |\n| `startWidget` / `endWidget` | `startItem` / `endItem` | Connector endpoints |\n| Board User Connection | Board Member | Sharing/permissions model |\n\n### Endpoint Migration Map\n\n```\n# v1 (DEPRECATED)                          \u2192 v2 (CURRENT)\nPOST /v1/boards/{id}/widgets               \u2192 POST /v2/boards/{id}/sticky_notes\n                                              POST /v2/boards/{id}/shapes\n                                              POST /v2/boards/{id}/cards\n                                              POST /v2/boards/{id}/texts\n                                              POST /v2/boards/{id}/frames\n                                              POST /v2/boards/{id}/images\n                                              POST /v2/boards/{id}/documents\n                                              POST /v2/boards/{id}/embeds\n                                              POST /v2/boards/{id}/app_cards\n\nGET  /v1/boards/{id}/widgets               \u2192 GET  /v2/boards/{id}/items\nGET  /v1/boards/{id}/widgets/{widget_id}   \u2192 GET  /v2/boards/{id}/items/{item_id}\n                                              (or type-specific: /v2/boards/{id}/sticky_notes/{item_id})\n\nPOST /v1/boards/{id}/widgets (type: line)  \u2192 POST /v2/boards/{id}/connectors\nGET  /v1/boards/{id}/widgets?type=line     \u2192 GET  /v2/boards/{id}/connectors\n```\n\n### Request Body Changes\n\n```typescript\n// v1: Create a sticky note (via universal widgets endpoint)\n// POST /v1/boards/{id}/widgets\n{\n  \"type\": \"sticker\",\n  \"text\": \"Hello World\",\n  \"style\": {\n    \"stickerBackgroundColor\": \"#FFFF00\"\n  },\n  \"x\": 100,\n  \"y\": 200,\n  \"width\": 200\n}\n\n// v2: Create a sticky note (dedicated endpoint)\n// POST /v2/boards/{id}/sticky_notes\n{\n  \"data\": {\n    \"content\": \"Hello World\",      // \"text\" \u2192 \"content\"\n    \"shape\": \"square\"              // Required in v2\n  },\n  \"style\": {\n    \"fillColor\": \"light_yellow\"    // Named colors or hex\n  },\n  \"position\": {\n    \"x\": 100,                      // Nested under \"position\"\n    \"y\": 200\n  },\n  \"geometry\": {\n    \"width\": 200                   // Nested under \"geometry\"\n  }\n}\n```\n\n```typescript\n// v1: Connector (line)\n{\n  \"type\": \"line\",\n  \"startWidget\": { \"id\": \"123\" },\n  \"endWidget\": { \"id\": \"456\" }\n}\n\n// v2: Connector\n{\n  \"startItem\": { \"id\": \"123\", \"snapTo\": \"right\" },    // Gains snapTo/position\n  \"endItem\": { \"id\": \"456\", \"snapTo\": \"left\" },\n  \"captions\": [{ \"content\": \"connects to\" }],          // New: captions\n  \"shape\": \"curved\",                                     // New: shape control\n  \"style\": {\n    \"startStrokeCap\": \"none\",\n    \"endStrokeCap\": \"stealth\"\n  }\n}\n```\n\n## SDK Upgrade Steps\n\n### Step 1: Check Current Version and Update\n\n```bash\n# Check current version\nnpm list @mirohq/miro-api\n\n# View available versions\nnpm view @mirohq/miro-api versions --json | tail -5\n\n# Create upgrade branch\ngit checkout -b upgrade/miro-api-v2\n\n# Install latest\nnpm install @mirohq/miro-api@latest\n```\n\n### Step 2: Update Import Patterns\n\n```typescript\n// OLD: Some early SDK versions\nimport { MiroClient } from '@miro/sdk';\n\n// CURRENT: Official @mirohq/miro-api\nimport { Miro, MiroApi } from '@mirohq/miro-api';\n\n// High-level (OAuth-aware, stateful)\nconst miro = new Miro({ clientId, clientSecret, redirectUrl });\nconst userApi = await miro.as(userId);\n\n// Low-level (stateless, pass token)\nconst api = new MiroApi(accessToken);\n```\n\n### Step 3: Migrate Widget Calls to Item Calls\n\n```typescript\n// BEFORE: Generic widget create\nconst widget = await client.createWidget(boardId, {\n  type: 'sticker',\n  text: 'Note content',\n});\n\n// AFTER: Type-specific item create\nconst stickyNote = await fetch(\n  `https://api.miro.com/v2/boards/${boardId}/sticky_notes`,\n  {\n    method: 'POST',\n    headers: {\n      'Authorization': `Bearer ${token}`,\n      'Content-Type': 'application/json',\n    },\n    body: JSON.stringify({\n      data: { content: 'Note content', shape: 'square' },\n      style: { fillColor: 'light_yellow' },\n      position: { x: 0, y: 0 },\n    }),\n  }\n);\n```\n\n### Step 4: Update Response Handling\n\n```typescript\n// v1 response: flat structure\n// { id, type, text, x, y, width, style: { stickerBackgroundColor } }\n\n// v2 response: nested structure\n// {\n//   id, type: 'sticky_note',\n//   data: { content, shape },\n//   style: { fillColor, textAlign },\n//   position: { x, y, origin },\n//   geometry: { width },\n//   createdAt, modifiedAt, createdBy\n// }\n\n// Adapter for gradual migration\nfunction adaptV2ToV1Shape(v2Item: any): any {\n  return {\n    id: v2Item.id,\n    type: v2Item.type === 'sticky_note' ? 'sticker' : v2Item.type,\n    text: v2Item.data?.content,\n    x: v2Item.position?.x,\n    y: v2Item.position?.y,\n    width: v2Item.geometry?.width,\n  };\n}\n```\n\n### Step 5: Verify and Test\n\n```bash\n# Run tests\nnpm test\n\n# Verify against a test board\nMIRO_TEST_BOARD_ID=your-test-board npm run test:integration\n\n# Check for any remaining v1 patterns\ngrep -r \"widgets\\|sticker\\|startWidget\\|endWidget\\|shapeType\" src/ --include=\"*.ts\"\n```\n\n## v2 Response Pagination Change\n\n```typescript\n// v1: offset-based pagination\n// GET /v1/boards/{id}/widgets?offset=100&limit=50\n\n// v2: cursor-based pagination\n// GET /v2/boards/{id}/items?limit=50&cursor=eyJ0...\n\nasync function getAllItemsV2(boardId: string): Promise<any[]> {\n  const items: any[] = [];\n  let cursor: string | undefined;\n\n  do {\n    const url = new URL(`https://api.miro.com/v2/boards/${boardId}/items`);\n    url.searchParams.set('limit', '50');\n    if (cursor) url.searchParams.set('cursor', cursor);\n\n    const response = await fetch(url.toString(), {\n      headers: { 'Authorization': `Bearer ${token}` },\n    });\n    const result = await response.json();\n    items.push(...result.data);\n    cursor = result.cursor;\n  } while (cursor);\n\n  return items;\n}\n```\n\n## Error Handling\n\n| Issue | Detection | Solution |\n|-------|-----------|----------|\n| `Cannot find module '@miro/sdk'` | Import error | Update to `@mirohq/miro-api` |\n| `widgets is not a function` | SDK API change | Use per-type endpoints |\n| `text` field undefined | v2 response shape | Access via `data.content` |\n| Connector fails | v1 line syntax | Update to `startItem`/`endItem` |\n| Position wrong | Flat vs nested | Wrap in `position: { x, y }` |\n\n## Resources\n\n- [REST API Comparison Guide (v1 vs v2)](https://developers.miro.com/docs/rest-api-comparison-guide)\n- [Migrate from v1 to v2](https://developers.miro.com/v1.0/docs/introduction-to-rest-api)\n- [REST API Reference Guide](https://developers.miro.com/docs/rest-api-reference-guide)\n- [@mirohq/miro-api Changelog](https://www.npmjs.com/package/@mirohq/miro-api?activeTab=versions)\n\n## Next Steps\n\nFor CI integration during upgrades, see `miro-ci-integration`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "miro-upgrade-migration",
-    "description": "Migrate Miro integrations from REST API v1 to v2 and upgrade @mirohq/miro-api",
-    "allowed-tools": "Read, Write, Edit, Bash(npm:*), Bash(npx:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

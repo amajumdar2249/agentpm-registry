@@ -1,15 +1,47 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000010862",
   "name": "discovery",
   "slug": "discovery-2",
   "description": "Capture interesting finds to the Vault via Inngest. Triggers when the user shares a URL, repo, or idea with signal words like \\\"interesting\\\", \\\"cool\\\", \\\"neat\\\", \\\"check this out\\\", \\\"look at this\\\", \\\"came across\\\", or when sharing content with minimal context that implies it should be remembered. Also triggers on bare URL drops with no explicit ask. Fires a discovery/noted event and continues the conversation \u2014 the pipeline handles everything else.",
   "content": "\n# Discovery \u2014 Capture What's Interesting\n\nWhen Joel flags something as interesting, fire it into the pipeline and keep moving.\n\n## Trigger Detection\n\nSignal words/patterns (case-insensitive):\n- \"interesting\", \"cool\", \"neat\", \"nice\", \"wild\", \"clever\"\n- \"check this out\", \"look at this\", \"came across\", \"found this\"\n- \"bookmarking\", \"save this\", \"remember this\"\n- Bare URL/repo link with minimal context (1-2 words + link)\n- Sharing a link then immediately moving on\n\n**When NOT to trigger**: If Joel is asking for help with the thing (debugging, implementing, reviewing), that's a task \u2014 not a discovery.\n\n## Workflow\n\n### 1. Resolve site + visibility first\n\nPreferred explicit fields:\n- `site`: `joelclaw` | `wizardshit` | `shared`\n- `visibility`: `public` | `private` | `archived` | `migration-only`\n\n**Sensible default when not specified**:\n- `site = joelclaw`\n- `visibility = public`\n\n### 2. Canonical operator path when you need the final link back\n\nUse the event surface directly and follow the run to completion:\n\n```bash\njoelclaw send discovery/noted --data '{\"url\":\"<url>\",\"context\":\"<optional context>\",\"site\":\"joelclaw\",\"visibility\":\"public\"}' --follow\n```\n\nThe terminal run result now includes the final link for the created piece:\n- public joelclaw discoveries \u2192 `https://joelclaw.com/cool/<slug>`\n- non-public or off-site captures \u2192 `vault:Resources/discoveries/<Title>.md`\n\n**Always return that `finalLink` to Joel**.\n\nIf Joel explicitly wants the piece published somewhere other than joelclaw and that venue has its own durable publish surface, route to that venue-specific workflow instead of pretending the joelclaw discovery pipeline published it there. The joelclaw discovery pipeline can carry site/visibility metadata, but it only gives you a public joelclaw URL when the capture is actually eligible for joelclaw publication.\n\n### 3. Compatibility shortcut\n\n`joelclaw discover` still works as the thin fire-and-forget shortcut and now accepts explicit site/visibility too:\n\n```bash\njoelclaw discover <url> --site joelclaw --visibility public\njoelclaw discover <url> -c \"what Joel said about it\" --site wizardshit --visibility private\n```\n\nBut if Joel needs the final link in the same turn, prefer `joelclaw send discovery/noted --follow`.\n\n### 2. Assess for Monitoring (before moving on)\n\nAfter firing the discovery event, quickly assess:\n\n1. **Is this monitorable?** \u2014 Does it have ongoing updates? (blog with feed, GitHub repo with releases, living document that changes)\n2. **Is it relevant to Joel's interests?** \u2014 Check the interest profile in the `monitor` skill. If it maps to 2+ areas, it's a strong candidate.\n\n**If both yes** \u2192 recommend monitoring via MCQ:\n```\n\"This looks like an active [blog/repo/guide] covering [matched interests]. Want to add it to the monitoring list?\"\n  1. Yes, monitor it (hourly/daily)\n  2. Not now\n```\n\nIf the agent recommends monitoring and Joel accepts, add the subscription per the `monitor` skill workflow.\n\n**If monitorable but low relevance** \u2192 mention briefly: \"This has a feed if you ever want to track it\" \u2014 don't push.\n\n**If not monitorable** (one-shot article, tweet, static page) \u2192 skip, don't mention monitoring at all.\n\n### 3. Continue conversation\n\nDon't wait. Joel flagged something and moved on \u2014 match that energy.\n\n## What the Pipeline Does (background, in system-bus worker)\n\n1. **Investigate** \u2014 clone repos, extract articles via defuddle, read content\n2. **Analyze via pi** \u2014 decides title, tags, relevance, writes summary in Joel's voice\n3. **Embed media** \u2014 if source is a video (YouTube, etc.), auto-embeds `<YouTubeEmbed url=\"...\" />` in the note\n4. **Write** \u2014 vault note to `~/Vault/Resources/discoveries/{slug}.md`\n5. **Sync** \u2014 fires `discovery/captured` event which syncs to joelclaw.com/cool/\n6. **Log** \u2014 `slog write --action noted --tool discovery`\n\n## X/Twitter URL Enrichment\n\nWhen the source URL is an X/Twitter post (`x.com/*/status/*` or `twitter.com/*/status/*`):\n- X blocks web scraping \u2014 **do NOT use url_to_markdown or web_search** for tweet content\n- Instead, use the **x-api skill** to fetch tweet text, author, and metrics via the Twitter API v2\n- Extract the tweet ID from the URL and call `GET /2/tweets/:id?tweet.fields=text,author_id,created_at,public_metrics&expansions=author_id&user.fields=name,username`\n- Include tweet text, author handle, and engagement metrics in the discovery note\n- See `x-api` skill for OAuth 1.0a signing details\n\n## Deep Dig \u2014 Inngest Enrichment Pipeline (ADR-0150)\n\nEnrichment is **not manual agent work**. The `discovery/noted` event triggers a durable Inngest function (`discovery/enrich`) that handles all enrichment automatically:\n\n1. **Classify URL** \u2014 tweet, repo, article, video\n2. **Fetch content** \u2014 X API for tweets, defuddle for articles, repo clone for repos\n3. **Match tracked projects** \u2014 opencode, opentui, course-builder, pi-tools\n4. **Deep dig if matched** \u2014 recent commits, PRs, issues from upstream\n5. **Profile the poster** \u2014 git authors, web search, contact lookup (fires `contact/enrich` if new)\n6. **Write enriched vault note** \u2014 full context, not a bare URL\n\nThe agent's job is just to fire `discovery/noted` with whatever context Joel provided. The pipeline does the rest.\n\n### Tracked projects (canonical list in `packages/system-bus/src/config/tracked-projects.ts`)\n- `anomalyco/opencode` (fork of `sst/opencode`)\n- `anomalyco/opentui` (fork of `sst/opentui`)\n- `badass-courses/course-builder`\n- `joelhooks/pi-tools`\n- `joelhooks/joelclaw`\n\n## Video/Media Handling\n\nWhen the source URL is a YouTube video (youtube.com or youtu.be):\n- The discovery note gets a `<YouTubeEmbed url=\"...\" />` component right after the title\n- This renders an embedded video player on the cool page at joelclaw.com\n- The note body still includes analysis/summary \u2014 the embed is supplemental, not a replacement for writing about it\n",
+  "author": "Joel Hooks",
   "version": "1.0.0",
-  "metadata": {
-    "name": "discovery",
-    "displayName": "Discovery",
-    "description": "Capture interesting finds to the Vault via Inngest. Triggers when the user shares a URL, repo, or idea with signal words like \\\"interesting\\\", \\\"cool\\\", \\\"neat\\\", \\\"check this out\\\", \\\"look at this\\\", \\\"came across\\\", or when sharing content with minimal context that implies it should be remembered. Also triggers on bare URL drops with no explicit ask. Fires a discovery/noted event and continues the conversation \u2014 the pipeline handles everything else.",
-    "version": "1.0.0",
-    "author": "Joel Hooks",
-    "tags": "[joelclaw, discovery, vault, inngest, capture]"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "[joelclaw",
+    "discovery",
+    "vault",
+    "inngest",
+    "capture]"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }

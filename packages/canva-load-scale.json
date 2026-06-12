@@ -1,17 +1,43 @@
 {
+  "id": "f81d4fae-7dec-11d0-a765-000000031430",
   "name": "canva-load-scale",
   "slug": "canva-load-scale",
   "description": "Implement Canva Connect API load testing, auto-scaling, and capacity",
   "content": "# Canva Load & Scale\n\n## Overview\n\nLoad test and scale Canva Connect API integrations. Since Canva enforces per-user rate limits, scaling means distributing load across users, not increasing per-user throughput.\n\n## Canva Rate Limit Constraints\n\n| Operation | Per-User Limit | Implication |\n|-----------|---------------|-------------|\n| Create design | 20/min | Max 1,200 designs/hr per user |\n| List designs | 100/min | Generous for reads |\n| Create export | 75/5min (500/24hr) | Max 500 exports/day per user |\n| Integration export | 750/5min (5,000/24hr) | Shared across all users |\n| Upload asset | 30/min | Max 1,800/hr per user |\n| Autofill | 60/min | Max 3,600/hr per user |\n\n**Key insight:** The integration-wide export limit of 5,000/day across ALL users is the most constraining for high-volume scenarios.\n\n## k6 Load Test\n\n```javascript\n// canva-load-test.js\nimport http from 'k6/http';\nimport { check, sleep } from 'k6';\nimport { Rate, Trend } from 'k6/metrics';\n\nconst errorRate = new Rate('canva_error_rate');\nconst exportDuration = new Trend('canva_export_duration');\n\nexport const options = {\n  scenarios: {\n    design_operations: {\n      executor: 'ramping-vus',\n      startVUs: 1,\n      stages: [\n        { duration: '1m', target: 5 },    // Ramp up slowly\n        { duration: '3m', target: 5 },    // Steady state\n        { duration: '1m', target: 10 },   // Test rate limits\n        { duration: '3m', target: 10 },   // Sustained load\n        { duration: '1m', target: 0 },    // Ramp down\n      ],\n    },\n  },\n  thresholds: {\n    http_req_duration: ['p(95)<2000'],       // P95 < 2s\n    canva_error_rate: ['rate<0.05'],          // < 5% errors\n    canva_export_duration: ['p(95)<30000'],   // Exports < 30s\n  },\n};\n\nconst BASE = 'https://api.canva.com/rest/v1';\nconst TOKEN = __ENV.CANVA_ACCESS_TOKEN;\nconst headers = {\n  'Authorization': `Bearer ${TOKEN}`,\n  'Content-Type': 'application/json',\n};\n\nexport default function () {\n  // 1. List designs (high rate limit \u2014 safe to call frequently)\n  const listRes = http.get(`${BASE}/designs?limit=5`, { headers });\n  check(listRes, { 'list 200': (r) => r.status === 200 });\n  errorRate.add(listRes.status !== 200);\n\n  if (listRes.status === 429) {\n    const retryAfter = parseInt(listRes.headers['Retry-After'] || '60');\n    sleep(retryAfter);\n    return;\n  }\n\n  // 2. Create a design (20/min limit)\n  const createRes = http.post(`${BASE}/designs`, JSON.stringify({\n    design_type: { type: 'custom', width: 100, height: 100 },\n    title: `k6 test ${Date.now()}`,\n  }), { headers });\n\n  check(createRes, { 'create 200': (r) => r.status === 200 });\n  errorRate.add(createRes.status !== 200);\n\n  if (createRes.status === 200) {\n    const designId = createRes.json('design.id');\n\n    // 3. Export (75/5min limit \u2014 most constrained)\n    const exportStart = Date.now();\n    const exportRes = http.post(`${BASE}/exports`, JSON.stringify({\n      design_id: designId,\n      format: { type: 'png' },\n    }), { headers });\n\n    if (exportRes.status === 200) {\n      const jobId = exportRes.json('job.id');\n\n      // Poll for completion\n      let status = 'in_progress';\n      while (status === 'in_progress') {\n        sleep(2);\n        const pollRes = http.get(`${BASE}/exports/${jobId}`, { headers });\n        status = pollRes.json('job.status');\n      }\n\n      exportDuration.add(Date.now() - exportStart);\n    }\n  }\n\n  sleep(3); // Stay under rate limits\n}\n```\n\n### Run Load Test\n\n```bash\nk6 run --env CANVA_ACCESS_TOKEN=\"${CANVA_ACCESS_TOKEN}\" canva-load-test.js\n\n# With Grafana/InfluxDB output\nk6 run --out influxdb=http://localhost:8086/k6 canva-load-test.js\n```\n\n## Scaling Architecture\n\n```\nUsers requesting designs\n       \u2502\n       \u25bc\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2502   Load      \u2502\n\u2502   Balancer  \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n       \u2502\n       \u25bc\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510     \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2502  App Pod 1  \u2502     \u2502  App Pod N  \u2502\n\u2502  (per-user  \u2502 ... \u2502  (per-user  \u2502\n\u2502   tokens)   \u2502     \u2502   tokens)   \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2518     \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n       \u2502                    \u2502\n       \u25bc                    \u25bc\n\u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n\u2502        Rate Limiter Queue       \u2502\n\u2502   (respects per-user + global   \u2502\n\u2502    Canva rate limits)           \u2502\n\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u252c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n               \u2502\n               \u25bc\n        api.canva.com\n         /rest/v1/*\n```\n\n## Capacity Planning\n\n```typescript\nfunction estimateCanvaCapacity(users: number): {\n  designsPerDay: number;\n  exportsPerDay: number;\n  constrainingFactor: string;\n} {\n  const perUserExportDaily = 500;\n  const integrationExportDaily = 5000;\n\n  const totalUserExports = users * perUserExportDaily;\n  const effectiveExports = Math.min(totalUserExports, integrationExportDaily);\n\n  return {\n    designsPerDay: users * 1200 * 8,  // 20/min * 60 * 8 work hours\n    exportsPerDay: effectiveExports,\n    constrainingFactor: effectiveExports === integrationExportDaily\n      ? `Integration-wide limit: ${integrationExportDaily}/day (hit at ${Math.ceil(integrationExportDaily / perUserExportDaily)} users)`\n      : `Per-user limit: ${perUserExportDaily}/day per user`,\n  };\n}\n\n// Example\nconst cap = estimateCanvaCapacity(20);\nconsole.log(`Exports/day: ${cap.exportsPerDay}`);\nconsole.log(`Constraint: ${cap.constrainingFactor}`);\n// Exports/day: 5000 (integration limit)\n// Constraint: Integration-wide limit: 5000/day (hit at 10 users)\n```\n\n## HPA Configuration\n\n```yaml\napiVersion: autoscaling/v2\nkind: HorizontalPodAutoscaler\nmetadata:\n  name: canva-integration-hpa\nspec:\n  scaleTargetRef:\n    apiVersion: apps/v1\n    kind: Deployment\n    name: canva-integration\n  minReplicas: 2\n  maxReplicas: 10\n  metrics:\n    - type: Resource\n      resource:\n        name: cpu\n        target:\n          type: Utilization\n          averageUtilization: 70\n    - type: Pods\n      pods:\n        metric:\n          name: canva_export_queue_depth\n        target:\n          type: AverageValue\n          averageValue: 50\n```\n\n## Error Handling\n\n| Issue | Cause | Solution |\n|-------|-------|----------|\n| k6 all 429s | Rate limit hit | Increase sleep between iterations |\n| Integration quota hit | > 5000 exports/day | Contact Canva for limit increase |\n| Export timeouts | Complex designs | Increase poll timeout |\n| Inconsistent results | Cold start | Add warm-up phase |\n\n## Resources\n\n- [Canva API Rate Limits](https://www.canva.dev/docs/connect/api-requests-responses/)\n- [k6 Documentation](https://k6.io/docs/)\n- [Kubernetes HPA](https://kubernetes.io/docs/tasks/run-application/horizontal-pod-autoscale/)\n\n## Next Steps\n\nFor reliability patterns, see `canva-reliability-patterns`.\n",
+  "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
   "version": "1.0.0",
-  "metadata": {
-    "name": "canva-load-scale",
-    "description": "Implement Canva Connect API load testing, auto-scaling, and capacity",
-    "allowed-tools": "Read, Write, Edit, Bash(k6:*), Bash(kubectl:*)",
-    "version": "1.0.0",
-    "license": "MIT",
-    "author": "Jeremy Longshore <jeremy@intentsolutions.io>",
-    "tags": "",
-    "compatibility": "Designed for Claude Code"
+  "created_at": "2026-05-30T00:00:00Z",
+  "updated_at": "2026-05-30T00:00:00Z",
+  "license": "MIT",
+  "category": "automation",
+  "tags": [
+    "agent"
+  ],
+  "difficulty_level": "intermediate",
+  "maturity_level": "stable",
+  "compatibility": {
+    "engines": [
+      "generic"
+    ]
+  },
+  "dependencies": {},
+  "examples": {
+    "success_cases": [],
+    "failure_cases": [],
+    "edge_cases": [],
+    "best_practices": []
+  },
+  "ratings": {
+    "average_rating": 0.0,
+    "total_ratings": 0,
+    "review_count": 0,
+    "quality_score": 80,
+    "trust_score": 100
+  },
+  "analytics": {
+    "downloads": 0,
+    "installs": 0,
+    "executions": 0,
+    "active_users": 0
   }
 }
