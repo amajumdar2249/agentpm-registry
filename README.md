@@ -23,8 +23,8 @@ This registry contains massive, cryptographically hashed JSON indexes and raw AS
 You do **not** need to manually download files from here. The `agentpm` CLI interacts with this registry securely.
 
 ```bash
-# 1. Install the CLI directly via NPM
-npm install -g github:amajumdar2249/agentpm
+# 1. Install the CLI directly from official NPM Registry
+npm install -g @amajumdar2249/agentpm
 
 # 2. Search & Install skills (CLI will automatically query this repo)
 agentpm install @oss/react-expert
